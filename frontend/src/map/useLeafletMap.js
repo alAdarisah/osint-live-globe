@@ -6,8 +6,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createMapController } from "./createMapController";
 
-const EMPTY_COUNTS = { acled: 0, firms: 0, ais: 0, gdelt: 0, adsb: 0, countries: 0, cities: 0, infra: 0 };
-const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, firms: false };
+const EMPTY_COUNTS = { acled: 0, firms: 0, ais: 0, gdelt: 0, adsb: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0 };
+const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
 
 export function useLeafletMap(containerRef, { theme, onRegionAutoReset }) {
   const controllerRef = useRef(null);

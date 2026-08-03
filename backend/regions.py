@@ -102,6 +102,13 @@ def _bboxes_intersect(a: Bounds, b: Bounds) -> bool:
 
 
 def filter_geojson(fc: dict, bounds: Bounds | None) -> dict:
+    # Before the countries source's first successful poll, state.data is
+    # still SourceState's generic empty-list default (see backend/cache.py),
+    # not yet the {"type": ..., "features": [...]} shape -- treat that as an
+    # empty FeatureCollection rather than crashing on a request that lands
+    # in that narrow startup window.
+    if not isinstance(fc, dict):
+        return {"type": "FeatureCollection", "features": []}
     if bounds is None:
         return fc
     features = fc.get("features") or []

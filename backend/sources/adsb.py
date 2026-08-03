@@ -31,6 +31,34 @@ _READSB_CATEGORY_TO_OPENSKY = {
     "C1": 16, "C2": 17, "C3": 18, "C4": 19, "C5": 20,
 }
 
+# airplanes.live's own "desc" field is already a human-readable string (e.g.
+# "Boeing KC-135R Stratotanker") for aircraft it has reference data for --
+# keyword-matching that text is far safer than hand-maintaining a table of
+# exact ICAO type-designator codes from memory, and only fires when a real
+# desc string came through (no fabrication when it didn't).
+_ROLE_KEYWORDS = [
+    ("tanker", ["tanker", "stratotanker"]),
+    ("bomber", ["bomber", "stratofortress", "spirit", "lancer"]),
+    ("fighter", ["fighter", "eagle", "falcon", "raptor", "lightning ii", "hornet", "typhoon", "viper"]),
+    ("awacs", ["sentry", "awacs"]),
+    ("recon", ["reconnaissance", "rivet joint", "recon"]),
+    ("patrol", ["poseidon", "orion"]),
+    ("drone", ["reaper", "predator", "global hawk", "unmanned"]),
+    ("transport", ["globemaster", "hercules", "galaxy", "transport", "extender"]),
+    ("helicopter", ["helicopter", "black hawk", "chinook", "apache"]),
+]
+
+
+def _infer_military_role(desc: str | None) -> str | None:
+    if not desc:
+        return None
+    lowered = desc.lower()
+    for role, keywords in _ROLE_KEYWORDS:
+        if any(kw in lowered for kw in keywords):
+            return role
+    return None
+
+
 _token: dict = {"access_token": None, "expires_at": 0}
 
 
@@ -109,6 +137,7 @@ async def _fetch_airplanes_live() -> dict[str, dict]:
                 alt_baro = ac.get("alt_baro")
                 on_ground = alt_baro == "ground"
                 db_flags = ac.get("dbFlags") or 0
+                type_desc = ac.get("desc")
                 items[hex_id] = {
                     "icao24": hex_id,
                     "callsign": (ac.get("flight") or "").strip() or None,
@@ -121,6 +150,11 @@ async def _fetch_airplanes_live() -> dict[str, dict]:
                     "on_ground": on_ground,
                     "category": _READSB_CATEGORY_TO_OPENSKY.get(ac.get("category"), 0),
                     "military": bool(db_flags & 1),
+                    "type_code": ac.get("t"),
+                    "type_desc": type_desc,
+                    "registration": ac.get("r"),
+                    "operator": ac.get("ownOp"),
+                    "military_role": _infer_military_role(type_desc),
                 }
     return items
 

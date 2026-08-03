@@ -22,7 +22,7 @@ _background_tasks: list[asyncio.Task] = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from backend.sources import gdelt, firms, ais, adsb, acled, countries, cities
+    from backend.sources import gdelt, firms, ais, adsb, acled, countries, cities, jamming, satellites
 
     pollers = [
         gdelt.start(),
@@ -32,6 +32,8 @@ async def lifespan(app: FastAPI):
         acled.start(),
         countries.start(),
         cities.start(),
+        jamming.start(),
+        satellites.start(),
         history.start(),
     ]
     for coro in pollers:
@@ -116,6 +118,25 @@ async def conflict(request: Request, region: str | None = None):
 @app.get("/api/fires")
 async def fires(request: Request, region: str | None = None):
     return _cached_source_response(request, "firms", region, config.FIRMS_POLL_INTERVAL, regions.filter_points)
+
+
+@app.get("/api/jamming")
+async def jamming_endpoint(request: Request, region: str | None = None):
+    # gpsjam.org itself only updates once/day -- see backend/sources/jamming.py.
+    from backend.sources.jamming import REFRESH_INTERVAL
+
+    return _cached_source_response(request, "jamming", region, REFRESH_INTERVAL, regions.filter_points)
+
+
+@app.get("/api/satellites")
+async def satellites(region: str | None = None):
+    # Position is propagated fresh every poll (see backend/sources/
+    # satellites.py) and changes continuously regardless of the underlying
+    # orbital elements' own refresh cadence -- same reasoning /api/wind and
+    # /api/replay already use for opting out of the version/ETag cache.
+    state = registry.get("satellites")
+    payload = regions.filter_points(state.data, regions.bounds_for(region))
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/ships")

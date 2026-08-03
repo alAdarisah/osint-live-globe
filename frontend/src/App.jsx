@@ -3,7 +3,7 @@
 // clock, health, viewport) together, then hands their state down to plain
 // presentational components. No component below this one talks to the
 // network or to Leaflet directly -- see src/map/ and src/hooks/ for that.
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import { useLeafletMap } from "./map/useLeafletMap";
 import { useOsintData } from "./hooks/useOsintData";
@@ -11,6 +11,7 @@ import { useReplay } from "./hooks/useReplay";
 import { useTheme } from "./hooks/useTheme";
 import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
+import { boundsContainsPoint } from "./utils/geo";
 
 import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
@@ -24,7 +25,7 @@ import Attribution from "./components/Attribution";
 
 const DEFAULT_LAYER_VISIBILITY = {
   acled: true, firms: true, ais: true, gdelt: true, adsb: true,
-  countries: true, cities: true, infra: true,
+  countries: true, cities: true, infra: true, jamming: true, satellites: true,
   precip: true, clouds: false, wind: false, windArrows: true,
 };
 
@@ -73,6 +74,34 @@ export default function App() {
 
   const { health, owmConfigured } = useHealth();
 
+  // Ranks conflict zones by how much is currently happening in each, so the
+  // "Choose Conflict Zone" menu (see RegionBar.jsx) lists the hottest first
+  // instead of alphabetically/arbitrarily. Bounds-contains check mirrors
+  // backend/regions.py's own _in_bounds -- no new endpoint needed, just the
+  // region bounds (already fetched) plus the ACLED/GDELT data already
+  // reactive in state for the news panel.
+  const regionActivity = useMemo(() => {
+    const scores = {};
+    for (const [key, entry] of Object.entries(dataApi.regions)) {
+      if (!entry.bounds) continue; // "world" has no bounds -- not a rankable zone
+      const [south, west, north, east] = entry.bounds;
+      const bounds = { south, west, north, east };
+      let score = 0;
+      for (const e of dataApi.acledRaw) {
+        if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
+        if (!boundsContainsPoint(bounds, e.lat, e.lon)) continue;
+        score += 1 + (e.fatalities || 0) * 2;
+      }
+      for (const e of dataApi.gdeltRaw) {
+        if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
+        if (!boundsContainsPoint(bounds, e.lat, e.lon)) continue;
+        score += e.mentions || 0;
+      }
+      scores[key] = score;
+    }
+    return scores;
+  }, [dataApi.regions, dataApi.acledRaw, dataApi.gdeltRaw]);
+
   const [layerVisibility, setLayerVisibility] = useState(DEFAULT_LAYER_VISIBILITY);
   const onToggleLayer = useCallback(
     (key, visible) => {
@@ -103,7 +132,12 @@ export default function App() {
 
       <TitleBar theme={theme} onToggleTheme={toggleTheme} />
 
-      <RegionBar regions={dataApi.regions} currentRegionKey={dataApi.currentRegionKey} onSelect={dataApi.selectRegion} />
+      <RegionBar
+        regions={dataApi.regions}
+        currentRegionKey={dataApi.currentRegionKey}
+        onSelect={dataApi.selectRegion}
+        regionActivity={regionActivity}
+      />
 
       <NewsBroadcastPanel
         gdeltRaw={dataApi.gdeltRaw}
