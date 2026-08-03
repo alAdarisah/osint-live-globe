@@ -11,19 +11,23 @@ before this feature existed.
 Bounds = tuple[float, float, float, float]
 
 REGIONS: dict[str, dict] = {
-    "world": {"label": "World", "group": "continent", "bounds": None},
-    "africa": {"label": "Africa", "group": "continent", "bounds": (-35.0, -18.0, 38.0, 52.0)},
-    "asia": {"label": "Asia", "group": "continent", "bounds": (-11.0, 26.0, 55.0, 150.0)},
-    "europe": {"label": "Europe", "group": "continent", "bounds": (34.5, -25.0, 72.0, 45.0)},
-    "north_america": {"label": "North America", "group": "continent", "bounds": (5.5, -168.0, 75.0, -52.0)},
-    "south_america": {"label": "South America", "group": "continent", "bounds": (-56.0, -82.0, 13.0, -34.0)},
-    "oceania": {"label": "Oceania", "group": "continent", "bounds": (-50.0, 110.0, 0.0, 180.0)},
-    # Conflict / high-interest theaters.
-    "middle_east": {"label": "Middle East", "group": "conflict", "bounds": (12.0, 32.0, 42.0, 63.0)},
-    "russia_ukraine": {"label": "Russia / Ukraine", "group": "conflict", "bounds": (44.0, 20.0, 57.0, 42.0)},
-    "korea_taiwan": {"label": "Korea / Taiwan Strait", "group": "conflict", "bounds": (20.0, 118.0, 43.0, 132.0)},
-    "south_china_sea": {"label": "South China Sea", "group": "conflict", "bounds": (-5.0, 99.0, 23.0, 122.0)},
-    "red_sea_horn_africa": {"label": "Red Sea / Horn of Africa", "group": "conflict", "bounds": (-2.0, 32.0, 30.0, 52.0)},
+    "world": {"label": "World", "group": "world", "bounds": None},
+    # Conflict / high-interest theaters only -- the old continent buttons
+    # (Africa/Asia/Europe/...) were dropped as too coarse to be useful next
+    # to these. Bounds are deliberately tight to the theater itself rather
+    # than the old sprawling boxes (e.g. the old "middle_east" ran from Egypt
+    # to Afghanistan) so each button actually flies to a meaningful area.
+    "russia_ukraine": {"label": "Russia / Ukraine", "group": "conflict", "bounds": (44.0, 21.0, 56.0, 41.0)},
+    "israel_gaza_lebanon": {"label": "Israel / Gaza / Lebanon", "group": "conflict", "bounds": (29.0, 34.0, 34.5, 37.0)},
+    "persian_gulf_hormuz": {"label": "Persian Gulf / Strait of Hormuz", "group": "conflict", "bounds": (23.0, 47.0, 31.0, 58.0)},
+    "red_sea_yemen": {"label": "Red Sea / Yemen", "group": "conflict", "bounds": (10.0, 38.0, 20.0, 51.0)},
+    "korean_peninsula": {"label": "Korean Peninsula", "group": "conflict", "bounds": (33.0, 124.0, 43.5, 131.0)},
+    "taiwan_strait": {"label": "Taiwan Strait", "group": "conflict", "bounds": (20.0, 116.0, 26.5, 123.0)},
+    "south_china_sea": {"label": "South China Sea", "group": "conflict", "bounds": (-4.0, 102.0, 23.0, 121.0)},
+    "sahel": {"label": "Sahel", "group": "conflict", "bounds": (8.0, -6.0, 18.0, 16.0)},
+    "sudan": {"label": "Sudan", "group": "conflict", "bounds": (8.0, 21.0, 23.0, 39.0)},
+    "kashmir": {"label": "Kashmir", "group": "conflict", "bounds": (28.0, 70.0, 37.0, 80.0)},
+    "venezuela_caribbean": {"label": "Venezuela / Caribbean", "group": "conflict", "bounds": (5.0, -75.0, 16.0, -58.0)},
 }
 
 

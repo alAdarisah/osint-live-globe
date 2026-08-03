@@ -85,7 +85,7 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, i
 function NewsItem({ item, onLocate }) {
   const headline = (item.real_title && item.real_title.trim()) || gdeltSentence(item);
   const when = timeAgoFromDateAdded(item.date_added);
-  const meta = [item.location, when].filter(Boolean).join(" · ");
+  const meta = [item.source_name, item.location, when].filter(Boolean).join(" · ");
 
   return (
     <div className="news-item">

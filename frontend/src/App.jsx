@@ -24,7 +24,7 @@ import Attribution from "./components/Attribution";
 
 const DEFAULT_LAYER_VISIBILITY = {
   acled: true, firms: true, ais: true, gdelt: true, adsb: true,
-  countries: true, cities: true,
+  countries: true, cities: true, infra: true,
   precip: true, clouds: false, wind: false, windArrows: true,
 };
 

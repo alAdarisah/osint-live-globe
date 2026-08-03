@@ -71,7 +71,8 @@ export function gdeltSentence(d) {
 export function decorateGdelt(d) {
   const hasRealTitle = !!(d.real_title && d.real_title.trim());
   const headline = hasRealTitle ? d.real_title.trim() : gdeltSentence(d);
-  const tooltip = `<b>${esc(headline)}</b><br/>${d.mentions || 0} mentions`;
+  const agency = d.source_name || null;
+  const tooltip = `<b>${esc(headline)}</b><br/>${agency ? `${esc(agency)} &middot; ` : ""}${d.mentions || 0} mentions`;
   const sourceNote = hasRealTitle
     ? "Headline is the article's own title."
     : "Real headline unavailable (fetch failed or blocked) -- this line is auto-generated from GDELT's structured event data, treat as a rough gist only.";
@@ -79,7 +80,7 @@ export function decorateGdelt(d) {
     <p class="news-sentence">${esc(headline)}</p>
     <div class="meta">${esc(d.location || "")} &middot; CAMEO ${esc(d.event_code || "n/a")} &middot; ${d.mentions || 0} mentions</div>
     ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
-    <div class="meta">Source: GDELT &middot; added ${esc(d.date_added || "")}</div>
+    <div class="meta">Source: ${agency ? `${esc(agency)} (via GDELT)` : "GDELT"} &middot; added ${esc(d.date_added || "")}</div>
     <p class="meta">${sourceNote}</p>`;
   const size = 14 + Math.min(Math.log10((d.mentions || 1) + 1), 3) * 2.5;
   return { icon: icon(SVG.news, "#ffd60a", size), tooltip, detail };
@@ -149,4 +150,35 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
   if (type === "military") cls += " military-marker";
   if (d.icao24 === selectedIcao) cls += " selected";
   return { icon: icon(style.svg, style.color, style.size, d.heading, cls), tooltip, detail };
+}
+
+// ---------- critical infrastructure ----------
+
+const INFRA_STYLE = {
+  refinery: { svg: SVG.refinery, color: "#ff9500", label: "Refinery" },
+  pipeline: { svg: SVG.pipeline, color: "#ffb347", label: "Pipeline" },
+  desalination: { svg: SVG.desalination, color: "#35c2ff", label: "Desalination plant" },
+  lng_terminal: { svg: SVG.lng, color: "#9be15d", label: "LNG terminal" },
+  nuclear: { svg: SVG.nuclear, color: "#ffd60a", label: "Nuclear power plant" },
+  port: { svg: SVG.port, color: "#d8b9ff", label: "Port / oil terminal" },
+  fab: { svg: SVG.fab, color: "#6fe3ff", label: "Semiconductor fab" },
+};
+
+export function decorateInfra(d, { hot, nearbyEvents } = {}) {
+  const style = INFRA_STYLE[d.type] || INFRA_STYLE.port;
+  const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)}${hot ? " &middot; HOT ZONE" : ""}`;
+  const events = nearbyEvents || [];
+  const activitySection = hot
+    ? `<div class="popup-events"><div class="meta">Recent activity within 75km</div>${events
+        .map((e) => `<div class="event-row">${esc(e.headline)}<div class="event-meta">${esc(e.source)}</div></div>`)
+        .join("")}</div>`
+    : "";
+  const detail = `
+    <h3>${esc(d.name)}${hot ? ' <span class="infra-hot-badge">HOT ZONE</span>' : ""}</h3>
+    <div class="meta">${esc(style.label)}</div>
+    ${d.note ? `<p>${esc(d.note)}</p>` : ""}
+    ${activitySection}
+    <p class="meta">Source: publicly documented location (open-source reference), approximate.</p>`;
+  const cls = `infra-marker${hot ? " infra-hot" : ""}`;
+  return { icon: icon(style.svg, style.color, 18, 0, cls), tooltip, detail };
 }

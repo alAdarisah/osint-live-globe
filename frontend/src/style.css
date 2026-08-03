@@ -117,6 +117,35 @@ html, body {
   filter: drop-shadow(0 0 7px var(--accent)) drop-shadow(0 0 3px var(--accent));
 }
 
+.infra-marker { cursor: pointer; }
+/* A nearby ACLED/GDELT event (see createMapController.js's INFRA_HOT_RADIUS_KM
+   check) flags a site as a "hot zone" -- same drop-shadow-glow technique as
+   .military-marker above, but animated so it visibly flares rather than just
+   glowing steady. */
+.infra-hot .entity-icon-wrap {
+  animation: infra-flare 1.1s ease-in-out infinite;
+}
+@keyframes infra-flare {
+  0%, 100% { filter: drop-shadow(0 0 3px #ff3d3d) drop-shadow(0 0 1px #ff3d3d); }
+  50% { filter: drop-shadow(0 0 14px #ff3d3d) drop-shadow(0 0 6px #fff); }
+}
+.infra-hot-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #ff3d3d;
+  border: 1px solid #ff3d3d;
+  border-radius: 4px;
+  padding: 1px 4px;
+  vertical-align: middle;
+  animation: infra-badge-pulse 1.1s ease-in-out infinite;
+}
+@keyframes infra-badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .entity-icon-wrap {
   display: flex;
   align-items: center;
@@ -185,6 +214,9 @@ html, body {
   padding: 6px 16px;
   background: var(--header-fade);
   z-index: 899;
+  /* Gaps between/below wrapped buttons would otherwise silently swallow
+     clicks meant for map markers underneath -- same fix as #titleBar. */
+  pointer-events: none;
 }
 
 .region-btn {
@@ -199,6 +231,7 @@ html, body {
   letter-spacing: 0.3px;
   cursor: pointer;
   white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .region-btn:hover { color: var(--text-bright); border-color: var(--accent); }
 .region-btn.active {
@@ -230,9 +263,10 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: border-color 0.15s ease, transform 0.15s ease;
   padding: 0;
 }
-#themeToggle:hover { border-color: var(--accent); }
+#themeToggle:hover { border-color: var(--accent); transform: rotate(20deg); }
 
 #panelToggle {
   position: fixed;
@@ -290,7 +324,10 @@ html, body {
   padding: 5px 2px;
   cursor: pointer;
   user-select: none;
+  border-radius: 4px;
+  transition: background 0.15s ease;
 }
+.layer-row:hover { background: rgba(var(--accent-rgb), 0.08); }
 
 .layer-row .count {
   margin-left: auto;
@@ -326,6 +363,7 @@ html, body {
 .swatch-wind { background: #7ee0c9; }
 .swatch-countries { background: #6fe3ff; }
 .swatch-cities { background: #ff6fb5; }
+.swatch-infra { background: #ff9500; }
 .swatch-wind-arrows { background: #7ee0c9; }
 
 /* leaflet-velocity draws its own canvas particle field -- no custom marker
@@ -403,6 +441,13 @@ html, body {
   font-size: 12.5px;
   line-height: 1.5;
   max-width: min(320px, calc(100vw - 40px));
+}
+.leaflet-popup {
+  animation: popup-in 0.16s ease;
+}
+@keyframes popup-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 .leaflet-popup-tip { background: var(--popup-bg); }
 .leaflet-popup-content { margin: 10px 12px; }

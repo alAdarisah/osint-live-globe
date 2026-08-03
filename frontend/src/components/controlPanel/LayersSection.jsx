@@ -32,6 +32,19 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
         <span className="count">{counts.ais}</span>
       </label>
 
+      <label className="layer-row" data-layer="infra">
+        <input
+          type="checkbox"
+          checked={layerVisibility.infra}
+          onChange={(e) => onToggleLayer("infra", e.target.checked)}
+        />
+        <span className="swatch swatch-infra" /> Critical Infrastructure
+        <span className="count">{counts.infra}</span>
+      </label>
+      <div className="sublegend">
+        Publicly documented sites relevant to the selected conflict zone; flares when a nearby event is reported.
+      </div>
+
       <label className="layer-row" data-layer="gdelt">
         <input
           type="checkbox"

@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import config, history, regions, replay
+from backend import config, history, infrastructure, regions, replay
 from backend.cache import registry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -68,6 +68,12 @@ async def regions_list():
     # -- no version/ETag machinery needed, just tell the browser to hold on
     # to it.
     return JSONResponse(regions.serialize(), headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.get("/api/infrastructure")
+async def infrastructure_list():
+    # Static for the process lifetime, same as /api/regions above.
+    return JSONResponse(infrastructure.serialize(), headers={"Cache-Control": "public, max-age=86400"})
 
 
 def _cached_source_response(request: Request, source_name: str, region: str | None, max_age: int, filter_fn):

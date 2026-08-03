@@ -40,7 +40,8 @@ function formatEventRow(type, item) {
   const link = item.source_url
     ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener noreferrer">${esc(headline)}</a>`
     : esc(headline);
-  return `<div class="event-row">${link}<div class="event-meta">${item.mentions || 0} mentions &middot; GDELT</div></div>`;
+  const sourceLabel = item.source_name || "GDELT";
+  return `<div class="event-row">${link}<div class="event-meta">${item.mentions || 0} mentions &middot; ${esc(sourceLabel)}</div></div>`;
 }
 
 function buildEventsSection(acledItems, gdeltItems) {
