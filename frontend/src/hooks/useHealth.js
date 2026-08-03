@@ -7,8 +7,14 @@ export function useHealth() {
   useEffect(() => {
     let cancelled = false;
     let timer = null;
+    let firstLoadDone = false;
 
     async function poll() {
+      if (document.hidden && firstLoadDone) {
+        if (!cancelled) timer = setTimeout(poll, 15000);
+        return;
+      }
+      firstLoadDone = true;
       try {
         const data = await fetchJson("/api/health");
         if (!cancelled) setHealth(data);
@@ -20,8 +26,17 @@ export function useHealth() {
     }
     poll();
 
+    function onVisibilityChange() {
+      if (!document.hidden) {
+        clearTimeout(timer);
+        poll();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       clearTimeout(timer);
     };
   }, []);
