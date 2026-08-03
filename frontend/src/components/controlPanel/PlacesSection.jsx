@@ -1,0 +1,28 @@
+export default function PlacesSection({ counts, zoomNotes, layerVisibility, onToggleLayer }) {
+  return (
+    <>
+      <h2>Places</h2>
+      <label className="layer-row" data-layer="countries">
+        <input
+          type="checkbox"
+          checked={layerVisibility.countries}
+          onChange={(e) => onToggleLayer("countries", e.target.checked)}
+        />
+        <span className="swatch swatch-countries" /> Countries
+        <span className="count">{counts.countries}</span>
+      </label>
+      <label className="layer-row" data-layer="cities">
+        <input
+          type="checkbox"
+          checked={layerVisibility.cities}
+          onChange={(e) => onToggleLayer("cities", e.target.checked)}
+        />
+        <span className="swatch swatch-cities" /> Cities (100k+)
+        <span className="count">{counts.cities}</span>
+      </label>
+      <div id="citiesZoomNote" className={`sublegend${zoomNotes.cities ? " visible" : ""}`}>
+        Zoom in to show cities
+      </div>
+    </>
+  );
+}
