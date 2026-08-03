@@ -7,6 +7,7 @@ import re
 import time
 import zipfile
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import httpx
 
@@ -17,6 +18,41 @@ log = logging.getLogger("osint-globe.gdelt")
 
 LASTUPDATE_URL = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
 GDELT_BASE_URL = "http://data.gdeltproject.org/gdeltv2/"
+
+# GDELT's crawler indexes anything -- wire services, national papers, but also
+# SEO blogs, content farms and unlabeled AI-generated aggregator sites. Rather
+# than trying to detect "AI-generated" after the fact, we only accept
+# source_urls from domains of known, editorially-staffed news organizations.
+# Subdomains of these (e.g. edition.cnn.com) match too.
+VERIFIED_NEWS_DOMAINS = {
+    "reuters.com", "apnews.com", "afp.com", "bbc.com", "bbc.co.uk",
+    "aljazeera.com", "npr.org", "pbs.org", "theguardian.com",
+    "nytimes.com", "washingtonpost.com", "wsj.com", "ft.com",
+    "economist.com", "bloomberg.com", "cnbc.com", "cnn.com",
+    "cbsnews.com", "nbcnews.com", "abcnews.go.com", "usatoday.com",
+    "time.com", "newsweek.com", "politico.com", "axios.com",
+    "thehill.com", "dw.com", "france24.com", "euronews.com",
+    "skynews.com", "independent.co.uk", "telegraph.co.uk",
+    "spiegel.de", "lemonde.fr", "elpais.com", "corriere.it",
+    "asahi.com", "japantimes.co.jp", "scmp.com", "straitstimes.com",
+    "timesofindia.indiatimes.com", "hindustantimes.com", "ndtv.com",
+    "haaretz.com", "timesofisrael.com", "jpost.com", "arabnews.com",
+    "middleeasteye.net", "kyivindependent.com", "themoscowtimes.com",
+    "abc.net.au", "cbc.ca", "globalnews.ca", "rnz.co.nz",
+    "voanews.com", "csmonitor.com", "foreignpolicy.com", "defensenews.com",
+    "military.com", "janes.com", "understandingwar.org",
+}
+
+
+def _is_verified_source(url: str) -> bool:
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == d or host.endswith("." + d) for d in VERIFIED_NEWS_DOMAINS)
 
 # GDELT publishes a new export file every 15 minutes. Fetching only the
 # latest one (the old behavior) meant a quiet 15-minute window could leave
@@ -90,6 +126,8 @@ def _parse_events(text: str) -> list[dict]:
         except (ValueError, IndexError):
             continue
         if quad_class not in (3, 4):  # verbal/material conflict events only
+            continue
+        if not _is_verified_source(row[COL_SOURCE_URL]):
             continue
         try:
             event_root_code = int(row[COL_EVENT_ROOT_CODE])
