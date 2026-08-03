@@ -14,6 +14,7 @@ WS_URL = "wss://stream.aisstream.io/v0/stream"
 STALE_AFTER = 60 * 30  # drop ships not updated in 30 minutes
 
 _ships: dict[int, dict] = {}
+_dirty = False  # set on every incoming position report, cleared once snapshotted
 
 
 def _bboxes_payload():
@@ -24,6 +25,7 @@ def _bboxes_payload():
 
 
 async def _consume(state):
+    global _dirty
     subscribe_msg = {
         "APIKey": config.AISSTREAM_API_KEY,
         "BoundingBoxes": _bboxes_payload(),
@@ -57,15 +59,24 @@ async def _consume(state):
                 "nav_status": report.get("NavigationalStatus"),
                 "updated": time.time(),
             }
+            _dirty = True
 
 
 async def _snapshot_loop(state):
+    global _dirty
     while True:
         await asyncio.sleep(5)
         cutoff = time.time() - STALE_AFTER
-        for mmsi in [m for m, ship in _ships.items() if ship["updated"] < cutoff]:
+        stale = [m for m, ship in _ships.items() if ship["updated"] < cutoff]
+        for mmsi in stale:
             _ships.pop(mmsi, None)
-        state.data = list(_ships.values())
+        # Only reassign (which bumps state.version, invalidating every
+        # client's ETag) when something actually changed -- a quiet bbox
+        # with no traffic used to still push a fresh version every 5s,
+        # forcing every polling client to re-fetch identical data.
+        if _dirty or stale:
+            state.data = list(_ships.values())
+            _dirty = False
         if _ships:
             state.last_success = time.time()
 

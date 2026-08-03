@@ -342,7 +342,14 @@ export function createMapController(container, initial, callbacks) {
 
   // ---------- wind arrows: fetched for whatever's currently in view ----------
 
+  let firstWindLoadDone = false;
   async function refreshWindArrows() {
+    // Backgrounded tab: skip, visibilitychange below catches up on return --
+    // except the very first call (map just mounted), so a map opened in a
+    // background tab still gets its initial wind data instead of sitting
+    // empty until the tab is focused.
+    if (document.hidden && firstWindLoadDone) return;
+    firstWindLoadDone = true;
     const b = map.getBounds();
     const url = `/api/wind?south=${b.getSouth()}&west=${b.getWest()}&north=${b.getNorth()}&east=${b.getEast()}`;
     try {
@@ -392,13 +399,12 @@ export function createMapController(container, initial, callbacks) {
     moveEndWindTimer = setTimeout(refreshWindArrows, 500); // debounced: don't hammer Open-Meteo mid-drag
   });
 
-  // Dedicated zoomend so the zoom-gated layers' show/hide reacts the instant
-  // a zoom crosses the threshold, rather than waiting on moveend's timing.
-  map.on("zoomend", () => {
-    renderAdsbLayer();
-    renderCities();
-    renderFirms();
-  });
+  // No separate zoomend handler: Leaflet always fires moveend right after
+  // zoomend for any zoom change (button, scroll, or pinch), so a dedicated
+  // zoomend listener re-running renderAdsbLayer/renderCities/renderFirms
+  // here just duplicated the exact same work moveend's renderAll() already
+  // does a moment later -- every zoom action was rendering those three
+  // layers twice.
 
   // Click empty map space to deselect the currently-selected aircraft/ship
   // trail. attachAircraftSelectHandler/attachShipSelectHandler stop
@@ -419,6 +425,10 @@ export function createMapController(container, initial, callbacks) {
 
   refreshWindArrows();
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
+  function onVisibilityChange() {
+    if (!document.hidden) refreshWindArrows(); // catch up immediately instead of waiting out the rest of the 5min interval
+  }
+  document.addEventListener("visibilitychange", onVisibilityChange);
   callbacks.onBoundsChange?.(boundsToPlainObject(map.getBounds()));
 
   // ---------- public API (consumed by useLeafletMap.js) ----------
@@ -456,6 +466,7 @@ export function createMapController(container, initial, callbacks) {
       clearInterval(windRefreshTimer);
       clearTimeout(moveEndWindTimer);
       clearTimeout(regionFlightTimer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       map.remove();
     },
   };

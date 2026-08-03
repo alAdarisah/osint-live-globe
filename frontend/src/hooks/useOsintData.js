@@ -74,6 +74,17 @@ export function useOsintData({ onData, flyToRegion }) {
       let firstLoadReported = false;
       async function tick() {
         if (timer) clearTimeout(timer);
+        if (document.hidden && firstLoadReported) {
+          // Nobody's looking at a backgrounded tab -- skip the network
+          // round-trip and just re-check next interval. The visibilitychange
+          // listener below calls refetchAllNow() the instant the tab comes
+          // back, so this never shows stale data, just skips fetching while
+          // it can't be seen. The very first load always goes through even
+          // if the tab happens to start backgrounded, so the boot screen
+          // can't hang waiting for data that never arrives.
+          timer = setTimeout(tick, intervalMs);
+          return;
+        }
         try {
           const data = await fetchJson(urlForRegion(url, currentRegionKeyRef.current));
           if (cancelled) return;
@@ -112,8 +123,14 @@ export function useOsintData({ onData, flyToRegion }) {
       })
       .catch((err) => console.warn("Failed to load regions:", err));
 
+    function onVisibilityChange() {
+      if (!document.hidden) refetchAllNow();
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       timeouts.forEach((clear) => clear());
       tickersRef.current = [];
     };
