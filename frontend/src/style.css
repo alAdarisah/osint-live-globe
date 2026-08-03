@@ -422,7 +422,7 @@ html, body {
 
 #attribution {
   position: absolute;
-  bottom: 0;
+  bottom: 46px;
   left: 0;
   right: 0;
   padding: 6px 14px;
@@ -434,6 +434,80 @@ html, body {
   pointer-events: none;
 }
 #attribution a { pointer-events: auto; color: var(--text-secondary); }
+
+/* ---------- replay timeline ----------
+   Fixed bar along the very bottom (below the attribution strip, which was
+   pushed up to make room). Deliberately just 4 controls: play/pause, the
+   scrubber itself, a label, and a "Live" button -- see TimelineBar.jsx. */
+#timelineBar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 960;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  padding: 0 14px;
+  background: var(--panel-bg);
+  border-top: 1px solid var(--panel-border);
+  backdrop-filter: blur(6px);
+}
+
+.timeline-play {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-bright);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.timeline-play:hover { border-color: var(--accent); color: var(--accent); }
+
+.timeline-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.timeline-label {
+  flex: none;
+  min-width: 108px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+#timelineBar.replaying .timeline-label { color: var(--accent); }
+
+.timeline-live-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.timeline-live-btn:disabled {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.5);
+  cursor: default;
+}
+.timeline-live-btn:disabled .live-dot { animation: none; }
+.timeline-live-btn:not(:disabled) .live-dot { background: var(--text-dim); animation: none; }
 
 .news-sentence {
   color: var(--text-bright);
@@ -642,6 +716,11 @@ html, body {
     width: 18px;
     height: 18px;
   }
+
+  #timelineBar { gap: 6px; padding: 0 8px; height: 50px; }
+  .timeline-label { min-width: 0; font-size: 10px; }
+  .timeline-live-btn { padding: 5px 8px; }
+  #attribution { bottom: 50px; }
 }
 
 /* ---------- boot-sequence loading screen ----------
