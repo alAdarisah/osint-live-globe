@@ -117,6 +117,16 @@ html, body {
   filter: drop-shadow(0 0 7px var(--accent)) drop-shadow(0 0 3px var(--accent));
 }
 
+/* US Navy/MSC ships (see decorators.js's isNavyVessel) always render larger
+   and glowing, same "permanent glow" treatment as .military-marker, and are
+   exempt from the AIS zoom gate (see createMapController.js). */
+.navy-marker .entity-icon-wrap {
+  filter: drop-shadow(0 0 5px #ffd60a) drop-shadow(0 0 2px #ffb347);
+}
+.navy-marker.selected .entity-icon-wrap {
+  filter: drop-shadow(0 0 7px var(--accent)) drop-shadow(0 0 3px var(--accent));
+}
+
 .infra-marker { cursor: pointer; }
 /* A nearby ACLED/GDELT event (see createMapController.js's INFRA_HOT_RADIUS_KM
    check) flags a site as a "hot zone" -- same drop-shadow-glow technique as
@@ -153,20 +163,6 @@ html, body {
   filter: drop-shadow(0 0 2px var(--shadow-color)) drop-shadow(0 0 1px var(--shadow-color));
 }
 .entity-icon-wrap svg { display: block; overflow: visible; }
-
-.clean-cluster div {
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--cluster-bg);
-  border: 1.5px solid rgba(var(--accent-rgb), 0.6);
-  color: var(--text-bright);
-  font-size: 11px;
-  font-weight: 600;
-}
 
 #titleBar {
   position: absolute;
@@ -249,6 +245,44 @@ html, body {
   background: var(--panel-border);
   margin: 2px 4px;
 }
+
+.region-zone-picker {
+  position: relative;
+  pointer-events: auto;
+}
+.region-zone-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 220px;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 960;
+  animation: popup-in 0.16s ease;
+}
+.region-zone-menu-item {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.region-zone-menu-item:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--text-bright); }
+.region-zone-menu-item.active { color: #ff8080; font-weight: 700; }
 
 #themeToggle {
   width: 26px;
@@ -364,14 +398,18 @@ html, body {
 .swatch-countries { background: #6fe3ff; }
 .swatch-cities { background: #ff6fb5; }
 .swatch-infra { background: #ff9500; }
+.swatch-jamming { background: #b833e0; }
+.swatch-satellites { background: #6fe3ff; }
 .swatch-wind-arrows { background: #7ee0c9; }
 
 /* leaflet-velocity draws its own canvas particle field -- no custom marker
    CSS needed. Just keep it from intercepting clicks meant for the map. */
 .leaflet-velocity { pointer-events: none; }
 
-#adsbZoomNote, #citiesZoomNote, #firmsZoomNote { display: none; }
-#adsbZoomNote.visible, #citiesZoomNote.visible, #firmsZoomNote.visible { display: block; }
+#adsbZoomNote, #citiesZoomNote, #firmsZoomNote, #acledZoomNote, #gdeltZoomNote, #aisZoomNote, #jammingZoomNote { display: none; }
+#adsbZoomNote.visible, #citiesZoomNote.visible, #firmsZoomNote.visible,
+#acledZoomNote.visible, #gdeltZoomNote.visible, #aisZoomNote.visible,
+#jammingZoomNote.visible { display: block; }
 
 .country-shape {
   fill: var(--country-fill);
@@ -382,6 +420,18 @@ html, body {
 }
 .country-shape:hover, .country-shape.hovered {
   fill: var(--country-hover-fill);
+}
+
+/* A country whose current ACLED activity crosses the war threshold (see
+   updateCountryWarFlare in createMapController.js) pulses red -- same
+   "alternate a resting/brighter drop-shadow" technique as .infra-hot, just
+   applied to a polygon's stroke/glow instead of a marker icon. */
+.country-shape.country-hot {
+  animation: country-flare 1.4s ease-in-out infinite;
+}
+@keyframes country-flare {
+  0%, 100% { stroke: #ff3d3d; stroke-width: 1.5; filter: drop-shadow(0 0 2px #ff3d3d); }
+  50% { stroke: #ff8080; stroke-width: 2.5; filter: drop-shadow(0 0 8px #ff3d3d); }
 }
 
 .city-dot {
@@ -577,6 +627,15 @@ html, body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
   overflow: hidden;
+  /* The panel's own background/padding/whitespace used to swallow clicks
+     meant for whatever map marker sits underneath it (most often a GDELT
+     pin, since that's what this panel lists) -- same fix as #regionBar:
+     opt the actually-interactive parts back in below. */
+  pointer-events: none;
+}
+
+.news-header, .news-list {
+  pointer-events: auto;
 }
 
 .news-header {

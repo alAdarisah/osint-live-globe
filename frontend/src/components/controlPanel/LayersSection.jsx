@@ -11,6 +11,9 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
         <span className="swatch swatch-acled" /> Conflict &amp; Violence (ACLED + UCDP)
         <span className="count">{counts.acled}</span>
       </label>
+      <div id="acledZoomNote" className={`sublegend${zoomNotes.acled ? " visible" : ""}`}>
+        Zoom in to show conflict events
+      </div>
 
       <label className="layer-row" data-layer="firms">
         <input
@@ -26,11 +29,30 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
         Zoom in to inspect individual fire points
       </div>
 
+      <label className="layer-row" data-layer="jamming">
+        <input
+          type="checkbox"
+          checked={layerVisibility.jamming}
+          onChange={(e) => onToggleLayer("jamming", e.target.checked)}
+        />
+        <span className="swatch swatch-jamming" /> GPS/Radio Jamming (GPSJam)
+        <span className="count">{counts.jamming}</span>
+      </label>
+      <div className="sublegend">
+        Data: gpsjam.org, derived from ADS-B aircraft GPS-quality reports. Updated once/day, not real-time.
+      </div>
+      <div id="jammingZoomNote" className={`sublegend${zoomNotes.jamming ? " visible" : ""}`}>
+        Zoom in to inspect individual cells
+      </div>
+
       <label className="layer-row" data-layer="ais">
         <input type="checkbox" checked={layerVisibility.ais} onChange={(e) => onToggleLayer("ais", e.target.checked)} />
         <span className="swatch swatch-ais" /> Maritime / AIS
         <span className="count">{counts.ais}</span>
       </label>
+      <div id="aisZoomNote" className={`sublegend${zoomNotes.ais ? " visible" : ""}`}>
+        Zoom in to show ships (Navy vessels shown at every zoom)
+      </div>
 
       <label className="layer-row" data-layer="infra">
         <input
@@ -45,6 +67,19 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
         Publicly documented sites relevant to the selected conflict zone; flares when a nearby event is reported.
       </div>
 
+      <label className="layer-row" data-layer="satellites">
+        <input
+          type="checkbox"
+          checked={layerVisibility.satellites}
+          onChange={(e) => onToggleLayer("satellites", e.target.checked)}
+        />
+        <span className="swatch swatch-satellites" /> Satellites (stations + military)
+        <span className="count">{counts.satellites}</span>
+      </label>
+      <div className="sublegend">
+        Position computed via SGP4 from CelesTrak's public orbital elements. Always shown, any zoom.
+      </div>
+
       <label className="layer-row" data-layer="gdelt">
         <input
           type="checkbox"
@@ -54,6 +89,9 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
         <span className="swatch swatch-gdelt" /> News (GDELT)
         <span className="count">{counts.gdelt}</span>
       </label>
+      <div id="gdeltZoomNote" className={`sublegend${zoomNotes.gdelt ? " visible" : ""}`}>
+        Zoom in to show news
+      </div>
 
       <label className="layer-row" data-layer="adsb">
         <input

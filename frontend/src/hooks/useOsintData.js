@@ -5,9 +5,10 @@
 // callback (wired to the map controller's applyData in App.jsx) rather than
 // stored as React state, since most of these sources (FIRMS alone can be
 // 100k+ points) would make every poll a wasteful full-tree re-render for no
-// UI that actually needs it reactively. The one exception is GDELT, which
-// the news broadcast panel *does* need reactively -- that one also lands in
-// real state.
+// UI that actually needs it reactively. GDELT and ACLED are the exceptions
+// -- the news broadcast panel and the "Choose Conflict Zone" activity
+// ranking need them reactively, and both payloads are small, bounded
+// (days-wide) windows, not the FIRMS/cities scale this comment warns about.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJson, urlForRegion } from "../api";
 
@@ -19,6 +20,8 @@ const BOOT_SOURCES = [
   { key: "gdelt", label: "Global news stream (GDELT)" },
   { key: "ais", label: "Maritime traffic (AIS)" },
   { key: "adsb", label: "Aircraft tracking (ADS-B)" },
+  { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
+  { key: "satellites", label: "Satellite tracking (CelesTrak)" },
 ];
 
 // ACLED/FIRMS refresh server-side every 30/15 minutes respectively (see
@@ -33,6 +36,8 @@ const POLL_CONFIG = [
   { key: "cities", url: "/api/cities", intervalMs: 5 * 60000 },
   { key: "ais", url: "/api/ships", intervalMs: 10000 },
   { key: "adsb", url: "/api/aircraft", intervalMs: 20000 },
+  { key: "jamming", url: "/api/jamming", intervalMs: 30 * 60000 }, // gpsjam.org itself only updates once/day
+  { key: "satellites", url: "/api/satellites", intervalMs: 10000 }, // position, not elements -- see backend/sources/satellites.py
 ];
 
 export function useOsintData({ onData, flyToRegion }) {
@@ -40,6 +45,7 @@ export function useOsintData({ onData, flyToRegion }) {
   const [currentRegionKey, setCurrentRegionKey] = useState(null); // null == world/unscoped
   const [currentRegionLabel, setCurrentRegionLabel] = useState("World");
   const [gdeltRaw, setGdeltRaw] = useState([]);
+  const [acledRaw, setAcledRaw] = useState([]);
   const [bootSources, setBootSources] = useState(() => BOOT_SOURCES.map((s) => ({ ...s, status: "pending" })));
 
   // Read by poller ticks so a region switch is picked up on the very next
@@ -109,8 +115,9 @@ export function useOsintData({ onData, flyToRegion }) {
       tick();
     }
 
+    const REACTIVE_SETTERS = { gdelt: setGdeltRaw, acled: setAcledRaw };
     for (const src of POLL_CONFIG) {
-      registerPoller(src.key, src.url, src.intervalMs, src.key === "gdelt" ? setGdeltRaw : undefined);
+      registerPoller(src.key, src.url, src.intervalMs, REACTIVE_SETTERS[src.key]);
     }
 
     // Static for the process lifetime -- fetched once, not part of the
@@ -186,6 +193,7 @@ export function useOsintData({ onData, flyToRegion }) {
     selectRegion,
     resetRegionToWorld,
     gdeltRaw,
+    acledRaw,
     bootSources,
     // Exposed for useReplay.js: leaving replay mode needs one immediate
     // refetch of every live source instead of waiting out each poller's own

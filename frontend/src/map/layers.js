@@ -5,25 +5,6 @@
 
 import { L } from "./leafletGlobal";
 
-function cleanClusterIcon(cluster) {
-  const count = cluster.getChildCount();
-  const size = count < 10 ? 26 : count < 100 ? 32 : 40;
-  return L.divIcon({
-    html: `<div>${count}</div>`,
-    className: "clean-cluster",
-    iconSize: [size, size],
-  });
-}
-
-const clusterOpts = {
-  maxClusterRadius: 70,
-  showCoverageOnHover: false,
-  spiderfyOnMaxZoom: true,
-  disableClusteringAtZoom: 8,
-  chunkedLoading: true,
-  iconCreateFunction: cleanClusterIcon,
-};
-
 export function createBaseLayer(map, theme) {
   const layer = L.tileLayer(basemapUrlFor(theme), {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
@@ -87,16 +68,39 @@ export function createFirmsLayers(map) {
   return { firmsHeat, firmsPointsLayer, firmsLayer, firmsCanvasRenderer };
 }
 
+// No clustering anywhere: every point layer either hides below its own
+// MIN_ZOOM gate (see createMapController.js) or, for small always-on sets
+// (military aircraft, Navy ships, infra), just stays a plain layerGroup at
+// every zoom. Clean at world zoom comes from the gate, not from grouping
+// markers into numbered bubbles.
+// GPS/radio jamming (gpsjam.org, via backend/sources/jamming.py): same
+// heat-plus-thin-click-layer shape as createFirmsLayers, since this is the
+// same kind of "too many cells to be individual icons, show density instead"
+// data, just with a distinct color so it doesn't read as fire.
+export function createJammingLayers(map) {
+  const jammingHeat = L.heatLayer([], {
+    radius: 22,
+    blur: 28,
+    maxZoom: 7,
+    minOpacity: 0.3,
+    gradient: { 0.2: "#2a0845", 0.4: "#6a0dad", 0.6: "#b833e0", 0.8: "#e066ff", 1: "#ff6fd8" },
+  });
+  const jammingCanvasRenderer = L.canvas({ padding: 0.25 });
+  const jammingPointsLayer = L.layerGroup();
+  const jammingLayer = L.layerGroup([jammingHeat, jammingPointsLayer]).addTo(map);
+  return { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer };
+}
+
 export function createEntityClusterGroups(map) {
   const groups = {
-    acled: L.markerClusterGroup(clusterOpts).addTo(map),
-    ais: L.markerClusterGroup(clusterOpts).addTo(map),
-    gdelt: L.markerClusterGroup(clusterOpts).addTo(map),
-    adsb: L.markerClusterGroup(clusterOpts), // wrapped below, alongside the always-visible military layer
+    acled: L.layerGroup().addTo(map),
+    ais: L.layerGroup(), // wrapped below, alongside the always-visible Navy layer
+    gdelt: L.layerGroup().addTo(map),
+    adsb: L.layerGroup(), // wrapped below, alongside the always-visible military layer
   };
-  // Military aircraft never cluster and are never hidden by the ADS-B zoom
-  // gate (see renderAdsbLayer) -- a plain layerGroup keeps every one an
-  // individually visible icon no matter how far out the view is zoomed.
+  // Military aircraft are never hidden by the ADS-B zoom gate (see
+  // renderAdsbLayer) -- a plain layerGroup keeps every one an individually
+  // visible icon no matter how far out the view is zoomed.
   const militaryAdsbGroup = L.layerGroup();
   const adsbLayer = L.layerGroup([groups.adsb, militaryAdsbGroup]).addTo(map);
   return { groups, militaryAdsbGroup, adsbLayer };
@@ -110,13 +114,28 @@ export function createCountriesLayer(map, onEachFeature) {
 }
 
 export function createCitiesGroup(map) {
-  return L.markerClusterGroup({ ...clusterOpts, maxClusterRadius: 50 }).addTo(map);
+  return L.layerGroup().addTo(map);
 }
 
 // Critical infrastructure is a small curated set (see backend/infrastructure.py)
 // -- every site should stay individually visible at any zoom, same reasoning
 // as militaryAdsbGroup, so this is a plain never-clustered layerGroup.
 export function createInfraGroup(map) {
+  return L.layerGroup().addTo(map);
+}
+
+// US Navy / Military Sealift Command ships (see decorators.js's
+// isNavyVessel) are always visible regardless of zoom, same exemption as
+// militaryAdsbGroup -- a plain, never-clustered, never-gated layerGroup.
+// Not added to the map directly: wrapped together with groups.ais into one
+// combined "ais" layer in createMapController.js, same as militaryAdsbGroup.
+export function createNavyAisGroup() {
+  return L.layerGroup();
+}
+
+// Satellites: a small curated set (~46 objects), always visible at any
+// zoom, same reasoning as militaryAdsbGroup/createInfraGroup.
+export function createSatelliteGroup(map) {
   return L.layerGroup().addTo(map);
 }
 

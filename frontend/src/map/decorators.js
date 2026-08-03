@@ -88,17 +88,28 @@ export function decorateGdelt(d) {
 
 // ---------- AIS ships ----------
 
+// USS/USNS is the standard naming convention for US Navy and Military
+// Sealift Command vessels -- the only way to identify them in a plain AIS
+// feed, since there's no "is this a warship" flag in the data itself.
+export function isNavyVessel(d) {
+  return /^(USS|USNS)\b/i.test((d.name || "").trim());
+}
+
 export function decorateAis(d, { selectedMmsi } = {}) {
-  const tooltip = `<b>${esc(d.name || "Unknown vessel")}</b><br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn`;
+  const navy = isNavyVessel(d);
+  const tooltip = `<b>${esc(d.name || "Unknown vessel")}</b>${navy ? " &middot; US Navy / MSC" : ""}<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn`;
   const detail = `
     <h3>${esc(d.name || "Unknown vessel")}</h3>
     <div class="meta">MMSI ${esc(d.mmsi)}</div>
     <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg;</div>
     <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
+    ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS name (USS/USNS). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
     <div class="meta">Source: aisstream.io (AIS)</div>`;
   const heading = Number.isFinite(d.heading) && d.heading !== 511 ? d.heading : d.course;
-  const cls = d.mmsi === selectedMmsi ? "ship-marker selected" : "ship-marker";
-  return { icon: icon(SVG.ship, "#35c2ff", 16, heading, cls), tooltip, detail };
+  let cls = navy ? "ship-marker navy-marker" : "ship-marker";
+  if (d.mmsi === selectedMmsi) cls += " selected";
+  const size = navy ? 26 : 16;
+  return { icon: icon(SVG.ship, navy ? "#ffd60a" : "#35c2ff", size, heading, cls), tooltip, detail };
 }
 
 // ---------- ADS-B aircraft ----------
@@ -133,18 +144,41 @@ const AIRCRAFT_STYLE = {
   other: { svg: SVG.planeOther, color: "#8aa0ad", size: 13, label: "General aviation / other" },
 };
 
+const MILITARY_ROLE_LABEL = {
+  tanker: "Aerial refueling tanker",
+  bomber: "Bomber",
+  fighter: "Fighter jet",
+  awacs: "AWACS / airborne early warning",
+  recon: "Reconnaissance",
+  patrol: "Maritime patrol",
+  drone: "Unmanned / drone",
+  transport: "Transport",
+  helicopter: "Military helicopter",
+};
+
 export function decorateAdsb(d, { selectedIcao } = {}) {
   const type = classifyAircraft(d);
   const style = AIRCRAFT_STYLE[type];
   const label = type === "military" ? (d.military === true ? "Military (confirmed)" : "Military (heuristic)") : style.label;
-  const tooltip = `<b>${esc(d.callsign || d.icao24)}</b> &middot; ${esc(label)}<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h`;
+  // airplanes.live supplies a real type/description for aircraft it has
+  // reference data for -- OpenSky has no such field at all, so this is
+  // only ever present some of the time (see backend/sources/adsb.py).
+  const hasRealType = !!(d.type_desc && d.type_desc.trim());
+  const roleLabel = d.military_role ? MILITARY_ROLE_LABEL[d.military_role] : null;
+  const aircraftLine = hasRealType ? `${d.type_desc}${roleLabel ? ` (${roleLabel})` : ""}` : null;
+  const tooltip = `<b>${esc(d.callsign || d.icao24)}</b>${aircraftLine ? ` &middot; ${esc(aircraftLine)}` : ` &middot; ${esc(label)}`}<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h`;
   const detail = `
     <h3>${esc(d.callsign || d.icao24)}</h3>
+    ${aircraftLine ? `<div class="meta">Aircraft: ${esc(aircraftLine)}</div>` : ""}
     <div class="meta">Type: ${esc(label)} &middot; ${esc(d.origin_country || "")} &middot; ICAO24 ${esc(d.icao24)}</div>
+    ${d.registration ? `<div>Registration: ${esc(d.registration)}</div>` : ""}
+    ${d.operator ? `<div>Operator: ${esc(d.operator)}</div>` : ""}
     <div>Altitude: ${esc(Math.round(d.altitude || 0))} m</div>
     <div>Ground speed: ${esc(Math.round((d.velocity || 0) * 3.6))} km/h</div>
     <div>On ground: ${d.on_ground ? "yes" : "no"}</div>
-    <p class="meta">Aircraft type is a best-effort guess from callsign pattern and ADS-B category when no confirmed source flag is available.</p>
+    ${hasRealType
+      ? '<p class="meta">Aircraft type/description from airplanes.live reference data.</p>'
+      : '<p class="meta">Aircraft type is a best-effort guess from callsign pattern and ADS-B category when no confirmed source flag is available.</p>'}
     <div class="meta">Source: OpenSky Network + airplanes.live (ADS-B)</div>`;
   let cls = "aircraft-marker";
   if (type === "military") cls += " military-marker";
@@ -181,4 +215,23 @@ export function decorateInfra(d, { hot, nearbyEvents } = {}) {
     <p class="meta">Source: publicly documented location (open-source reference), approximate.</p>`;
   const cls = `infra-marker${hot ? " infra-hot" : ""}`;
   return { icon: icon(style.svg, style.color, 18, 0, cls), tooltip, detail };
+}
+
+// ---------- satellites ----------
+
+const SATELLITE_GROUP_LABEL = {
+  stations: "Space station",
+  military: "Military satellite",
+};
+
+export function decorateSatellite(d) {
+  const groupLabel = SATELLITE_GROUP_LABEL[d.group] || "Satellite";
+  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(groupLabel)} &middot; ${Math.round(d.alt_km || 0)} km`;
+  const detail = `
+    <h3>${esc(d.name || `NORAD ${d.norad_id}`)}</h3>
+    <div class="meta">${esc(groupLabel)} &middot; NORAD catalog ID ${esc(d.norad_id)}</div>
+    <div>Altitude: ${Math.round(d.alt_km || 0)} km</div>
+    <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- a real orbit, not a live telemetry confirmation.</p>
+    <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
+  return { icon: icon(SVG.satellite, "#6fe3ff", 16, 0, "satellite-marker"), tooltip, detail };
 }

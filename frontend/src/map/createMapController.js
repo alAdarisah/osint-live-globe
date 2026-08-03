@@ -17,15 +17,28 @@ import {
   basemapUrlFor,
   createWeatherLayers,
   createFirmsLayers,
+  createJammingLayers,
   createEntityClusterGroups,
   createCountriesLayer,
   createCitiesGroup,
   createInfraGroup,
+  createNavyAisGroup,
+  createSatelliteGroup,
   createTrailLayers,
   createWindFlowLayer,
 } from "./layers";
-import { decorateAcled, decorateGdelt, decorateAis, decorateAdsb, decorateInfra, classifyAircraft, gdeltSentence } from "./decorators";
-import { countryPopupHtml, cityPopupHtml } from "./popups";
+import {
+  decorateAcled,
+  decorateGdelt,
+  decorateAis,
+  decorateAdsb,
+  decorateInfra,
+  decorateSatellite,
+  classifyAircraft,
+  isNavyVessel,
+  gdeltSentence,
+} from "./decorators";
+import { countryPopupHtml, cityPopupHtml, normalizeCountryName } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
@@ -38,12 +51,25 @@ import { fetchJson } from "../api";
 // rather than the facility itself.
 const INFRA_HOT_RADIUS_KM = 75;
 
-// World-view clusters everything into a handful of giant count bubbles --
-// pure clutter. Below these zooms the whole layer hides and its ...ZoomNote
-// shows instead; individual clustering still kicks in separately via
-// clusterOpts.disableClusteringAtZoom once zoomed in.
+// A country crossing either threshold (matched by name against the current
+// ACLED feed, same normalizeCountryName matching the country popup already
+// uses) is flagged as an active war and gets the country-hot flare.
+const WAR_FATALITY_THRESHOLD = 25;
+const WAR_EVENT_COUNT_THRESHOLD = 8;
+
+// No clustering anywhere (see layers.js) -- instead every point layer hides
+// below its own MIN_ZOOM and shows its ...ZoomNote, so world zoom stays
+// clean by construction rather than by grouping markers into bubbles. The
+// map's own initial view is zoom 3 (see L.map(...).setView below), so
+// ACLED/GDELT/AIS start hidden by default and appear one zoom step in.
 const ADSB_MIN_ZOOM = 5;
 const CITIES_MIN_ZOOM = 5;
+const ACLED_MIN_ZOOM = 3;
+const GDELT_MIN_ZOOM = 3;
+const AIS_MIN_ZOOM = 3;
+// AIS has its own dedicated renderAisLayer (civilian/Navy split, like ADS-B's
+// civilian/military split) so it isn't part of this generic lookup.
+const MARKER_LAYER_MIN_ZOOM = { acled: ACLED_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM };
 // Gates only the interactive per-point FIRMS layer -- the heat layer itself
 // always stays on regardless of zoom.
 const FIRMS_DETAIL_MIN_ZOOM = 5;
@@ -75,17 +101,27 @@ export function createMapController(container, initial, callbacks) {
   const baseLayer = createBaseLayer(map, initial.theme);
   const weatherLayers = createWeatherLayers(map);
   const { firmsHeat, firmsPointsLayer, firmsLayer, firmsCanvasRenderer } = createFirmsLayers(map);
+  const { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer } = createJammingLayers(map);
   const { groups, militaryAdsbGroup, adsbLayer } = createEntityClusterGroups(map);
   const citiesGroup = createCitiesGroup(map);
   const infraGroup = createInfraGroup(map);
+  const navyAisGroup = createNavyAisGroup();
+  const aisLayer = L.layerGroup([groups.ais, navyAisGroup]).addTo(map);
+  const satelliteGroup = createSatelliteGroup(map);
   const { shipTrailsLayer, aircraftTrailsLayer } = createTrailLayers(map);
   const windFlowLayer = createWindFlowLayer(map);
 
   // ---------- state that used to be top-level `let`s in app.js ----------
   // All internal to the controller: nothing outside the map needs to know
   // which aircraft is selected, so it never needs to be React state.
-  const raw = { acled: [], firms: [], ais: [], gdelt: [], adsb: [], countries: { features: [] }, cities: [], infra: [] };
-  const markersByKey = { acled: new Map(), gdelt: new Map(), ais: new Map(), adsb: new Map(), adsbMilitary: new Map(), cities: new Map(), infra: new Map() };
+  const raw = {
+    acled: [], firms: [], ais: [], gdelt: [], adsb: [],
+    countries: { features: [] }, cities: [], infra: [], jamming: [], satellites: [],
+  };
+  const markersByKey = {
+    acled: new Map(), gdelt: new Map(), ais: new Map(), aisNavy: new Map(),
+    adsb: new Map(), adsbMilitary: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
+  };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
   let selectedIcao = null;
@@ -112,6 +148,9 @@ export function createMapController(container, initial, callbacks) {
     if (key === "infra") return infraGroup;
     if (key === "windArrows") return windFlowLayer;
     if (key === "adsb") return adsbLayer;
+    if (key === "ais") return aisLayer;
+    if (key === "jamming") return jammingLayer;
+    if (key === "satellites") return satelliteGroup;
     return groups[key];
   }
 
@@ -170,8 +209,8 @@ export function createMapController(container, initial, callbacks) {
   // screen -- both a real perf win given FIRMS/ADS-B/cities volumes, and
   // literally "only show what you're looking at."
 
-  const counts = { acled: 0, firms: 0, ais: 0, gdelt: 0, adsb: 0, countries: 0, cities: 0, infra: 0 };
-  const zoomNotes = { adsb: false, cities: false, firms: false };
+  const counts = { acled: 0, firms: 0, ais: 0, gdelt: 0, adsb: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0 };
+  const zoomNotes = { adsb: false, cities: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
   function reportCounts() { callbacks.onCountsChange?.({ ...counts }); }
   function reportZoomNotes() { callbacks.onZoomNotesChange?.({ ...zoomNotes }); }
 
@@ -180,22 +219,27 @@ export function createMapController(container, initial, callbacks) {
       renderAdsbLayer();
       return;
     }
+    if (key === "ais") {
+      renderAisLayer();
+      return;
+    }
     const group = groups[key];
     const decorate = DECORATORS[key];
     const bounds = map.getBounds().pad(0.25);
     const idField = ID_FIELD[key];
-    const visible = [];
-    for (const item of raw[key]) {
-      if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
-      if (!bounds.contains([item.lat, item.lon])) continue;
-      visible.push(item);
+    const minZoom = MARKER_LAYER_MIN_ZOOM[key];
+    const belowMinZoom = minZoom != null && map.getZoom() < minZoom;
+    if (minZoom != null) {
+      zoomNotes[key] = belowMinZoom;
+      reportZoomNotes();
     }
-    // If the selected ship is no longer in the feed at all (out of AIS
-    // range / stopped reporting), drop the selection so the highlight/trail
-    // don't linger on a marker that no longer exists -- same as ADS-B.
-    if (key === "ais" && selectedMmsi && !raw.ais.some((s) => s.mmsi === selectedMmsi)) {
-      selectedMmsi = null;
-      shipTrails.clear();
+    const visible = [];
+    if (!belowMinZoom) {
+      for (const item of raw[key]) {
+        if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
+        if (!bounds.contains([item.lat, item.lon])) continue;
+        visible.push(item);
+      }
     }
     syncLayerMarkers(
       markersByKey[key],
@@ -207,9 +251,46 @@ export function createMapController(container, initial, callbacks) {
     );
     counts[key] = visible.length;
     reportCounts();
-    if (key === "ais") {
-      renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set());
+  }
+
+  // Navy/MSC ships (USS/USNS) always render, ignoring the AIS zoom gate,
+  // same exemption renderAdsbLayer already gives military aircraft.
+  function renderAisLayer() {
+    const decorate = DECORATORS.ais;
+    const bounds = map.getBounds().pad(0.25);
+    const belowAisMinZoom = map.getZoom() < AIS_MIN_ZOOM;
+    zoomNotes.ais = belowAisMinZoom;
+    reportZoomNotes();
+
+    const civilianVisible = [];
+    const navyVisible = [];
+    for (const item of raw.ais) {
+      if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
+      if (!bounds.contains([item.lat, item.lon])) continue;
+      if (isNavyVessel(item)) {
+        navyVisible.push(item);
+      } else if (!belowAisMinZoom) {
+        civilianVisible.push(item);
+      }
     }
+
+    // If the selected ship is no longer in the feed at all (out of AIS
+    // range / stopped reporting), drop the selection so the highlight/trail
+    // don't linger on a marker that no longer exists -- same as ADS-B.
+    if (selectedMmsi && !raw.ais.some((s) => s.mmsi === selectedMmsi)) {
+      selectedMmsi = null;
+      shipTrails.clear();
+    }
+
+    const idFn = (item) => item.mmsi;
+    const buildFn = (item) => buildMarker("ais", item, decorate);
+    const updateFn = (marker, item) => updateMarker(marker, item, decorate);
+    syncLayerMarkers(markersByKey.ais, groups.ais, civilianVisible, idFn, buildFn, updateFn);
+    syncLayerMarkers(markersByKey.aisNavy, navyAisGroup, navyVisible, idFn, buildFn, updateFn);
+
+    counts.ais = civilianVisible.length + navyVisible.length;
+    reportCounts();
+    renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set());
   }
 
   // Military aircraft get their own always-on, never-clustered group so they
@@ -304,6 +385,71 @@ export function createMapController(container, initial, callbacks) {
     reportCounts();
   }
 
+  function buildSatelliteMarker(sat) {
+    const d = decorateSatellite(sat);
+    const marker = L.marker([sat.lat, sat.lon], { icon: d.icon });
+    marker.bindPopup(d.detail, { maxWidth: 320 });
+    marker.bindTooltip(d.tooltip, { className: "map-tooltip", direction: "top" });
+    return marker;
+  }
+
+  function updateSatelliteMarker(marker, sat) {
+    const d = decorateSatellite(sat);
+    marker.setLatLng([sat.lat, sat.lon]);
+    marker.setIcon(d.icon);
+    marker.setTooltipContent(d.tooltip);
+    marker.setPopupContent(d.detail);
+  }
+
+  // Always on, any zoom -- only ~46 curated objects (stations + military),
+  // same reasoning as militaryAdsbGroup/infra.
+  function renderSatellites() {
+    const bounds = map.getBounds().pad(0.25);
+    const visible = raw.satellites.filter(
+      (s) => typeof s.lat === "number" && typeof s.lon === "number" && bounds.contains([s.lat, s.lon])
+    );
+    syncLayerMarkers(markersByKey.satellites, satelliteGroup, visible, (s) => s.norad_id, buildSatelliteMarker, updateSatelliteMarker);
+    counts.satellites = visible.length;
+    reportCounts();
+  }
+
+  function renderJamming() {
+    const bounds = map.getBounds().pad(0.25);
+    const visible = raw.jamming.filter(
+      (d) => typeof d.lat === "number" && typeof d.lon === "number" && bounds.contains([d.lat, d.lon])
+    );
+    // Always on, any zoom -- same reasoning as FIRMS' heat layer.
+    jammingHeat.setLatLngs(visible.map((d) => [d.lat, d.lon, d.jam_ratio]));
+
+    jammingPointsLayer.clearLayers();
+    const belowJammingDetailZoom = map.getZoom() < FIRMS_DETAIL_MIN_ZOOM;
+    zoomNotes.jamming = belowJammingDetailZoom;
+    reportZoomNotes();
+    if (!belowJammingDetailZoom) {
+      for (const d of visible) {
+        const tooltip = `<b>${Math.round(d.jam_ratio * 100)}% affected</b><br/>${d.bad}/${d.bad + d.good} reports`;
+        const detail = `
+          <h3>GPS/GNSS interference</h3>
+          <div class="meta">${esc(d.date || "")}</div>
+          <div>Affected aircraft reports: ${Math.round(d.jam_ratio * 100)}% (${d.bad} of ${d.bad + d.good})</div>
+          <p class="meta">Derived from ADS-B aircraft GPS-quality reports, aggregated into a ~1,770km&sup2; hex cell -- a once-daily, regional signal, not a real-time or pinpoint one.</p>
+          <div class="meta">Source: gpsjam.org (ADS-B Exchange)</div>`;
+        const marker = L.circleMarker([d.lat, d.lon], {
+          radius: 8,
+          fillOpacity: 0.02,
+          opacity: 0,
+          renderer: jammingCanvasRenderer,
+        });
+        marker.bindTooltip(tooltip, { className: "map-tooltip", direction: "top" });
+        marker.bindPopup(detail, { maxWidth: 280 });
+        jammingPointsLayer.addLayer(marker);
+      }
+    }
+
+    counts.jamming = visible.length;
+    reportCounts();
+  }
+
   // Country boundaries only actually change once/day server-side (see
   // countries.py), but the frontend re-polls every 5 minutes and a browser
   // HTTP cache hit still hands back a fresh-looking (but byte-identical)
@@ -314,18 +460,42 @@ export function createMapController(container, initial, callbacks) {
 
   function renderCountries() {
     const signature = JSON.stringify(raw.countries);
-    if (signature === lastCountriesSignature) return;
-    lastCountriesSignature = signature;
-
-    countriesLayer.clearLayers();
-    const features = raw.countries.features || [];
-    if (features.length) countriesLayer.addData(raw.countries);
-    countryNameByIso2 = {};
-    for (const f of features) {
-      if (f.properties.iso_a2) countryNameByIso2[f.properties.iso_a2] = f.properties.name;
+    if (signature !== lastCountriesSignature) {
+      lastCountriesSignature = signature;
+      countriesLayer.clearLayers();
+      const features = raw.countries.features || [];
+      if (features.length) countriesLayer.addData(raw.countries);
+      countryNameByIso2 = {};
+      for (const f of features) {
+        if (f.properties.iso_a2) countryNameByIso2[f.properties.iso_a2] = f.properties.name;
+      }
+      counts.countries = features.length;
+      reportCounts();
     }
-    counts.countries = features.length;
-    reportCounts();
+    updateCountryWarFlare();
+  }
+
+  // Flags a country as an active war zone (a pulsing red flare, same visual
+  // language as the infra hot-zone flare) when its current ACLED activity
+  // crosses a threshold. Only toggles a CSS class on the already-rendered
+  // path -- cheap enough to re-run after every ACLED update, not just when
+  // the country boundaries themselves change.
+  function updateCountryWarFlare() {
+    countriesLayer.eachLayer((layer) => {
+      const name = layer.feature?.properties?.name;
+      if (!name) return;
+      const wanted = normalizeCountryName(name);
+      let fatalities = 0;
+      let count = 0;
+      for (const e of raw.acled) {
+        if (normalizeCountryName(e.country) !== wanted) continue;
+        fatalities += e.fatalities || 0;
+        count += 1;
+      }
+      const hot = fatalities >= WAR_FATALITY_THRESHOLD || count >= WAR_EVENT_COUNT_THRESHOLD;
+      const el = layer.getElement?.();
+      if (el) el.classList.toggle("country-hot", hot);
+    });
   }
 
   function cityKey(city) {
@@ -411,6 +581,7 @@ export function createMapController(container, initial, callbacks) {
     renderFirms();
     renderCities();
     renderInfra();
+    updateCountryWarFlare();
   }
 
   // ---------- wind arrows: fetched for whatever's currently in view ----------
@@ -515,7 +686,10 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "firms") renderFirms();
       else if (key === "cities") renderCities();
       else if (key === "infra") renderInfra();
+      else if (key === "jamming") renderJamming();
+      else if (key === "satellites") renderSatellites();
       else renderMarkerLayer(key);
+      if (key === "acled") updateCountryWarFlare();
     },
 
     flyToRegion,
