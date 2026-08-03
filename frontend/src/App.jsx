@@ -7,6 +7,7 @@ import { useCallback, useRef, useState } from "react";
 
 import { useLeafletMap } from "./map/useLeafletMap";
 import { useOsintData } from "./hooks/useOsintData";
+import { useReplay } from "./hooks/useReplay";
 import { useTheme } from "./hooks/useTheme";
 import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
@@ -18,6 +19,7 @@ import RegionBar from "./components/RegionBar";
 import NewsBroadcastPanel from "./components/NewsBroadcastPanel";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
+import TimelineBar from "./components/TimelineBar";
 import Attribution from "./components/Attribution";
 
 const DEFAULT_LAYER_VISIBILITY = {
@@ -47,8 +49,27 @@ export default function App() {
     theme,
     onRegionAutoReset: () => regionAutoResetRef.current(),
   });
-  const dataApi = useOsintData({ onData: mapApi.applyData, flyToRegion: mapApi.flyToRegion });
+
+  // While the replay timeline is scrubbed back, live poller ticks must not
+  // overwrite whatever past moment is on screen -- this ref (rather than a
+  // useOsintData prop) is the gate, so useOsintData itself stays unaware
+  // replay even exists. Cheap ref instead of state since flipping it never
+  // needs to trigger a re-render on its own.
+  const replayActiveRef = useRef(false);
+  const dataApi = useOsintData({
+    onData: (key, data) => {
+      if (!replayActiveRef.current) mapApi.applyData(key, data);
+    },
+    flyToRegion: mapApi.flyToRegion,
+  });
   regionAutoResetRef.current = dataApi.resetRegionToWorld;
+
+  const replayApi = useReplay({
+    applyData: mapApi.applyData,
+    currentRegionKey: dataApi.currentRegionKey,
+    onExitReplay: dataApi.refetchAllNow,
+  });
+  replayActiveRef.current = replayApi.isReplaying;
 
   const { health, owmConfigured } = useHealth();
 
@@ -102,6 +123,16 @@ export default function App() {
         onToggleLayer={onToggleLayer}
         health={health}
         owmConfigured={owmConfigured}
+      />
+
+      <TimelineBar
+        isReplaying={replayApi.isReplaying}
+        isPlaying={replayApi.isPlaying}
+        replayAt={replayApi.replayAt}
+        bounds={replayApi.bounds}
+        onScrub={replayApi.scrubTo}
+        onTogglePlay={replayApi.togglePlay}
+        onGoLive={replayApi.goLive}
       />
 
       <Attribution />

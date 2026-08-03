@@ -63,5 +63,8 @@ class SourceRegistry:
     def get(self, name: str) -> SourceState:
         return self._sources[name]
 
+    def has(self, name: str) -> bool:
+        return name in self._sources
+
 
 registry = SourceRegistry()

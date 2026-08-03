@@ -177,5 +177,10 @@ export function useOsintData({ onData, flyToRegion }) {
     resetRegionToWorld,
     gdeltRaw,
     bootSources,
+    // Exposed for useReplay.js: leaving replay mode needs one immediate
+    // refetch of every live source instead of waiting out each poller's own
+    // interval, same reasoning selectRegion/resetRegionToWorld already rely
+    // on above.
+    refetchAllNow,
   };
 }

@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import config, regions
+from backend import config, history, regions, replay
 from backend.cache import registry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
         acled.start(),
         countries.start(),
         cities.start(),
+        history.start(),
     ]
     for coro in pollers:
         _background_tasks.append(asyncio.create_task(coro))
@@ -144,6 +145,26 @@ async def countries(request: Request, region: str | None = None):
 @app.get("/api/cities")
 async def cities(request: Request, region: str | None = None):
     return _cached_source_response(request, "cities", region, 3600, regions.filter_points)
+
+
+@app.get("/api/replay")
+async def replay_at(at: float, region: str | None = None):
+    """Point-in-time snapshot for the timeline scrubber: conflict/fires/news
+    filtered to whatever was already true at or before `at` (a unix
+    timestamp), plus the nearest captured ship/aircraft position snapshot.
+    Not cached -- every drag of the scrubber is a distinct `at`, so an ETag
+    would just be dead weight on every request.
+    """
+    bounds = regions.bounds_for(region)
+    payload = {
+        "at": at,
+        "acled": regions.filter_points(replay.filter_up_to(registry.get("acled").data, replay.acled_ts, at), bounds),
+        "firms": regions.filter_points(replay.filter_up_to(registry.get("firms").data, replay.firms_ts, at), bounds),
+        "gdelt": regions.filter_points(replay.filter_up_to(registry.get("gdelt").data, replay.gdelt_ts, at), bounds),
+        "ais": regions.filter_points(history.SHIP_HISTORY.at(at), bounds),
+        "adsb": regions.filter_points(history.AIRCRAFT_HISTORY.at(at), bounds),
+    }
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 # Wind arrows: no polling loop -- fetched on demand for whatever bbox the
