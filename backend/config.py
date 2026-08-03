@@ -22,6 +22,19 @@ ADSB_POLL_INTERVAL_AUTH = int(os.getenv("ADSB_POLL_INTERVAL_AUTH", "60"))     # 
 ACLED_POLL_INTERVAL = int(os.getenv("ACLED_POLL_INTERVAL", "1800"))
 UCDP_POLL_INTERVAL = int(os.getenv("UCDP_POLL_INTERVAL", "21600"))  # UCDP's candidate file only updates monthly
 
+# How long an entity can go without a fresh position report before
+# storage.py evicts it from entity_latest (see backend/storage.py). Separate
+# from ais.py's own STALE_AFTER, which governs the in-memory live layer
+# (/api/ships) -- these answer different questions and are allowed to diverge.
+AIS_STALE_AFTER = int(os.getenv("AIS_STALE_AFTER", "1800"))
+ADSB_STALE_AFTER = int(os.getenv("ADSB_STALE_AFTER", "1800"))
+
+# How long entity_history rows are kept before storage.py's retention sweep
+# deletes them. 3 days, matching the replay timeline's range and ACLED's own
+# fetch window -- no point keeping ship/aircraft history the rest of the
+# replay range can't use anyway.
+HISTORY_RETENTION_SECONDS = int(os.getenv("HISTORY_RETENTION_SECONDS", str(3 * 24 * 3600)))
+
 # High-interest maritime chokepoints/conflict waters for the AIS layer, as
 # "lat_min,lon_min,lat_max,lon_max" boxes separated by ";". Kept narrow (rather
 # than the whole planet) to stay within aisstream.io's practical volume and to
@@ -86,3 +99,6 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 # here -- index.html plus hashed assets/*.[hash].js|css. The backend serves
 # this built output, not the frontend/src sources directly.
 FRONTEND_DIST_DIR = FRONTEND_DIR / "dist"
+
+# SQLite position store (see backend/storage.py) lives here, gitignored.
+DATA_DIR = BASE_DIR / "data"

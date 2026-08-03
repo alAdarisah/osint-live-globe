@@ -5,7 +5,7 @@ import time
 
 import websockets
 
-from backend import config
+from backend import config, storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.ais")
@@ -98,6 +98,7 @@ async def _snapshot_loop(state):
         if _dirty or stale:
             state.data = list(_ships.values())
             _dirty = False
+            await storage.record_snapshot("ais", state.data, "mmsi")
         if _ships:
             state.last_success = time.time()
 

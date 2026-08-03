@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import config, history, infrastructure, regions, replay
+from backend import config, history, infrastructure, regions, replay, storage
 from backend.cache import registry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             log.exception("Failed to start source %r -- it will stay unavailable", name)
 
-    _background_tasks.append(asyncio.create_task(history.start()))
+    _background_tasks.append(asyncio.create_task(storage.retention_sweep_loop()))
 
     # Weather has no polling loop of its own -- it's proxied tile-by-tile on
     # demand below -- but is registered here so its key status shows up
@@ -191,8 +191,8 @@ async def replay_at(at: float, region: str | None = None):
         "acled": regions.filter_points(replay.filter_up_to(registry.get("acled").data, replay.acled_ts, at), bounds),
         "firms": regions.filter_points(replay.filter_up_to(registry.get("firms").data, replay.firms_ts, at), bounds),
         "gdelt": regions.filter_points(replay.filter_up_to(registry.get("gdelt").data, replay.gdelt_ts, at), bounds),
-        "ais": regions.filter_points(history.SHIP_HISTORY.at(at), bounds),
-        "adsb": regions.filter_points(history.AIRCRAFT_HISTORY.at(at), bounds),
+        "ais": regions.filter_points(await history.SHIP_HISTORY.at(at), bounds),
+        "adsb": regions.filter_points(await history.AIRCRAFT_HISTORY.at(at), bounds),
     }
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 

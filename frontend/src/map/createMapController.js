@@ -40,10 +40,13 @@ import {
   classifyAircraft,
   classifyShip,
   gdeltSentence,
+  SHIP_STYLE,
+  AIRCRAFT_STYLE,
 } from "./decorators";
 import { countryPopupHtml, cityPopupHtml, normalizeCountryName } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
+import { createEntityWebglLayer } from "./webglLayer";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
 import { boundsContainsPoint } from "../utils/geo";
 import { fetchJson } from "../api";
@@ -145,6 +148,14 @@ export function createMapController(container, initial, callbacks) {
   const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer } = createTrailLayers(map);
   const satelliteLayerWithTrails = L.layerGroup([satelliteGroup, satelliteTrailsLayer]).addTo(map);
   const windFlowLayer = createWindFlowLayer(map);
+  // GPU-batched sprite rendering for AIS/ADS-B markers (see webglLayer.js) --
+  // replaces the L.marker+L.divIcon path buildMarker/updateMarker below still
+  // use for every other point layer. One shared Pixi canvas covers all five
+  // ais/aisNavy/aisTanker/adsb/adsbMilitary buckets (added to the map once,
+  // always on) since toggling five separate WebGL contexts on/off would cost
+  // more than it saves -- setLayerVisible below calls entityWebglLayer's own
+  // per-bucket setVisible instead of map.addLayer/removeLayer for these keys.
+  const entityWebglLayer = createEntityWebglLayer(map);
 
   // ---------- state that used to be top-level `let`s in app.js ----------
   // All internal to the controller: nothing outside the map needs to know
@@ -153,9 +164,11 @@ export function createMapController(container, initial, callbacks) {
     acled: [], firms: [], ais: [], gdelt: [], adsb: [],
     countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
   };
+  // ais/aisNavy/aisTanker/adsb/adsbMilitary are no longer here -- their
+  // markers live inside entityWebglLayer's own per-bucket entry maps now
+  // (see webglLayer.js's updateEntities), not as L.marker instances.
   const markersByKey = {
-    acled: new Map(), gdelt: new Map(), ais: new Map(), aisNavy: new Map(), aisTanker: new Map(),
-    adsb: new Map(), adsbMilitary: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
+    acled: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
   };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
@@ -246,17 +259,22 @@ export function createMapController(container, initial, callbacks) {
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
     if (key === "clouds") return weatherLayers.clouds;
-    if (key === "adsbCivilian") return groups.adsb;
-    if (key === "adsbMilitary") return militaryAdsbGroup;
-    if (key === "aisCivilian") return groups.ais;
-    if (key === "aisNavy") return navyAisGroup;
-    if (key === "aisTanker") return tankerAisGroup;
     if (key === "jamming") return jammingLayerWithPing;
     if (key === "satellites") return satelliteLayerWithTrails;
     return groups[key];
   }
 
+  // The five AIS/ADS-B bucket keys route through entityWebglLayer's own
+  // per-bucket visibility instead of a Leaflet layerForKey lookup -- see the
+  // comment where entityWebglLayer is created above.
+  const WEBGL_BUCKET_KEYS = new Set(["adsbCivilian", "adsbMilitary", "aisCivilian", "aisNavy", "aisTanker"]);
+
   function setLayerVisible(key, visible) {
+    if (WEBGL_BUCKET_KEYS.has(key)) {
+      entityWebglLayer.setVisible(key, visible);
+      return;
+    }
+
     const layer = layerForKey(key);
     if (!layer) return;
     if (visible) map.addLayer(layer);
@@ -281,43 +299,47 @@ export function createMapController(container, initial, callbacks) {
   }
 
   // ---------- selection + trails ----------
+  // AIS/ADS-B markers are Pixi sprites now (see entityWebglLayer), which
+  // have no Leaflet bindPopup/marker.on("click") of their own -- these two
+  // functions are what webglLayer.js's onSelect callback (wired below, in
+  // renderAisLayer/renderAdsbLayer) calls instead, reproducing the same
+  // toggle-select/seed-trail/open-popup/re-decorate behavior the old
+  // marker-based handlers gave for free.
 
-  function attachAircraftSelectHandler(marker, item) {
-    marker.on("click", (e) => {
-      if (e.originalEvent) e.originalEvent.stopPropagation(); // don't let this reach the map's own click (would immediately deselect)
-      selectedIcao = selectedIcao === item.icao24 ? null : item.icao24;
-      if (selectedIcao) {
-        // Seed the trail right away instead of waiting for the next
-        // scheduled poll -- otherwise the trail stayed empty until then,
-        // which just looked like flight history didn't work.
-        updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
-      } else {
-        aircraftTrails.clear();
-      }
-      renderAdsbLayer(); // re-decorate every visible aircraft so the highlight moves
-    });
+  function selectAircraft(item) {
+    selectedIcao = selectedIcao === item.icao24 ? null : item.icao24;
+    if (selectedIcao) {
+      // Seed the trail right away instead of waiting for the next scheduled
+      // poll -- otherwise the trail stayed empty until then, which just
+      // looked like flight history didn't work.
+      updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
+      const d = decorateAdsb(item, { selectedIcao });
+      L.popup({ maxWidth: 320 }).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+    } else {
+      aircraftTrails.clear();
+      map.closePopup();
+    }
+    renderAdsbLayer(); // re-decorate every visible aircraft so the highlight moves
   }
 
-  function attachShipSelectHandler(marker, item) {
-    marker.on("click", (e) => {
-      if (e.originalEvent) e.originalEvent.stopPropagation();
-      selectedMmsi = selectedMmsi === item.mmsi ? null : item.mmsi;
-      if (selectedMmsi) {
-        updateTrails(shipTrails, raw.ais, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
-      } else {
-        shipTrails.clear();
-      }
-      renderMarkerLayer("ais");
-    });
+  function selectShip(item) {
+    selectedMmsi = selectedMmsi === item.mmsi ? null : item.mmsi;
+    if (selectedMmsi) {
+      updateTrails(shipTrails, raw.ais, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
+      const d = decorateAis(item, { selectedMmsi });
+      L.popup({ maxWidth: 320 }).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+    } else {
+      shipTrails.clear();
+      map.closePopup();
+    }
+    renderMarkerLayer("ais");
   }
 
   function buildMarker(key, item, decorate) {
-    const d = decorate(item, { selectedIcao, selectedMmsi });
+    const d = decorate(item, {});
     const marker = L.marker([item.lat, item.lon], { icon: d.icon });
     marker.bindPopup(d.detail, { maxWidth: 320 });
     marker.bindTooltip(d.tooltip, { className: "map-tooltip", direction: "top" });
-    if (key === "adsb") attachAircraftSelectHandler(marker, item);
-    if (key === "ais") attachShipSelectHandler(marker, item);
     return marker;
   }
 
@@ -419,11 +441,21 @@ export function createMapController(container, initial, callbacks) {
     }
 
     const idFn = (item) => item.mmsi;
-    const buildFn = (item) => buildMarker("ais", item, decorate);
-    const updateFn = (marker, item) => updateMarker(marker, item, decorate);
-    syncLayerMarkers(markersByKey.ais, groups.ais, civilianVisible, idFn, buildFn, updateFn);
-    syncLayerMarkers(markersByKey.aisTanker, tankerAisGroup, tankerVisible, idFn, buildFn, updateFn);
-    syncLayerMarkers(markersByKey.aisNavy, navyAisGroup, navyVisible, idFn, buildFn, updateFn);
+    const headingFn = (item) => (Number.isFinite(item.heading) && item.heading !== 511 ? item.heading : item.course);
+    const tooltipFn = (item) => decorate(item, { selectedMmsi }).tooltip;
+    const isSelectedFn = (item) => item.mmsi === selectedMmsi;
+    entityWebglLayer.updateEntities("aisCivilian", civilianVisible, {
+      idField: idFn, heading: headingFn, style: () => SHIP_STYLE.other,
+      isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+    });
+    entityWebglLayer.updateEntities("aisTanker", tankerVisible, {
+      idField: idFn, heading: headingFn, style: () => SHIP_STYLE.tanker,
+      isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+    });
+    entityWebglLayer.updateEntities("aisNavy", navyVisible, {
+      idField: idFn, heading: headingFn, style: () => SHIP_STYLE.navy,
+      isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+    });
 
     counts.aisCivilian = civilianVisible.length;
     counts.aisTanker = tankerVisible.length;
@@ -463,10 +495,17 @@ export function createMapController(container, initial, callbacks) {
     }
 
     const idFn = (item) => item.icao24;
-    const buildFn = (item) => buildMarker("adsb", item, decorate);
-    const updateFn = (marker, item) => updateMarker(marker, item, decorate);
-    syncLayerMarkers(markersByKey.adsb, groups.adsb, civilianVisible, idFn, buildFn, updateFn);
-    syncLayerMarkers(markersByKey.adsbMilitary, militaryAdsbGroup, militaryVisible, idFn, buildFn, updateFn);
+    const tooltipFn = (item) => decorate(item, { selectedIcao }).tooltip;
+    const isSelectedFn = (item) => item.icao24 === selectedIcao;
+    entityWebglLayer.updateEntities("adsbCivilian", civilianVisible, {
+      idField: idFn, heading: (item) => item.heading,
+      style: (item) => AIRCRAFT_STYLE[classifyAircraft(item)],
+      isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
+    });
+    entityWebglLayer.updateEntities("adsbMilitary", militaryVisible, {
+      idField: idFn, heading: (item) => item.heading, style: () => AIRCRAFT_STYLE.military,
+      isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
+    });
 
     counts.adsbCivilian = civilianVisible.length;
     counts.adsbMilitary = militaryVisible.length;
@@ -929,10 +968,14 @@ export function createMapController(container, initial, callbacks) {
   // layers twice.
 
   // Click empty map space to deselect the currently-selected aircraft/ship
-  // trail. attachAircraftSelectHandler/attachShipSelectHandler stop
-  // propagation on the marker's own click, so this only fires for clicks
-  // that didn't land on a marker.
+  // trail. This only fires for clicks that didn't land on a marker/sprite --
+  // ordinary Leaflet markers already stopPropagation() on their own click
+  // (see buildMarker's bindPopup/tooltip usage above); Pixi sprite taps
+  // don't share that DOM propagation chain (they run through Pixi's own
+  // internal event queue on the same canvas), so entityWebglLayer sets a
+  // one-shot flag on tap that's checked and cleared here instead.
   map.on("click", () => {
+    if (entityWebglLayer.consumeSuppressedClick()) return;
     if (selectedIcao) {
       selectedIcao = null;
       aircraftTrails.clear();

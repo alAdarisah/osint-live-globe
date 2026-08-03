@@ -113,6 +113,15 @@ export function classifyShip(d) {
   return "other";
 }
 
+// Same {svg,color,size} triples decorateAis picks inline below, pulled out
+// so webglLayer.js can build its sprite texture cache from the same source
+// of truth instead of re-deriving these values.
+export const SHIP_STYLE = {
+  navy: { svg: SVG.ship, color: "#ffd60a", size: 26, name: "ship-navy" },
+  tanker: { svg: SVG.tanker, color: "#ffb347", size: 20, name: "ship-tanker" },
+  other: { svg: SVG.ship, color: "#35c2ff", size: 16, name: "ship-other" },
+};
+
 export function decorateAis(d, { selectedMmsi } = {}) {
   const type = classifyShip(d);
   const navy = type === "navy";
@@ -163,11 +172,13 @@ export function classifyAircraft(d) {
   return "other";
 }
 
-const AIRCRAFT_STYLE = {
-  military: { svg: SVG.planeMilitary, color: "#ff4d4d", size: 28, label: "Military" },
-  helicopter: { svg: SVG.helicopter, color: "#9be15d", size: 18, label: "Helicopter" },
-  commercial: { svg: SVG.planeCommercial, color: "#d8b9ff", size: 16, label: "Commercial / airline" },
-  other: { svg: SVG.planeOther, color: "#8aa0ad", size: 13, label: "General aviation / other" },
+// Exported so webglLayer.js's sprite texture cache draws from the same
+// source of truth decorateAdsb below uses for its divIcon.
+export const AIRCRAFT_STYLE = {
+  military: { svg: SVG.planeMilitary, color: "#ff4d4d", size: 28, label: "Military", name: "plane-military" },
+  helicopter: { svg: SVG.helicopter, color: "#9be15d", size: 18, label: "Helicopter", name: "plane-helicopter" },
+  commercial: { svg: SVG.planeCommercial, color: "#d8b9ff", size: 16, label: "Commercial / airline", name: "plane-commercial" },
+  other: { svg: SVG.planeOther, color: "#8aa0ad", size: 13, label: "General aviation / other", name: "plane-other" },
 };
 
 const MILITARY_ROLE_LABEL = {
