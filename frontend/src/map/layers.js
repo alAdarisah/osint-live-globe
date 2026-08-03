@@ -113,6 +113,13 @@ export function createCitiesGroup(map) {
   return L.markerClusterGroup({ ...clusterOpts, maxClusterRadius: 50 }).addTo(map);
 }
 
+// Critical infrastructure is a small curated set (see backend/infrastructure.py)
+// -- every site should stay individually visible at any zoom, same reasoning
+// as militaryAdsbGroup, so this is a plain never-clustered layerGroup.
+export function createInfraGroup(map) {
+  return L.layerGroup().addTo(map);
+}
+
 export function createTrailLayers(map) {
   // Plain (non-clustered) layers for fading position-history lines behind
   // ships/aircraft. Kept separate from the marker cluster groups since

@@ -22,37 +22,61 @@ GDELT_BASE_URL = "http://data.gdeltproject.org/gdeltv2/"
 # GDELT's crawler indexes anything -- wire services, national papers, but also
 # SEO blogs, content farms and unlabeled AI-generated aggregator sites. Rather
 # than trying to detect "AI-generated" after the fact, we only accept
-# source_urls from domains of known, editorially-staffed news organizations.
+# source_urls from domains of known, editorially-staffed news organizations,
+# and the display name doubles as the on-map "which outlet is this" label.
 # Subdomains of these (e.g. edition.cnn.com) match too.
 VERIFIED_NEWS_DOMAINS = {
-    "reuters.com", "apnews.com", "afp.com", "bbc.com", "bbc.co.uk",
-    "aljazeera.com", "npr.org", "pbs.org", "theguardian.com",
-    "nytimes.com", "washingtonpost.com", "wsj.com", "ft.com",
-    "economist.com", "bloomberg.com", "cnbc.com", "cnn.com",
-    "cbsnews.com", "nbcnews.com", "abcnews.go.com", "usatoday.com",
-    "time.com", "newsweek.com", "politico.com", "axios.com",
-    "thehill.com", "dw.com", "france24.com", "euronews.com",
-    "skynews.com", "independent.co.uk", "telegraph.co.uk",
-    "spiegel.de", "lemonde.fr", "elpais.com", "corriere.it",
-    "asahi.com", "japantimes.co.jp", "scmp.com", "straitstimes.com",
-    "timesofindia.indiatimes.com", "hindustantimes.com", "ndtv.com",
-    "haaretz.com", "timesofisrael.com", "jpost.com", "arabnews.com",
-    "middleeasteye.net", "kyivindependent.com", "themoscowtimes.com",
-    "abc.net.au", "cbc.ca", "globalnews.ca", "rnz.co.nz",
-    "voanews.com", "csmonitor.com", "foreignpolicy.com", "defensenews.com",
-    "military.com", "janes.com", "understandingwar.org",
+    "reuters.com": "Reuters", "apnews.com": "AP News", "afp.com": "AFP",
+    "bbc.com": "BBC News", "bbc.co.uk": "BBC News",
+    "aljazeera.com": "Al Jazeera", "npr.org": "NPR", "pbs.org": "PBS",
+    "theguardian.com": "The Guardian", "nytimes.com": "The New York Times",
+    "washingtonpost.com": "The Washington Post", "wsj.com": "The Wall Street Journal",
+    "ft.com": "Financial Times", "economist.com": "The Economist",
+    "bloomberg.com": "Bloomberg", "cnbc.com": "CNBC", "cnn.com": "CNN",
+    "cbsnews.com": "CBS News", "nbcnews.com": "NBC News",
+    "abcnews.go.com": "ABC News", "usatoday.com": "USA Today",
+    "time.com": "TIME", "newsweek.com": "Newsweek", "politico.com": "Politico",
+    "axios.com": "Axios", "thehill.com": "The Hill", "dw.com": "DW",
+    "france24.com": "France 24", "euronews.com": "Euronews",
+    "skynews.com": "Sky News", "independent.co.uk": "The Independent",
+    "telegraph.co.uk": "The Telegraph", "spiegel.de": "Der Spiegel",
+    "lemonde.fr": "Le Monde", "elpais.com": "El País", "corriere.it": "Corriere della Sera",
+    "asahi.com": "The Asahi Shimbun", "japantimes.co.jp": "The Japan Times",
+    "scmp.com": "South China Morning Post", "straitstimes.com": "The Straits Times",
+    "timesofindia.indiatimes.com": "The Times of India", "hindustantimes.com": "Hindustan Times",
+    "ndtv.com": "NDTV", "haaretz.com": "Haaretz", "timesofisrael.com": "The Times of Israel",
+    "jpost.com": "The Jerusalem Post", "arabnews.com": "Arab News",
+    "middleeasteye.net": "Middle East Eye", "kyivindependent.com": "The Kyiv Independent",
+    "themoscowtimes.com": "The Moscow Times", "abc.net.au": "ABC News (Australia)",
+    "cbc.ca": "CBC News", "globalnews.ca": "Global News", "rnz.co.nz": "RNZ",
+    "voanews.com": "Voice of America", "csmonitor.com": "The Christian Science Monitor",
+    "foreignpolicy.com": "Foreign Policy", "defensenews.com": "Defense News",
+    "military.com": "Military.com", "janes.com": "Janes",
+    "understandingwar.org": "Institute for the Study of War",
 }
 
 
-def _is_verified_source(url: str) -> bool:
+def _matched_domain(url: str) -> str | None:
     try:
         host = urlparse(url).hostname or ""
     except ValueError:
-        return False
+        return None
     host = host.lower()
     if host.startswith("www."):
         host = host[4:]
-    return any(host == d or host.endswith("." + d) for d in VERIFIED_NEWS_DOMAINS)
+    for domain in VERIFIED_NEWS_DOMAINS:
+        if host == domain or host.endswith("." + domain):
+            return domain
+    return None
+
+
+def _is_verified_source(url: str) -> bool:
+    return _matched_domain(url) is not None
+
+
+def _agency_name(url: str) -> str | None:
+    domain = _matched_domain(url)
+    return VERIFIED_NEWS_DOMAINS.get(domain) if domain else None
 
 # GDELT publishes a new export file every 15 minutes. Fetching only the
 # latest one (the old behavior) meant a quiet 15-minute window could leave
@@ -127,7 +151,8 @@ def _parse_events(text: str) -> list[dict]:
             continue
         if quad_class not in (3, 4):  # verbal/material conflict events only
             continue
-        if not _is_verified_source(row[COL_SOURCE_URL]):
+        agency = _agency_name(row[COL_SOURCE_URL])
+        if not agency:
             continue
         try:
             event_root_code = int(row[COL_EVENT_ROOT_CODE])
@@ -149,6 +174,7 @@ def _parse_events(text: str) -> list[dict]:
                 "avg_tone": float(row[COL_AVG_TONE]) if row[COL_AVG_TONE] else None,
                 "date_added": row[COL_DATE_ADDED],
                 "source_url": row[COL_SOURCE_URL],
+                "source_name": agency,
             }
         )
     return candidates

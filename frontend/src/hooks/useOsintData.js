@@ -123,6 +123,16 @@ export function useOsintData({ onData, flyToRegion }) {
       })
       .catch((err) => console.warn("Failed to load regions:", err));
 
+    // Critical-infrastructure reference sites -- also static for the
+    // process lifetime, fetched once and handed to the map the same way
+    // every polled source is (see onData/mapApi.applyData in App.jsx).
+    fetchJson("/api/infrastructure")
+      .then((data) => {
+        if (cancelled) return;
+        onData("infra", data);
+      })
+      .catch((err) => console.warn("Failed to load infrastructure sites:", err));
+
     function onVisibilityChange() {
       if (!document.hidden) refetchAllNow();
     }

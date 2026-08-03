@@ -20,15 +20,23 @@ import {
   createEntityClusterGroups,
   createCountriesLayer,
   createCitiesGroup,
+  createInfraGroup,
   createTrailLayers,
   createWindFlowLayer,
 } from "./layers";
-import { decorateAcled, decorateGdelt, decorateAis, decorateAdsb, classifyAircraft } from "./decorators";
+import { decorateAcled, decorateGdelt, decorateAis, decorateAdsb, decorateInfra, classifyAircraft, gdeltSentence } from "./decorators";
 import { countryPopupHtml, cityPopupHtml } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
-import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime } from "../utils/format";
+import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
 import { fetchJson } from "../api";
+
+// A nearby ACLED/GDELT event within this radius flags an infrastructure
+// site as a "hot zone" and triggers its flare animation -- same radius
+// class as the city popup's own event-matching (see popups.js), just a bit
+// wider since infra strikes are often geocoded to the nearest city/province
+// rather than the facility itself.
+const INFRA_HOT_RADIUS_KM = 75;
 
 // World-view clusters everything into a handful of giant count bubbles --
 // pure clutter. Below these zooms the whole layer hides and its ...ZoomNote
@@ -69,14 +77,15 @@ export function createMapController(container, initial, callbacks) {
   const { firmsHeat, firmsPointsLayer, firmsLayer, firmsCanvasRenderer } = createFirmsLayers(map);
   const { groups, militaryAdsbGroup, adsbLayer } = createEntityClusterGroups(map);
   const citiesGroup = createCitiesGroup(map);
+  const infraGroup = createInfraGroup(map);
   const { shipTrailsLayer, aircraftTrailsLayer } = createTrailLayers(map);
   const windFlowLayer = createWindFlowLayer(map);
 
   // ---------- state that used to be top-level `let`s in app.js ----------
   // All internal to the controller: nothing outside the map needs to know
   // which aircraft is selected, so it never needs to be React state.
-  const raw = { acled: [], firms: [], ais: [], gdelt: [], adsb: [], countries: { features: [] }, cities: [] };
-  const markersByKey = { acled: new Map(), gdelt: new Map(), ais: new Map(), adsb: new Map(), adsbMilitary: new Map() };
+  const raw = { acled: [], firms: [], ais: [], gdelt: [], adsb: [], countries: { features: [] }, cities: [], infra: [] };
+  const markersByKey = { acled: new Map(), gdelt: new Map(), ais: new Map(), adsb: new Map(), adsbMilitary: new Map(), cities: new Map(), infra: new Map() };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
   let selectedIcao = null;
@@ -100,6 +109,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "firms") return firmsLayer;
     if (key === "countries") return countriesLayer;
     if (key === "cities") return citiesGroup;
+    if (key === "infra") return infraGroup;
     if (key === "windArrows") return windFlowLayer;
     if (key === "adsb") return adsbLayer;
     return groups[key];
@@ -160,7 +170,7 @@ export function createMapController(container, initial, callbacks) {
   // screen -- both a real perf win given FIRMS/ADS-B/cities volumes, and
   // literally "only show what you're looking at."
 
-  const counts = { acled: 0, firms: 0, ais: 0, gdelt: 0, adsb: 0, countries: 0, cities: 0 };
+  const counts = { acled: 0, firms: 0, ais: 0, gdelt: 0, adsb: 0, countries: 0, cities: 0, infra: 0 };
   const zoomNotes = { adsb: false, cities: false, firms: false };
   function reportCounts() { callbacks.onCountsChange?.({ ...counts }); }
   function reportZoomNotes() { callbacks.onZoomNotesChange?.({ ...zoomNotes }); }
@@ -294,7 +304,19 @@ export function createMapController(container, initial, callbacks) {
     reportCounts();
   }
 
+  // Country boundaries only actually change once/day server-side (see
+  // countries.py), but the frontend re-polls every 5 minutes and a browser
+  // HTTP cache hit still hands back a fresh-looking (but byte-identical)
+  // payload -- rebuilding the whole GeoJSON layer (and killing any open
+  // popup) on every one of those ticks is the same anti-pattern
+  // syncLayerMarkers exists to avoid. Skip the rebuild when nothing changed.
+  let lastCountriesSignature = null;
+
   function renderCountries() {
+    const signature = JSON.stringify(raw.countries);
+    if (signature === lastCountriesSignature) return;
+    lastCountriesSignature = signature;
+
     countriesLayer.clearLayers();
     const features = raw.countries.features || [];
     if (features.length) countriesLayer.addData(raw.countries);
@@ -306,28 +328,78 @@ export function createMapController(container, initial, callbacks) {
     reportCounts();
   }
 
+  function cityKey(city) {
+    return `${city.name}|${city.country_code}|${city.lat}|${city.lon}`;
+  }
+
+  function buildCityMarker(city) {
+    const marker = L.marker([city.lat, city.lon], {
+      icon: L.divIcon({ html: '<div class="city-dot"></div>', className: "", iconSize: [8, 8], iconAnchor: [4, 4] }),
+    });
+    marker.bindPopup(() => cityPopupHtml(city, raw, countryNameByIso2), { maxWidth: 320 });
+    marker.bindTooltip(`${esc(city.name)} (${fmtNumber(city.population)})`, { className: "map-tooltip", direction: "top" });
+    return marker;
+  }
+
   function renderCities() {
-    citiesGroup.clearLayers();
     const belowCitiesMinZoom = map.getZoom() < CITIES_MIN_ZOOM;
     zoomNotes.cities = belowCitiesMinZoom;
     reportZoomNotes();
-    if (belowCitiesMinZoom) {
-      counts.cities = 0;
-      reportCounts();
-      return;
-    }
     const bounds = map.getBounds().pad(0.25);
-    const visible = raw.cities.filter((c) => bounds.contains([c.lat, c.lon]));
-    const markers = visible.map((city) => {
-      const marker = L.marker([city.lat, city.lon], {
-        icon: L.divIcon({ html: '<div class="city-dot"></div>', className: "", iconSize: [8, 8], iconAnchor: [4, 4] }),
-      });
-      marker.bindPopup(() => cityPopupHtml(city, raw, countryNameByIso2), { maxWidth: 320 });
-      marker.bindTooltip(`${esc(city.name)} (${fmtNumber(city.population)})`, { className: "map-tooltip", direction: "top" });
-      return marker;
-    });
-    citiesGroup.addLayers(markers);
+    const visible = belowCitiesMinZoom ? [] : raw.cities.filter((c) => bounds.contains([c.lat, c.lon]));
+    // Diff-based sync (not clearLayers()+rebuild) -- a full teardown on
+    // every moveend used to destroy the marker (and its just-opened popup)
+    // that a click's own auto-pan had just triggered, making city dots feel
+    // unclickable. See renderMarkerLayer/syncLayerMarkers for the same fix
+    // applied to every other point layer.
+    syncLayerMarkers(markersByKey.cities, citiesGroup, visible, cityKey, buildCityMarker, () => {});
     counts.cities = visible.length;
+    reportCounts();
+  }
+
+  // ---------- critical infrastructure + hot-zone flare ----------
+
+  function nearbyEventsFor(site) {
+    const events = [];
+    for (const e of raw.acled) {
+      if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
+      if (haversineKm(site.lat, site.lon, e.lat, e.lon) > INFRA_HOT_RADIUS_KM) continue;
+      events.push({ headline: e.event_type || "Conflict event", source: "ACLED" });
+    }
+    for (const e of raw.gdelt) {
+      if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
+      if (haversineKm(site.lat, site.lon, e.lat, e.lon) > INFRA_HOT_RADIUS_KM) continue;
+      const headline = (e.real_title && e.real_title.trim()) || gdeltSentence(e);
+      events.push({ headline, source: e.source_name || "GDELT" });
+    }
+    return events.slice(0, 5);
+  }
+
+  function buildInfraMarker(site) {
+    const nearbyEvents = nearbyEventsFor(site);
+    const d = decorateInfra(site, { hot: nearbyEvents.length > 0, nearbyEvents });
+    const marker = L.marker([site.lat, site.lon], { icon: d.icon });
+    marker.bindPopup(d.detail, { maxWidth: 320 });
+    marker.bindTooltip(d.tooltip, { className: "map-tooltip", direction: "top" });
+    return marker;
+  }
+
+  function updateInfraMarker(marker, site) {
+    const nearbyEvents = nearbyEventsFor(site);
+    const d = decorateInfra(site, { hot: nearbyEvents.length > 0, nearbyEvents });
+    marker.setIcon(d.icon);
+    marker.setTooltipContent(d.tooltip);
+    marker.setPopupContent(d.detail);
+  }
+
+  function renderInfra() {
+    const bounds = map.getBounds().pad(0.25);
+    const visible = raw.infra.filter((s) => bounds.contains([s.lat, s.lon]));
+    // Diff-sync like every other point layer -- re-runs on every ACLED/GDELT
+    // update too (see renderAll) so a flare turns on/off promptly, without
+    // destroying markers/open popups for sites whose hot status didn't change.
+    syncLayerMarkers(markersByKey.infra, infraGroup, visible, (s) => s.id, buildInfraMarker, updateInfraMarker);
+    counts.infra = visible.length;
     reportCounts();
   }
 
@@ -338,6 +410,7 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("adsb");
     renderFirms();
     renderCities();
+    renderInfra();
   }
 
   // ---------- wind arrows: fetched for whatever's currently in view ----------
@@ -441,6 +514,7 @@ export function createMapController(container, initial, callbacks) {
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();
       else if (key === "cities") renderCities();
+      else if (key === "infra") renderInfra();
       else renderMarkerLayer(key);
     },
 
