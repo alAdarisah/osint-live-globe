@@ -33,7 +33,11 @@ _DEFAULT_AIS_BBOXES = (
     "24,48,30,57;"    # Strait of Hormuz / Persian Gulf
     "21,117,26,123;"  # Taiwan Strait
     "0,105,23,121;"   # South China Sea
-    "31,20,37,36"     # Eastern Mediterranean
+    "31,20,37,36;"    # Eastern Mediterranean
+    "29.5,32.0,31.5,33.0"  # Suez Canal -- outside every box above (the
+                            # Eastern Mediterranean box stops at lat 31, the
+                            # canal runs ~29.9-31.5N), so tanker/cargo traffic
+                            # transiting it was invisible.
 )
 
 

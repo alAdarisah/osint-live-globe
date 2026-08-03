@@ -11,11 +11,11 @@ import LocateIcon from "./icons/LocateIcon";
 
 const NEWS_MAX_ITEMS = 8;
 
-export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, isMobileViewport, onLocate }) {
-  // Only the *initial* viewport decides the default -- an 85vw-wide open
-  // drawer would cover most of a small screen, but we don't want to fight a
-  // user's manual toggle if they later resize the window.
-  const [collapsed, setCollapsed] = useState(isMobileViewport);
+export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, onLocate }) {
+  // Starts collapsed on every viewport -- the news ticker is opt-in, same
+  // "quiet by default" treatment as the layer checkboxes in App.jsx's
+  // DEFAULT_LAYER_VISIBILITY.
+  const [collapsed, setCollapsed] = useState(true);
 
   const items = useMemo(() => {
     if (!mapBounds) return [];

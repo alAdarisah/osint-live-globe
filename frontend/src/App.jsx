@@ -22,11 +22,16 @@ import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
 import TimelineBar from "./components/TimelineBar";
 import Attribution from "./components/Attribution";
+import CountryInfoCard from "./components/CountryInfoCard";
 
+// "Tickers" (the layer checkboxes) default off except critical
+// infrastructure, satellites, and the military-only halves of ADS-B/AIS --
+// everything else is opt-in rather than cluttering the map on first load.
 const DEFAULT_LAYER_VISIBILITY = {
-  acled: true, firms: true, ais: true, gdelt: true, adsb: true,
-  countries: true, cities: true, infra: true, jamming: true, satellites: true,
-  precip: true, clouds: false, wind: false, windArrows: true,
+  acled: false, firms: false, aisCivilian: false, aisTanker: false, aisNavy: true, gdelt: false,
+  adsbCivilian: false, adsbMilitary: true,
+  countries: false, cities: false, infra: true, jamming: false, satellites: true,
+  precip: false, clouds: false, windArrows: false,
 };
 
 export default function App() {
@@ -49,6 +54,7 @@ export default function App() {
   const mapApi = useLeafletMap(mapContainerRef, {
     theme,
     onRegionAutoReset: () => regionAutoResetRef.current(),
+    initialLayerVisibility: DEFAULT_LAYER_VISIBILITY,
   });
 
   // While the replay timeline is scrubbed back, live poller ticks must not
@@ -111,6 +117,15 @@ export default function App() {
     [mapApi.setLayerVisible]
   );
 
+  const [infraFilterText, setInfraFilterText] = useState("");
+  const onInfraFilterChange = useCallback(
+    (text) => {
+      setInfraFilterText(text);
+      mapApi.setInfraFilter(text);
+    },
+    [mapApi.setInfraFilter]
+  );
+
   const togglePanel = useCallback(() => {
     setPanelOpen((prev) => {
       const next = !prev;
@@ -143,7 +158,6 @@ export default function App() {
         gdeltRaw={dataApi.gdeltRaw}
         mapBounds={mapApi.mapBounds}
         regionLabel={dataApi.currentRegionLabel}
-        isMobileViewport={isMobileViewport}
         onLocate={onLocateNewsItem}
       />
 
@@ -157,6 +171,9 @@ export default function App() {
         onToggleLayer={onToggleLayer}
         health={health}
         owmConfigured={owmConfigured}
+        windStatus={mapApi.windStatus}
+        infraFilterText={infraFilterText}
+        onInfraFilterChange={onInfraFilterChange}
       />
 
       <TimelineBar
@@ -170,6 +187,8 @@ export default function App() {
       />
 
       <Attribution />
+
+      <CountryInfoCard country={mapApi.selectedCountry} onClose={mapApi.closeCountryCard} />
     </>
   );
 }

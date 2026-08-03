@@ -45,7 +45,13 @@ export function updateTrails(trailMap, items, idField, maxPoints, restrictTo) {
   }
 }
 
-export function renderTrailLayer(trailLayer, trailMap, color, visibleIds) {
+// `style` optionally overrides the opacity ceiling and adds a dashArray --
+// used by satellite trails (semi-transparent, dashed, reads as a background
+// orbital track) while ship/aircraft trails keep their default solid,
+// higher-opacity "active selection" look.
+export function renderTrailLayer(trailLayer, trailMap, color, visibleIds, style) {
+  const maxOpacity = style?.maxOpacity ?? 0.5;
+  const dashArray = style?.dashArray;
   trailLayer.clearLayers();
   for (const [id, points] of trailMap) {
     if (!visibleIds.has(id) || points.length < 2) continue;
@@ -54,7 +60,8 @@ export function renderTrailLayer(trailLayer, trailMap, color, visibleIds) {
       L.polyline([points[i], points[i + 1]], {
         color,
         weight: 2,
-        opacity: 0.08 + t * 0.42,
+        opacity: (0.08 + t * 0.42) * (maxOpacity / 0.5),
+        dashArray,
         interactive: false,
       }).addTo(trailLayer);
     }

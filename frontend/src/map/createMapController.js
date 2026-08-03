@@ -18,11 +18,14 @@ import {
   createWeatherLayers,
   createFirmsLayers,
   createJammingLayers,
+  createJammingPingGroup,
   createEntityClusterGroups,
   createCountriesLayer,
   createCitiesGroup,
   createInfraGroup,
+  createPipelinesGroup,
   createNavyAisGroup,
+  createTankerAisGroup,
   createSatelliteGroup,
   createTrailLayers,
   createWindFlowLayer,
@@ -35,13 +38,14 @@ import {
   decorateInfra,
   decorateSatellite,
   classifyAircraft,
-  isNavyVessel,
+  classifyShip,
   gdeltSentence,
 } from "./decorators";
 import { countryPopupHtml, cityPopupHtml, normalizeCountryName } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
+import { boundsContainsPoint } from "../utils/geo";
 import { fetchJson } from "../api";
 
 // A nearby ACLED/GDELT event within this radius flags an infrastructure
@@ -76,11 +80,37 @@ const FIRMS_DETAIL_MIN_ZOOM = 5;
 
 const SHIP_TRAIL_MAX_POINTS = 60;
 const AIRCRAFT_TRAIL_MAX_POINTS = 90;
+// Satellites poll every 10s (see useOsintData.js's POLL_CONFIG) -- 36 points
+// is a several-minute trailing arc, same "grows from app-open" cold start as
+// ship/aircraft trails.
+const SATELLITE_TRAIL_MAX_POINTS = 36;
+
+// How long a "new jamming cell" ripple marker stays on the map before it's
+// removed -- must comfortably cover the CSS ping animation's own total run
+// time (see .jamming-ping in style.css) so the marker isn't yanked mid-ring.
+const JAMMING_PING_LIFETIME_MS = 2600;
 
 const ID_FIELD = { acled: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24" };
 const DECORATORS = { acled: decorateAcled, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb };
 
 const REGION_FLY_DURATION = 1.2;
+
+// leaflet.heat's setLatLngs() always calls its own redraw(), which
+// dereferences `this._map._animating` with no null check -- harmless when
+// the heat layer is actually on the map, but a hard crash otherwise, and
+// FIRMS/jamming now both default to *off* (see DEFAULT_LAYER_VISIBILITY in
+// App.jsx) so this path is exercised on every poll while either stays
+// toggled off. `_latlngs` is assigned before redraw() runs (a comma
+// expression inside the library), so the data itself is never lost --
+// swallowing this specific redraw failure just skips the pointless paint
+// attempt; the layer draws correctly from that same data once re-added.
+function safeHeatSetLatLngs(heatLayer, points) {
+  try {
+    heatLayer.setLatLngs(points);
+  } catch (err) {
+    if (!(err instanceof TypeError)) throw err;
+  }
+}
 
 function boundsToPlainObject(bounds) {
   return {
@@ -102,13 +132,18 @@ export function createMapController(container, initial, callbacks) {
   const weatherLayers = createWeatherLayers(map);
   const { firmsHeat, firmsPointsLayer, firmsLayer, firmsCanvasRenderer } = createFirmsLayers(map);
   const { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer } = createJammingLayers(map);
-  const { groups, militaryAdsbGroup, adsbLayer } = createEntityClusterGroups(map);
+  const jammingPingGroup = createJammingPingGroup();
+  const jammingLayerWithPing = L.layerGroup([jammingLayer, jammingPingGroup]).addTo(map);
+  const { groups, militaryAdsbGroup } = createEntityClusterGroups(map);
   const citiesGroup = createCitiesGroup(map);
-  const infraGroup = createInfraGroup(map);
-  const navyAisGroup = createNavyAisGroup();
-  const aisLayer = L.layerGroup([groups.ais, navyAisGroup]).addTo(map);
-  const satelliteGroup = createSatelliteGroup(map);
-  const { shipTrailsLayer, aircraftTrailsLayer } = createTrailLayers(map);
+  const infraGroup = createInfraGroup();
+  const pipelinesGroup = createPipelinesGroup();
+  const infraLayer = L.layerGroup([infraGroup, pipelinesGroup]).addTo(map);
+  const navyAisGroup = createNavyAisGroup(map);
+  const tankerAisGroup = createTankerAisGroup();
+  const satelliteGroup = createSatelliteGroup();
+  const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer } = createTrailLayers(map);
+  const satelliteLayerWithTrails = L.layerGroup([satelliteGroup, satelliteTrailsLayer]).addTo(map);
   const windFlowLayer = createWindFlowLayer(map);
 
   // ---------- state that used to be top-level `let`s in app.js ----------
@@ -116,14 +151,15 @@ export function createMapController(container, initial, callbacks) {
   // which aircraft is selected, so it never needs to be React state.
   const raw = {
     acled: [], firms: [], ais: [], gdelt: [], adsb: [],
-    countries: { features: [] }, cities: [], infra: [], jamming: [], satellites: [],
+    countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
   };
   const markersByKey = {
-    acled: new Map(), gdelt: new Map(), ais: new Map(), aisNavy: new Map(),
+    acled: new Map(), gdelt: new Map(), ais: new Map(), aisNavy: new Map(), aisTanker: new Map(),
     adsb: new Map(), adsbMilitary: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
   };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
+  const satelliteTrails = new Map();
   let selectedIcao = null;
   let selectedMmsi = null;
   let countryNameByIso2 = {};
@@ -133,25 +169,115 @@ export function createMapController(container, initial, callbacks) {
   let windRefreshTimer = null;
   let moveEndWindTimer = null;
 
+  // ---------- cities gate + country selection/highlight ----------
+  // Cities only render once the user has opted into a scope (clicking a
+  // country, or picking a conflict zone from the Region bar) -- world-zoom
+  // city dots by default were just clutter with nothing to say about them.
+  // selectedCountryIso/activeConflictZoneBounds double as *which* countries
+  // get the `.country-selected` highlight, so both features share one state.
+  let citiesEnabled = false;
+  let selectedCountryIso = null;
+  let activeConflictZoneBounds = null; // {south,west,north,east} or null
+
+  // Mirrors the map's actual add/remove state for these two toggles so the
+  // render functions themselves can skip work (not just hide the result)
+  // while switched off -- satellitesVisible additionally gates trail
+  // rendering entirely (see renderSatellites), and jammingVisible drives the
+  // "ping everything currently known" burst below when the layer is
+  // switched on (see setLayerVisible).
+  let satellitesVisible = true;
+  let jammingVisible = true;
+
+  // Free-text name filter for critical infrastructure/military bases (see
+  // setInfraFilter in the public API and the search input in
+  // LayersSection.jsx) -- scoped to just this one layer, not a global
+  // cross-layer search.
+  let infraNameFilter = "";
+
   // ---------- country/city popups ----------
 
+  // Country click no longer opens a Leaflet popup (which auto-panned the
+  // map and closed the moment you clicked elsewhere) -- instead it drives a
+  // persistent React info card (see CountryInfoCard.jsx/onCountrySelect)
+  // that stays open across pan/zoom, and toggles closed on a second click of
+  // the same country. Hover still uses the plain fillOpacity swap below.
   const countriesLayer = createCountriesLayer(map, (feature, layer) => {
-    layer.bindPopup(() => countryPopupHtml(feature.properties, raw), { maxWidth: 320 });
     layer.on("mouseover", () => layer.setStyle({ fillOpacity: 0.18 }));
     layer.on("mouseout", () => layer.setStyle({ fillOpacity: 0.03 }));
+    layer.on("click", (e) => {
+      if (e.originalEvent) e.originalEvent.stopPropagation(); // don't let the map's own click handler immediately deselect
+      const iso = feature.properties?.iso_a2 || null;
+      if (selectedCountryIso && selectedCountryIso === iso) {
+        selectedCountryIso = null;
+        if (!activeConflictZoneBounds) citiesEnabled = false; // no other active scope -- fully closing means fully closing
+        callbacks.onCountrySelect?.(null);
+      } else {
+        citiesEnabled = true;
+        selectedCountryIso = iso;
+        callbacks.onCountrySelect?.({ iso, name: feature.properties?.name, html: countryPopupHtml(feature.properties, raw) });
+      }
+      renderCities();
+      updateCountryHighlights();
+    });
   });
+
+  // Same shape as updateCountryWarFlare below: iterate the already-rendered
+  // countriesLayer and toggle a CSS class per feature, rather than rebuilding
+  // anything -- cheap enough to re-run on every selection change.
+  function updateCountryHighlights() {
+    countriesLayer.eachLayer((layer) => {
+      const props = layer.feature?.properties;
+      if (!props) return;
+      let selected = props.iso_a2 && props.iso_a2 === selectedCountryIso;
+      if (!selected && activeConflictZoneBounds) {
+        const center = layer.getBounds().getCenter();
+        selected = boundsContainsPoint(activeConflictZoneBounds, center.lat, center.lng);
+      }
+      const el = layer.getElement?.();
+      if (el) el.classList.toggle("country-selected", !!selected);
+    });
+  }
 
   function layerForKey(key) {
     if (key === "firms") return firmsLayer;
     if (key === "countries") return countriesLayer;
     if (key === "cities") return citiesGroup;
-    if (key === "infra") return infraGroup;
+    if (key === "infra") return infraLayer; // wraps infraGroup + pipelinesGroup together
     if (key === "windArrows") return windFlowLayer;
-    if (key === "adsb") return adsbLayer;
-    if (key === "ais") return aisLayer;
-    if (key === "jamming") return jammingLayer;
-    if (key === "satellites") return satelliteGroup;
+    if (key === "precip") return weatherLayers.precip;
+    if (key === "clouds") return weatherLayers.clouds;
+    if (key === "adsbCivilian") return groups.adsb;
+    if (key === "adsbMilitary") return militaryAdsbGroup;
+    if (key === "aisCivilian") return groups.ais;
+    if (key === "aisNavy") return navyAisGroup;
+    if (key === "aisTanker") return tankerAisGroup;
+    if (key === "jamming") return jammingLayerWithPing;
+    if (key === "satellites") return satelliteLayerWithTrails;
     return groups[key];
+  }
+
+  function setLayerVisible(key, visible) {
+    const layer = layerForKey(key);
+    if (!layer) return;
+    if (visible) map.addLayer(layer);
+    else map.removeLayer(layer);
+
+    if (key === "satellites") {
+      satellitesVisible = visible;
+      if (visible) renderSatellites(); // was skipped entirely while off -- catch up now
+      else satelliteTrailsLayer.clearLayers(); // don't leave a stale trail sitting under the (now-empty) group
+    }
+    if (key === "jamming") {
+      const wasOff = !jammingVisible;
+      jammingVisible = visible;
+      // Turning it on is the only moment a normal user could actually see
+      // the sonar-ping -- a real "new cell" only happens on the next data
+      // refresh (up to 30min away), which made the effect functionally
+      // invisible in practice. Pinging every currently-known cell here
+      // makes it observable the moment someone opts in, not just once,
+      // invisibly, at boot.
+      if (visible && wasOff) pingAllCurrentJammingCells();
+    }
   }
 
   // ---------- selection + trails ----------
@@ -209,7 +335,10 @@ export function createMapController(container, initial, callbacks) {
   // screen -- both a real perf win given FIRMS/ADS-B/cities volumes, and
   // literally "only show what you're looking at."
 
-  const counts = { acled: 0, firms: 0, ais: 0, gdelt: 0, adsb: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0 };
+  const counts = {
+    acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
+    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+  };
   const zoomNotes = { adsb: false, cities: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
   function reportCounts() { callbacks.onCountsChange?.({ ...counts }); }
   function reportZoomNotes() { callbacks.onZoomNotesChange?.({ ...zoomNotes }); }
@@ -262,13 +391,20 @@ export function createMapController(container, initial, callbacks) {
     zoomNotes.ais = belowAisMinZoom;
     reportZoomNotes();
 
+    // Tankers get their own ticker/layer (see createTankerAisGroup) instead
+    // of being mixed into "Civilian Ships" -- three-way split on the same
+    // classifyShip() decorators.js already uses to pick the marker icon/color.
     const civilianVisible = [];
+    const tankerVisible = [];
     const navyVisible = [];
     for (const item of raw.ais) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!bounds.contains([item.lat, item.lon])) continue;
-      if (isNavyVessel(item)) {
+      const type = classifyShip(item);
+      if (type === "navy") {
         navyVisible.push(item);
+      } else if (!belowAisMinZoom && type === "tanker") {
+        tankerVisible.push(item);
       } else if (!belowAisMinZoom) {
         civilianVisible.push(item);
       }
@@ -286,9 +422,12 @@ export function createMapController(container, initial, callbacks) {
     const buildFn = (item) => buildMarker("ais", item, decorate);
     const updateFn = (marker, item) => updateMarker(marker, item, decorate);
     syncLayerMarkers(markersByKey.ais, groups.ais, civilianVisible, idFn, buildFn, updateFn);
+    syncLayerMarkers(markersByKey.aisTanker, tankerAisGroup, tankerVisible, idFn, buildFn, updateFn);
     syncLayerMarkers(markersByKey.aisNavy, navyAisGroup, navyVisible, idFn, buildFn, updateFn);
 
-    counts.ais = civilianVisible.length + navyVisible.length;
+    counts.aisCivilian = civilianVisible.length;
+    counts.aisTanker = tankerVisible.length;
+    counts.aisNavy = navyVisible.length;
     reportCounts();
     renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set());
   }
@@ -329,7 +468,8 @@ export function createMapController(container, initial, callbacks) {
     syncLayerMarkers(markersByKey.adsb, groups.adsb, civilianVisible, idFn, buildFn, updateFn);
     syncLayerMarkers(markersByKey.adsbMilitary, militaryAdsbGroup, militaryVisible, idFn, buildFn, updateFn);
 
-    counts.adsb = civilianVisible.length + militaryVisible.length;
+    counts.adsbCivilian = civilianVisible.length;
+    counts.adsbMilitary = militaryVisible.length;
     reportCounts();
     renderTrailLayer(aircraftTrailsLayer, aircraftTrails, "#d8b9ff", selectedIcao ? new Set([selectedIcao]) : new Set());
   }
@@ -342,7 +482,7 @@ export function createMapController(container, initial, callbacks) {
     // Always on, any zoom -- leaflet.heat draws this as one canvas
     // regardless of point count, so it stays cheap even with tens of
     // thousands visible.
-    firmsHeat.setLatLngs(visible.map((d) => [d.lat, d.lon, Math.min((d.frp ? Number(d.frp) : 5) / 50, 1) + 0.2]));
+    safeHeatSetLatLngs(firmsHeat, visible.map((d) => [d.lat, d.lon, Math.min((d.frp ? Number(d.frp) : 5) / 50, 1) + 0.2]));
 
     firmsPointsLayer.clearLayers();
     const belowFirmsDetailZoom = map.getZoom() < FIRMS_DETAIL_MIN_ZOOM;
@@ -404,6 +544,13 @@ export function createMapController(container, initial, callbacks) {
   // Always on, any zoom -- only ~46 curated objects (stations + military),
   // same reasoning as militaryAdsbGroup/infra.
   function renderSatellites() {
+    // Skip the work entirely while the layer is switched off -- not just
+    // hidden. setLayerVisible clears satelliteTrailsLayer and re-runs this
+    // once when switched back on, so nothing is missed, but a backgrounded
+    // 10s-interval poll doesn't spend time building/updating markers and
+    // trails nobody can see.
+    if (!satellitesVisible) return;
+
     const bounds = map.getBounds().pad(0.25);
     const visible = raw.satellites.filter(
       (s) => typeof s.lat === "number" && typeof s.lon === "number" && bounds.contains([s.lat, s.lon])
@@ -411,6 +558,81 @@ export function createMapController(container, initial, callbacks) {
     syncLayerMarkers(markersByKey.satellites, satelliteGroup, visible, (s) => s.norad_id, buildSatelliteMarker, updateSatelliteMarker);
     counts.satellites = visible.length;
     reportCounts();
+
+    // Satellites have no click-to-select model like ships/aircraft, so every
+    // satellite's trail is tracked all the time (restrictTo === undefined,
+    // per trails.js's documented semantics) rather than just the selected
+    // one -- their orbital path is the point, not a detail you opt into.
+    // Semi-transparent + dashed (vs. ship/aircraft trails' solid look) so it
+    // reads as a background orbital track, not an active-selection cue.
+    updateTrails(satelliteTrails, raw.satellites, "norad_id", SATELLITE_TRAIL_MAX_POINTS, undefined);
+    renderTrailLayer(satelliteTrailsLayer, satelliteTrails, "#6fe3ff", new Set(satelliteTrails.keys()), {
+      maxOpacity: 0.22,
+      dashArray: "2 5",
+    });
+  }
+
+  // Cells seen as of the last *data* update -- gpsjam's H3 cell centers are
+  // stable day to day, so `${lat},${lon}` is a good enough surrogate id for
+  // "is this the same cell as last time" without the backend needing to hand
+  // back a real one. Deliberately keyed off the full dataset (see
+  // detectNewJammingCells, called only from applyData) rather than the
+  // viewport-filtered `visible` set renderJamming works with -- renderJamming
+  // also re-runs on every pan/zoom now (see renderAll), and diffing against
+  // a viewport-scoped set would "discover" already-known cells as new every
+  // time they scroll back into view.
+  let seenJammingKeys = new Set();
+
+  function jammingCellKey(d) {
+    return `${d.lat},${d.lon}`;
+  }
+
+  // Concentric-rings "sonar ping"/water-drop-ripple marker for a
+  // newly-appeared jamming cell -- distinct from the .infra-hot/.country-hot
+  // steady glow, and self-removing (one reverb, not a persistent indicator)
+  // since a jamming refresh is a daily event, not an ongoing state to flag
+  // forever.
+  function buildJammingPing(d) {
+    const html =
+      '<div class="jamming-ping-wrap">' +
+      '<span class="jamming-ping-ring" style="animation-delay:0ms"></span>' +
+      '<span class="jamming-ping-ring" style="animation-delay:400ms"></span>' +
+      '<span class="jamming-ping-ring" style="animation-delay:800ms"></span>' +
+      "</div>";
+    const icon = L.divIcon({ html, className: "", iconSize: [1, 1], iconAnchor: [0, 0] });
+    const marker = L.marker([d.lat, d.lon], { icon, interactive: false });
+    jammingPingGroup.addLayer(marker);
+    setTimeout(() => jammingPingGroup.removeLayer(marker), JAMMING_PING_LIFETIME_MS);
+  }
+
+  // Called once per genuine jamming data refresh (applyData("jamming", ...)),
+  // not per render -- pings only newly-appeared cells versus the last poll,
+  // regardless of what's currently panned into view. Still tracks
+  // seenJammingKeys while off (so a cell that appeared while hidden doesn't
+  // wrongly ping again once shown), just skips building the (invisible)
+  // marker itself.
+  function detectNewJammingCells(points) {
+    const nextSeenKeys = new Set();
+    for (const d of points) {
+      if (typeof d.lat !== "number" || typeof d.lon !== "number") continue;
+      const key = jammingCellKey(d);
+      nextSeenKeys.add(key);
+      if (!seenJammingKeys.has(key) && jammingVisible) buildJammingPing(d);
+    }
+    seenJammingKeys = nextSeenKeys;
+  }
+
+  // Fired once when the jamming layer is switched from off to on (see
+  // setLayerVisible) -- a real "new cell" event only happens on the next
+  // data refresh (up to 30min away), so without this the ping would be
+  // functionally invisible: the only actual "new" moment is the very first
+  // load, which fires before the user has ever seen the layer. Pinging
+  // every currently-known cell here is what makes the effect discoverable.
+  function pingAllCurrentJammingCells() {
+    for (const d of raw.jamming) {
+      if (typeof d.lat !== "number" || typeof d.lon !== "number") continue;
+      buildJammingPing(d);
+    }
   }
 
   function renderJamming() {
@@ -418,8 +640,9 @@ export function createMapController(container, initial, callbacks) {
     const visible = raw.jamming.filter(
       (d) => typeof d.lat === "number" && typeof d.lon === "number" && bounds.contains([d.lat, d.lon])
     );
+
     // Always on, any zoom -- same reasoning as FIRMS' heat layer.
-    jammingHeat.setLatLngs(visible.map((d) => [d.lat, d.lon, d.jam_ratio]));
+    safeHeatSetLatLngs(jammingHeat, visible.map((d) => [d.lat, d.lon, d.jam_ratio]));
 
     jammingPointsLayer.clearLayers();
     const belowJammingDetailZoom = map.getZoom() < FIRMS_DETAIL_MIN_ZOOM;
@@ -473,6 +696,7 @@ export function createMapController(container, initial, callbacks) {
       reportCounts();
     }
     updateCountryWarFlare();
+    updateCountryHighlights();
   }
 
   // Flags a country as an active war zone (a pulsing red flare, same visual
@@ -513,10 +737,14 @@ export function createMapController(container, initial, callbacks) {
 
   function renderCities() {
     const belowCitiesMinZoom = map.getZoom() < CITIES_MIN_ZOOM;
-    zoomNotes.cities = belowCitiesMinZoom;
+    // citiesScoped tells the UI *which* note to show (see PlacesSection.jsx)
+    // -- "select a country/zone" takes priority over "zoom in", since
+    // zooming in without a scope selected still shows nothing.
+    zoomNotes.citiesScoped = citiesEnabled;
+    zoomNotes.cities = !citiesEnabled || belowCitiesMinZoom;
     reportZoomNotes();
     const bounds = map.getBounds().pad(0.25);
-    const visible = belowCitiesMinZoom ? [] : raw.cities.filter((c) => bounds.contains([c.lat, c.lon]));
+    const visible = !citiesEnabled || belowCitiesMinZoom ? [] : raw.cities.filter((c) => bounds.contains([c.lat, c.lon]));
     // Diff-based sync (not clearLayers()+rebuild) -- a full teardown on
     // every moveend used to destroy the marker (and its just-opened popup)
     // that a click's own auto-pan had just triggered, making city dots feel
@@ -564,13 +792,34 @@ export function createMapController(container, initial, callbacks) {
 
   function renderInfra() {
     const bounds = map.getBounds().pad(0.25);
-    const visible = raw.infra.filter((s) => bounds.contains([s.lat, s.lon]));
+    const needle = infraNameFilter.trim().toLowerCase();
+    const visible = raw.infra.filter(
+      (s) => bounds.contains([s.lat, s.lon]) && (!needle || s.name.toLowerCase().includes(needle))
+    );
     // Diff-sync like every other point layer -- re-runs on every ACLED/GDELT
     // update too (see renderAll) so a flare turns on/off promptly, without
     // destroying markers/open popups for sites whose hot status didn't change.
     syncLayerMarkers(markersByKey.infra, infraGroup, visible, (s) => s.id, buildInfraMarker, updateInfraMarker);
     counts.infra = visible.length;
     reportCounts();
+  }
+
+  // Pipeline routes (backend/infrastructure.py's PIPELINE_ROUTES) -- a small
+  // static set fetched once (see useOsintData.js), so this just draws every
+  // route once rather than diff-syncing per-viewport like the point layers.
+  function renderPipelines() {
+    pipelinesGroup.clearLayers();
+    for (const route of raw.pipelines) {
+      const line = L.polyline(route.coords, {
+        color: "#ffb347",
+        weight: 2,
+        opacity: 0.65,
+        dashArray: "6 6",
+      });
+      line.bindTooltip(esc(route.name), { className: "map-tooltip", direction: "top" });
+      line.bindPopup(`<h3>${esc(route.name)}</h3><p>${esc(route.note || "")}</p>`, { maxWidth: 280 });
+      pipelinesGroup.addLayer(line);
+    }
   }
 
   function renderAll() {
@@ -581,6 +830,13 @@ export function createMapController(container, initial, callbacks) {
     renderFirms();
     renderCities();
     renderInfra();
+    // jamming/satellites used to only re-render when new data arrived (via
+    // applyData), never on pan/zoom -- since both bounds-filter to the
+    // current viewport, panning away from wherever the map happened to be
+    // at the last poll left them empty until the next one (up to 30min for
+    // jamming), which read as "not loading" even though the data was there.
+    renderJamming();
+    renderSatellites();
     updateCountryWarFlare();
   }
 
@@ -599,8 +855,14 @@ export function createMapController(container, initial, callbacks) {
     try {
       const data = await fetchJson(url);
       windFlowLayer.setData(data);
+      callbacks.onWindStatusChange?.({ ok: true });
     } catch (err) {
       console.warn("Failed to fetch windArrows:", err);
+      // Surfaced in WeatherSection.jsx instead of only a console warning --
+      // Open-Meteo's free tier has a hard *daily* cap, so a 502 here often
+      // means "unavailable until tomorrow," not a transient blip; the user
+      // should be able to tell that from the UI, not just silence.
+      callbacks.onWindStatusChange?.({ ok: false, message: String(err.message || err) });
     }
   }
 
@@ -619,6 +881,22 @@ export function createMapController(container, initial, callbacks) {
     regionFlightTimer = setTimeout(() => {
       regionFlightActive = false;
     }, REGION_FLY_DURATION * 1000 + 250);
+
+    // Cities (and the country-selected highlight) stay off until the user
+    // opts into a scope -- picking any conflict zone from the Region bar
+    // counts as one; explicitly going back to "World" clears both the
+    // individually-clicked country and the zone highlight, same as never
+    // having selected anything.
+    citiesEnabled = key !== "world";
+    activeConflictZoneBounds = entry && entry.bounds
+      ? { south: entry.bounds[0], west: entry.bounds[1], north: entry.bounds[2], east: entry.bounds[3] }
+      : null;
+    if (key === "world" && selectedCountryIso) {
+      selectedCountryIso = null;
+      callbacks.onCountrySelect?.(null);
+    }
+    renderCities();
+    updateCountryHighlights();
   }
 
   function flyTo(lat, lon, minZoom) {
@@ -667,6 +945,21 @@ export function createMapController(container, initial, callbacks) {
     }
   });
 
+  // Sync every layer's actual add/remove state to the caller's initial
+  // defaults (see DEFAULT_LAYER_VISIBILITY in App.jsx) right after
+  // construction -- most layers default to .addTo(map) individually in
+  // layers.js, so a layer whose default is *false* needs removing once,
+  // here, before the map ever paints (no flash-then-hide). Must run after
+  // every render function/const it might call into (setLayerVisible("satellites",
+  // true) calls renderSatellites(), which reads `counts`/`zoomNotes` --
+  // running this any earlier hits their temporal-dead-zone before those
+  // `const`s are initialized).
+  if (initial.layerVisibility) {
+    for (const [key, visible] of Object.entries(initial.layerVisibility)) {
+      setLayerVisible(key, visible);
+    }
+  }
+
   refreshWindArrows();
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
   function onVisibilityChange() {
@@ -686,8 +979,11 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "firms") renderFirms();
       else if (key === "cities") renderCities();
       else if (key === "infra") renderInfra();
-      else if (key === "jamming") renderJamming();
-      else if (key === "satellites") renderSatellites();
+      else if (key === "pipelines") renderPipelines();
+      else if (key === "jamming") {
+        detectNewJammingCells(data);
+        renderJamming();
+      } else if (key === "satellites") renderSatellites();
       else renderMarkerLayer(key);
       if (key === "acled") updateCountryWarFlare();
     },
@@ -695,11 +991,22 @@ export function createMapController(container, initial, callbacks) {
     flyToRegion,
     flyTo,
 
-    setLayerVisible(key, visible) {
-      const layer = layerForKey(key);
-      if (!layer) return;
-      if (visible) map.addLayer(layer);
-      else map.removeLayer(layer);
+    setLayerVisible,
+
+    setInfraFilter(text) {
+      infraNameFilter = text || "";
+      renderInfra();
+    },
+
+    // Mirrors the country layer's own toggle-off branch -- called from the
+    // info card's own close button, so the controller's selection state
+    // stays in sync with what React is actually showing.
+    deselectCountry() {
+      if (!selectedCountryIso) return;
+      selectedCountryIso = null;
+      if (!activeConflictZoneBounds) citiesEnabled = false;
+      renderCities();
+      updateCountryHighlights();
     },
 
     setTheme(theme) {

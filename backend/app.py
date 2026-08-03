@@ -20,24 +20,27 @@ log = logging.getLogger("osint-globe")
 _background_tasks: list[asyncio.Task] = []
 
 
+_SOURCE_MODULES = ("gdelt", "firms", "ais", "adsb", "acled", "countries", "cities", "jamming", "satellites")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from backend.sources import gdelt, firms, ais, adsb, acled, countries, cities, jamming, satellites
+    # Each source is imported and started independently -- one module with a
+    # broken/missing dependency (e.g. jamming.py needing the `h3` package)
+    # used to take the entire backend down at startup via a single shared
+    # `from backend.sources import ...` line, silently breaking every other
+    # source (and /api/regions, and therefore the Conflict Zone picker) along
+    # with it. A bad source now just logs and sits inert instead.
+    import importlib
 
-    pollers = [
-        gdelt.start(),
-        firms.start(),
-        ais.start(),
-        adsb.start(),
-        acled.start(),
-        countries.start(),
-        cities.start(),
-        jamming.start(),
-        satellites.start(),
-        history.start(),
-    ]
-    for coro in pollers:
-        _background_tasks.append(asyncio.create_task(coro))
+    for name in _SOURCE_MODULES:
+        try:
+            module = importlib.import_module(f"backend.sources.{name}")
+            _background_tasks.append(asyncio.create_task(module.start()))
+        except Exception:
+            log.exception("Failed to start source %r -- it will stay unavailable", name)
+
+    _background_tasks.append(asyncio.create_task(history.start()))
 
     # Weather has no polling loop of its own -- it's proxied tile-by-tile on
     # demand below -- but is registered here so its key status shows up
@@ -202,9 +205,17 @@ async def replay_at(at: float, region: str | None = None):
 # Open-Meteo's free tier has a hard *daily* request cap that a fine-grained
 # cache key burns through fast (every few-pixel pan was a fresh API call).
 _WIND_CACHE: dict[tuple[float, float, float, float], tuple[float, list[dict], int]] = {}
-_WIND_CACHE_TTL = 300
-_WIND_CACHE_GRID_DEG = 2
+_WIND_CACHE_TTL = 600
+_WIND_CACHE_GRID_DEG = 4
 _wind_version = 0  # bumped only on an actual re-fetch, same idea as SourceState.version
+
+# Open-Meteo's cap is a hard *daily* count, not a rate limit that recovers in
+# seconds -- once it's exhausted (or the upstream is otherwise down), retrying
+# on every pan/zoom just keeps failing and can't dig the quota back out. A
+# short negative-cache means a burst of moveend-triggered requests during an
+# outage costs one upstream call instead of one per request.
+_WIND_ERROR_CACHE: dict[tuple[float, float, float, float], tuple[float, str]] = {}
+_WIND_ERROR_TTL = 120
 
 
 @app.get("/api/wind")
@@ -216,6 +227,11 @@ async def wind(request: Request, south: float, west: float, north: float, east: 
         return round(v / _WIND_CACHE_GRID_DEG) * _WIND_CACHE_GRID_DEG
 
     cache_key = (snap(south), snap(west), snap(north), snap(east))
+
+    cached_error = _WIND_ERROR_CACHE.get(cache_key)
+    if cached_error and time.time() - cached_error[0] < _WIND_ERROR_TTL:
+        raise HTTPException(502, f"Wind data fetch failed: {cached_error[1]}")
+
     cached = _WIND_CACHE.get(cache_key)
     if not cached or time.time() - cached[0] >= _WIND_CACHE_TTL:
         if len(_WIND_CACHE) > 500:
@@ -223,6 +239,7 @@ async def wind(request: Request, south: float, west: float, north: float, east: 
         try:
             data = await fetch_wind_velocity_grid(south, west, north, east)
         except Exception as exc:
+            _WIND_ERROR_CACHE[cache_key] = (time.time(), str(exc))
             raise HTTPException(502, f"Wind data fetch failed: {exc}")
         _wind_version += 1
         cached = (time.time(), data, _wind_version)
