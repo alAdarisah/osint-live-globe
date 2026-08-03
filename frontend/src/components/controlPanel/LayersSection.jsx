@@ -1,4 +1,4 @@
-export default function LayersSection({ counts, zoomNotes, layerVisibility, onToggleLayer }) {
+export default function LayersSection({ counts, zoomNotes, layerVisibility, onToggleLayer, infraFilterText, onInfraFilterChange }) {
   return (
     <>
       <h2>Layers</h2>
@@ -45,13 +45,39 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
         Zoom in to inspect individual cells
       </div>
 
-      <label className="layer-row" data-layer="ais">
-        <input type="checkbox" checked={layerVisibility.ais} onChange={(e) => onToggleLayer("ais", e.target.checked)} />
-        <span className="swatch swatch-ais" /> Maritime / AIS
-        <span className="count">{counts.ais}</span>
+      <label className="layer-row" data-layer="aisNavy">
+        <input
+          type="checkbox"
+          checked={layerVisibility.aisNavy}
+          onChange={(e) => onToggleLayer("aisNavy", e.target.checked)}
+        />
+        <span className="swatch swatch-ais" /> Navy &amp; MSC Ships
+        <span className="count">{counts.aisNavy}</span>
+      </label>
+      <div className="sublegend">Identified by AIS ship-type code or USS/USNS naming. Shown at every zoom.</div>
+
+      <label className="layer-row" data-layer="aisTanker">
+        <input
+          type="checkbox"
+          checked={layerVisibility.aisTanker}
+          onChange={(e) => onToggleLayer("aisTanker", e.target.checked)}
+        />
+        <span className="swatch" style={{ background: "#ffb347" }} /> Oil Tankers
+        <span className="count">{counts.aisTanker}</span>
+      </label>
+      <div className="sublegend">AIS ship-type code 80-89. Its own ticker, not mixed into Civilian Ships.</div>
+
+      <label className="layer-row" data-layer="aisCivilian">
+        <input
+          type="checkbox"
+          checked={layerVisibility.aisCivilian}
+          onChange={(e) => onToggleLayer("aisCivilian", e.target.checked)}
+        />
+        <span className="swatch swatch-ais" /> Civilian Ships (AIS)
+        <span className="count">{counts.aisCivilian}</span>
       </label>
       <div id="aisZoomNote" className={`sublegend${zoomNotes.ais ? " visible" : ""}`}>
-        Zoom in to show ships (Navy vessels shown at every zoom)
+        Zoom in to show civilian ships
       </div>
 
       <label className="layer-row" data-layer="infra">
@@ -65,7 +91,15 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
       </label>
       <div className="sublegend">
         Publicly documented sites relevant to the selected conflict zone; flares when a nearby event is reported.
+        Includes military bases (air/naval/army/missile/joint/logistics/radar).
       </div>
+      <input
+        type="text"
+        className="infra-filter-input"
+        placeholder="Filter infrastructure/bases by name..."
+        value={infraFilterText}
+        onChange={(e) => onInfraFilterChange(e.target.value)}
+      />
 
       <label className="layer-row" data-layer="satellites">
         <input
@@ -93,17 +127,28 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
         Zoom in to show news
       </div>
 
-      <label className="layer-row" data-layer="adsb">
+      <label className="layer-row" data-layer="adsbMilitary">
         <input
           type="checkbox"
-          checked={layerVisibility.adsb}
-          onChange={(e) => onToggleLayer("adsb", e.target.checked)}
+          checked={layerVisibility.adsbMilitary}
+          onChange={(e) => onToggleLayer("adsbMilitary", e.target.checked)}
         />
-        <span className="swatch swatch-adsb" /> Aircraft (ADS-B)
-        <span className="count">{counts.adsb}</span>
+        <span className="swatch swatch-adsb" /> Military Aircraft
+        <span className="count">{counts.adsbMilitary}</span>
+      </label>
+      <div className="sublegend">Shown at every zoom.</div>
+
+      <label className="layer-row" data-layer="adsbCivilian">
+        <input
+          type="checkbox"
+          checked={layerVisibility.adsbCivilian}
+          onChange={(e) => onToggleLayer("adsbCivilian", e.target.checked)}
+        />
+        <span className="swatch swatch-adsb" /> Civilian Aircraft (ADS-B)
+        <span className="count">{counts.adsbCivilian}</span>
       </label>
       <div id="adsbZoomNote" className={`sublegend${zoomNotes.adsb ? " visible" : ""}`}>
-        Zoom in to show aircraft (military shown at every zoom)
+        Zoom in to show civilian aircraft
       </div>
       <div className="sublegend">
         <span>

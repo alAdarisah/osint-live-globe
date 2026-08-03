@@ -33,12 +33,8 @@ export function createWeatherLayers(map) {
     opacity: 0.45,
     attribution: "Weather: OpenWeatherMap",
   });
-  const windLayer = L.tileLayer("/api/weather/tile/wind_new/{z}/{x}/{y}.png", {
-    opacity: 0.5,
-    attribution: "Weather: OpenWeatherMap",
-  });
 
-  return { precip: precipLayer, clouds: cloudsLayer, wind: windLayer };
+  return { precip: precipLayer, clouds: cloudsLayer };
 }
 
 export function createFirmsLayers(map) {
@@ -87,23 +83,31 @@ export function createJammingLayers(map) {
   });
   const jammingCanvasRenderer = L.canvas({ padding: 0.25 });
   const jammingPointsLayer = L.layerGroup();
-  const jammingLayer = L.layerGroup([jammingHeat, jammingPointsLayer]).addTo(map);
+  // Not added to the map directly -- wrapped together with the new-cell
+  // ripple/ping group into one combined "jamming" layer in
+  // createMapController.js, same pattern as infraGroup+pipelinesGroup.
+  const jammingLayer = L.layerGroup([jammingHeat, jammingPointsLayer]);
   return { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer };
 }
 
+// Civilian/military (and, in createNavyAisGroup below, civilian/Navy) each
+// get their own independently toggleable layerGroup rather than one combined
+// "adsb"/"ais" layer -- military aircraft and Navy ships default to visible
+// while their civilian counterparts default to hidden (see
+// DEFAULT_LAYER_VISIBILITY in App.jsx), which only works if the map can
+// add/remove each half separately.
 export function createEntityClusterGroups(map) {
   const groups = {
     acled: L.layerGroup().addTo(map),
-    ais: L.layerGroup(), // wrapped below, alongside the always-visible Navy layer
+    ais: L.layerGroup(), // civilian ships -- default hidden, see App.jsx
     gdelt: L.layerGroup().addTo(map),
-    adsb: L.layerGroup(), // wrapped below, alongside the always-visible military layer
+    adsb: L.layerGroup(), // civilian aircraft -- default hidden, see App.jsx
   };
   // Military aircraft are never hidden by the ADS-B zoom gate (see
   // renderAdsbLayer) -- a plain layerGroup keeps every one an individually
   // visible icon no matter how far out the view is zoomed.
-  const militaryAdsbGroup = L.layerGroup();
-  const adsbLayer = L.layerGroup([groups.adsb, militaryAdsbGroup]).addTo(map);
-  return { groups, militaryAdsbGroup, adsbLayer };
+  const militaryAdsbGroup = L.layerGroup().addTo(map);
+  return { groups, militaryAdsbGroup };
 }
 
 export function createCountriesLayer(map, onEachFeature) {
@@ -119,34 +123,68 @@ export function createCitiesGroup(map) {
 
 // Critical infrastructure is a small curated set (see backend/infrastructure.py)
 // -- every site should stay individually visible at any zoom, same reasoning
-// as militaryAdsbGroup, so this is a plain never-clustered layerGroup.
-export function createInfraGroup(map) {
-  return L.layerGroup().addTo(map);
+// as militaryAdsbGroup, so this is a plain never-clustered layerGroup. Not
+// added to the map directly -- wrapped together with createPipelinesGroup
+// into one combined "infra" layer in createMapController.js.
+export function createInfraGroup() {
+  return L.layerGroup();
+}
+
+// Major oil/gas pipeline routes (backend/infrastructure.py's
+// PIPELINE_ROUTES) -- lines, not points, but the same "small curated set,
+// always visible" treatment. Toggled together with createInfraGroup under
+// the single "infra" layer key (see layerForKey in createMapController.js).
+export function createPipelinesGroup() {
+  return L.layerGroup();
 }
 
 // US Navy / Military Sealift Command ships (see decorators.js's
 // isNavyVessel) are always visible regardless of zoom, same exemption as
 // militaryAdsbGroup -- a plain, never-clustered, never-gated layerGroup.
-// Not added to the map directly: wrapped together with groups.ais into one
-// combined "ais" layer in createMapController.js, same as militaryAdsbGroup.
-export function createNavyAisGroup() {
+// Default-visible (see App.jsx), independent of the civilian AIS layer.
+export function createNavyAisGroup(map) {
+  return L.layerGroup().addTo(map);
+}
+
+// Oil/chemical tankers (see decorators.js's classifyShip) get their own
+// dedicated toggle/ticker instead of being mixed into "Civilian Ships" --
+// same never-clustered layerGroup shape as the Navy split above, just
+// default-hidden (see App.jsx) since it's opt-in like the rest of the
+// civilian-side layers.
+export function createTankerAisGroup() {
   return L.layerGroup();
 }
 
 // Satellites: a small curated set (~46 objects), always visible at any
-// zoom, same reasoning as militaryAdsbGroup/createInfraGroup.
-export function createSatelliteGroup(map) {
-  return L.layerGroup().addTo(map);
+// zoom, same reasoning as militaryAdsbGroup/createInfraGroup. Not added to
+// the map directly -- combined with satelliteTrailsLayer into one toggle in
+// createMapController.js, so hiding Satellites hides its trails too.
+export function createSatelliteGroup() {
+  return L.layerGroup();
 }
 
 export function createTrailLayers(map) {
   // Plain (non-clustered) layers for fading position-history lines behind
-  // ships/aircraft. Kept separate from the marker cluster groups since
-  // lines shouldn't be clustered.
+  // ships/aircraft/satellites. Kept separate from the marker cluster groups
+  // since lines shouldn't be clustered. Ship/aircraft trails only ever show
+  // for the one selected vehicle and are always-on layers (no toggle of
+  // their own); satelliteTrailsLayer is deliberately NOT added here -- see
+  // createSatelliteGroup above.
   return {
     shipTrailsLayer: L.layerGroup().addTo(map),
     aircraftTrailsLayer: L.layerGroup().addTo(map),
+    satelliteTrailsLayer: L.layerGroup(),
   };
+}
+
+// Short-lived ripple markers for newly-appeared jamming cells (see
+// renderJamming in createMapController.js) -- kept as its own layerGroup,
+// separate from jammingPointsLayer's persistent click targets, since these
+// markers self-remove a few seconds after being added. Not added to the map
+// directly -- combined with jammingLayer in createMapController.js so
+// toggling the "jamming" layer off also hides pings.
+export function createJammingPingGroup() {
+  return L.layerGroup();
 }
 
 export function createWindFlowLayer(map) {

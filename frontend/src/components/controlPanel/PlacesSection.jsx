@@ -21,7 +21,7 @@ export default function PlacesSection({ counts, zoomNotes, layerVisibility, onTo
         <span className="count">{counts.cities}</span>
       </label>
       <div id="citiesZoomNote" className={`sublegend${zoomNotes.cities ? " visible" : ""}`}>
-        Zoom in to show cities
+        {zoomNotes.citiesScoped ? "Zoom in to show cities" : "Select a country or conflict zone to show cities"}
       </div>
     </>
   );

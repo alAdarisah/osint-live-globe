@@ -6,15 +6,20 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createMapController } from "./createMapController";
 
-const EMPTY_COUNTS = { acled: 0, firms: 0, ais: 0, gdelt: 0, adsb: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0 };
-const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
+const EMPTY_COUNTS = {
+  acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
+  aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+};
+const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
 
-export function useLeafletMap(containerRef, { theme, onRegionAutoReset }) {
+export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialLayerVisibility }) {
   const controllerRef = useRef(null);
   const [counts, setCounts] = useState(EMPTY_COUNTS);
   const [zoomNotes, setZoomNotes] = useState(EMPTY_ZOOM_NOTES);
   const [mapBounds, setMapBounds] = useState(null);
   const [ready, setReady] = useState(false);
+  const [windStatus, setWindStatus] = useState({ ok: true });
+  const [selectedCountry, setSelectedCountry] = useState(null);
 
   // onRegionAutoReset changes identity across renders (it closes over
   // region state) -- keep the latest one in a ref so the controller (created
@@ -27,12 +32,14 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset }) {
     if (!containerRef.current) return undefined;
     const controller = createMapController(
       containerRef.current,
-      { theme },
+      { theme, layerVisibility: initialLayerVisibility },
       {
         onCountsChange: setCounts,
         onZoomNotesChange: setZoomNotes,
         onBoundsChange: setMapBounds,
         onRegionAutoReset: () => onRegionAutoResetRef.current?.(),
+        onWindStatusChange: setWindStatus,
+        onCountrySelect: setSelectedCountry,
       }
     );
     controllerRef.current = controller;
@@ -68,9 +75,21 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset }) {
     controllerRef.current?.setLayerVisible(key, visible);
   }, []);
 
+  const setInfraFilter = useCallback((text) => {
+    controllerRef.current?.setInfraFilter(text);
+  }, []);
+
+  const closeCountryCard = useCallback(() => {
+    controllerRef.current?.deselectCountry();
+    setSelectedCountry(null);
+  }, []);
+
   useEffect(() => {
     controllerRef.current?.setTheme(theme);
   }, [theme]);
 
-  return { ready, counts, zoomNotes, mapBounds, applyData, flyToRegion, flyTo, setLayerVisible };
+  return {
+    ready, counts, zoomNotes, mapBounds, windStatus, selectedCountry,
+    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, closeCountryCard,
+  };
 }

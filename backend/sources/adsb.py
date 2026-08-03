@@ -4,7 +4,7 @@ import time
 
 import httpx
 
-from backend import config
+from backend import config, storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.adsb")
@@ -183,6 +183,7 @@ async def start():
             state.data = await _fetch()
             state.last_success = time.time()
             state.last_error = None
+            await storage.record_snapshot("adsb", state.data, "icao24")
             military_count = sum(1 for a in state.data if a.get("military"))
             log.info(
                 "ADS-B: %d aircraft (%s, %d flagged military)",

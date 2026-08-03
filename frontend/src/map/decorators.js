@@ -88,28 +88,63 @@ export function decorateGdelt(d) {
 
 // ---------- AIS ships ----------
 
-// USS/USNS is the standard naming convention for US Navy and Military
-// Sealift Command vessels -- the only way to identify them in a plain AIS
-// feed, since there's no "is this a warship" flag in the data itself.
+// AIS "Type" (ship type code, from ShipStaticData -- see backend/sources/
+// ais.py) is a real classification signal when present: 35 = "Military
+// ops". USS/USNS name matching is the fallback for when static data hasn't
+// arrived yet for a vessel (or it's a non-US warship AIS doesn't code as
+// military ops) -- same "trust the flag over the heuristic" pattern
+// classifyAircraft uses for d.military.
+const MILITARY_SHIP_TYPE = 35;
+const TANKER_SHIP_TYPE_MIN = 80;
+const TANKER_SHIP_TYPE_MAX = 89;
+
 export function isNavyVessel(d) {
+  if (d.ship_type === MILITARY_SHIP_TYPE) return true;
   return /^(USS|USNS)\b/i.test((d.name || "").trim());
 }
 
+function isTanker(d) {
+  return typeof d.ship_type === "number" && d.ship_type >= TANKER_SHIP_TYPE_MIN && d.ship_type <= TANKER_SHIP_TYPE_MAX;
+}
+
+export function classifyShip(d) {
+  if (isNavyVessel(d)) return "navy";
+  if (isTanker(d)) return "tanker";
+  return "other";
+}
+
+// Same {svg,color,size} triples decorateAis picks inline below, pulled out
+// so webglLayer.js can build its sprite texture cache from the same source
+// of truth instead of re-deriving these values.
+export const SHIP_STYLE = {
+  navy: { svg: SVG.ship, color: "#ffd60a", size: 26, name: "ship-navy" },
+  tanker: { svg: SVG.tanker, color: "#ffb347", size: 20, name: "ship-tanker" },
+  other: { svg: SVG.ship, color: "#35c2ff", size: 16, name: "ship-other" },
+};
+
 export function decorateAis(d, { selectedMmsi } = {}) {
-  const navy = isNavyVessel(d);
-  const tooltip = `<b>${esc(d.name || "Unknown vessel")}</b>${navy ? " &middot; US Navy / MSC" : ""}<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn`;
+  const type = classifyShip(d);
+  const navy = type === "navy";
+  const tanker = type === "tanker";
+  const typeLabel = navy ? " &middot; US Navy / MSC" : tanker ? " &middot; Oil/chemical tanker" : "";
+  const tooltip = `<b>${esc(d.name || "Unknown vessel")}</b>${typeLabel}<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn`;
   const detail = `
     <h3>${esc(d.name || "Unknown vessel")}</h3>
     <div class="meta">MMSI ${esc(d.mmsi)}</div>
     <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg;</div>
     <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
-    ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS name (USS/USNS). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
+    ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS ship-type code (or USS/USNS naming when static data hasn\'t arrived yet). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
+    ${tanker ? '<p class="meta">Identified as an oil/chemical tanker from its AIS ship-type code.</p>' : ""}
     <div class="meta">Source: aisstream.io (AIS)</div>`;
   const heading = Number.isFinite(d.heading) && d.heading !== 511 ? d.heading : d.course;
-  let cls = navy ? "ship-marker navy-marker" : "ship-marker";
+  let cls = "ship-marker";
+  if (navy) cls += " navy-marker";
+  if (tanker) cls += " tanker-marker";
   if (d.mmsi === selectedMmsi) cls += " selected";
-  const size = navy ? 26 : 16;
-  return { icon: icon(SVG.ship, navy ? "#ffd60a" : "#35c2ff", size, heading, cls), tooltip, detail };
+  const size = navy ? 26 : tanker ? 20 : 16;
+  const color = navy ? "#ffd60a" : tanker ? "#ffb347" : "#35c2ff";
+  const svg = tanker ? SVG.tanker : SVG.ship;
+  return { icon: icon(svg, color, size, heading, cls), tooltip, detail };
 }
 
 // ---------- ADS-B aircraft ----------
@@ -137,11 +172,13 @@ export function classifyAircraft(d) {
   return "other";
 }
 
-const AIRCRAFT_STYLE = {
-  military: { svg: SVG.planeMilitary, color: "#ff4d4d", size: 28, label: "Military" },
-  helicopter: { svg: SVG.helicopter, color: "#9be15d", size: 18, label: "Helicopter" },
-  commercial: { svg: SVG.planeCommercial, color: "#d8b9ff", size: 16, label: "Commercial / airline" },
-  other: { svg: SVG.planeOther, color: "#8aa0ad", size: 13, label: "General aviation / other" },
+// Exported so webglLayer.js's sprite texture cache draws from the same
+// source of truth decorateAdsb below uses for its divIcon.
+export const AIRCRAFT_STYLE = {
+  military: { svg: SVG.planeMilitary, color: "#ff4d4d", size: 28, label: "Military", name: "plane-military" },
+  helicopter: { svg: SVG.helicopter, color: "#9be15d", size: 18, label: "Helicopter", name: "plane-helicopter" },
+  commercial: { svg: SVG.planeCommercial, color: "#d8b9ff", size: 16, label: "Commercial / airline", name: "plane-commercial" },
+  other: { svg: SVG.planeOther, color: "#8aa0ad", size: 13, label: "General aviation / other", name: "plane-other" },
 };
 
 const MILITARY_ROLE_LABEL = {
@@ -198,8 +235,23 @@ const INFRA_STYLE = {
   fab: { svg: SVG.fab, color: "#6fe3ff", label: "Semiconductor fab" },
 };
 
+// Military bases share the "infra" data shape/toggle but pick their icon
+// from `subtype` (air/naval/army/missile/joint/logistics/radar) instead of
+// `type` -- see backend/infrastructure.py's MILITARY_BASES.
+const MILITARY_SUBTYPE_STYLE = {
+  air: { svg: SVG.planeMilitary, color: "#ff4d4d", label: "Air base" },
+  naval: { svg: SVG.ship, color: "#ffd60a", label: "Naval base" },
+  army: { svg: SVG.armyBase, color: "#9be15d", label: "Army base" },
+  missile: { svg: SVG.missileBase, color: "#ff8c3a", label: "Missile / space base" },
+  joint: { svg: SVG.jointBase, color: "#d8b9ff", label: "Joint base" },
+  logistics: { svg: SVG.logisticsBase, color: "#8aa0ad", label: "Logistics base" },
+  radar: { svg: SVG.radarBase, color: "#6fe3ff", label: "Radar / early-warning site" },
+};
+
 export function decorateInfra(d, { hot, nearbyEvents } = {}) {
-  const style = INFRA_STYLE[d.type] || INFRA_STYLE.port;
+  const style = d.type === "military"
+    ? MILITARY_SUBTYPE_STYLE[d.subtype] || MILITARY_SUBTYPE_STYLE.joint
+    : INFRA_STYLE[d.type] || INFRA_STYLE.port;
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)}${hot ? " &middot; HOT ZONE" : ""}`;
   const events = nearbyEvents || [];
   const activitySection = hot
@@ -233,5 +285,5 @@ export function decorateSatellite(d) {
     <div>Altitude: ${Math.round(d.alt_km || 0)} km</div>
     <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- a real orbit, not a live telemetry confirmation.</p>
     <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
-  return { icon: icon(SVG.satellite, "#6fe3ff", 16, 0, "satellite-marker"), tooltip, detail };
+  return { icon: icon(SVG.satellite, "#6fe3ff", 24, 0, "satellite-marker"), tooltip, detail };
 }

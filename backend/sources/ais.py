@@ -5,7 +5,7 @@ import time
 
 import websockets
 
-from backend import config
+from backend import config, storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.ais")
@@ -15,6 +15,13 @@ STALE_AFTER = 60 * 30  # drop ships not updated in 30 minutes
 
 _ships: dict[int, dict] = {}
 _dirty = False  # set on every incoming position report, cleared once snapshotted
+
+# AIS "Type" (ship type code, from ShipStaticData) is a real classification
+# signal PositionReport alone never carries -- e.g. 35 = "Military ops", 80-89
+# = tanker. Cached separately per MMSI (static data arrives far less often
+# than position reports, and on its own schedule) and merged onto each ship's
+# record in _snapshot_loop below.
+_ship_types: dict[int, int] = {}
 
 
 def _bboxes_payload():
@@ -29,7 +36,7 @@ async def _consume(state):
     subscribe_msg = {
         "APIKey": config.AISSTREAM_API_KEY,
         "BoundingBoxes": _bboxes_payload(),
-        "FilterMessageTypes": ["PositionReport"],
+        "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
     }
     async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
         await ws.send(json.dumps(subscribe_msg))
@@ -39,14 +46,27 @@ async def _consume(state):
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            if msg.get("MessageType") != "PositionReport":
-                continue
+            msg_type = msg.get("MessageType")
             meta = msg.get("MetaData", {})
-            report = msg.get("Message", {}).get("PositionReport", {})
             mmsi = meta.get("MMSI")
+            if mmsi is None:
+                continue
+
+            if msg_type == "ShipStaticData":
+                static = msg.get("Message", {}).get("ShipStaticData", {})
+                ship_type = static.get("Type")
+                if ship_type is not None:
+                    _ship_types[mmsi] = ship_type
+                    if mmsi in _ships:
+                        _ships[mmsi]["ship_type"] = ship_type
+                continue
+
+            if msg_type != "PositionReport":
+                continue
+            report = msg.get("Message", {}).get("PositionReport", {})
             lat = meta.get("latitude", report.get("Latitude"))
             lon = meta.get("longitude", report.get("Longitude"))
-            if mmsi is None or lat is None or lon is None:
+            if lat is None or lon is None:
                 continue
             _ships[mmsi] = {
                 "mmsi": mmsi,
@@ -57,6 +77,7 @@ async def _consume(state):
                 "course": report.get("Cog"),
                 "heading": report.get("TrueHeading"),
                 "nav_status": report.get("NavigationalStatus"),
+                "ship_type": _ship_types.get(mmsi),
                 "updated": time.time(),
             }
             _dirty = True
@@ -77,6 +98,7 @@ async def _snapshot_loop(state):
         if _dirty or stale:
             state.data = list(_ships.values())
             _dirty = False
+            await storage.record_snapshot("ais", state.data, "mmsi")
         if _ships:
             state.last_success = time.time()
 

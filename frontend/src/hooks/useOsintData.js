@@ -55,6 +55,19 @@ export function useOsintData({ onData, flyToRegion }) {
 
   const regionsRef = useRef({});
 
+  // `onData` is a fresh inline function from App.jsx on every render (it
+  // closes over `mapApi`) -- reading it through a ref, rather than putting
+  // it in the effect's dependency array, is what actually makes the
+  // pollers-registration effect below mount-once like its own comments say.
+  // With `onData` in the deps, every App re-render (which happens on nearly
+  // every poll, since reportCounts/reportZoomNotes flow into React state)
+  // tore down and re-registered all 9 pollers, cancelling whichever fetches
+  // hadn't resolved yet -- the short-interval sources (satellites, AIS) lost
+  // that race almost every time and could go long stretches never actually
+  // delivering data, even though every individual fetch succeeded.
+  const onDataRef = useRef(onData);
+  onDataRef.current = onData;
+
   // Each entry is a zero-arg fn that re-runs that source's fetch immediately
   // (cancelling its own pending scheduled tick first) -- see registerPoller
   // below. refetchAllNow calls every one of them, which is what makes a
@@ -95,7 +108,7 @@ export function useOsintData({ onData, flyToRegion }) {
           const data = await fetchJson(urlForRegion(url, currentRegionKeyRef.current));
           if (cancelled) return;
           onSuccess?.(data);
-          onData(key, data);
+          onDataRef.current(key, data);
           if (!firstLoadReported) {
             firstLoadReported = true;
             markSourceLoaded(key, true);
@@ -130,13 +143,21 @@ export function useOsintData({ onData, flyToRegion }) {
       })
       .catch((err) => console.warn("Failed to load regions:", err));
 
-    // Critical-infrastructure reference sites -- also static for the
-    // process lifetime, fetched once and handed to the map the same way
-    // every polled source is (see onData/mapApi.applyData in App.jsx).
+    // Critical-infrastructure reference sites + pipeline routes -- also
+    // static for the process lifetime, fetched once as one payload
+    // ({sites, pipelines}, see backend/infrastructure.py) and split into two
+    // onData calls so each has its own raw slot, same as every other source
+    // (see onData/mapApi.applyData in App.jsx). This endpoint is cached by
+    // the browser for 24h (see its Cache-Control in backend/app.py) --
+    // a still-cached response from before pipelines existed would just be
+    // the old bare sites array, so both shapes are handled rather than
+    // assuming every cached copy already matches the current one.
     fetchJson("/api/infrastructure")
       .then((data) => {
         if (cancelled) return;
-        onData("infra", data);
+        const isLegacyArray = Array.isArray(data);
+        onDataRef.current("infra", (isLegacyArray ? data : data.sites) || []);
+        onDataRef.current("pipelines", (isLegacyArray ? [] : data.pipelines) || []);
       })
       .catch((err) => console.warn("Failed to load infrastructure sites:", err));
 
@@ -152,9 +173,10 @@ export function useOsintData({ onData, flyToRegion }) {
       tickersRef.current = [];
     };
     // Deliberately mount-once: pollers read the live region via
-    // currentRegionKeyRef rather than being recreated per region change.
+    // currentRegionKeyRef (and the latest onData via onDataRef) rather than
+    // being recreated per region change or per App render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onData]);
+  }, []);
 
   const selectRegion = useCallback(
     (key) => {

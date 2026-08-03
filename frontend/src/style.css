@@ -127,6 +127,18 @@ html, body {
   filter: drop-shadow(0 0 7px var(--accent)) drop-shadow(0 0 3px var(--accent));
 }
 
+/* Oil/chemical tankers (see decorators.js's classifyShip) get a subtle
+   amber glow so they read as distinct from plain civilian ships at a
+   glance, same technique as .navy-marker but lighter -- tankers are common
+   enough in a chokepoint view that a full permanent-glow treatment would be
+   noisy. */
+.tanker-marker .entity-icon-wrap {
+  filter: drop-shadow(0 0 3px #ffb347) drop-shadow(0 0 1px #ffb347);
+}
+.tanker-marker.selected .entity-icon-wrap {
+  filter: drop-shadow(0 0 7px var(--accent)) drop-shadow(0 0 3px var(--accent));
+}
+
 .infra-marker { cursor: pointer; }
 /* A nearby ACLED/GDELT event (see createMapController.js's INFRA_HOT_RADIUS_KM
    check) flags a site as a "hot zone" -- same drop-shadow-glow technique as
@@ -154,6 +166,36 @@ html, body {
 @keyframes infra-badge-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
+}
+
+/* Newly-appeared GPS jamming cell (see detectNewJammingCells in
+   createMapController.js) -- a sonar-ping/water-drop-ripple: 2-3 concentric
+   rings expanding outward and fading, staggered so they visibly "reverb"
+   once rather than the steady flare/glow .infra-hot uses. Self-removed by
+   JS a couple seconds after this finishes (see JAMMING_PING_LIFETIME_MS),
+   not a persistent indicator. */
+.jamming-ping-wrap {
+  position: relative;
+  width: 0;
+  height: 0;
+}
+.jamming-ping-ring {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 26px;
+  height: 26px;
+  margin: -13px;
+  border-radius: 50%;
+  border: 2px solid #e066ff;
+  box-shadow: 0 0 6px #b833e0;
+  opacity: 0;
+  animation: jamming-ping 1.6s ease-out;
+  animation-iteration-count: 1;
+}
+@keyframes jamming-ping {
+  0% { transform: scale(0.3); opacity: 0.9; }
+  100% { transform: scale(2.4); opacity: 0; }
 }
 
 .entity-icon-wrap {
@@ -386,6 +428,21 @@ html, body {
 }
 .sublegend span { display: inline-flex; align-items: center; gap: 4px; }
 .sublegend .swatch { width: 8px; height: 8px; }
+.sublegend.wind-unavailable { color: #ff8c3a; }
+
+.infra-filter-input {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 0 0 8px 20px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  background: var(--control-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  color: var(--text-primary);
+}
+.infra-filter-input:focus { outline: none; border-color: var(--accent); }
 
 .swatch-acled { background: #ff3b30; }
 .swatch-firms { background: #ff9500; }
@@ -432,6 +489,17 @@ html, body {
 @keyframes country-flare {
   0%, 100% { stroke: #ff3d3d; stroke-width: 1.5; filter: drop-shadow(0 0 2px #ff3d3d); }
   50% { stroke: #ff8080; stroke-width: 2.5; filter: drop-shadow(0 0 8px #ff3d3d); }
+}
+
+/* A country that's individually clicked, or inside the active conflict
+   zone's bounds (see updateCountryHighlights in createMapController.js) --
+   both the trigger for showing its cities and the visual confirmation of
+   which countries are "in scope" right now. Independent of/stackable with
+   .country-hot, which flags war activity rather than selection. */
+.country-shape.country-selected {
+  fill: rgba(var(--accent-rgb), 0.16);
+  stroke: var(--accent);
+  stroke-width: 1.6;
 }
 
 .city-dot {
@@ -637,6 +705,44 @@ html, body {
 .news-header, .news-list {
   pointer-events: auto;
 }
+
+/* Persistent country details panel (CountryInfoCard.jsx) -- replaces the
+   old Leaflet popup on country click so pan/zoom keep working while it's
+   open. Reuses countryPopupHtml()'s markup verbatim, so it needs the same
+   h3/.meta/.popup-events rules the Leaflet popup styling already defines
+   (those are scoped to `.leaflet-popup-content`, which this isn't). */
+#countryInfoCard {
+  position: fixed;
+  left: 14px;
+  bottom: 56px;
+  width: 320px;
+  max-width: calc(100vw - 28px);
+  max-height: 44vh;
+  overflow-y: auto;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  padding: 14px 16px;
+  animation: popup-in 0.16s ease;
+}
+.country-info-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px;
+}
+.country-info-close:hover { color: var(--text-bright); }
+.country-info-body h3 { margin: 0 20px 6px 0; font-size: 13px; color: var(--text-heading); }
+.country-info-body .meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
 
 .news-header {
   display: flex;
