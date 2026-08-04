@@ -22,6 +22,7 @@ WB_DENSITY_URL = "https://api.worldbank.org/v2/country/{code}/indicator/EN.POP.D
 # World Bank indicators above.
 OWID_HDI_CSV_URL = "https://ourworldindata.org/grapher/human-development-index.csv"
 REFRESH_INTERVAL = 24 * 3600  # population/density/boundaries are annual-ish data, not "live"
+FAILURE_RETRY_INTERVAL = 60  # scaled by consecutive failures, capped at REFRESH_INTERVAL
 
 # World Bank's API is fast per-request but unreliable under concurrency --
 # a wide-open semaphore silently fails most requests, even though the same
@@ -110,13 +111,20 @@ async def _fetch() -> dict:
 
 async def start():
     state = registry.register("countries", key_configured=True)  # no key required
+    consecutive_failures = 0
     while True:
+        ok = False
         try:
             state.data = await _fetch()
             state.last_success = time.time()
             state.last_error = None
+            ok = True
             log.info("Countries: %d boundaries loaded", len(state.data["features"]))
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("Countries fetch failed: %s", exc)
-        await asyncio.sleep(REFRESH_INTERVAL)
+        # An empty exception message (e.g. a bare asyncio.TimeoutError) is
+        # still a failure -- branch on whether the fetch itself succeeded,
+        # not on the truthiness of the resulting error string.
+        consecutive_failures = 0 if ok else consecutive_failures + 1
+        await asyncio.sleep(REFRESH_INTERVAL if ok else min(FAILURE_RETRY_INTERVAL * consecutive_failures, REFRESH_INTERVAL))

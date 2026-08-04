@@ -3,8 +3,7 @@
 // acled/gdelt arrays passed in by the caller (see useLeafletMap) rather than
 // holding its own copy, so it's always working off the latest poll.
 
-import { esc, fmtNumber, haversineKm } from "../utils/format";
-import { gdeltSentence } from "./decorators";
+import { esc, fmtNumber, haversineKm, timeAgoFromDateAdded } from "../utils/format";
 
 // ACLED/GDELT country names don't always match Natural Earth's ADMIN name
 // (e.g. "Russian Federation" vs "Russia") -- this covers the common cases.
@@ -36,12 +35,15 @@ function formatEventRow(type, item) {
     return `<div class="event-row"><b>${esc(label)}</b>${item.fatalities ? ` (${item.fatalities} fatalities)` : ""}
       <div class="event-meta">${esc(item.country || "")} &middot; ${esc(item.date || "")} &middot; ACLED</div></div>`;
   }
-  const headline = (item.real_title && item.real_title.trim()) || gdeltSentence(item);
+  const headline = (item.real_title || "").trim();
+  if (!headline) return ""; // defensive: server should never serve a title-less item, but never render a blank row if it slips through
   const link = item.source_url
     ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener noreferrer">${esc(headline)}</a>`
     : esc(headline);
   const sourceLabel = item.source_name || "GDELT";
-  return `<div class="event-row">${link}<div class="event-meta">${item.mentions || 0} mentions &middot; ${esc(sourceLabel)}</div></div>`;
+  const when = timeAgoFromDateAdded(item.date_added);
+  const corroborated = item.corroborated ? " &middot; corroborated" : "";
+  return `<div class="event-row">${link}<div class="event-meta">${esc(sourceLabel)} &middot; ${esc(when)}${corroborated}</div></div>`;
 }
 
 const MONTH_ABBR = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -68,7 +70,7 @@ function buildEventsSection(acledItems, gdeltItems) {
   const rows = [
     ...acledItems.map((i) => formatEventRow("acled", i)),
     ...gdeltItems.map((i) => formatEventRow("gdelt", i)),
-  ];
+  ].filter(Boolean);
   if (!rows.length) {
     return '<div class="popup-events"><div class="meta">No recent conflict/news events matched for this area.</div></div>';
   }

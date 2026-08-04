@@ -135,7 +135,18 @@ export function createCountriesLayer(map, onEachFeature) {
   function countryStyle() {
     return { className: "country-shape", color: "rgba(111, 227, 255, 0)", weight: 1, fillColor: "#6fe3ff", fillOpacity: 0 };
   }
-  return L.geoJSON(null, { style: countryStyle, onEachFeature }).addTo(map);
+  // Own pane, z-indexed below the default overlayPane (400) that every
+  // point layer's canvas/SVG renders into -- an SVG path's interior still
+  // hit-tests pointer events even at fillOpacity 0 (SVG "visiblePainted"
+  // ignores fill-opacity, only fill:none), so without this the country
+  // shapes -- created after jamming/FIRMS/etc, so stacked on top of them --
+  // swallowed every click landing over land before it reached those layers'
+  // markers. Below overlayPane still receives clicks fine wherever nothing
+  // else covers that pixel, which is nearly everywhere on land.
+  if (!map.getPane("countriesPane")) {
+    map.createPane("countriesPane").style.zIndex = 350;
+  }
+  return L.geoJSON(null, { style: countryStyle, onEachFeature, pane: "countriesPane" }).addTo(map);
 }
 
 export function createCitiesGroup(map) {
@@ -186,15 +197,18 @@ export function createSatelliteGroup() {
 
 export function createTrailLayers(map) {
   // Plain (non-clustered) layers for fading position-history lines behind
-  // ships/aircraft/satellites. Kept separate from the marker cluster groups
-  // since lines shouldn't be clustered. Ship/aircraft trails only ever show
-  // for the one selected vehicle and are always-on layers (no toggle of
-  // their own); satelliteTrailsLayer is deliberately NOT added here -- see
-  // createSatelliteGroup above.
+  // ships/aircraft/satellites/tankers. Kept separate from the marker cluster
+  // groups since lines shouldn't be clustered. Ship/aircraft trails only
+  // ever show for the one selected vehicle and are always-on layers (no
+  // toggle of their own); satelliteTrailsLayer and tankerTrailsLayer are
+  // deliberately NOT added here -- see createSatelliteGroup above and the
+  // "aisTanker" special-case in createMapController.js's setLayerVisible
+  // (tankers ride the same toggle as the tanker markers themselves).
   return {
     shipTrailsLayer: L.layerGroup().addTo(map),
     aircraftTrailsLayer: L.layerGroup().addTo(map),
     satelliteTrailsLayer: L.layerGroup(),
+    tankerTrailsLayer: L.layerGroup(),
   };
 }
 

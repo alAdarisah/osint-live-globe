@@ -295,6 +295,50 @@ def _parse_date_added(s: str | None) -> datetime | None:
         return None
 
 
+# --- cross-reference against ACLED/UCDP -----------------------------------
+#
+# A verified-domain headline is still just one outlet's report -- flagging
+# which ones are independently corroborated by a ground-truth conflict
+# record (ACLED and/or UCDP, already polled by backend/sources/acled.py)
+# gives a reader a real confidence signal. Same thresholds as
+# conflict_watch.py's own GDELT<->UCDP matching (duplicated rather than
+# imported -- not worth coupling two sibling source modules over two
+# numbers).
+_MATCH_DAYS = 2
+_MATCH_DEGREES = 0.5
+
+
+def _parse_acled_date(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+
+def _corroborated_by(ev: dict, acled_rows: list[dict]) -> list[str]:
+    lat, lon = ev.get("lat"), ev.get("lon")
+    added = _parse_date_added(ev.get("date_added"))
+    if lat is None or lon is None or added is None:
+        return []
+    matched: set[str] = set()
+    for row in acled_rows:
+        row_date = _parse_acled_date(row.get("date"))
+        if not row_date or abs((added - row_date).days) > _MATCH_DAYS:
+            continue
+        row_lat, row_lon = row.get("lat"), row.get("lon")
+        if not isinstance(row_lat, (int, float)) or not isinstance(row_lon, (int, float)):
+            continue
+        if abs(row_lat - lat) > _MATCH_DEGREES or abs(row_lon - lon) > _MATCH_DEGREES:
+            continue
+        matched.add(row.get("source") or "acled")
+    return sorted(matched)
+
+
 # Persists across polls so items accumulate instead of being wholesale-
 # replaced every 15 minutes; pruned by age (below) and by a hard cap so a
 # very newsy window can't grow this unboundedly.
@@ -321,7 +365,17 @@ async def _fetch() -> list[dict]:
         for key, _ in overflow:
             del _ACCUMULATED[key]
 
-    return sorted(_ACCUMULATED.values(), key=lambda d: d["mentions"], reverse=True)[:MAX_ITEMS]
+    result = sorted(_ACCUMULATED.values(), key=lambda d: d["mentions"], reverse=True)[:MAX_ITEMS]
+
+    # Recomputed fresh every poll (never accumulated/stale) since ACLED/UCDP
+    # data moves independently of GDELT's own window.
+    acled_rows = (registry.get("acled").data if registry.has("acled") else []) or []
+    for ev in result:
+        matches = _corroborated_by(ev, acled_rows)
+        ev["corroborated"] = bool(matches)
+        ev["corroborated_by"] = matches
+
+    return result
 
 
 async def start():

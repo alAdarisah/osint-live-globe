@@ -1,34 +1,27 @@
-export default function LayersSection({ counts, zoomNotes, layerVisibility, onToggleLayer, infraFilterText, onInfraFilterChange }) {
+export default function LayersSection({
+  counts, zoomNotes, layerVisibility, onToggleLayer, onToggleConflictLayers, infraFilterText, onInfraFilterChange,
+}) {
   return (
     <>
       <h2>Layers</h2>
-      <label className="layer-row" data-layer="acled">
+      <label className="layer-row" data-layer="conflict">
         <input
           type="checkbox"
-          checked={layerVisibility.acled}
-          onChange={(e) => onToggleLayer("acled", e.target.checked)}
+          checked={layerVisibility.acled && layerVisibility.conflictWatch}
+          onChange={(e) => onToggleConflictLayers(e.target.checked)}
         />
-        <span className="swatch swatch-acled" /> Conflict &amp; Violence (ACLED + UCDP)
-        <span className="count">{counts.acled} ({counts.acledTotal})</span>
-      </label>
-      <div id="acledZoomNote" className={`sublegend${zoomNotes.acled ? " visible" : ""}`}>
-        Zoom in to show conflict events
-      </div>
-
-      <label className="layer-row" data-layer="conflictWatch">
-        <input
-          type="checkbox"
-          checked={layerVisibility.conflictWatch}
-          onChange={(e) => onToggleLayer("conflictWatch", e.target.checked)}
-        />
-        <span className="swatch swatch-conflictWatch" /> Conflict Watch (independent)
-        <span className="count">{counts.conflictWatch} ({counts.conflictWatchTotal})</span>
+        <span className="swatch swatch-acled" /> Conflict &amp; Violence (ACLED + UCDP + Conflict Watch)
+        <span className="count">
+          {counts.acled + counts.conflictWatch} ({counts.acledTotal + counts.conflictWatchTotal})
+        </span>
       </label>
       <div className="sublegend">
-        UCDP GED Candidate + NLP-extracted GDELT events, cross-referenced -- no ACLED account used. Blue markers are corroborated by a second source.
+        ACLED (where an account is configured) + UCDP GED Candidate + NLP-extracted GDELT events, cross-referenced.
+        Blue markers are corroborated by a second source. Only the last 3 days show on the map. HDX monthly
+        conflict-fatality trends are shown automatically in each country's info card, no toggle needed.
       </div>
-      <div id="conflictWatchZoomNote" className={`sublegend${zoomNotes.conflictWatch ? " visible" : ""}`}>
-        Zoom in to show conflict watch events
+      <div id="conflictZoomNote" className={`sublegend${zoomNotes.acled || zoomNotes.conflictWatch ? " visible" : ""}`}>
+        Zoom in to show conflict events
       </div>
 
       <label className="layer-row" data-layer="firms">

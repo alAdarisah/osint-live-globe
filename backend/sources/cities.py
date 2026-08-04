@@ -13,6 +13,7 @@ log = logging.getLogger("osint-globe.cities")
 CITIES_URL = "http://download.geonames.org/export/dump/cities15000.zip"
 MIN_POPULATION = 100_000
 REFRESH_INTERVAL = 6 * 3600  # cheap to refetch; city populations don't change fast
+FAILURE_RETRY_INTERVAL = 60  # scaled by consecutive failures, capped at REFRESH_INTERVAL
 
 # Column indices in GeoNames' cities15000.txt (tab-separated, no header).
 COL_NAME = 1
@@ -58,13 +59,20 @@ async def _fetch() -> list[dict]:
 
 async def start():
     state = registry.register("cities", key_configured=True)  # no key required
+    consecutive_failures = 0
     while True:
+        ok = False
         try:
             state.data = await _fetch()
             state.last_success = time.time()
             state.last_error = None
+            ok = True
             log.info("Cities: %d with population >= %d", len(state.data), MIN_POPULATION)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("Cities fetch failed: %s", exc)
-        await asyncio.sleep(REFRESH_INTERVAL)
+        # An empty exception message (e.g. a bare asyncio.TimeoutError) is
+        # still a failure -- branch on whether the fetch itself succeeded,
+        # not on the truthiness of the resulting error string.
+        consecutive_failures = 0 if ok else consecutive_failures + 1
+        await asyncio.sleep(REFRESH_INTERVAL if ok else min(FAILURE_RETRY_INTERVAL * consecutive_failures, REFRESH_INTERVAL))

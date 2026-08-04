@@ -29,7 +29,7 @@ import CountryInfoCard from "./components/CountryInfoCard";
 // infrastructure, satellites, and the military-only halves of ADS-B/AIS --
 // everything else is opt-in rather than cluttering the map on first load.
 const DEFAULT_LAYER_VISIBILITY = {
-  acled: false, conflictWatch: false, firms: false, aisCivilian: false, aisTanker: false, aisNavy: true, gdelt: true,
+  acled: true, conflictWatch: true, firms: false, aisCivilian: false, aisTanker: true, aisNavy: true, gdelt: true,
   adsbCivilian: false, adsbMilitary: true,
   countries: true, cities: false, infra: true, jamming: false, satellites: true,
   precip: false, clouds: false, windArrows: false,
@@ -114,6 +114,19 @@ export default function App() {
     (key, visible) => {
       setLayerVisibility((prev) => ({ ...prev, [key]: visible }));
       mapApi.setLayerVisible(key, visible);
+    },
+    [mapApi.setLayerVisible]
+  );
+
+  // Single Layers-panel control for every conflict/violence source (ACLED,
+  // UCDP, Conflict Watch) -- see LayersSection.jsx's merged checkbox. Still
+  // two distinct layer keys under the hood since createMapController.js
+  // renders/counts/zoom-gates them separately.
+  const onToggleConflictLayers = useCallback(
+    (visible) => {
+      setLayerVisibility((prev) => ({ ...prev, acled: visible, conflictWatch: visible }));
+      mapApi.setLayerVisible("acled", visible);
+      mapApi.setLayerVisible("conflictWatch", visible);
     },
     [mapApi.setLayerVisible]
   );
@@ -219,6 +232,7 @@ export default function App() {
         zoomNotes={mapApi.zoomNotes}
         layerVisibility={layerVisibility}
         onToggleLayer={onToggleLayer}
+        onToggleConflictLayers={onToggleConflictLayers}
         health={health}
         owmConfigured={owmConfigured}
         windStatus={mapApi.windStatus}
