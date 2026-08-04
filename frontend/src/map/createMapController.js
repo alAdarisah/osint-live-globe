@@ -33,6 +33,7 @@ import {
 import {
   decorateAcled,
   decorateGdelt,
+  decorateConflictWatch,
   decorateAis,
   decorateAdsb,
   decorateInfra,
@@ -73,10 +74,11 @@ const ADSB_MIN_ZOOM = 5;
 const CITIES_MIN_ZOOM = 5;
 const ACLED_MIN_ZOOM = 3;
 const GDELT_MIN_ZOOM = 3;
+const CONFLICT_WATCH_MIN_ZOOM = 3;
 const AIS_MIN_ZOOM = 3;
 // AIS has its own dedicated renderAisLayer (civilian/Navy split, like ADS-B's
 // civilian/military split) so it isn't part of this generic lookup.
-const MARKER_LAYER_MIN_ZOOM = { acled: ACLED_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM };
+const MARKER_LAYER_MIN_ZOOM = { acled: ACLED_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictWatch: CONFLICT_WATCH_MIN_ZOOM };
 // Gates only the interactive per-point FIRMS layer -- the heat layer itself
 // always stays on regardless of zoom.
 const FIRMS_DETAIL_MIN_ZOOM = 5;
@@ -88,8 +90,11 @@ const AIRCRAFT_TRAIL_MAX_POINTS = 90;
 // ship/aircraft trails.
 const SATELLITE_TRAIL_MAX_POINTS = 36;
 
-const ID_FIELD = { acled: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24" };
-const DECORATORS = { acled: decorateAcled, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb };
+const ID_FIELD = { acled: "id", gdelt: "event_id", conflictWatch: "id", ais: "mmsi", adsb: "icao24" };
+const DECORATORS = {
+  acled: decorateAcled, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
+  conflictWatch: decorateConflictWatch,
+};
 
 const REGION_FLY_DURATION = 1.2;
 
@@ -156,14 +161,15 @@ export function createMapController(container, initial, callbacks) {
   // All internal to the controller: nothing outside the map needs to know
   // which aircraft is selected, so it never needs to be React state.
   const raw = {
-    acled: [], firms: [], ais: [], gdelt: [], adsb: [],
+    acled: [], firms: [], ais: [], gdelt: [], adsb: [], conflictWatch: [],
     countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
+    conflictStats: {},
   };
   // ais/aisNavy/aisTanker/adsb/adsbMilitary are no longer here -- their
   // markers live inside entityWebglLayer's own per-bucket entry maps now
   // (see webglLayer.js's updateEntities), not as L.marker instances.
   const markersByKey = {
-    acled: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
+    acled: new Map(), gdelt: new Map(), conflictWatch: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
   };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
@@ -363,17 +369,19 @@ export function createMapController(container, initial, callbacks) {
   // literally "only show what you're looking at."
 
   const counts = {
-    acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
+    acled: 0, firms: 0, gdelt: 0, conflictWatch: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
     aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
   };
   // Total number loaded from the backend for each layer, independent of the
   // current viewport/zoom filtering that `counts` reflects -- shown in the
   // UI as the "(total)" figure next to the live on-screen tick.
   const totals = {
-    acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
+    acled: 0, firms: 0, gdelt: 0, conflictWatch: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
     aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
   };
-  const zoomNotes = { adsb: false, cities: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
+  const zoomNotes = {
+    adsb: false, cities: false, firms: false, acled: false, gdelt: false, conflictWatch: false, ais: false, jamming: false,
+  };
   function reportCounts() {
     const totalsSuffixed = {};
     for (const key of Object.keys(totals)) totalsSuffixed[`${key}Total`] = totals[key];
@@ -737,22 +745,35 @@ export function createMapController(container, initial, callbacks) {
 
   // Flags a country as an active war zone (a pulsing red flare, same visual
   // language as the infra hot-zone flare) when its current ACLED activity
-  // crosses a threshold. Only toggles a CSS class on the already-rendered
+  // crosses a threshold -- but only for countries currently in scope
+  // (individually selected, or inside the active conflict zone's bounds,
+  // same "inScope" test updateCountryHighlights uses). A country never
+  // pulses just because it crossed the threshold; it has to be the thing
+  // the user picked first. Only toggles a CSS class on the already-rendered
   // path -- cheap enough to re-run after every ACLED update, not just when
   // the country boundaries themselves change.
   function updateCountryWarFlare() {
     countriesLayer.eachLayer((layer) => {
-      const name = layer.feature?.properties?.name;
+      const props = layer.feature?.properties;
+      const name = props?.name;
       if (!name) return;
-      const wanted = normalizeCountryName(name);
-      let fatalities = 0;
-      let count = 0;
-      for (const e of raw.acled) {
-        if (normalizeCountryName(e.country) !== wanted) continue;
-        fatalities += e.fatalities || 0;
-        count += 1;
+      let inScope = props.iso_a2 && props.iso_a2 === selectedCountryIso;
+      if (!inScope && activeConflictZoneBounds) {
+        const center = layer.getBounds().getCenter();
+        inScope = boundsContainsPoint(activeConflictZoneBounds, center.lat, center.lng);
       }
-      const hot = fatalities >= WAR_FATALITY_THRESHOLD || count >= WAR_EVENT_COUNT_THRESHOLD;
+      let hot = false;
+      if (inScope) {
+        const wanted = normalizeCountryName(name);
+        let fatalities = 0;
+        let count = 0;
+        for (const e of raw.acled) {
+          if (normalizeCountryName(e.country) !== wanted) continue;
+          fatalities += e.fatalities || 0;
+          count += 1;
+        }
+        hot = fatalities >= WAR_FATALITY_THRESHOLD || count >= WAR_EVENT_COUNT_THRESHOLD;
+      }
       const el = layer.getElement?.();
       if (el) el.classList.toggle("country-hot", hot);
     });
@@ -780,7 +801,23 @@ export function createMapController(container, initial, callbacks) {
     zoomNotes.cities = !citiesEnabled || belowCitiesMinZoom;
     reportZoomNotes();
     const bounds = map.getBounds().pad(0.25);
-    const visible = !citiesEnabled || belowCitiesMinZoom ? [] : raw.cities.filter((c) => bounds.contains([c.lat, c.lon]));
+    // Scoped to the in-scope country/zone, not just whatever's in the
+    // viewport -- a single selected country only shows *its own* cities
+    // (matched by country_code, same ISO2 selectedCountryIso holds), and a
+    // conflict-zone selection only shows cities inside that zone's own
+    // bounds, even in world view where the map viewport itself spans the
+    // whole globe. Falls back to `false` if citiesEnabled is somehow true
+    // without either scope set, which shouldn't happen (see flyToRegion and
+    // the country click handler, the only two places that set it).
+    const visible =
+      !citiesEnabled || belowCitiesMinZoom
+        ? []
+        : raw.cities.filter((c) => {
+            if (!bounds.contains([c.lat, c.lon])) return false;
+            if (selectedCountryIso) return c.country_code === selectedCountryIso;
+            if (activeConflictZoneBounds) return boundsContainsPoint(activeConflictZoneBounds, c.lat, c.lon);
+            return false;
+          });
     // Diff-based sync (not clearLayers()+rebuild) -- a full teardown on
     // every moveend used to destroy the marker (and its just-opened popup)
     // that a click's own auto-pan had just triggered, making city dots feel
@@ -863,6 +900,7 @@ export function createMapController(container, initial, callbacks) {
   function renderAll() {
     renderMarkerLayer("acled");
     renderMarkerLayer("gdelt");
+    renderMarkerLayer("conflictWatch");
     renderMarkerLayer("ais");
     renderMarkerLayer("adsb");
     renderFirms();
@@ -1053,6 +1091,11 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "pipelines") renderPipelines();
       else if (key === "jamming") renderJamming();
       else if (key === "satellites") renderSatellites();
+      // conflictStats is a country->monthly-series dict (see
+      // hdx_conflict_stats.py), not a point array -- it's read directly out
+      // of raw.conflictStats by popups.js's buildTrendSection, and has no
+      // marker layer of its own to render.
+      else if (key === "conflictStats") { /* no-op */ }
       else renderMarkerLayer(key);
       if (key === "acled") updateCountryWarFlare();
     },

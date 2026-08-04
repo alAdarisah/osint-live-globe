@@ -117,6 +117,7 @@ export function createEntityClusterGroups(map) {
     ais: L.layerGroup(), // civilian ships -- default hidden, see App.jsx
     gdelt: L.layerGroup().addTo(map),
     adsb: L.layerGroup(), // civilian aircraft -- default hidden, see App.jsx
+    conflictWatch: L.layerGroup(), // ACLED-independent layer -- default hidden, see App.jsx
   };
   // Military aircraft are never hidden by the ADS-B zoom gate (see
   // renderAdsbLayer) -- a plain layerGroup keeps every one an individually

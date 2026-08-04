@@ -448,6 +448,7 @@ html, body {
 .infra-filter-input:focus { outline: none; border-color: var(--accent); }
 
 .swatch-acled { background: #ff3b30; }
+.swatch-conflictWatch { background: #3ac1ff; }
 .swatch-firms { background: #ff9500; }
 .swatch-ais { background: #35c2ff; }
 .swatch-gdelt { background: #ffd60a; }
@@ -528,6 +529,11 @@ html, body {
 .popup-events .event-row { margin-bottom: 5px; font-size: 11.5px; }
 .popup-events .event-row a { color: var(--accent); }
 .popup-events .event-row .event-meta { color: var(--text-dim); font-size: 10.5px; }
+
+.popup-trend { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(var(--accent-rgb), 0.2); }
+.popup-trend .trend-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; margin-bottom: 2px; }
+.popup-trend .trend-month { color: var(--text-dim); }
+.popup-trend .trend-count { color: var(--text-secondary); }
 
 .layer-row.disabled { opacity: 0.45; cursor: not-allowed; }
 .key-note {

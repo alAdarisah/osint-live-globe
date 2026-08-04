@@ -33,6 +33,14 @@ _token: dict = {"access_token": None, "expires_at": 0}
 # last URL that worked so most polls need just one request instead of
 # walking back through several 404s.
 _last_good_ucdp_url: str | None = None
+# Research-tier myACLED accounts are embargoed from recent events (ACLED
+# returns the cutoff itself in data_query_restrictions.date_recency, e.g.
+# "12 Months old"). None means "not measured yet, try the live window
+# first"; once known, cache it so most polls need one request, not two --
+# but recheck daily in case the account's access level changes.
+_acled_embargo_days: int | None = None
+_acled_embargo_checked_at: float = 0
+ACLED_LOOKBACK_DAYS = 3
 
 
 async def _get_token(client: httpx.AsyncClient) -> str:
@@ -55,24 +63,49 @@ async def _get_token(client: httpx.AsyncClient) -> str:
     return _token["access_token"]
 
 
-async def _fetch_acled() -> list[dict]:
-    today = datetime.now(timezone.utc).date()
-    since = today - timedelta(days=3)
-    async with httpx.AsyncClient(timeout=30) as client:
-        token = await _get_token(client)
-        params = {
-            "_format": "json",
-            "limit": "2000",
-            "event_date": f"{since.isoformat()}|{today.isoformat()}",
-            "event_date_where": "BETWEEN",
-            "fields": "event_id_cnty|event_date|event_type|sub_event_type|actor1|actor2|fatalities|latitude|longitude|country|notes",
-        }
-        resp = await client.get(
-            READ_URL, params=params, headers={"Authorization": f"Bearer {token}"}
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+ACLED_PAGE_SIZE = 2000
 
+
+async def _query_acled_page(client: httpx.AsyncClient, token: str, since, until, page: int) -> dict:
+    params = {
+        "_format": "json",
+        "limit": str(ACLED_PAGE_SIZE),
+        "page": str(page),
+        "event_date": f"{since.isoformat()}|{until.isoformat()}",
+        "event_date_where": "BETWEEN",
+        "fields": "event_id_cnty|event_date|event_type|sub_event_type|actor1|actor2|fatalities|latitude|longitude|country|notes",
+    }
+    resp = await client.get(
+        READ_URL, params=params, headers={"Authorization": f"Bearer {token}"}
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _query_acled(client: httpx.AsyncClient, token: str, since, until) -> dict:
+    """Pages through ACLED's read API until a short page ends the window.
+
+    ACLED caps every response at ACLED_PAGE_SIZE rows -- a window with more
+    events than that (a busy multi-day pull, or the daily scrape script's
+    wide catch-up runs) used to silently lose everything past the first
+    page. `page` is ACLED's own 1-based paging param; a page shorter than
+    the cap means there's nothing left to fetch.
+    """
+    first = await _query_acled_page(client, token, since, until, 1)
+    rows = first.get("data", []) if isinstance(first, dict) else first
+    all_rows = list(rows)
+    page = 1
+    while len(rows) == ACLED_PAGE_SIZE:
+        page += 1
+        payload = await _query_acled_page(client, token, since, until, page)
+        rows = payload.get("data", []) if isinstance(payload, dict) else payload
+        all_rows.extend(rows)
+    merged = dict(first) if isinstance(first, dict) else {}
+    merged["data"] = all_rows
+    return merged
+
+
+def _parse_acled_rows(payload: dict) -> list[dict]:
     rows = payload.get("data", []) if isinstance(payload, dict) else payload
     items = []
     for row in rows:
@@ -100,6 +133,40 @@ async def _fetch_acled() -> list[dict]:
     return items
 
 
+async def _fetch_acled() -> list[dict]:
+    global _acled_embargo_days, _acled_embargo_checked_at
+    today = datetime.now(timezone.utc).date()
+    recheck_live = _acled_embargo_days is None or time.time() - _acled_embargo_checked_at > 86400
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        token = await _get_token(client)
+
+        offset = 0 if recheck_live else _acled_embargo_days
+        until = today - timedelta(days=offset)
+        since = until - timedelta(days=ACLED_LOOKBACK_DAYS)
+        payload = await _query_acled(client, token, since, until)
+        restriction = (payload.get("data_query_restrictions") or {}).get("date_recency") or {}
+        cutoff_str = restriction.get("date")
+
+        if cutoff_str:
+            cutoff = datetime.fromisoformat(cutoff_str).date()
+            new_offset = max((today - cutoff).days, 0)
+            if new_offset != offset:
+                # Account is embargoed (or the embargo shifted) -- requery the
+                # window ACLED actually allows instead of the live one.
+                _acled_embargo_days = new_offset
+                until = today - timedelta(days=new_offset)
+                since = until - timedelta(days=ACLED_LOOKBACK_DAYS)
+                payload = await _query_acled(client, token, since, until)
+            else:
+                _acled_embargo_days = new_offset
+        else:
+            _acled_embargo_days = 0
+        _acled_embargo_checked_at = time.time()
+
+    return _parse_acled_rows(payload)
+
+
 def _ucdp_candidate_urls() -> list[str]:
     # The cumulative Jan-to-date file's own name embeds its end month, so
     # there's no stable "latest" alias -- walk back from the current month
@@ -116,25 +183,45 @@ def _ucdp_candidate_urls() -> list[str]:
     return urls
 
 
-def _parse_ucdp_csv(text: str, cutoff_date: str) -> list[dict]:
-    items = []
+UCDP_LOOKBACK_DAYS = 3
+
+
+def _parse_ucdp_csv(text: str) -> list[dict]:
+    # The candidate file's own publication lags real time by a month or
+    # more (it's only cut once UCDP has done enough review to call a month
+    # "candidate"-quality) -- a cutoff measured from wall-clock *today* was
+    # always older than every row in the freshest file that exists, so this
+    # layer was structurally guaranteed to return nothing. Instead, take the
+    # window relative to the newest date_start actually present in the file
+    # -- "the last few days of whatever data exists" instead of "the last
+    # few days of real time," which is what the file can actually deliver.
+    rows = []
     for row in csv.DictReader(io.StringIO(text)):
         try:
             lat = float(row["latitude"])
             lon = float(row["longitude"])
         except (KeyError, ValueError, TypeError):
             continue
+        date = (row.get("date_start") or "").split(" ")[0]  # "YYYY-MM-DD HH:MM:SS.000" -> date only
+        if not date:
+            continue
+        rows.append((date, lat, lon, row))
+    if not rows:
+        return []
+
+    latest_date = max(d for d, _, _, _ in rows)
+    cutoff_date = (
+        datetime.strptime(latest_date, "%Y-%m-%d").date() - timedelta(days=UCDP_LOOKBACK_DAYS)
+    ).isoformat()
+
+    items = []
+    for date, lat, lon, row in rows:
+        if date < cutoff_date:
+            continue
         try:
             fatalities = int(row.get("best") or 0)
         except ValueError:
             fatalities = 0
-        date = (row.get("date_start") or "").split(" ")[0]  # "YYYY-MM-DD HH:MM:SS.000" -> date only
-        # The candidate file is cumulative month-to-date (not just "recent"
-        # events) -- ISO date strings compare correctly lexicographically, so
-        # this is a cheap way to drop anything older than the window without
-        # parsing each one into a real date.
-        if not date or date < cutoff_date:
-            continue
         items.append(
             {
                 "id": f"ucdp-{row.get('id')}",  # prefixed so it can never collide with an ACLED event_id_cnty
@@ -156,7 +243,6 @@ def _parse_ucdp_csv(text: str, cutoff_date: str) -> list[dict]:
 
 async def _fetch_ucdp() -> list[dict]:
     global _last_good_ucdp_url
-    cutoff_date = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
     candidates = _ucdp_candidate_urls()
     if _last_good_ucdp_url and _last_good_ucdp_url in candidates:
         candidates.remove(_last_good_ucdp_url)
@@ -169,7 +255,7 @@ async def _fetch_ucdp() -> list[dict]:
                     continue
                 resp.raise_for_status()
                 _last_good_ucdp_url = url
-                return _parse_ucdp_csv(resp.text, cutoff_date)
+                return _parse_ucdp_csv(resp.text)
             except httpx.HTTPStatusError:
                 continue
             except Exception as exc:  # noqa: BLE001 - one bad file shouldn't sink the whole poll
@@ -177,6 +263,19 @@ async def _fetch_ucdp() -> list[dict]:
                 continue
     log.warning("UCDP: no candidate dataset file found in the last 15 months")
     return []
+
+
+def _within_real_lookback(items: list[dict]) -> list[dict]:
+    # Both _fetch_acled (embargo re-query) and _parse_ucdp_csv (window
+    # relative to the newest row *in the file*) pick their window relative
+    # to something other than actual wall-clock now -- an embargoed ACLED
+    # account or a stale UCDP candidate file can otherwise hand back a
+    # perfectly well-formed "last 3 days" window that's really from a year
+    # ago, which reads as current on the map. This is the one true recency
+    # gate: drop anything whose own event date isn't in the real last-N-days
+    # window, no matter which upstream quirk produced it.
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=max(ACLED_LOOKBACK_DAYS, UCDP_LOOKBACK_DAYS))).isoformat()
+    return [d for d in items if d.get("date") and d["date"] >= cutoff]
 
 
 async def _fetch() -> list[dict]:
@@ -192,7 +291,7 @@ async def _fetch() -> list[dict]:
             log.warning("Conflict source fetch failed: %s", result)
             continue
         items.extend(result)
-    return items
+    return _within_real_lookback(items)
 
 
 async def start():
