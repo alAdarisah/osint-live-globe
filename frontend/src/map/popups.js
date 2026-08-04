@@ -44,6 +44,26 @@ function formatEventRow(type, item) {
   return `<div class="event-row">${link}<div class="event-meta">${item.mentions || 0} mentions &middot; ${esc(sourceLabel)}</div></div>`;
 }
 
+const MONTH_ABBR = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const TREND_MONTHS = 6;
+
+// HDX's aggregate ACLED export (backend/sources/hdx_conflict_stats.py) --
+// country-month event/fatality counts with no registration or embargo, so
+// it stays current even when the point-level ACLED feed above is stuck on
+// an account's recency embargo. Keyed by ACLED's own country naming, same
+// as raw.acled, so normalizeCountryName's alias table covers both.
+function buildTrendSection(monthlySeries) {
+  if (!monthlySeries || !monthlySeries.length) return "";
+  const recent = monthlySeries.slice(-TREND_MONTHS);
+  const rows = recent
+    .map((m) => {
+      const label = `${MONTH_ABBR[m.month]} ${m.year}`;
+      return `<div class="trend-row"><span class="trend-month">${esc(label)}</span><span class="trend-count">${m.events} events${m.fatalities ? `, ${m.fatalities} killed` : ""}</span></div>`;
+    })
+    .join("");
+  return `<div class="popup-trend"><div class="meta">Conflict trend (HDX/ACLED, monthly)</div>${rows}</div>`;
+}
+
 function buildEventsSection(acledItems, gdeltItems) {
   const rows = [
     ...acledItems.map((i) => formatEventRow("acled", i)),
@@ -66,12 +86,15 @@ export function countryPopupHtml(props, raw) {
       return normalizeCountryName(parts[parts.length - 1]) === wanted;
     })
     .slice(0, 3);
+  const statsKey = Object.keys(raw.conflictStats || {}).find((k) => normalizeCountryName(k) === wanted);
+  const trendSeries = statsKey ? raw.conflictStats[statsKey] : null;
   return `
     <h3>${esc(name)}</h3>
     <div class="meta">Population: ${fmtNumber(props.population)}${props.pop_year ? ` (${esc(props.pop_year)})` : ""}</div>
     <div class="meta">Population density: ${props.density != null ? `${props.density} /km&sup2;` : "n/a"}</div>
     <div class="meta">Human Development Index: ${props.hdi != null ? props.hdi.toFixed(3) : "n/a"}</div>
     ${buildEventsSection(acledMatches, gdeltMatches)}
+    ${buildTrendSection(trendSeries)}
     <p class="meta">Population/density: World Bank. HDI: UNDP (via Our World in Data). Events matched by country name &mdash; naming differences can cause a miss.</p>`;
 }
 

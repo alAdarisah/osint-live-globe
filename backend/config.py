@@ -22,6 +22,13 @@ ADSB_POLL_INTERVAL_AUTH = int(os.getenv("ADSB_POLL_INTERVAL_AUTH", "60"))     # 
 ACLED_POLL_INTERVAL = int(os.getenv("ACLED_POLL_INTERVAL", "1800"))
 UCDP_POLL_INTERVAL = int(os.getenv("UCDP_POLL_INTERVAL", "21600"))  # UCDP's candidate file only updates monthly
 
+# conflict_watch.py doesn't poll anything itself -- it re-derives from acled.py's
+# (UCDP rows) and gdelt.py's already-fetched state.data, so it has no interval
+# of its own to configure, only how long its local SQLite archive keeps rows.
+# Long relative to HISTORY_RETENTION_SECONDS since this table is meant to be
+# the durable "personal daily archive", not a short replay buffer.
+CONFLICT_WATCH_RETENTION_DAYS = int(os.getenv("CONFLICT_WATCH_RETENTION_DAYS", "180"))
+
 # How long an entity can go without a fresh position report before
 # storage.py evicts it from entity_latest (see backend/storage.py). Separate
 # from ais.py's own STALE_AFTER, which governs the in-memory live layer

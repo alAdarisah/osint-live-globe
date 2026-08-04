@@ -21,6 +21,30 @@ function acledColor(d) {
   return "#ffd11a";
 }
 
+// ACLED's own 6 top-level event_type categories, plus the UCDP violence-type
+// labels (see acled.py's UCDP_VIOLENCE_TYPE) and conflict_watch.py's local
+// classifier -- all three sources land in this one shared taxonomy, so one
+// lookup covers every item this glyph function will ever see. Matched by
+// substring (lowercased) rather than exact string since UCDP/conflict_watch
+// labels ("State-based armed conflict") don't spell ACLED's own wording.
+const ACLED_EVENT_ICON = [
+  [/battle/i, SVG.battle],
+  [/explosion|remote violence/i, SVG.explosion],
+  [/violence against civilians|one-sided/i, SVG.violenceCivilians],
+  [/riot/i, SVG.riot],
+  [/protest/i, SVG.protest],
+  [/strategic development/i, SVG.strategicDevelopment],
+  [/state-based|non-state/i, SVG.battle],
+];
+
+function acledIcon(d) {
+  const label = `${d.event_type || ""} ${d.sub_event_type || ""}`;
+  for (const [re, svg] of ACLED_EVENT_ICON) {
+    if (re.test(label)) return svg;
+  }
+  return SVG.burst;
+}
+
 export function decorateAcled(d) {
   const tooltip = `<b>${esc(d.event_type || "Event")}</b><br/>${esc(d.country || "")} &middot; ${esc(d.date || "")}<br/>Fatalities: ${d.fatalities ?? 0}`;
   const detail = `
@@ -31,7 +55,29 @@ export function decorateAcled(d) {
     ${d.notes ? `<p>${esc(d.notes)}</p>` : ""}
     <div class="meta">Source: ${d.source === "ucdp" ? "UCDP (GED Candidate)" : "ACLED"}</div>`;
   const size = 14 + Math.min(Math.sqrt(d.fatalities || 0), 8) * 1.6;
-  return { icon: icon(SVG.burst, acledColor(d), size), tooltip, detail };
+  return { icon: icon(acledIcon(d), acledColor(d), size), tooltip, detail };
+}
+
+// ---------- Conflict Watch (ACLED-independent: UCDP + GDELT NLP) ----------
+
+function conflictWatchSourceLabel(d) {
+  if (d.source === "ucdp") return "UCDP (GED Candidate)";
+  if (d.source === "gdelt-nlp") return "GDELT (NLP-extracted)";
+  return d.source || "Conflict Watch";
+}
+
+export function decorateConflictWatch(d) {
+  const tooltip = `<b>${esc(d.event_type || "Event")}</b><br/>${esc(d.country || d.notes || "")}${d.date ? " &middot; " + esc(d.date) : ""}<br/>Fatalities: ${d.fatalities ?? 0}`;
+  const detail = `
+    <h3>${esc(d.event_type || "Conflict event")}${d.sub_event_type ? " &mdash; " + esc(d.sub_event_type) : ""}</h3>
+    <div class="meta">${esc(d.country || "")} &middot; ${esc(d.date || "")} &middot; Fatalities: ${d.fatalities ?? 0}</div>
+    ${d.actor1 ? `<div>Actor 1: ${esc(d.actor1)}</div>` : ""}
+    ${d.actor2 ? `<div>Actor 2: ${esc(d.actor2)}</div>` : ""}
+    ${d.notes ? `<p>${esc(d.notes)}</p>` : ""}
+    <div class="meta">Source: ${esc(conflictWatchSourceLabel(d))}${d.corroborated ? ` &middot; corroborated by ${esc((d.corroborated_by || []).join(", "))}` : ""}</div>`;
+  const size = 14 + Math.min(Math.sqrt(d.fatalities || 0), 8) * 1.6;
+  const color = d.corroborated ? "#3ac1ff" : acledColor(d);
+  return { icon: icon(acledIcon(d), color, size), tooltip, detail };
 }
 
 // ---------- GDELT news ----------

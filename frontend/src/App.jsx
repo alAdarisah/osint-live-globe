@@ -29,7 +29,7 @@ import CountryInfoCard from "./components/CountryInfoCard";
 // infrastructure, satellites, and the military-only halves of ADS-B/AIS --
 // everything else is opt-in rather than cluttering the map on first load.
 const DEFAULT_LAYER_VISIBILITY = {
-  acled: false, firms: false, aisCivilian: false, aisTanker: false, aisNavy: true, gdelt: true,
+  acled: false, conflictWatch: false, firms: false, aisCivilian: false, aisTanker: false, aisNavy: true, gdelt: true,
   adsbCivilian: false, adsbMilitary: true,
   countries: true, cities: false, infra: true, jamming: false, satellites: true,
   precip: false, clouds: false, windArrows: false,

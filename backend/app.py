@@ -20,7 +20,10 @@ log = logging.getLogger("osint-globe")
 _background_tasks: list[asyncio.Task] = []
 
 
-_SOURCE_MODULES = ("gdelt", "firms", "ais", "adsb", "acled", "countries", "cities", "jamming", "satellites")
+_SOURCE_MODULES = (
+    "gdelt", "firms", "ais", "adsb", "acled", "countries", "cities", "jamming", "satellites",
+    "hdx_conflict_stats", "conflict_watch",
+)
 
 
 @asynccontextmanager
@@ -81,7 +84,7 @@ async def infrastructure_list():
     return JSONResponse(infrastructure.serialize(), headers={"Cache-Control": "public, max-age=86400"})
 
 
-def _cached_source_response(request: Request, source_name: str, region: str | None, max_age: int, filter_fn):
+def _cached_source_response(request: Request, source_name: str, region: str | None, filter_fn, max_age: int | None = None):
     """Serves a source's (region-filtered) data with a version-based ETag.
 
     A source's data can only actually change when its background poller
@@ -90,9 +93,17 @@ def _cached_source_response(request: Request, source_name: str, region: str | No
     without ever hashing or re-filtering the payload just to check -- that
     matters here since some of these run to 100k+ points (FIRMS) where
     touching the full payload on every poll would defeat the point of
-    caching. max_age is set per-source to that source's own real refresh
-    interval (see the callers below), so the browser stops asking entirely
-    until there's actually a chance of new data.
+    caching. `no-cache` (not a bare max-age) is deliberate: it still lets the
+    browser skip re-downloading the body via the ETag/304 path below, but
+    forces it to actually ask the server every time rather than serving a
+    stale disk-cached response with no server round trip at all -- a bare
+    `public, max-age={source's poll interval}` (e.g. ACLED's 30min) silently
+    ate the frontend's own, much shorter poll interval (useOsintData.js polls
+    every 3min), so a client could sit on a 30-minute-old snapshot with no
+    way to notice a poll had even happened. `max_age` is only for sources
+    whose poller itself runs far slower than any client poll could ever
+    catch (countries/cities, ~once/day) -- there, skipping the round trip
+    entirely for a while is safe and actually the point.
     """
     state = registry.get(source_name)
     # Before a source's very first successful poll, state.data is still the
@@ -106,7 +117,8 @@ def _cached_source_response(request: Request, source_name: str, region: str | No
     if state.version == 0:
         return JSONResponse(filter_fn(state.data, regions.bounds_for(region)), headers={"Cache-Control": "no-store"})
     etag = f'"{state.version}:{region or "world"}"'
-    headers = {"Cache-Control": f"public, max-age={max_age}", "ETag": etag}
+    cache_control = f"public, max-age={max_age}" if max_age else "no-cache"
+    headers = {"Cache-Control": cache_control, "ETag": etag}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
     payload = filter_fn(state.data, regions.bounds_for(region))
@@ -115,20 +127,41 @@ def _cached_source_response(request: Request, source_name: str, region: str | No
 
 @app.get("/api/conflict")
 async def conflict(request: Request, region: str | None = None):
-    return _cached_source_response(request, "acled", region, config.ACLED_POLL_INTERVAL, regions.filter_points)
+    return _cached_source_response(request, "acled", region, regions.filter_points)
+
+
+@app.get("/api/conflict-stats")
+async def conflict_stats(request: Request):
+    # Country-keyed monthly aggregate, not point data -- no region filter
+    # (see backend/sources/hdx_conflict_stats.py), so this skips
+    # _cached_source_response's regions.filter_points and just does its own
+    # version-based ETag the same way.
+    state = registry.get("hdx_conflict_stats")
+    if state.version == 0:
+        return JSONResponse(state.data, headers={"Cache-Control": "no-store"})
+    etag = f'"{state.version}"'
+    headers = {"Cache-Control": "no-cache", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(state.data, headers=headers)
+
+
+@app.get("/api/conflict-watch")
+async def conflict_watch(request: Request, region: str | None = None):
+    # ACLED-independent layer -- UCDP GED Candidate rows + NLP-derived GDELT
+    # events, cross-referenced for corroboration. See
+    # backend/sources/conflict_watch.py.
+    return _cached_source_response(request, "conflict_watch", region, regions.filter_points)
 
 
 @app.get("/api/fires")
 async def fires(request: Request, region: str | None = None):
-    return _cached_source_response(request, "firms", region, config.FIRMS_POLL_INTERVAL, regions.filter_points)
+    return _cached_source_response(request, "firms", region, regions.filter_points)
 
 
 @app.get("/api/jamming")
 async def jamming_endpoint(request: Request, region: str | None = None):
-    # gpsjam.org itself only updates once/day -- see backend/sources/jamming.py.
-    from backend.sources.jamming import REFRESH_INTERVAL
-
-    return _cached_source_response(request, "jamming", region, REFRESH_INTERVAL, regions.filter_points)
+    return _cached_source_response(request, "jamming", region, regions.filter_points)
 
 
 @app.get("/api/satellites")
@@ -145,23 +178,19 @@ async def satellites(region: str | None = None):
 @app.get("/api/ships")
 async def ships(request: Request, region: str | None = None):
     # AIS is a live websocket stream snapshotted every few seconds (see
-    # backend/sources/ais.py) rather than a polled REST call -- there's no
-    # external request to save by caching longer, and ship positions churn
-    # fast, so this stays short purely to skip re-sending byte-identical
-    # responses for the same instant.
-    return _cached_source_response(request, "ais", region, 5, regions.filter_points)
+    # backend/sources/ais.py) -- ETag/304 still saves the body bytes, `no-cache`
+    # (see _cached_source_response) just means every poll actually asks.
+    return _cached_source_response(request, "ais", region, regions.filter_points)
 
 
 @app.get("/api/news")
 async def news(request: Request, region: str | None = None):
-    return _cached_source_response(request, "gdelt", region, config.GDELT_POLL_INTERVAL, regions.filter_points)
+    return _cached_source_response(request, "gdelt", region, regions.filter_points)
 
 
 @app.get("/api/aircraft")
 async def aircraft(request: Request, region: str | None = None):
-    authenticated = bool(config.OPENSKY_CLIENT_ID and config.OPENSKY_CLIENT_SECRET)
-    max_age = config.ADSB_POLL_INTERVAL_AUTH if authenticated else config.ADSB_POLL_INTERVAL_ANON
-    return _cached_source_response(request, "adsb", region, max_age, regions.filter_points)
+    return _cached_source_response(request, "adsb", region, regions.filter_points)
 
 
 @app.get("/api/countries")
@@ -169,12 +198,12 @@ async def countries(request: Request, region: str | None = None):
     # Refreshed server-side once/day (see backend/sources/countries.py) --
     # capped well under that so a dev-server restart's fresh data doesn't
     # sit invisible to an already-open tab for a full day.
-    return _cached_source_response(request, "countries", region, 3600, regions.filter_geojson)
+    return _cached_source_response(request, "countries", region, regions.filter_geojson, max_age=3600)
 
 
 @app.get("/api/cities")
 async def cities(request: Request, region: str | None = None):
-    return _cached_source_response(request, "cities", region, 3600, regions.filter_points)
+    return _cached_source_response(request, "cities", region, regions.filter_points, max_age=3600)
 
 
 @app.get("/api/replay")

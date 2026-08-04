@@ -15,6 +15,22 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
         Zoom in to show conflict events
       </div>
 
+      <label className="layer-row" data-layer="conflictWatch">
+        <input
+          type="checkbox"
+          checked={layerVisibility.conflictWatch}
+          onChange={(e) => onToggleLayer("conflictWatch", e.target.checked)}
+        />
+        <span className="swatch swatch-conflictWatch" /> Conflict Watch (independent)
+        <span className="count">{counts.conflictWatch} ({counts.conflictWatchTotal})</span>
+      </label>
+      <div className="sublegend">
+        UCDP GED Candidate + NLP-extracted GDELT events, cross-referenced -- no ACLED account used. Blue markers are corroborated by a second source.
+      </div>
+      <div id="conflictWatchZoomNote" className={`sublegend${zoomNotes.conflictWatch ? " visible" : ""}`}>
+        Zoom in to show conflict watch events
+      </div>
+
       <label className="layer-row" data-layer="firms">
         <input
           type="checkbox"

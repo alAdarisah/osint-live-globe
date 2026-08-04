@@ -62,6 +62,25 @@ CREATE TABLE IF NOT EXISTS entity_history (
 );
 CREATE INDEX IF NOT EXISTS idx_history_lookup ON entity_history(kind, ts);
 CREATE INDEX IF NOT EXISTS idx_history_entity ON entity_history(kind, entity_id, ts);
+CREATE TABLE IF NOT EXISTS conflict_watch_events (
+  id TEXT PRIMARY KEY,
+  date TEXT,
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
+  event_type TEXT,
+  sub_event_type TEXT,
+  actor1 TEXT,
+  actor2 TEXT,
+  fatalities INTEGER,
+  country TEXT,
+  notes TEXT,
+  source TEXT,
+  corroborated INTEGER,
+  corroborated_by TEXT,
+  first_seen REAL NOT NULL,
+  last_seen REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conflict_watch_date ON conflict_watch_events(date);
 """
 
 
@@ -202,10 +221,56 @@ async def entity_latest(kind: str, order_by_recency: bool = False) -> list[dict]
     return await asyncio.to_thread(_entity_latest_sync, kind, order_by_recency)
 
 
+def _record_conflict_watch_events_sync(items: list[dict]) -> None:
+    conn = _writer()
+    now = time.time()
+    cur = conn.cursor()
+    cur.execute("BEGIN")
+    try:
+        for item in items:
+            item_id = item.get("id")
+            lat, lon = item.get("lat"), item.get("lon")
+            if item_id is None or lat is None or lon is None:
+                continue
+            corroborated_by = ",".join(item.get("corroborated_by") or [])
+            cur.execute(
+                """INSERT INTO conflict_watch_events
+                     (id, date, lat, lon, event_type, sub_event_type, actor1, actor2,
+                      fatalities, country, notes, source, corroborated, corroborated_by,
+                      first_seen, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     date=excluded.date, lat=excluded.lat, lon=excluded.lon,
+                     event_type=excluded.event_type, sub_event_type=excluded.sub_event_type,
+                     actor1=excluded.actor1, actor2=excluded.actor2, fatalities=excluded.fatalities,
+                     country=excluded.country, notes=excluded.notes, source=excluded.source,
+                     corroborated=excluded.corroborated, corroborated_by=excluded.corroborated_by,
+                     last_seen=excluded.last_seen""",
+                (
+                    str(item_id), item.get("date"), lat, lon, item.get("event_type"),
+                    item.get("sub_event_type"), item.get("actor1"), item.get("actor2"),
+                    int(item.get("fatalities") or 0), item.get("country"), item.get("notes"),
+                    item.get("source"), int(bool(item.get("corroborated"))), corroborated_by,
+                    now, now,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+async def record_conflict_watch_events(items: list[dict]) -> None:
+    async with _write_lock:
+        await asyncio.to_thread(_record_conflict_watch_events_sync, items)
+
+
 def _retention_sweep_sync(checkpoint: bool) -> None:
     conn = _writer()
     cutoff = time.time() - config.HISTORY_RETENTION_SECONDS
     conn.execute("DELETE FROM entity_history WHERE ts < ?", (cutoff,))
+    conflict_watch_cutoff = time.time() - config.CONFLICT_WATCH_RETENTION_DAYS * 86400
+    conn.execute("DELETE FROM conflict_watch_events WHERE last_seen < ?", (conflict_watch_cutoff,))
     conn.commit()
     if checkpoint:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

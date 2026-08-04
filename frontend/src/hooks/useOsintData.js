@@ -18,6 +18,7 @@ const BOOT_SOURCES = [
   { key: "acled", label: "Conflict & violence data (ACLED/UCDP)" },
   { key: "firms", label: "Thermal anomaly feed (NASA FIRMS)" },
   { key: "gdelt", label: "Global news stream (GDELT)" },
+  { key: "conflictWatch", label: "Conflict Watch (independent, UCDP + GDELT NLP)" },
   { key: "ais", label: "Maritime traffic (AIS)" },
   { key: "adsb", label: "Aircraft tracking (ADS-B)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
@@ -32,12 +33,14 @@ const POLL_CONFIG = [
   { key: "acled", url: "/api/conflict", intervalMs: 180000 },
   { key: "firms", url: "/api/fires", intervalMs: 180000 },
   { key: "gdelt", url: "/api/news", intervalMs: 60000 },
+  { key: "conflictWatch", url: "/api/conflict-watch", intervalMs: 60000 }, // GDELT-driven, same cadence as gdelt above
   { key: "countries", url: "/api/countries", intervalMs: 5 * 60000 },
   { key: "cities", url: "/api/cities", intervalMs: 5 * 60000 },
   { key: "ais", url: "/api/ships", intervalMs: 10000 },
   { key: "adsb", url: "/api/aircraft", intervalMs: 20000 },
   { key: "jamming", url: "/api/jamming", intervalMs: 30 * 60000 }, // gpsjam.org itself only updates once/day
   { key: "satellites", url: "/api/satellites", intervalMs: 10000 }, // position, not elements -- see backend/sources/satellites.py
+  { key: "conflictStats", url: "/api/conflict-stats", intervalMs: 60 * 60000 }, // HDX file itself only changes weekly -- see backend/sources/hdx_conflict_stats.py
 ];
 
 export function useOsintData({ onData, flyToRegion }) {

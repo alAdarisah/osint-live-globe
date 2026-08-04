@@ -28,6 +28,14 @@ export const SVG = {
   jointBase: '<path fill="currentColor" d="M12 2 L14.2 9.2 L21.5 9.2 L15.6 13.6 L17.8 20.8 L12 16.4 L6.2 20.8 L8.4 13.6 L2.5 9.2 L9.8 9.2 Z" fill-opacity="0.85"/>',
   logisticsBase: '<rect x="3" y="8" width="18" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" d="M3 8 L12 3 L21 8"/><line x1="12" y1="8" x2="12" y2="20" stroke="currentColor" stroke-width="1.6"/>',
   radarBase: '<path fill="none" stroke="currentColor" stroke-width="2" d="M4 18 A8 8 0 0 1 20 18"/><path fill="none" stroke="currentColor" stroke-width="2" d="M8 18 A4 4 0 0 1 16 18"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/><line x1="12" y1="18" x2="18" y2="7" stroke="currentColor" stroke-width="2"/>',
+  // ---- ACLED/UCDP/Conflict Watch event types (see decorators.js's
+  // ACLED_EVENT_ICON) ----
+  battle: '<path fill="currentColor" d="M3 3 L11 11 L9 13 L1 5 Z"/><path fill="currentColor" d="M21 3 L13 11 L15 13 L23 5 Z"/><rect x="10.9" y="13" width="2.2" height="9" fill="currentColor" transform="rotate(45 12 17.5)"/>',
+  explosion: '<path fill="currentColor" d="M12 2 L14.2 9.2 L21.5 9.2 L15.6 13.6 L17.8 20.8 L12 16.4 L6.2 20.8 L8.4 13.6 L2.5 9.2 L9.8 9.2 Z"/>',
+  violenceCivilians: '<path fill="currentColor" d="M12 2 L22 20 L2 20 Z"/><rect x="11" y="9" width="2" height="6" fill="#0b0d10"/><circle cx="12" cy="17" r="1.2" fill="#0b0d10"/>',
+  riot: '<path fill="currentColor" d="M9 22 L9 13 C9 11 10 10 10 8 L10 3 a1.3 1.3 0 0 1 2.6 0 L12.6 8 L13.2 8 L13.2 4 a1.2 1.2 0 0 1 2.4 0 L15.6 8.3 L16.1 8.3 L16.1 5 a1.1 1.1 0 0 1 2.2 0 L18.3 12 C18.3 15 17 15.5 17 18 L17 22 Z"/>',
+  protest: '<rect x="5" y="3" width="2" height="19" fill="currentColor"/><path fill="currentColor" d="M7 4 L19 7 L7 10 Z"/>',
+  strategicDevelopment: '<path fill="currentColor" d="M12 2 L14.6 9.6 L22 9.6 L16 14.2 L18.2 22 L12 17.2 L5.8 22 L8 14.2 L2 9.6 L9.4 9.6 Z" fill-opacity="0.35"/><circle cx="12" cy="12" r="3.4" fill="currentColor"/>',
 };
 
 // A small crosshair/target glyph used by the news panel's "show on map"
