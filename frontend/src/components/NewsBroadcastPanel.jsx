@@ -4,7 +4,6 @@
 // reflects whatever region is currently in view/selected, not just the
 // initial selection.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { gdeltSentence } from "../map/decorators";
 import { timeAgoFromDateAdded } from "../utils/format";
 import { padBounds, boundsContainsPoint } from "../utils/geo";
 import LocateIcon from "./icons/LocateIcon";
@@ -69,22 +68,16 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
     for (const d of gdeltRaw) {
       if (typeof d.lat !== "number" || typeof d.lon !== "number") continue;
       if (!boundsContainsPoint(bounds, d.lat, d.lon)) continue;
+      // /api/news only ever serves items with a real scraped title (see
+      // backend/app.py's _gdelt_filter) -- this re-check is a defensive
+      // backstop, not an expected path.
+      if (!(d.real_title && d.real_title.trim())) continue;
       const key = d.source_url || d.event_id;
       if (key == null || seen.has(key)) continue;
       seen.add(key);
       filtered.push(d);
     }
-    // The scrape-backfill that fills in a real headline (see gdelt.py's
-    // _backfill_titles) runs after each poll and lags the newest items the
-    // most -- sorting on recency alone would mean the panel is dominated by
-    // the CAMEO-generated fallback sentence. Prefer real titles first, and
-    // only fall back to less-titled items when there aren't enough yet.
-    const hasRealTitle = (d) => !!(d.real_title && d.real_title.trim());
-    filtered.sort((a, b) => {
-      const titleDiff = (hasRealTitle(b) ? 1 : 0) - (hasRealTitle(a) ? 1 : 0);
-      if (titleDiff !== 0) return titleDiff;
-      return (b.date_added || "").localeCompare(a.date_added || "");
-    });
+    filtered.sort((a, b) => (b.date_added || "").localeCompare(a.date_added || ""));
     return filtered.slice(0, NEWS_MAX_ITEMS);
   }, [gdeltRaw, mapBounds]);
 
@@ -141,9 +134,9 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
 }
 
 function NewsItem({ item, onLocate }) {
-  const headline = (item.real_title && item.real_title.trim()) || gdeltSentence(item);
+  const headline = item.real_title.trim();
   const when = timeAgoFromDateAdded(item.date_added);
-  const meta = [item.source_name, item.location, when].filter(Boolean).join(" · ");
+  const meta = [item.source_name, when, item.corroborated ? "corroborated" : null].filter(Boolean).join(" · ");
 
   return (
     <div className="news-item">

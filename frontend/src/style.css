@@ -1,5 +1,21 @@
 * { box-sizing: border-box; }
 
+/* Thin themed scrollbar for every scrollable panel (control panel, country
+   card, news ticker, briefing card, zone menu) -- default OS scrollbars are
+   wide/grey and clash with the dark HUD look, plus eat width in narrow
+   320-340px cards. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--accent-rgb), 0.35) transparent;
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(var(--accent-rgb), 0.35);
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(var(--accent-rgb), 0.55); }
+
 :root {
   --bg-page: #000308;
   --bg-map: #060d14;
@@ -488,9 +504,9 @@ html, body {
    CSS needed. Just keep it from intercepting clicks meant for the map. */
 .leaflet-velocity { pointer-events: none; }
 
-#adsbZoomNote, #citiesZoomNote, #firmsZoomNote, #acledZoomNote, #gdeltZoomNote, #aisZoomNote, #jammingZoomNote { display: none; }
+#adsbZoomNote, #citiesZoomNote, #firmsZoomNote, #conflictZoomNote, #gdeltZoomNote, #aisZoomNote, #jammingZoomNote { display: none; }
 #adsbZoomNote.visible, #citiesZoomNote.visible, #firmsZoomNote.visible,
-#acledZoomNote.visible, #gdeltZoomNote.visible, #aisZoomNote.visible,
+#conflictZoomNote.visible, #gdeltZoomNote.visible, #aisZoomNote.visible,
 #jammingZoomNote.visible { display: block; }
 
 .country-shape {
@@ -956,6 +972,9 @@ html, body {
   padding: 8px 10px;
   border-bottom: 1px solid var(--panel-border);
   flex: none;
+  cursor: move;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
 }
 
 .briefing-title {

@@ -6,7 +6,7 @@
 
 import { L } from "./leafletGlobal";
 import { SVG, buildDivIcon } from "./svgIcons";
-import { esc, titleCase } from "../utils/format";
+import { esc, timeAgoFromDateAdded } from "../utils/format";
 
 function icon(svgInner, color, size, rotateDeg, extraClass) {
   return buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass);
@@ -82,54 +82,28 @@ export function decorateConflictWatch(d) {
 
 // ---------- GDELT news ----------
 
-// GDELT's raw event export has no headline/summary text -- it's structured
-// CAMEO-coded data (who did what to whom), and auto-coding that into a
-// sentence was frequently wrong ("snow leopard tracking" got coded as
-// "fighting"). The backend fetches each article's real <title>/og:title
-// instead, which is what's shown when available; this CAMEO sentence is
-// only a fallback for when that fetch fails.
-const CAMEO_ROOT_VERB = {
-  1: "made a public statement about", 2: "appealed to", 3: "expressed intent to cooperate with",
-  4: "held consultations with", 5: "engaged in diplomatic cooperation with", 6: "engaged in material cooperation with",
-  7: "provided aid to", 8: "yielded to", 9: "was investigated in connection with", 10: "made demands of",
-  11: "disapproved of", 12: "rejected", 13: "threatened", 14: "protested against", 15: "exhibited military posture toward",
-  16: "reduced relations with", 17: "used coercion against", 18: "assaulted", 19: "engaged in fighting with",
-  20: "engaged in mass violence against",
-};
-const CAMEO_ROOT_LABEL = {
-  1: "a public statement", 2: "an appeal", 3: "a show of intent to cooperate", 4: "consultations",
-  5: "diplomatic cooperation", 6: "material cooperation", 7: "aid", 8: "a concession", 9: "an investigation",
-  10: "a demand", 11: "disapproval", 12: "a rejection", 13: "a threat", 14: "a protest",
-  15: "a show of military posture", 16: "reduced relations", 17: "coercion", 18: "an assault",
-  19: "fighting", 20: "mass violence",
-};
-
-export function gdeltSentence(d) {
-  const root = d.event_root_code;
-  const a1 = d.actor1 ? titleCase(d.actor1) : "An unidentified party";
-  const loc = d.location ? ` in ${d.location}` : "";
-  if (d.actor2 && CAMEO_ROOT_VERB[root]) {
-    return `${a1} ${CAMEO_ROOT_VERB[root]} ${titleCase(d.actor2)}${loc}.`;
-  }
-  return `${a1} was involved in ${CAMEO_ROOT_LABEL[root] || "an incident"}${loc}.`;
-}
-
+// The backend (backend/app.py's /api/news) only ever serves items with a
+// real scraped article <title>/og:title -- title-less CAMEO-only candidates
+// are filtered out before they reach the frontend. `|| ""` is a defensive
+// guard, not an expected path: an empty headline here means that
+// server-side guarantee was somehow violated (e.g. a stale cached
+// response), and a blank line is a far better failure mode than crashing
+// the whole map.
 export function decorateGdelt(d) {
-  const hasRealTitle = !!(d.real_title && d.real_title.trim());
-  const headline = hasRealTitle ? d.real_title.trim() : gdeltSentence(d);
+  const headline = (d.real_title || "").trim();
   const agency = d.source_name || null;
-  const tooltip = `<b>${esc(headline)}</b><br/>${agency ? `${esc(agency)} &middot; ` : ""}${d.mentions || 0} mentions`;
-  const sourceNote = hasRealTitle
-    ? "Headline is the article's own title."
-    : "Real headline unavailable (fetch failed or blocked) -- this line is auto-generated from GDELT's structured event data, treat as a rough gist only.";
+  const when = timeAgoFromDateAdded(d.date_added);
+  const corroboratedNote = d.corroborated
+    ? ` &middot; corroborated by ${esc((d.corroborated_by || []).join(", "))}`
+    : "";
+  const tooltip = `<b>${esc(headline)}</b><br/>${agency ? `${esc(agency)} &middot; ` : ""}${esc(when)}`;
   const detail = `
     <p class="news-sentence">${esc(headline)}</p>
-    <div class="meta">${esc(d.location || "")} &middot; CAMEO ${esc(d.event_code || "n/a")} &middot; ${d.mentions || 0} mentions</div>
     ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
-    <div class="meta">Source: ${agency ? `${esc(agency)} (via GDELT)` : "GDELT"} &middot; added ${esc(d.date_added || "")}</div>
-    <p class="meta">${sourceNote}</p>`;
+    <div class="meta">Source: ${agency ? esc(agency) : "GDELT"} &middot; ${esc(when)}${corroboratedNote}</div>`;
   const size = 14 + Math.min(Math.log10((d.mentions || 1) + 1), 3) * 2.5;
-  return { icon: icon(SVG.news, "#ffd60a", size), tooltip, detail };
+  const color = d.corroborated ? "#3ac1ff" : "#ffd60a";
+  return { icon: icon(SVG.news, color, size), tooltip, detail };
 }
 
 // ---------- AIS ships ----------

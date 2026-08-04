@@ -8,10 +8,6 @@ export function esc(s) {
   ));
 }
 
-export function titleCase(s) {
-  return String(s ?? "").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
 export function fmtNumber(n) {
   return typeof n === "number" ? n.toLocaleString() : "n/a";
 }

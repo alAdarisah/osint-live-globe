@@ -19,6 +19,7 @@ log = logging.getLogger("osint-globe.jamming")
 MANIFEST_URL = "https://gpsjam.org/data/manifest.csv"
 DAY_URL_TEMPLATE = "https://gpsjam.org/data/{date}-h3_4.csv"
 REFRESH_INTERVAL = 6 * 3600  # the underlying data itself only updates once/day
+FAILURE_RETRY_INTERVAL = 60  # scaled by consecutive failures, capped at REFRESH_INTERVAL
 
 # Drop single-aircraft noise -- require at least this many total ADS-B
 # reports (good+bad) in a cell before trusting its jam ratio.
@@ -86,7 +87,9 @@ async def _fetch() -> tuple[list[dict], str]:
 
 async def start():
     state = registry.register("jamming", key_configured=True)  # no key required
+    consecutive_failures = 0
     while True:
+        ok = False
         try:
             points, date = await _fetch()
             for p in points:
@@ -94,8 +97,13 @@ async def start():
             state.data = points
             state.last_success = time.time()
             state.last_error = None
+            ok = True
             log.info("GPS jamming: %d hot cells for %s", len(points), date)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("GPS jamming fetch failed: %s", exc)
-        await asyncio.sleep(REFRESH_INTERVAL)
+        # An empty exception message (e.g. a bare asyncio.TimeoutError) is
+        # still a failure -- branch on whether the fetch itself succeeded,
+        # not on the truthiness of the resulting error string.
+        consecutive_failures = 0 if ok else consecutive_failures + 1
+        await asyncio.sleep(REFRESH_INTERVAL if ok else min(FAILURE_RETRY_INTERVAL * consecutive_failures, REFRESH_INTERVAL))

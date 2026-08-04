@@ -40,7 +40,6 @@ import {
   decorateSatellite,
   classifyAircraft,
   classifyShip,
-  gdeltSentence,
   SHIP_STYLE,
   AIRCRAFT_STYLE,
 } from "./decorators";
@@ -89,6 +88,9 @@ const AIRCRAFT_TRAIL_MAX_POINTS = 90;
 // is a several-minute trailing arc, same "grows from app-open" cold start as
 // ship/aircraft trails.
 const SATELLITE_TRAIL_MAX_POINTS = 36;
+// Tankers poll on the same cadence as the rest of AIS -- same "several
+// polls back" length as ship trails, not satellites' longer arc.
+const TANKER_TRAIL_MAX_POINTS = 60;
 
 const ID_FIELD = { acled: "id", gdelt: "event_id", conflictWatch: "id", ais: "mmsi", adsb: "icao24" };
 const DECORATORS = {
@@ -145,7 +147,7 @@ export function createMapController(container, initial, callbacks) {
   const navyAisGroup = createNavyAisGroup(map);
   const tankerAisGroup = createTankerAisGroup();
   const satelliteGroup = createSatelliteGroup();
-  const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer } = createTrailLayers(map);
+  const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer, tankerTrailsLayer } = createTrailLayers(map);
   const satelliteLayerWithTrails = L.layerGroup([satelliteGroup, satelliteTrailsLayer]).addTo(map);
   const windFlowLayer = createWindFlowLayer(map);
   // GPU-batched sprite rendering for AIS/ADS-B markers (see webglLayer.js) --
@@ -174,6 +176,7 @@ export function createMapController(container, initial, callbacks) {
   const shipTrails = new Map();
   const aircraftTrails = new Map();
   const satelliteTrails = new Map();
+  const tankerTrails = new Map();
   let selectedIcao = null;
   let selectedMmsi = null;
   let countryNameByIso2 = {};
@@ -212,6 +215,11 @@ export function createMapController(container, initial, callbacks) {
   // while switched off -- satellitesVisible additionally gates trail
   // rendering entirely (see renderSatellites).
   let satellitesVisible = true;
+  // Same mirror-the-map-state purpose as satellitesVisible, for tanker
+  // trails -- entityWebglLayer keeps updating tanker sprites regardless of
+  // visibility (see WEBGL_BUCKET_KEYS comment above), so renderAisLayer
+  // needs its own flag to know whether it's worth building trail polylines.
+  let tankerTrailsVisible = false;
 
   // Free-text name filter for critical infrastructure/military bases (see
   // setInfraFilter in the public API and the search input in
@@ -294,6 +302,20 @@ export function createMapController(container, initial, callbacks) {
   function setLayerVisible(key, visible) {
     if (WEBGL_BUCKET_KEYS.has(key)) {
       entityWebglLayer.setVisible(key, visible);
+      if (key === "aisTanker") {
+        // Tanker trails ride the same toggle as the tanker markers
+        // themselves (see createTrailLayers) -- there's no separate
+        // "Tanker Trails" control, unticking tankers turns both off.
+        tankerTrailsVisible = visible;
+        if (visible) {
+          map.addLayer(tankerTrailsLayer);
+          renderAisLayer(); // catch up on trails that were skipped while off
+        } else {
+          map.removeLayer(tankerTrailsLayer);
+          tankerTrailsLayer.clearLayers(); // don't leave a stale trail sitting under the (now-hidden) tankers
+          tankerTrails.clear();
+        }
+      }
       return;
     }
 
@@ -508,6 +530,19 @@ export function createMapController(container, initial, callbacks) {
     }
     reportCounts();
     renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set());
+
+    // Every on-screen tanker gets a trail, not just a selected one -- same
+    // "the path itself is the point" reasoning as renderSatellites, just
+    // scoped to the current viewport (tankerVisible) since the global tanker
+    // fleet is far bigger than the ~46 curated satellites and isn't worth
+    // tracking off-screen. Skipped entirely while the layer's toggled off.
+    if (tankerTrailsVisible) {
+      updateTrails(tankerTrails, tankerVisible, "mmsi", TANKER_TRAIL_MAX_POINTS, undefined);
+      renderTrailLayer(tankerTrailsLayer, tankerTrails, "#ffb347", new Set(tankerTrails.keys()), {
+        maxOpacity: 0.35,
+        dashArray: "2 5",
+      });
+    }
   }
 
   // Military aircraft get their own always-on, never-clustered group so they
@@ -712,8 +747,13 @@ export function createMapController(container, initial, callbacks) {
         <div>Affected aircraft reports: ${Math.round(d.jam_ratio * 100)}% (${d.bad} of ${d.bad + d.good})</div>
         <p class="meta">Derived from ADS-B aircraft GPS-quality reports, aggregated into a ~1,770km&sup2; hex cell -- a once-daily, regional signal, not a real-time or pinpoint one.</p>
         <div class="meta">Source: gpsjam.org (ADS-B Exchange)</div>`;
+      // Hit radius sized to the *visible* ping ring (up to ~31px at peak
+      // scale, see .jamming-ping-ring/@keyframes jamming-ping in style.css),
+      // not the old 8px dot -- otherwise the pulsing ring people actually
+      // see and click on covers far more area than the thing registering
+      // the click, and most clicks miss.
       const marker = L.circleMarker([d.lat, d.lon], {
-        radius: 8,
+        radius: 18,
         fillOpacity: 0.02,
         opacity: 0,
         renderer: jammingCanvasRenderer,
@@ -853,7 +893,8 @@ export function createMapController(container, initial, callbacks) {
     for (const e of raw.gdelt) {
       if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
       if (haversineKm(site.lat, site.lon, e.lat, e.lon) > INFRA_HOT_RADIUS_KM) continue;
-      const headline = (e.real_title && e.real_title.trim()) || gdeltSentence(e);
+      const headline = (e.real_title || "").trim();
+      if (!headline) continue; // defensive: /api/news should never serve a title-less item
       events.push({ headline, source: e.source_name || "GDELT" });
     }
     return events.slice(0, 5);

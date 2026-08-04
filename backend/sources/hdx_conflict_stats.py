@@ -23,6 +23,7 @@ XLSX_URL = (
     "political-violence-events-and-fatalities.xlsx"
 )
 POLL_INTERVAL = 6 * 3600  # the file itself only changes weekly; this just needs to notice within a day or so
+FAILURE_RETRY_INTERVAL = 60  # scaled by consecutive failures, capped at POLL_INTERVAL
 MONTHS_KEPT = 24  # bounds the payload -- this is a trend indicator, not an archive (full history lives in the source file itself)
 
 _MONTH_NUM = {
@@ -105,13 +106,20 @@ async def _fetch() -> dict[str, list[dict]]:
 
 async def start():
     state = registry.register("hdx_conflict_stats", key_configured=True)
+    consecutive_failures = 0
     while True:
+        ok = False
         try:
             state.data = await _fetch()
             state.last_success = time.time()
             state.last_error = None
+            ok = True
             log.info("HDX conflict stats: %d countries, last %d months", len(state.data), MONTHS_KEPT)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("HDX conflict stats fetch failed: %s", exc)
-        await asyncio.sleep(POLL_INTERVAL)
+        # An empty exception message (e.g. a bare asyncio.TimeoutError) is
+        # still a failure -- branch on whether the fetch itself succeeded,
+        # not on the truthiness of the resulting error string.
+        consecutive_failures = 0 if ok else consecutive_failures + 1
+        await asyncio.sleep(POLL_INTERVAL if ok else min(FAILURE_RETRY_INTERVAL * consecutive_failures, POLL_INTERVAL))

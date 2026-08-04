@@ -183,9 +183,20 @@ async def ships(request: Request, region: str | None = None):
     return _cached_source_response(request, "ais", region, regions.filter_points)
 
 
+def _gdelt_filter(items: list[dict], bounds) -> list[dict]:
+    # Only ever serve items with a real scraped article title -- a
+    # CAMEO-coded fallback sentence isn't a headline and shouldn't be shown
+    # as one. backend/sources/gdelt.py keeps title-less items in its own
+    # accumulator (for the backfill and for conflict_watch.py's direct read
+    # of registry state), so this filter only applies at this public
+    # serving boundary.
+    titled = [d for d in items if (d.get("real_title") or "").strip()]
+    return regions.filter_points(titled, bounds)
+
+
 @app.get("/api/news")
 async def news(request: Request, region: str | None = None):
-    return _cached_source_response(request, "gdelt", region, regions.filter_points)
+    return _cached_source_response(request, "gdelt", region, _gdelt_filter)
 
 
 @app.get("/api/aircraft")
