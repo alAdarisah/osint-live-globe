@@ -20,6 +20,11 @@ export function basemapUrlFor(theme) {
 }
 
 export function createWeatherLayers(map) {
+  // URL starts empty -- RainViewer has no fixed tile path, it's a frame
+  // timestamp that changes every ~10min, so the real URL is filled in by
+  // refreshPrecipRadar() in createMapController.js right after this layer is
+  // created (and re-filled on a timer). Until that first fetch resolves,
+  // Leaflet has nothing to request, which is expected, not a bug.
   const precipLayer = L.tileLayer("", {
     opacity: 0.55,
     zIndex: 5,
@@ -31,6 +36,16 @@ export function createWeatherLayers(map) {
 
   const cloudsLayer = L.tileLayer("/api/weather/tile/clouds_new/{z}/{x}/{y}.png", {
     opacity: 0.45,
+    zIndex: 5,
+    // OWM's clouds_new tiles are only meaningfully distinct up to about z9 --
+    // past that it's the same low-res data upscaled. Without this cap, every
+    // zoom-in past z9 requested a brand new set of unique {z}/{x}/{y} tiles
+    // the backend cache had never seen, which (a) hammered OWM with fetches
+    // for pixels that carried no new information and (b) blew past the
+    // backend's 8000-entry cache cap fast enough to trigger repeated
+    // full-cache clears -- the combination is what showed up as "laggy" pan
+    // and zoom.
+    maxNativeZoom: 9,
     attribution: "Weather: OpenWeatherMap",
   });
 
@@ -111,8 +126,13 @@ export function createEntityClusterGroups(map) {
 }
 
 export function createCountriesLayer(map, onEachFeature) {
+  // Stroke starts fully transparent -- boundaries only appear on hover (see
+  // mouseover/mouseout in createMapController.js) or via the .country-hot/
+  // .country-selected CSS classes, which set their own stroke color and win
+  // over this base regardless. Without that, every untouched country's
+  // outline sat faintly visible at world zoom, which read as visual noise.
   function countryStyle() {
-    return { className: "country-shape", color: "rgba(111, 227, 255, 0.45)", weight: 1, fillColor: "#6fe3ff", fillOpacity: 0.03 };
+    return { className: "country-shape", color: "rgba(111, 227, 255, 0)", weight: 1, fillColor: "#6fe3ff", fillOpacity: 0 };
   }
   return L.geoJSON(null, { style: countryStyle, onEachFeature }).addTo(map);
 }

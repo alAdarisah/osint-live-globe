@@ -88,11 +88,6 @@ const AIRCRAFT_TRAIL_MAX_POINTS = 90;
 // ship/aircraft trails.
 const SATELLITE_TRAIL_MAX_POINTS = 36;
 
-// How long a "new jamming cell" ripple marker stays on the map before it's
-// removed -- must comfortably cover the CSS ping animation's own total run
-// time (see .jamming-ping in style.css) so the marker isn't yanked mid-ring.
-const JAMMING_PING_LIFETIME_MS = 2600;
-
 const ID_FIELD = { acled: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24" };
 const DECORATORS = { acled: decorateAcled, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb };
 
@@ -181,6 +176,7 @@ export function createMapController(container, initial, callbacks) {
   let regionFlightTimer = null;
   let windRefreshTimer = null;
   let moveEndWindTimer = null;
+  let precipRefreshTimer = null;
 
   // ---------- cities gate + country selection/highlight ----------
   // Cities only render once the user has opted into a scope (clicking a
@@ -190,16 +186,26 @@ export function createMapController(container, initial, callbacks) {
   // get the `.country-selected` highlight, so both features share one state.
   let citiesEnabled = false;
   let selectedCountryIso = null;
+  let selectedCountryLayer = null; // the L.Path currently selected -- lets the card's screen anchor track it across pan/zoom
   let activeConflictZoneBounds = null; // {south,west,north,east} or null
+
+  // Viewport-pixel anchor for the country info card (see CountryInfoCard.jsx)
+  // -- it renders as a widget popping out of the clicked country rather than
+  // a fixed corner panel, so it needs to track the shape's on-screen position
+  // as the user pans/zooms while it's open (see the "move zoom" handler near
+  // the bottom of this function).
+  function countryAnchorPoint(layer) {
+    const center = layer.getBounds().getCenter();
+    const pt = map.latLngToContainerPoint(center);
+    const rect = container.getBoundingClientRect();
+    return { x: rect.left + pt.x, y: rect.top + pt.y };
+  }
 
   // Mirrors the map's actual add/remove state for these two toggles so the
   // render functions themselves can skip work (not just hide the result)
   // while switched off -- satellitesVisible additionally gates trail
-  // rendering entirely (see renderSatellites), and jammingVisible drives the
-  // "ping everything currently known" burst below when the layer is
-  // switched on (see setLayerVisible).
+  // rendering entirely (see renderSatellites).
   let satellitesVisible = true;
-  let jammingVisible = true;
 
   // Free-text name filter for critical infrastructure/military bases (see
   // setInfraFilter in the public API and the search input in
@@ -213,21 +219,31 @@ export function createMapController(container, initial, callbacks) {
   // map and closed the moment you clicked elsewhere) -- instead it drives a
   // persistent React info card (see CountryInfoCard.jsx/onCountrySelect)
   // that stays open across pan/zoom, and toggles closed on a second click of
-  // the same country. Hover still uses the plain fillOpacity swap below.
+  // the same country. Every country gets these handlers, not just the
+  // auto-flagged war-hot ones -- hover/click work on any country shape.
+  // fillOpacity alone (0.03 -> 0.18) was too subtle against the near-
+  // transparent base fill to read as a highlight, so hover also brightens
+  // the stroke -- same technique .country-selected already uses, just
+  // lighter so the two states stay visually distinct.
   const countriesLayer = createCountriesLayer(map, (feature, layer) => {
-    layer.on("mouseover", () => layer.setStyle({ fillOpacity: 0.18 }));
-    layer.on("mouseout", () => layer.setStyle({ fillOpacity: 0.03 }));
+    layer.on("mouseover", () => layer.setStyle({ fillOpacity: 0.25, color: "#aef0ff", weight: 2 }));
+    layer.on("mouseout", () => layer.setStyle({ fillOpacity: 0, color: "rgba(111, 227, 255, 0)", weight: 1 }));
     layer.on("click", (e) => {
       if (e.originalEvent) e.originalEvent.stopPropagation(); // don't let the map's own click handler immediately deselect
       const iso = feature.properties?.iso_a2 || null;
       if (selectedCountryIso && selectedCountryIso === iso) {
         selectedCountryIso = null;
+        selectedCountryLayer = null;
         if (!activeConflictZoneBounds) citiesEnabled = false; // no other active scope -- fully closing means fully closing
         callbacks.onCountrySelect?.(null);
       } else {
         citiesEnabled = true;
         selectedCountryIso = iso;
-        callbacks.onCountrySelect?.({ iso, name: feature.properties?.name, html: countryPopupHtml(feature.properties, raw) });
+        selectedCountryLayer = layer;
+        callbacks.onCountrySelect?.({
+          iso, name: feature.properties?.name, html: countryPopupHtml(feature.properties, raw),
+          point: countryAnchorPoint(layer),
+        });
       }
       renderCities();
       updateCountryHighlights();
@@ -284,17 +300,6 @@ export function createMapController(container, initial, callbacks) {
       satellitesVisible = visible;
       if (visible) renderSatellites(); // was skipped entirely while off -- catch up now
       else satelliteTrailsLayer.clearLayers(); // don't leave a stale trail sitting under the (now-empty) group
-    }
-    if (key === "jamming") {
-      const wasOff = !jammingVisible;
-      jammingVisible = visible;
-      // Turning it on is the only moment a normal user could actually see
-      // the sonar-ping -- a real "new cell" only happens on the next data
-      // refresh (up to 30min away), which made the effect functionally
-      // invisible in practice. Pinging every currently-known cell here
-      // makes it observable the moment someone opts in, not just once,
-      // invisibly, at boot.
-      if (visible && wasOff) pingAllCurrentJammingCells();
     }
   }
 
@@ -361,8 +366,19 @@ export function createMapController(container, initial, callbacks) {
     acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
     aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
   };
+  // Total number loaded from the backend for each layer, independent of the
+  // current viewport/zoom filtering that `counts` reflects -- shown in the
+  // UI as the "(total)" figure next to the live on-screen tick.
+  const totals = {
+    acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
+    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+  };
   const zoomNotes = { adsb: false, cities: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
-  function reportCounts() { callbacks.onCountsChange?.({ ...counts }); }
+  function reportCounts() {
+    const totalsSuffixed = {};
+    for (const key of Object.keys(totals)) totalsSuffixed[`${key}Total`] = totals[key];
+    callbacks.onCountsChange?.({ ...counts, ...totalsSuffixed });
+  }
   function reportZoomNotes() { callbacks.onZoomNotesChange?.({ ...zoomNotes }); }
 
   function renderMarkerLayer(key) {
@@ -401,6 +417,7 @@ export function createMapController(container, initial, callbacks) {
       (marker, item) => updateMarker(marker, item, decorate)
     );
     counts[key] = visible.length;
+    totals[key] = raw[key].length;
     reportCounts();
   }
 
@@ -460,6 +477,15 @@ export function createMapController(container, initial, callbacks) {
     counts.aisCivilian = civilianVisible.length;
     counts.aisTanker = tankerVisible.length;
     counts.aisNavy = navyVisible.length;
+    totals.aisCivilian = 0;
+    totals.aisTanker = 0;
+    totals.aisNavy = 0;
+    for (const item of raw.ais) {
+      const type = classifyShip(item);
+      if (type === "navy") totals.aisNavy += 1;
+      else if (type === "tanker") totals.aisTanker += 1;
+      else totals.aisCivilian += 1;
+    }
     reportCounts();
     renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set());
   }
@@ -509,6 +535,12 @@ export function createMapController(container, initial, callbacks) {
 
     counts.adsbCivilian = civilianVisible.length;
     counts.adsbMilitary = militaryVisible.length;
+    totals.adsbCivilian = 0;
+    totals.adsbMilitary = 0;
+    for (const item of raw.adsb) {
+      if (classifyAircraft(item) === "military") totals.adsbMilitary += 1;
+      else totals.adsbCivilian += 1;
+    }
     reportCounts();
     renderTrailLayer(aircraftTrailsLayer, aircraftTrails, "#d8b9ff", selectedIcao ? new Set([selectedIcao]) : new Set());
   }
@@ -561,6 +593,7 @@ export function createMapController(container, initial, callbacks) {
     }
 
     counts.firms = visible.length;
+    totals.firms = raw.firms.length;
     reportCounts();
   }
 
@@ -596,6 +629,7 @@ export function createMapController(container, initial, callbacks) {
     );
     syncLayerMarkers(markersByKey.satellites, satelliteGroup, visible, (s) => s.norad_id, buildSatelliteMarker, updateSatelliteMarker);
     counts.satellites = visible.length;
+    totals.satellites = raw.satellites.length;
     reportCounts();
 
     // Satellites have no click-to-select model like ships/aircraft, so every
@@ -611,104 +645,66 @@ export function createMapController(container, initial, callbacks) {
     });
   }
 
-  // Cells seen as of the last *data* update -- gpsjam's H3 cell centers are
-  // stable day to day, so `${lat},${lon}` is a good enough surrogate id for
-  // "is this the same cell as last time" without the backend needing to hand
-  // back a real one. Deliberately keyed off the full dataset (see
-  // detectNewJammingCells, called only from applyData) rather than the
-  // viewport-filtered `visible` set renderJamming works with -- renderJamming
-  // also re-runs on every pan/zoom now (see renderAll), and diffing against
-  // a viewport-scoped set would "discover" already-known cells as new every
-  // time they scroll back into view.
-  let seenJammingKeys = new Set();
-
-  function jammingCellKey(d) {
-    return `${d.lat},${d.lon}`;
-  }
-
-  // Concentric-rings "sonar ping"/water-drop-ripple marker for a
-  // newly-appeared jamming cell -- distinct from the .infra-hot/.country-hot
-  // steady glow, and self-removing (one reverb, not a persistent indicator)
-  // since a jamming refresh is a daily event, not an ongoing state to flag
-  // forever.
+  // Concentric-rings "sonar ping"/water-drop-ripple marker for an active
+  // jamming cell -- distinct from the .infra-hot/.country-hot steady glow.
+  // Loops continuously via CSS (animation-iteration-count: infinite, see
+  // .jamming-ping-ring in style.css) for as long as the cell stays on the
+  // map, rebuilt on every renderJamming() pass alongside jammingPointsLayer
+  // rather than firing once and leaving only the heat layer's static purple
+  // blur behind.
   function buildJammingPing(d) {
     const html =
       '<div class="jamming-ping-wrap">' +
       '<span class="jamming-ping-ring" style="animation-delay:0ms"></span>' +
-      '<span class="jamming-ping-ring" style="animation-delay:400ms"></span>' +
-      '<span class="jamming-ping-ring" style="animation-delay:800ms"></span>' +
+      '<span class="jamming-ping-ring" style="animation-delay:1500ms"></span>' +
+      '<span class="jamming-ping-ring" style="animation-delay:3000ms"></span>' +
       "</div>";
     const icon = L.divIcon({ html, className: "", iconSize: [1, 1], iconAnchor: [0, 0] });
     const marker = L.marker([d.lat, d.lon], { icon, interactive: false });
     jammingPingGroup.addLayer(marker);
-    setTimeout(() => jammingPingGroup.removeLayer(marker), JAMMING_PING_LIFETIME_MS);
-  }
-
-  // Called once per genuine jamming data refresh (applyData("jamming", ...)),
-  // not per render -- pings only newly-appeared cells versus the last poll,
-  // regardless of what's currently panned into view. Still tracks
-  // seenJammingKeys while off (so a cell that appeared while hidden doesn't
-  // wrongly ping again once shown), just skips building the (invisible)
-  // marker itself.
-  function detectNewJammingCells(points) {
-    const nextSeenKeys = new Set();
-    for (const d of points) {
-      if (typeof d.lat !== "number" || typeof d.lon !== "number") continue;
-      const key = jammingCellKey(d);
-      nextSeenKeys.add(key);
-      if (!seenJammingKeys.has(key) && jammingVisible) buildJammingPing(d);
-    }
-    seenJammingKeys = nextSeenKeys;
-  }
-
-  // Fired once when the jamming layer is switched from off to on (see
-  // setLayerVisible) -- a real "new cell" event only happens on the next
-  // data refresh (up to 30min away), so without this the ping would be
-  // functionally invisible: the only actual "new" moment is the very first
-  // load, which fires before the user has ever seen the layer. Pinging
-  // every currently-known cell here is what makes the effect discoverable.
-  function pingAllCurrentJammingCells() {
-    for (const d of raw.jamming) {
-      if (typeof d.lat !== "number" || typeof d.lon !== "number") continue;
-      buildJammingPing(d);
-    }
   }
 
   function renderJamming() {
     const bounds = map.getBounds().pad(0.25);
-    const visible = raw.jamming.filter(
-      (d) => typeof d.lat === "number" && typeof d.lon === "number" && bounds.contains([d.lat, d.lon])
-    );
+    // Same zoom gate as civilian ADS-B (ADSB_MIN_ZOOM) -- world zoom stays
+    // clean by construction rather than by showing a purple blur everywhere,
+    // heat/pings/points all withheld together until the user zooms in.
+    const belowJammingDetailZoom = map.getZoom() < ADSB_MIN_ZOOM;
+    zoomNotes.jamming = belowJammingDetailZoom;
+    reportZoomNotes();
 
-    // Always on, any zoom -- same reasoning as FIRMS' heat layer.
+    const visible = belowJammingDetailZoom
+      ? []
+      : raw.jamming.filter(
+          (d) => typeof d.lat === "number" && typeof d.lon === "number" && bounds.contains([d.lat, d.lon])
+        );
+
     safeHeatSetLatLngs(jammingHeat, visible.map((d) => [d.lat, d.lon, d.jam_ratio]));
 
     jammingPointsLayer.clearLayers();
-    const belowJammingDetailZoom = map.getZoom() < FIRMS_DETAIL_MIN_ZOOM;
-    zoomNotes.jamming = belowJammingDetailZoom;
-    reportZoomNotes();
-    if (!belowJammingDetailZoom) {
-      for (const d of visible) {
-        const tooltip = `<b>${Math.round(d.jam_ratio * 100)}% affected</b><br/>${d.bad}/${d.bad + d.good} reports`;
-        const detail = `
-          <h3>GPS/GNSS interference</h3>
-          <div class="meta">${esc(d.date || "")}</div>
-          <div>Affected aircraft reports: ${Math.round(d.jam_ratio * 100)}% (${d.bad} of ${d.bad + d.good})</div>
-          <p class="meta">Derived from ADS-B aircraft GPS-quality reports, aggregated into a ~1,770km&sup2; hex cell -- a once-daily, regional signal, not a real-time or pinpoint one.</p>
-          <div class="meta">Source: gpsjam.org (ADS-B Exchange)</div>`;
-        const marker = L.circleMarker([d.lat, d.lon], {
-          radius: 8,
-          fillOpacity: 0.02,
-          opacity: 0,
-          renderer: jammingCanvasRenderer,
-        });
-        marker.bindTooltip(tooltip, { className: "map-tooltip", direction: "top" });
-        marker.bindPopup(detail, { maxWidth: 280 });
-        jammingPointsLayer.addLayer(marker);
-      }
+    jammingPingGroup.clearLayers();
+    for (const d of visible) {
+      buildJammingPing(d);
+      const tooltip = `<b>${Math.round(d.jam_ratio * 100)}% affected</b><br/>${d.bad}/${d.bad + d.good} reports`;
+      const detail = `
+        <h3>GPS/GNSS interference</h3>
+        <div class="meta">${esc(d.date || "")}</div>
+        <div>Affected aircraft reports: ${Math.round(d.jam_ratio * 100)}% (${d.bad} of ${d.bad + d.good})</div>
+        <p class="meta">Derived from ADS-B aircraft GPS-quality reports, aggregated into a ~1,770km&sup2; hex cell -- a once-daily, regional signal, not a real-time or pinpoint one.</p>
+        <div class="meta">Source: gpsjam.org (ADS-B Exchange)</div>`;
+      const marker = L.circleMarker([d.lat, d.lon], {
+        radius: 8,
+        fillOpacity: 0.02,
+        opacity: 0,
+        renderer: jammingCanvasRenderer,
+      });
+      marker.bindTooltip(tooltip, { className: "map-tooltip", direction: "top" });
+      marker.bindPopup(detail, { maxWidth: 280 });
+      jammingPointsLayer.addLayer(marker);
     }
 
     counts.jamming = visible.length;
+    totals.jamming = raw.jamming.length;
     reportCounts();
   }
 
@@ -732,6 +728,7 @@ export function createMapController(container, initial, callbacks) {
         if (f.properties.iso_a2) countryNameByIso2[f.properties.iso_a2] = f.properties.name;
       }
       counts.countries = features.length;
+      totals.countries = features.length;
       reportCounts();
     }
     updateCountryWarFlare();
@@ -791,6 +788,7 @@ export function createMapController(container, initial, callbacks) {
     // applied to every other point layer.
     syncLayerMarkers(markersByKey.cities, citiesGroup, visible, cityKey, buildCityMarker, () => {});
     counts.cities = visible.length;
+    totals.cities = raw.cities.length;
     reportCounts();
   }
 
@@ -840,6 +838,7 @@ export function createMapController(container, initial, callbacks) {
     // destroying markers/open popups for sites whose hot status didn't change.
     syncLayerMarkers(markersByKey.infra, infraGroup, visible, (s) => s.id, buildInfraMarker, updateInfraMarker);
     counts.infra = visible.length;
+    totals.infra = raw.infra.length;
     reportCounts();
   }
 
@@ -905,6 +904,24 @@ export function createMapController(container, initial, callbacks) {
     }
   }
 
+  // ---------- precipitation radar: RainViewer frame timestamp ----------
+  // RainViewer has no fixed tile URL -- each radar pass gets a new frame
+  // path, published via this small JSON endpoint, and a fresh pass lands
+  // roughly every 10min. precipLayer is created in layers.js with an empty
+  // URL; this is what fills it in, both on startup and periodically so the
+  // radar doesn't go stale if the map just sits open.
+  async function refreshPrecipRadar() {
+    try {
+      const data = await fetchJson("https://api.rainviewer.com/public/weather-maps.json");
+      const frames = data?.radar?.past;
+      const latest = frames?.[frames.length - 1];
+      if (!latest?.path) return;
+      weatherLayers.precip.setUrl(`https://tilecache.rainviewer.com${latest.path}/256/{z}/{x}/{y}/2/1_1.png`);
+    } catch (err) {
+      console.warn("Failed to fetch precip radar frame:", err);
+    }
+  }
+
   // ---------- region flyTo ----------
 
   function flyToRegion(key, entry) {
@@ -960,6 +977,15 @@ export function createMapController(container, initial, callbacks) {
     moveEndWindTimer = setTimeout(refreshWindArrows, 500); // debounced: don't hammer Open-Meteo mid-drag
   });
 
+  // Country info card is anchored to a screen pixel, not a DOM position
+  // Leaflet manages itself (see CountryInfoCard.jsx) -- "move"/"zoom" fire
+  // continuously during pan/zoom animation (unlike moveend), so this is what
+  // keeps the card glued to its country instead of drifting off during a
+  // drag or zoom gesture.
+  map.on("move zoom", () => {
+    if (selectedCountryLayer) callbacks.onCountryPointChange?.(countryAnchorPoint(selectedCountryLayer));
+  });
+
   // No separate zoomend handler: Leaflet always fires moveend right after
   // zoomend for any zoom change (button, scroll, or pinch), so a dedicated
   // zoomend listener re-running renderAdsbLayer/renderCities/renderFirms
@@ -1005,6 +1031,8 @@ export function createMapController(container, initial, callbacks) {
 
   refreshWindArrows();
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
+  refreshPrecipRadar();
+  precipRefreshTimer = setInterval(refreshPrecipRadar, 10 * 60 * 1000); // matches RainViewer's own pass cadence
   function onVisibilityChange() {
     if (!document.hidden) refreshWindArrows(); // catch up immediately instead of waiting out the rest of the 5min interval
   }
@@ -1023,10 +1051,8 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "cities") renderCities();
       else if (key === "infra") renderInfra();
       else if (key === "pipelines") renderPipelines();
-      else if (key === "jamming") {
-        detectNewJammingCells(data);
-        renderJamming();
-      } else if (key === "satellites") renderSatellites();
+      else if (key === "jamming") renderJamming();
+      else if (key === "satellites") renderSatellites();
       else renderMarkerLayer(key);
       if (key === "acled") updateCountryWarFlare();
     },
@@ -1047,6 +1073,7 @@ export function createMapController(container, initial, callbacks) {
     deselectCountry() {
       if (!selectedCountryIso) return;
       selectedCountryIso = null;
+      selectedCountryLayer = null;
       if (!activeConflictZoneBounds) citiesEnabled = false;
       renderCities();
       updateCountryHighlights();
@@ -1062,6 +1089,7 @@ export function createMapController(container, initial, callbacks) {
 
     destroy() {
       clearInterval(windRefreshTimer);
+      clearInterval(precipRefreshTimer);
       clearTimeout(moveEndWindTimer);
       clearTimeout(regionFlightTimer);
       document.removeEventListener("visibilitychange", onVisibilityChange);

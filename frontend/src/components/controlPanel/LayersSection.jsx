@@ -9,7 +9,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("acled", e.target.checked)}
         />
         <span className="swatch swatch-acled" /> Conflict &amp; Violence (ACLED + UCDP)
-        <span className="count">{counts.acled}</span>
+        <span className="count">{counts.acled} ({counts.acledTotal})</span>
       </label>
       <div id="acledZoomNote" className={`sublegend${zoomNotes.acled ? " visible" : ""}`}>
         Zoom in to show conflict events
@@ -22,7 +22,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("firms", e.target.checked)}
         />
         <span className="swatch swatch-firms" /> Fires / Thermal Anomalies (FIRMS)
-        <span className="count">{counts.firms}</span>
+        <span className="count">{counts.firms} ({counts.firmsTotal})</span>
       </label>
       <div className="sublegend">Heat intensity = Fire Radiative Power (FRP). Click a point for detail.</div>
       <div id="firmsZoomNote" className={`sublegend${zoomNotes.firms ? " visible" : ""}`}>
@@ -36,7 +36,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("jamming", e.target.checked)}
         />
         <span className="swatch swatch-jamming" /> GPS/Radio Jamming (GPSJam)
-        <span className="count">{counts.jamming}</span>
+        <span className="count">{counts.jamming} ({counts.jammingTotal})</span>
       </label>
       <div className="sublegend">
         Data: gpsjam.org, derived from ADS-B aircraft GPS-quality reports. Updated once/day, not real-time.
@@ -52,7 +52,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("aisNavy", e.target.checked)}
         />
         <span className="swatch swatch-ais" /> Navy &amp; MSC Ships
-        <span className="count">{counts.aisNavy}</span>
+        <span className="count">{counts.aisNavy} ({counts.aisNavyTotal})</span>
       </label>
       <div className="sublegend">Identified by AIS ship-type code or USS/USNS naming. Shown at every zoom.</div>
 
@@ -63,7 +63,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("aisTanker", e.target.checked)}
         />
         <span className="swatch" style={{ background: "#ffb347" }} /> Oil Tankers
-        <span className="count">{counts.aisTanker}</span>
+        <span className="count">{counts.aisTanker} ({counts.aisTankerTotal})</span>
       </label>
       <div className="sublegend">AIS ship-type code 80-89. Its own ticker, not mixed into Civilian Ships.</div>
 
@@ -74,7 +74,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("aisCivilian", e.target.checked)}
         />
         <span className="swatch swatch-ais" /> Civilian Ships (AIS)
-        <span className="count">{counts.aisCivilian}</span>
+        <span className="count">{counts.aisCivilian} ({counts.aisCivilianTotal})</span>
       </label>
       <div id="aisZoomNote" className={`sublegend${zoomNotes.ais ? " visible" : ""}`}>
         Zoom in to show civilian ships
@@ -87,7 +87,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("infra", e.target.checked)}
         />
         <span className="swatch swatch-infra" /> Critical Infrastructure
-        <span className="count">{counts.infra}</span>
+        <span className="count">{counts.infra} ({counts.infraTotal})</span>
       </label>
       <div className="sublegend">
         Publicly documented sites relevant to the selected conflict zone; flares when a nearby event is reported.
@@ -108,7 +108,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("satellites", e.target.checked)}
         />
         <span className="swatch swatch-satellites" /> Satellites (stations + military)
-        <span className="count">{counts.satellites}</span>
+        <span className="count">{counts.satellites} ({counts.satellitesTotal})</span>
       </label>
       <div className="sublegend">
         Position computed via SGP4 from CelesTrak's public orbital elements. Always shown, any zoom.
@@ -121,7 +121,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("gdelt", e.target.checked)}
         />
         <span className="swatch swatch-gdelt" /> News (GDELT)
-        <span className="count">{counts.gdelt}</span>
+        <span className="count">{counts.gdelt} ({counts.gdeltTotal})</span>
       </label>
       <div id="gdeltZoomNote" className={`sublegend${zoomNotes.gdelt ? " visible" : ""}`}>
         Zoom in to show news
@@ -134,7 +134,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("adsbMilitary", e.target.checked)}
         />
         <span className="swatch swatch-adsb" /> Military Aircraft
-        <span className="count">{counts.adsbMilitary}</span>
+        <span className="count">{counts.adsbMilitary} ({counts.adsbMilitaryTotal})</span>
       </label>
       <div className="sublegend">Shown at every zoom.</div>
 
@@ -145,7 +145,7 @@ export default function LayersSection({ counts, zoomNotes, layerVisibility, onTo
           onChange={(e) => onToggleLayer("adsbCivilian", e.target.checked)}
         />
         <span className="swatch swatch-adsb" /> Civilian Aircraft (ADS-B)
-        <span className="count">{counts.adsbCivilian}</span>
+        <span className="count">{counts.adsbCivilian} ({counts.adsbCivilianTotal})</span>
       </label>
       <div id="adsbZoomNote" className={`sublegend${zoomNotes.adsb ? " visible" : ""}`}>
         Zoom in to show civilian aircraft

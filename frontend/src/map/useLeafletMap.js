@@ -6,10 +6,13 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createMapController } from "./createMapController";
 
-const EMPTY_COUNTS = {
-  acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
-  aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
-};
+const COUNT_KEYS = [
+  "acled", "firms", "gdelt", "countries", "cities", "infra", "jamming", "satellites",
+  "aisCivilian", "aisNavy", "aisTanker", "adsbCivilian", "adsbMilitary",
+];
+const EMPTY_COUNTS = Object.fromEntries(
+  COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
+);
 const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
 
 export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialLayerVisibility }) {
@@ -40,6 +43,7 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
         onRegionAutoReset: () => onRegionAutoResetRef.current?.(),
         onWindStatusChange: setWindStatus,
         onCountrySelect: setSelectedCountry,
+        onCountryPointChange: (point) => setSelectedCountry((prev) => (prev ? { ...prev, point } : prev)),
       }
     );
     controllerRef.current = controller;

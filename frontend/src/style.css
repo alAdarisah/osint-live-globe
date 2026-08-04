@@ -168,12 +168,12 @@ html, body {
   50% { opacity: 0.5; }
 }
 
-/* Newly-appeared GPS jamming cell (see detectNewJammingCells in
-   createMapController.js) -- a sonar-ping/water-drop-ripple: 2-3 concentric
-   rings expanding outward and fading, staggered so they visibly "reverb"
-   once rather than the steady flare/glow .infra-hot uses. Self-removed by
-   JS a couple seconds after this finishes (see JAMMING_PING_LIFETIME_MS),
-   not a persistent indicator. */
+/* Active GPS jamming cell (see buildJammingPing in createMapController.js)
+   -- a sonar-ping/water-drop-ripple: 2-3 concentric rings expanding outward
+   and fading, staggered so they visibly "reverb", looping continuously for
+   as long as the cell stays on the map (rebuilt each renderJamming() pass)
+   rather than firing once and leaving the heat layer's purple blur as the
+   only persistent indicator. */
 .jamming-ping-wrap {
   position: relative;
   width: 0;
@@ -190,8 +190,7 @@ html, body {
   border: 2px solid #e066ff;
   box-shadow: 0 0 6px #b833e0;
   opacity: 0;
-  animation: jamming-ping 1.6s ease-out;
-  animation-iteration-count: 1;
+  animation: jamming-ping 6s ease-out infinite;
 }
 @keyframes jamming-ping {
   0% { transform: scale(0.3); opacity: 0.9; }
@@ -251,7 +250,11 @@ html, body {
   gap: 6px;
   padding: 6px 16px;
   background: var(--header-fade);
-  z-index: 899;
+  /* Above #controlPanel's 1000 -- the panel is open by default and sits at
+     top:80px/left:0, which used to bury the conflict-zone button/dropdown
+     (they start at top:46px but the dropdown extends well past 80px) behind
+     the opaque panel with no way to see or click it. */
+  z-index: 1001;
   /* Gaps between/below wrapped buttons would otherwise silently swallow
      clicks meant for map markers underneath -- same fix as #titleBar. */
   pointer-events: none;
@@ -308,7 +311,7 @@ html, body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 960;
+  z-index: 1001;
   animation: popup-in 0.16s ease;
 }
 .region-zone-menu-item {
@@ -474,6 +477,16 @@ html, body {
   stroke-width: 1;
   cursor: pointer;
   transition: fill 0.15s ease;
+  /* Browsers only hit-test a "painted" (nonzero-opacity) area by default
+     (pointer-events: visiblePainted) -- with the boundary now invisible
+     until hover (see createCountriesLayer in layers.js, fillOpacity: 0),
+     that left the whole shape unclickable. `all` decouples hit-testing
+     from paint so click/hover still fire regardless of current opacity.
+     !important because leaflet.css's own `.leaflet-interactive` rule
+     (element+class, higher specificity than this single class) sets
+     pointer-events: auto and would otherwise win regardless of source
+     order. */
+  pointer-events: all !important;
 }
 .country-shape:hover, .country-shape.hovered {
   fill: var(--country-hover-fill);
@@ -706,15 +719,19 @@ html, body {
   pointer-events: auto;
 }
 
-/* Persistent country details panel (CountryInfoCard.jsx) -- replaces the
+/* Persistent country details widget (CountryInfoCard.jsx) -- replaces the
    old Leaflet popup on country click so pan/zoom keep working while it's
    open. Reuses countryPopupHtml()'s markup verbatim, so it needs the same
    h3/.meta/.popup-events rules the Leaflet popup styling already defines
-   (those are scoped to `.leaflet-popup-content`, which this isn't). */
+   (those are scoped to `.leaflet-popup-content`, which this isn't).
+   Pops out of the clicked country instead of sitting in a fixed corner --
+   `left`/`top`/`bottom` come from the component as inline styles, tracking
+   `country.point` (the country's live screen position, see
+   onCountryPointChange in createMapController.js). Default opens upward
+   (anchored by `bottom`, tail on the bottom edge); `.flip` opens downward
+   near the top of the screen instead (anchored by `top`, tail on top). */
 #countryInfoCard {
   position: fixed;
-  left: 14px;
-  bottom: 56px;
   width: 320px;
   max-width: calc(100vw - 28px);
   max-height: 44vh;
@@ -727,6 +744,28 @@ html, body {
   z-index: 950;
   padding: 14px 16px;
   animation: popup-in 0.16s ease;
+}
+.country-info-tail {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  transform: rotate(45deg);
+}
+/* Default (opens upward): tail sits on the bottom edge, pointing down at
+   the country. Only the bottom-right two edges get a border so it reads as
+   part of the card's outline rather than a floating diamond. */
+#countryInfoCard:not(.flip) .country-info-tail {
+  bottom: -7.5px;
+  border-top: none;
+  border-left: none;
+}
+#countryInfoCard.flip .country-info-tail {
+  top: -7.5px;
+  border-bottom: none;
+  border-right: none;
 }
 .country-info-close {
   position: absolute;
@@ -751,14 +790,35 @@ html, body {
   padding: 8px 10px;
   border-bottom: 1px solid var(--panel-border);
   flex: none;
-  cursor: pointer;
+  cursor: move;
   -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+
+.news-caret-btn {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  touch-action: auto;
+}
+.news-caret-btn:hover {
+  background: var(--accent);
+  color: var(--panel-bg);
 }
 
 .news-caret {
   flex: none;
-  color: var(--text-dim);
-  font-size: 10px;
+  font-size: 13px;
+  line-height: 1;
   transition: transform 0.2s ease;
 }
 
@@ -836,6 +896,120 @@ html, body {
 .news-item-row > a, .news-item-row > span {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* Conflict-zone briefing widget (ConflictBriefingCard.jsx) -- pops up next
+   to the news ticker's corner (not on top of it) whenever a conflict zone
+   is picked from RegionBar, same fixed-corner-card treatment as
+   #newsBroadcast/#countryInfoCard. Reuses .news-item/.news-list wholesale
+   for its headline rows instead of duplicating that styling. */
+#conflictBriefing {
+  position: fixed;
+  top: 80px;
+  right: 364px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid rgba(255, 61, 61, 0.4);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  animation: popup-in 0.16s ease;
+}
+
+.briefing-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+
+.briefing-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-bright);
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.briefing-close {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.briefing-close:hover { color: var(--text-bright); }
+
+.briefing-body {
+  overflow-y: auto;
+  padding: 10px 12px 12px;
+}
+
+.briefing-summary {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.briefing-events {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.briefing-events li {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
+}
+.briefing-events li:last-child { border-bottom: none; padding-bottom: 0; }
+.briefing-event-type {
+  color: #ff8080;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.3px;
+}
+.briefing-event-notes {
+  margin-top: 2px;
+  color: var(--text-dim);
+}
+
+.briefing-news-heading {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
+.briefing-news-list { padding: 4px 0 0; }
+
+@media (max-width: 700px) {
+  #conflictBriefing {
+    right: 14px;
+    top: 130px;
+  }
 }
 
 .news-locate-btn {
