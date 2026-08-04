@@ -7,13 +7,13 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { createMapController } from "./createMapController";
 
 const COUNT_KEYS = [
-  "acled", "firms", "gdelt", "countries", "cities", "infra", "jamming", "satellites",
+  "events", "firms", "gdelt", "countries", "cities", "infra", "jamming", "satellites",
   "aisCivilian", "aisNavy", "aisTanker", "adsbCivilian", "adsbMilitary",
 ];
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
 );
-const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
+const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false, ais: false, jamming: false };
 
 export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialLayerVisibility }) {
   const controllerRef = useRef(null);

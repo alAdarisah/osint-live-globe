@@ -1,3 +1,6 @@
+import { SVG } from "../../map/svgIcons";
+import LayerIcon from "./LayerIcon";
+
 export default function WeatherSection({ layerVisibility, onToggleLayer, owmConfigured, windStatus }) {
   return (
     <>
@@ -8,7 +11,7 @@ export default function WeatherSection({ layerVisibility, onToggleLayer, owmConf
           checked={layerVisibility.precip}
           onChange={(e) => onToggleLayer("precip", e.target.checked)}
         />
-        <span className="swatch swatch-precip" /> Precipitation Radar
+        <LayerIcon svg={SVG.raindrop} color="#3ba0ff" /> Precipitation Radar
       </label>
       <label className={`layer-row${owmConfigured ? "" : " disabled"}`} data-layer="clouds">
         <input
@@ -17,7 +20,7 @@ export default function WeatherSection({ layerVisibility, onToggleLayer, owmConf
           checked={layerVisibility.clouds}
           onChange={(e) => onToggleLayer("clouds", e.target.checked)}
         />
-        <span className="swatch swatch-clouds" /> Cloud Cover
+        <LayerIcon svg={SVG.cloud} color="#c9d6dd" /> Cloud Cover
         <span className="key-note">{owmConfigured ? "" : "needs key"}</span>
       </label>
       <label className="layer-row" data-layer="windArrows">
@@ -26,7 +29,7 @@ export default function WeatherSection({ layerVisibility, onToggleLayer, owmConf
           checked={layerVisibility.windArrows}
           onChange={(e) => onToggleLayer("windArrows", e.target.checked)}
         />
-        <span className="swatch swatch-wind-arrows" /> Wind
+        <LayerIcon svg={SVG.wind} color="#7ee0c9" /> Wind
       </label>
       <div className="sublegend">Flowing particles, colored by speed (Open-Meteo) -- merges the old separate heatmap toggle.</div>
       {windStatus && !windStatus.ok && (

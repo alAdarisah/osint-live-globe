@@ -4,7 +4,7 @@ import WeatherSection from "./WeatherSection";
 import SourceStatusSection from "./SourceStatusSection";
 
 export default function ControlPanel({
-  open, counts, zoomNotes, layerVisibility, onToggleLayer, onToggleConflictLayers, health, owmConfigured, windStatus, infraFilterText, onInfraFilterChange,
+  open, counts, zoomNotes, layerVisibility, onToggleLayer, health, owmConfigured, windStatus, infraFilterText, onInfraFilterChange,
 }) {
   return (
     <aside id="controlPanel" className={open ? "open" : ""}>
@@ -13,7 +13,6 @@ export default function ControlPanel({
         zoomNotes={zoomNotes}
         layerVisibility={layerVisibility}
         onToggleLayer={onToggleLayer}
-        onToggleConflictLayers={onToggleConflictLayers}
         infraFilterText={infraFilterText}
         onInfraFilterChange={onInfraFilterChange}
       />

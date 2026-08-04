@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from backend import config
+from backend import config, storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.gdelt")
@@ -70,10 +70,6 @@ def _matched_domain(url: str) -> str | None:
     return None
 
 
-def _is_verified_source(url: str) -> bool:
-    return _matched_domain(url) is not None
-
-
 def _agency_name(url: str) -> str | None:
     domain = _matched_domain(url)
     return VERIFIED_NEWS_DOMAINS.get(domain) if domain else None
@@ -97,7 +93,11 @@ _ACCUMULATED_HARD_CAP = MAX_ITEMS * 4  # safety valve for an unusually newsy win
 # Column indices in the GDELT 2.0 Event export CSV (tab-separated, no header).
 COL_GLOBAL_EVENT_ID = 0
 COL_ACTOR1_NAME = 6
+COL_ACTOR1_KNOWN_GROUP = 8
+COL_ACTOR1_TYPE1 = 12
 COL_ACTOR2_NAME = 16
+COL_ACTOR2_KNOWN_GROUP = 18
+COL_ACTOR2_TYPE1 = 22
 COL_EVENT_CODE = 26
 COL_EVENT_ROOT_CODE = 28
 COL_QUAD_CLASS = 29
@@ -149,11 +149,25 @@ def _parse_events(text: str) -> list[dict]:
             mentions = int(row[COL_NUM_MENTIONS])
         except (ValueError, IndexError):
             continue
-        if quad_class not in (3, 4):  # verbal/material conflict events only
+        # Verbal (3) *and* material (4) conflict are both kept here on
+        # purpose. This feed backs /api/news, which wants the broad political
+        # picture -- accusations and demands are news even when nobody was
+        # hurt. The conflict *map* needs the opposite, so the violence-only
+        # gate lives in event_fusion.py (VIOLENCE_ROOT_CODES) rather than
+        # here. Don't "simplify" by narrowing this: it would silently strip
+        # the news layer down to shootings.
+        if quad_class not in (3, 4):
             continue
+        # Used to hard-require a verified-domain source_url here, which threw
+        # away most raw CAMEO conflict events (anything only reported by a
+        # regional/local outlet outside VERIFIED_NEWS_DOMAINS never made it
+        # past this point). Verified domain is still required to display a
+        # real headline (see _attach_titles below) and to serve as a News
+        # pin (see app.py's _gdelt_filter), but event_fusion.py needs the
+        # full, broader set of structured conflict events -- CAMEO
+        # actor/geo/date data alone is enough to cross-reference against
+        # ACLED/UCDP, no headline required.
         agency = _agency_name(row[COL_SOURCE_URL])
-        if not agency:
-            continue
         try:
             event_root_code = int(row[COL_EVENT_ROOT_CODE])
         except (ValueError, IndexError):
@@ -163,9 +177,20 @@ def _parse_events(text: str) -> list[dict]:
                 "event_id": row[COL_GLOBAL_EVENT_ID],
                 "lat": lat,
                 "lon": lon,
-                "location": row[COL_ACTION_GEO_FULLNAME],
-                "actor1": row[COL_ACTOR1_NAME] or None,
-                "actor2": row[COL_ACTOR2_NAME] or None,
+                "location": _fix_mojibake(row[COL_ACTION_GEO_FULLNAME]),
+                "actor1": _fix_mojibake(row[COL_ACTOR1_NAME]) or None,
+                "actor2": _fix_mojibake(row[COL_ACTOR2_NAME]) or None,
+                # CAMEO actor *type* codes (MIL/REB/INS/SEP/...), as opposed
+                # to the free-text names above. These are what distinguish an
+                # armed-conflict event from an ordinary violent crime that
+                # happens to be coded FIGHT -- see event_fusion.py's
+                # ARMED_ACTOR_TYPES. KnownGroup is carried too: a named
+                # organisation (a militia, a listed group) is itself a strong
+                # signal even when the type code is blank.
+                "actor1_type": row[COL_ACTOR1_TYPE1] or None,
+                "actor2_type": row[COL_ACTOR2_TYPE1] or None,
+                "actor1_group": row[COL_ACTOR1_KNOWN_GROUP] or None,
+                "actor2_group": row[COL_ACTOR2_KNOWN_GROUP] or None,
                 "event_code": row[COL_EVENT_CODE],
                 "event_root_code": event_root_code,
                 "quad_class": quad_class,
@@ -197,6 +222,7 @@ def _parse_events(text: str) -> list[dict]:
 # fallback sentence and get their real headline filled in moments later.
 
 _TITLE_CACHE: dict[str, str | None] = {}
+_backfill_task = None  # strong reference to the in-flight backfill -- see start()
 _TITLE_FETCH_SEM = asyncio.Semaphore(15)
 _OGTITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']*)["\']', re.IGNORECASE)
 _TITLE_TAG_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -209,7 +235,9 @@ _FETCH_HEADERS = {
 
 
 def _clean_title(raw: str) -> str:
-    return re.sub(r"\s+", " ", html.unescape(raw)).strip()
+    # _fix_mojibake before unescaping: entity decoding can introduce the
+    # very characters the repair keys on.
+    return re.sub(r"\s+", " ", html.unescape(_fix_mojibake(raw) or "")).strip()
 
 
 async def _fetch_title(client: httpx.AsyncClient, url: str) -> str | None:
@@ -251,6 +279,67 @@ async def _backfill_titles(candidates: list[dict]) -> None:
 # --- rolling multi-file window -------------------------------------------
 
 
+def _decode_export(raw: bytes) -> str:
+    """Decodes an export file. UTF-8, replacing only the bytes that are bad.
+
+    Do NOT "improve" this into a Latin-1 fallback. It looks tempting -- the
+    files occasionally carry a stray non-UTF-8 byte, and Latin-1 can never
+    raise -- but the fallback is all-or-nothing across the whole file: one
+    bad byte in 100k lines re-decodes every legitimate multi-byte sequence
+    as Latin-1, turning correct place names into "Ã¢â‚¬" mojibake. That was
+    measured, not theorised.
+
+    errors="replace" is the right trade: valid UTF-8 (the overwhelming
+    majority) stays exact, and only the genuinely undecodable bytes become
+    U+FFFD. Note that visible "?" characters in GDELT place names (e.g.
+    "La?ij") are literal ASCII 0x3F in the upstream data, not a decoding
+    artifact -- nothing here can recover those.
+    """
+    return raw.decode("utf-8", errors="replace")
+
+
+# Signatures of text that was UTF-8, then encoded as UTF-8 a second time:
+# "î" for "î", "â€™" for "'", "Â " for a non-breaking space. GDELT's exports
+# carry this, and so do many of the pages scraped for headlines (a server
+# declaring Latin-1 while serving UTF-8). Both land in place names and
+# headlines, which is exactly the text that has to be readable here.
+#
+# Only the *lead* characters are listed. A UTF-8 lead byte misread as a
+# single character is always one of these, whichever codec did the misreading
+# -- keying on longer sequences like "â€" would match the cp1252 form and
+# miss the latin-1 one. Over-matching is harmless: legitimate text like
+# French "âme" fails the UTF-8 decode below and is returned untouched, so
+# that round-trip, not this check, is what actually guarantees safety.
+_MOJIBAKE_MARKERS = ("Ã", "â", "Â")
+
+
+def _fix_mojibake(text: str | None) -> str | None:
+    """Undoes one round of double-encoded UTF-8, when that's clearly what it is.
+
+    Gated on the marker check rather than applied blindly: the round-trip
+    below is lossy for legitimate text that merely happens to be Latin-1
+    representable, so it must only run on strings showing the actual
+    signature. If the repair fails or produces nothing better, the original
+    is returned untouched.
+    """
+    if not text or not any(marker in text for marker in _MOJIBAKE_MARKERS):
+        return text
+    # cp1252 first, then latin-1. Which one applies depends on how the bytes
+    # were misread upstream, and it's observable in the result: cp1252 maps
+    # 0x80/0x99 to "EURO SIGN"/"TRADE MARK SIGN" (what the live GDELT data
+    # actually shows), latin-1 maps them to C1 control characters. Trying
+    # only one silently no-ops on half the cases, because the other half
+    # contains characters that codec cannot encode.
+    for codec in ("cp1252", "latin-1"):
+        try:
+            repaired = text.encode(codec).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if "�" not in repaired:
+            return repaired
+    return text  # not actually double-encoded, or not recoverable -- leave it alone
+
+
 async def _fetch_one_export(client: httpx.AsyncClient, url: str) -> list[dict]:
     try:
         resp = await client.get(url)
@@ -258,7 +347,7 @@ async def _fetch_one_export(client: httpx.AsyncClient, url: str) -> list[dict]:
             return []  # slot not published / skipped -- not fatal
         resp.raise_for_status()
         with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-            text = zf.read(zf.namelist()[0]).decode("utf-8", errors="replace")
+            text = _decode_export(zf.read(zf.namelist()[0]))
         return _parse_events(text)
     except Exception as exc:  # noqa: BLE001 - one bad file shouldn't sink the whole window
         log.debug("GDELT window file fetch failed (%s): %s", url, exc)
@@ -388,9 +477,22 @@ async def start():
             state.last_error = None
             with_titles = sum(1 for d in candidates if d.get("real_title"))
             log.info("GDELT: %d events (%d with a real title, rest backfilling)", len(candidates), with_titles)
-            to_fetch = [c for c in candidates if "real_title" not in c]
-            if to_fetch:
-                asyncio.create_task(_backfill_titles(to_fetch))
+            await storage.record_snapshot("gdelt", candidates, "event_id")
+            await storage.record_source_health("gdelt", len(candidates), True)
+            to_fetch = [c for c in candidates if c.get("source_name") and "real_title" not in c]
+            # Skipped while a previous backfill is still running: title
+            # scraping is network-bound and can outlast a poll interval, and
+            # launching a second pass over an overlapping candidate set would
+            # just contend for the same semaphore. The next poll picks up
+            # whatever is still missing anyway, since a scraped title is
+            # carried forward in _ACCUMULATED.
+            #
+            # The task is also held in a module-level reference rather than
+            # discarded -- asyncio only weakly references running tasks, so a
+            # bare create_task() can be garbage collected mid-scrape.
+            global _backfill_task
+            if to_fetch and (_backfill_task is None or _backfill_task.done()):
+                _backfill_task = asyncio.create_task(_backfill_titles(to_fetch))
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("GDELT fetch failed: %s", exc)

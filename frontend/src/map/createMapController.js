@@ -24,16 +24,13 @@ import {
   createCitiesGroup,
   createInfraGroup,
   createPipelinesGroup,
-  createNavyAisGroup,
-  createTankerAisGroup,
   createSatelliteGroup,
   createTrailLayers,
   createWindFlowLayer,
 } from "./layers";
 import {
-  decorateAcled,
+  decorateEvent,
   decorateGdelt,
-  decorateConflictWatch,
   decorateAis,
   decorateAdsb,
   decorateInfra,
@@ -42,7 +39,9 @@ import {
   classifyShip,
   SHIP_STYLE,
   AIRCRAFT_STYLE,
+  MILITARY_ROLE_STYLE,
 } from "./decorators";
+import { declutterPoints } from "./declutter";
 import { countryPopupHtml, cityPopupHtml, normalizeCountryName } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
@@ -71,13 +70,12 @@ const WAR_EVENT_COUNT_THRESHOLD = 8;
 // ACLED/GDELT/AIS start hidden by default and appear one zoom step in.
 const ADSB_MIN_ZOOM = 5;
 const CITIES_MIN_ZOOM = 5;
-const ACLED_MIN_ZOOM = 3;
+const EVENTS_MIN_ZOOM = 3;
 const GDELT_MIN_ZOOM = 3;
-const CONFLICT_WATCH_MIN_ZOOM = 3;
 const AIS_MIN_ZOOM = 3;
 // AIS has its own dedicated renderAisLayer (civilian/Navy split, like ADS-B's
 // civilian/military split) so it isn't part of this generic lookup.
-const MARKER_LAYER_MIN_ZOOM = { acled: ACLED_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictWatch: CONFLICT_WATCH_MIN_ZOOM };
+const MARKER_LAYER_MIN_ZOOM = { events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM };
 // Gates only the interactive per-point FIRMS layer -- the heat layer itself
 // always stays on regardless of zoom.
 const FIRMS_DETAIL_MIN_ZOOM = 5;
@@ -92,10 +90,9 @@ const SATELLITE_TRAIL_MAX_POINTS = 36;
 // polls back" length as ship trails, not satellites' longer arc.
 const TANKER_TRAIL_MAX_POINTS = 60;
 
-const ID_FIELD = { acled: "id", gdelt: "event_id", conflictWatch: "id", ais: "mmsi", adsb: "icao24" };
+const ID_FIELD = { events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24" };
 const DECORATORS = {
-  acled: decorateAcled, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
-  conflictWatch: decorateConflictWatch,
+  events: decorateEvent, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
 };
 
 const REGION_FLY_DURATION = 1.2;
@@ -139,16 +136,15 @@ export function createMapController(container, initial, callbacks) {
   const { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer } = createJammingLayers(map);
   const jammingPingGroup = createJammingPingGroup();
   const jammingLayerWithPing = L.layerGroup([jammingLayer, jammingPingGroup]).addTo(map);
-  const { groups, militaryAdsbGroup } = createEntityClusterGroups(map);
+  const { groups } = createEntityClusterGroups(map);
   const citiesGroup = createCitiesGroup(map);
   const infraGroup = createInfraGroup();
   const pipelinesGroup = createPipelinesGroup();
   const infraLayer = L.layerGroup([infraGroup, pipelinesGroup]).addTo(map);
-  const navyAisGroup = createNavyAisGroup(map);
-  const tankerAisGroup = createTankerAisGroup();
   const satelliteGroup = createSatelliteGroup();
-  const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer, tankerTrailsLayer } = createTrailLayers(map);
-  const satelliteLayerWithTrails = L.layerGroup([satelliteGroup, satelliteTrailsLayer]).addTo(map);
+  const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer, tankerTrailsLayer, militaryTrailsLayer } =
+    createTrailLayers(map);
+  satelliteGroup.addTo(map);
   const windFlowLayer = createWindFlowLayer(map);
   // GPU-batched sprite rendering for AIS/ADS-B markers (see webglLayer.js) --
   // replaces the L.marker+L.divIcon path buildMarker/updateMarker below still
@@ -163,7 +159,7 @@ export function createMapController(container, initial, callbacks) {
   // All internal to the controller: nothing outside the map needs to know
   // which aircraft is selected, so it never needs to be React state.
   const raw = {
-    acled: [], firms: [], ais: [], gdelt: [], adsb: [], conflictWatch: [],
+    events: [], firms: [], ais: [], gdelt: [], adsb: [],
     countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
     conflictStats: {},
   };
@@ -171,12 +167,13 @@ export function createMapController(container, initial, callbacks) {
   // markers live inside entityWebglLayer's own per-bucket entry maps now
   // (see webglLayer.js's updateEntities), not as L.marker instances.
   const markersByKey = {
-    acled: new Map(), gdelt: new Map(), conflictWatch: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
+    events: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
   };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
   const satelliteTrails = new Map();
   const tankerTrails = new Map();
+  const militaryTrails = new Map();
   let selectedIcao = null;
   let selectedMmsi = null;
   let countryNameByIso2 = {};
@@ -210,16 +207,20 @@ export function createMapController(container, initial, callbacks) {
     return { x: rect.left + pt.x, y: rect.top + pt.y };
   }
 
-  // Mirrors the map's actual add/remove state for these two toggles so the
-  // render functions themselves can skip work (not just hide the result)
-  // while switched off -- satellitesVisible additionally gates trail
-  // rendering entirely (see renderSatellites).
+  // Mirrors the map's actual add/remove state for "satellites" so
+  // renderSatellites can skip work (not just hide the result) while
+  // switched off.
   let satellitesVisible = true;
-  // Same mirror-the-map-state purpose as satellitesVisible, for tanker
-  // trails -- entityWebglLayer keeps updating tanker sprites regardless of
-  // visibility (see WEBGL_BUCKET_KEYS comment above), so renderAisLayer
-  // needs its own flag to know whether it's worth building trail polylines.
-  let tankerTrailsVisible = false;
+  // These three mirror their own dedicated "*Trails" sub-ticker toggle (see
+  // LayersSection.jsx's "Show ... trails" rows and the matching keys in
+  // setLayerVisible below) -- entityWebglLayer/renderSatellites keep
+  // updating the underlying markers regardless, so each render function
+  // needs its own flag to know whether it's worth building trail polylines
+  // at all, and each trail track is otherwise independent of whether the
+  // parent marker layer itself is shown.
+  let tankerTrailsVisible = true;
+  let militaryTrailsVisible = true;
+  let satellitesTrailsVisible = true;
 
   // Free-text name filter for critical infrastructure/military bases (see
   // setInfraFilter in the public API and the search input in
@@ -290,7 +291,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "precip") return weatherLayers.precip;
     if (key === "clouds") return weatherLayers.clouds;
     if (key === "jamming") return jammingLayerWithPing;
-    if (key === "satellites") return satelliteLayerWithTrails;
+    if (key === "satellites") return satelliteGroup;
     return groups[key];
   }
 
@@ -299,23 +300,33 @@ export function createMapController(container, initial, callbacks) {
   // comment where entityWebglLayer is created above.
   const WEBGL_BUCKET_KEYS = new Set(["adsbCivilian", "adsbMilitary", "aisCivilian", "aisNavy", "aisTanker"]);
 
+  // Each entry: the trail flag it drives, the trail layer to add/remove, the
+  // trail Map to clear, and the render fn to catch up with once switched
+  // back on -- one dedicated sub-ticker each (see LayersSection.jsx's "Show
+  // ... trails" rows), independent of the parent marker layer's own toggle.
+  const TRAIL_TOGGLES = {
+    aisTankerTrails: { setFlag: (v) => (tankerTrailsVisible = v), layer: () => tankerTrailsLayer, trails: () => tankerTrails, catchUp: renderAisLayer },
+    adsbMilitaryTrails: { setFlag: (v) => (militaryTrailsVisible = v), layer: () => militaryTrailsLayer, trails: () => militaryTrails, catchUp: renderAdsbLayer },
+    satellitesTrails: { setFlag: (v) => (satellitesTrailsVisible = v), layer: () => satelliteTrailsLayer, trails: () => satelliteTrails, catchUp: renderSatellites },
+  };
+
   function setLayerVisible(key, visible) {
+    const trailToggle = TRAIL_TOGGLES[key];
+    if (trailToggle) {
+      trailToggle.setFlag(visible);
+      if (visible) {
+        map.addLayer(trailToggle.layer());
+        trailToggle.catchUp(); // build/show trails that were skipped while off
+      } else {
+        map.removeLayer(trailToggle.layer());
+        trailToggle.layer().clearLayers(); // don't leave a stale trail sitting under the (now-hidden) markers
+        trailToggle.trails().clear();
+      }
+      return;
+    }
+
     if (WEBGL_BUCKET_KEYS.has(key)) {
       entityWebglLayer.setVisible(key, visible);
-      if (key === "aisTanker") {
-        // Tanker trails ride the same toggle as the tanker markers
-        // themselves (see createTrailLayers) -- there's no separate
-        // "Tanker Trails" control, unticking tankers turns both off.
-        tankerTrailsVisible = visible;
-        if (visible) {
-          map.addLayer(tankerTrailsLayer);
-          renderAisLayer(); // catch up on trails that were skipped while off
-        } else {
-          map.removeLayer(tankerTrailsLayer);
-          tankerTrailsLayer.clearLayers(); // don't leave a stale trail sitting under the (now-hidden) tankers
-          tankerTrails.clear();
-        }
-      }
       return;
     }
 
@@ -326,8 +337,13 @@ export function createMapController(container, initial, callbacks) {
 
     if (key === "satellites") {
       satellitesVisible = visible;
-      if (visible) renderSatellites(); // was skipped entirely while off -- catch up now
-      else satelliteTrailsLayer.clearLayers(); // don't leave a stale trail sitting under the (now-empty) group
+      if (visible) {
+        renderSatellites(); // was skipped entirely while off -- catch up now
+        if (satellitesTrailsVisible) map.addLayer(satelliteTrailsLayer);
+      } else {
+        map.removeLayer(satelliteTrailsLayer); // parent off overrides the trail sub-ticker
+        satelliteTrailsLayer.clearLayers();
+      }
     }
   }
 
@@ -368,20 +384,44 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("ais");
   }
 
+  // Popup/tooltip content is bound as a *function*, not a string, so Leaflet
+  // only builds that HTML when the thing is actually opened or hovered. At
+  // most one popup and one tooltip exist at a time, but the old eager
+  // binding rebuilt the full detail+tooltip markup for every marker on every
+  // render -- ~400 markers' worth of string building and DOM writes per pan,
+  // for content nobody was looking at. buildCityMarker already used this
+  // lazy form; this brings the rest of the point layers in line.
+  //
+  // The function reads marker._item rather than closing over `item`, because
+  // the marker outlives any single render (see syncLayerMarkers' diffing) --
+  // updateMarker refreshes _item in place, so an open popup always reflects
+  // the entity's current data rather than whatever it held when created.
   function buildMarker(key, item, decorate) {
     const d = decorate(item, {});
     const marker = L.marker([item.lat, item.lon], { icon: d.icon });
-    marker.bindPopup(d.detail, { maxWidth: 320 });
-    marker.bindTooltip(d.tooltip, { className: "map-tooltip", direction: "top" });
+    marker._item = item;
+    marker._iconHtml = d.icon.options.html;
+    marker.bindPopup(() => decorate(marker._item, { selectedIcao, selectedMmsi }).detail, { maxWidth: 320 });
+    marker.bindTooltip(() => decorate(marker._item, { selectedIcao, selectedMmsi }).tooltip, {
+      className: "map-tooltip",
+      direction: "top",
+    });
     return marker;
   }
 
   function updateMarker(marker, item, decorate) {
     const d = decorate(item, { selectedIcao, selectedMmsi });
+    marker._item = item;
     marker.setLatLng([item.lat, item.lon]);
-    marker.setIcon(d.icon);
-    marker.setTooltipContent(d.tooltip);
-    marker.setPopupContent(d.detail);
+    // setIcon tears down and recreates the marker's DOM element, so doing it
+    // unconditionally meant every pan re-created hundreds of icons that were
+    // pixel-identical. The generated html string is a complete description
+    // of the icon (glyph, colour, size, rotation -- see svgIcons.js's
+    // buildDivIcon), so comparing it is an exact, cheap change test.
+    if (marker._iconHtml !== d.icon.options.html) {
+      marker.setIcon(d.icon);
+      marker._iconHtml = d.icon.options.html;
+    }
   }
 
   // ---------- per-source renderers ----------
@@ -391,18 +431,18 @@ export function createMapController(container, initial, callbacks) {
   // literally "only show what you're looking at."
 
   const counts = {
-    acled: 0, firms: 0, gdelt: 0, conflictWatch: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
+    events: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
     aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
   };
   // Total number loaded from the backend for each layer, independent of the
   // current viewport/zoom filtering that `counts` reflects -- shown in the
   // UI as the "(total)" figure next to the live on-screen tick.
   const totals = {
-    acled: 0, firms: 0, gdelt: 0, conflictWatch: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
+    events: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
     aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
   };
   const zoomNotes = {
-    adsb: false, cities: false, firms: false, acled: false, gdelt: false, conflictWatch: false, ais: false, jamming: false,
+    adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
   };
   function reportCounts() {
     const totalsSuffixed = {};
@@ -410,6 +450,24 @@ export function createMapController(container, initial, callbacks) {
     callbacks.onCountsChange?.({ ...counts, ...totalsSuffixed });
   }
   function reportZoomNotes() { callbacks.onZoomNotesChange?.({ ...zoomNotes }); }
+
+  // Nudges same-layer items that project to the exact same screen pixel
+  // apart (see declutter.js) -- only affects where the icon is drawn, not
+  // the item itself, so popups/tooltips still show the item's real data.
+  // Cloning (not mutating raw[key]'s own objects) matters: raw[key] is
+  // reused across polls, and repeatedly nudging the same object each render
+  // would compound into permanent drift from its true position.
+  function declutterVisible(items) {
+    if (items.length < 2) return items;
+    const points = items.map((item) => map.latLngToLayerPoint([item.lat, item.lon]));
+    const adjusted = declutterPoints(points);
+    return items.map((item, i) => {
+      const p = points[i], a = adjusted[i];
+      if (a.x === p.x && a.y === p.y) return item;
+      const latlng = map.layerPointToLatLng(L.point(a.x, a.y));
+      return { ...item, lat: latlng.lat, lon: latlng.lng };
+    });
+  }
 
   function renderMarkerLayer(key) {
     if (key === "adsb") {
@@ -441,7 +499,7 @@ export function createMapController(container, initial, callbacks) {
     syncLayerMarkers(
       markersByKey[key],
       group,
-      visible,
+      declutterVisible(visible),
       (item) => item[idField],
       (item) => buildMarker(key, item, decorate),
       (marker, item) => updateMarker(marker, item, decorate)
@@ -572,7 +630,8 @@ export function createMapController(container, initial, callbacks) {
       isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
     });
     entityWebglLayer.updateEntities("adsbMilitary", militaryVisible, {
-      idField: idFn, heading: (item) => item.heading, style: () => AIRCRAFT_STYLE.military,
+      idField: idFn, heading: (item) => item.heading,
+      style: (item) => (item.military_role && MILITARY_ROLE_STYLE[item.military_role]) || AIRCRAFT_STYLE.military,
       isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
     });
 
@@ -586,6 +645,17 @@ export function createMapController(container, initial, callbacks) {
     }
     reportCounts();
     renderTrailLayer(aircraftTrailsLayer, aircraftTrails, "#d8b9ff", selectedIcao ? new Set([selectedIcao]) : new Set());
+
+    // Every on-screen military aircraft gets a trail, not just a selected
+    // one -- same "the path itself is the point" reasoning as tanker/
+    // satellite trails above. Skipped entirely while its sub-ticker is off.
+    if (militaryTrailsVisible) {
+      updateTrails(militaryTrails, militaryVisible, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, undefined);
+      renderTrailLayer(militaryTrailsLayer, militaryTrails, "#ff4d4d", new Set(militaryTrails.keys()), {
+        maxOpacity: 0.35,
+        dashArray: "2 5",
+      });
+    }
   }
 
   function renderFirms() {
@@ -643,17 +713,22 @@ export function createMapController(container, initial, callbacks) {
   function buildSatelliteMarker(sat) {
     const d = decorateSatellite(sat);
     const marker = L.marker([sat.lat, sat.lon], { icon: d.icon });
-    marker.bindPopup(d.detail, { maxWidth: 320 });
-    marker.bindTooltip(d.tooltip, { className: "map-tooltip", direction: "top" });
+    marker._item = sat;
+    marker._iconHtml = d.icon.options.html;
+    marker.bindPopup(() => decorateSatellite(marker._item).detail, { maxWidth: 320 });
+    marker.bindTooltip(() => decorateSatellite(marker._item).tooltip, {
+      className: "map-tooltip",
+      direction: "top",
+    });
     return marker;
   }
 
+  // Satellites re-poll every 10s and their icon never varies -- only the
+  // position does, so this is the layer where the unconditional setIcon was
+  // pure waste (see updateMarker's note on why it's skipped).
   function updateSatelliteMarker(marker, sat) {
-    const d = decorateSatellite(sat);
+    marker._item = sat;
     marker.setLatLng([sat.lat, sat.lon]);
-    marker.setIcon(d.icon);
-    marker.setTooltipContent(d.tooltip);
-    marker.setPopupContent(d.detail);
   }
 
   // Always on, any zoom -- only ~46 curated objects (stations + military),
@@ -681,11 +756,16 @@ export function createMapController(container, initial, callbacks) {
     // one -- their orbital path is the point, not a detail you opt into.
     // Semi-transparent + dashed (vs. ship/aircraft trails' solid look) so it
     // reads as a background orbital track, not an active-selection cue.
-    updateTrails(satelliteTrails, raw.satellites, "norad_id", SATELLITE_TRAIL_MAX_POINTS, undefined);
-    renderTrailLayer(satelliteTrailsLayer, satelliteTrails, "#6fe3ff", new Set(satelliteTrails.keys()), {
-      maxOpacity: 0.22,
-      dashArray: "2 5",
-    });
+    // Gated on its own sub-ticker (satellitesTrailsVisible), independent of
+    // the Satellites layer itself being on -- see the "satellitesTrails" key
+    // in setLayerVisible.
+    if (satellitesTrailsVisible) {
+      updateTrails(satelliteTrails, raw.satellites, "norad_id", SATELLITE_TRAIL_MAX_POINTS, undefined);
+      renderTrailLayer(satelliteTrailsLayer, satelliteTrails, "#6fe3ff", new Set(satelliteTrails.keys()), {
+        maxOpacity: 0.22,
+        dashArray: "2 5",
+      });
+    }
   }
 
   // Concentric-rings "sonar ping"/water-drop-ripple marker for an active
@@ -807,7 +887,7 @@ export function createMapController(container, initial, callbacks) {
         const wanted = normalizeCountryName(name);
         let fatalities = 0;
         let count = 0;
-        for (const e of raw.acled) {
+        for (const e of raw.events) {
           if (normalizeCountryName(e.country) !== wanted) continue;
           fatalities += e.fatalities || 0;
           count += 1;
@@ -871,12 +951,30 @@ export function createMapController(container, initial, callbacks) {
 
   // ---------- critical infrastructure + hot-zone flare ----------
 
+  // Bumped whenever the data nearbyEventsFor() reads actually changes (see
+  // applyData). Every other trigger for a re-render -- panning, zooming,
+  // toggling a layer -- leaves that data untouched, so the cache below turns
+  // what was a full O(sites x events) haversine sweep per moveend into one
+  // sweep per ACLED/GDELT poll. Measured at ~22k distance calculations per
+  // pan before this, on top of the popup HTML it fed.
+  let eventsDataVersion = 0;
+  const nearbyEventsCache = new Map(); // site key -> { version, events }
+
   function nearbyEventsFor(site) {
+    const cacheKey = `${site.name}|${site.lat}|${site.lon}`;
+    const cached = nearbyEventsCache.get(cacheKey);
+    if (cached && cached.version === eventsDataVersion) return cached.events;
+    const computed = computeNearbyEventsFor(site);
+    nearbyEventsCache.set(cacheKey, { version: eventsDataVersion, events: computed });
+    return computed;
+  }
+
+  function computeNearbyEventsFor(site) {
     const events = [];
-    for (const e of raw.acled) {
+    for (const e of raw.events) {
       if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
       if (haversineKm(site.lat, site.lon, e.lat, e.lon) > INFRA_HOT_RADIUS_KM) continue;
-      events.push({ headline: e.event_type || "Conflict event", source: "ACLED" });
+      events.push({ headline: e.event_type || "Conflict event", source: (e.corroborated_by || [e.source]).join("/").toUpperCase() });
     }
     for (const e of raw.gdelt) {
       if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
@@ -888,21 +986,35 @@ export function createMapController(container, initial, callbacks) {
     return events.slice(0, 5);
   }
 
-  function buildInfraMarker(site) {
+  // Same lazy-content + icon-diff treatment as buildMarker/updateMarker
+  // above, and for the same reason: the "recent activity within 75km" list
+  // rendered into each popup is the most expensive markup in the app, and
+  // it was being built for all 79 sites on every pan.
+  function infraDecoration(site) {
     const nearbyEvents = nearbyEventsFor(site);
-    const d = decorateInfra(site, { hot: nearbyEvents.length > 0, nearbyEvents });
+    return decorateInfra(site, { hot: nearbyEvents.length > 0, nearbyEvents });
+  }
+
+  function buildInfraMarker(site) {
+    const d = infraDecoration(site);
     const marker = L.marker([site.lat, site.lon], { icon: d.icon });
-    marker.bindPopup(d.detail, { maxWidth: 320 });
-    marker.bindTooltip(d.tooltip, { className: "map-tooltip", direction: "top" });
+    marker._item = site;
+    marker._iconHtml = d.icon.options.html;
+    marker.bindPopup(() => infraDecoration(marker._item).detail, { maxWidth: 320 });
+    marker.bindTooltip(() => infraDecoration(marker._item).tooltip, {
+      className: "map-tooltip",
+      direction: "top",
+    });
     return marker;
   }
 
   function updateInfraMarker(marker, site) {
-    const nearbyEvents = nearbyEventsFor(site);
-    const d = decorateInfra(site, { hot: nearbyEvents.length > 0, nearbyEvents });
-    marker.setIcon(d.icon);
-    marker.setTooltipContent(d.tooltip);
-    marker.setPopupContent(d.detail);
+    const d = infraDecoration(site);
+    marker._item = site;
+    if (marker._iconHtml !== d.icon.options.html) {
+      marker.setIcon(d.icon);
+      marker._iconHtml = d.icon.options.html;
+    }
   }
 
   function renderInfra() {
@@ -939,9 +1051,8 @@ export function createMapController(container, initial, callbacks) {
   }
 
   function renderAll() {
-    renderMarkerLayer("acled");
+    renderMarkerLayer("events");
     renderMarkerLayer("gdelt");
-    renderMarkerLayer("conflictWatch");
     renderMarkerLayer("ais");
     renderMarkerLayer("adsb");
     renderFirms();
@@ -1125,6 +1236,9 @@ export function createMapController(container, initial, callbacks) {
 
     applyData(key, data) {
       raw[key] = data;
+      // Invalidates nearbyEventsFor's cache -- these are the only two
+      // sources it reads, so nothing else needs to bust it.
+      if (key === "events" || key === "gdelt") eventsDataVersion += 1;
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();
       else if (key === "cities") renderCities();
@@ -1138,7 +1252,7 @@ export function createMapController(container, initial, callbacks) {
       // marker layer of its own to render.
       else if (key === "conflictStats") { /* no-op */ }
       else renderMarkerLayer(key);
-      if (key === "acled") updateCountryWarFlare();
+      if (key === "events") updateCountryWarFlare();
     },
 
     flyToRegion,

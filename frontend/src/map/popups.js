@@ -1,6 +1,6 @@
 // Country/city popup HTML: population + density (countries) and any
 // recent conflict/news events matched nearby. Reads from the current raw
-// acled/gdelt arrays passed in by the caller (see useLeafletMap) rather than
+// events/gdelt arrays passed in by the caller (see useLeafletMap) rather than
 // holding its own copy, so it's always working off the latest poll.
 
 import { esc, fmtNumber, haversineKm, timeAgoFromDateAdded } from "../utils/format";
@@ -30,10 +30,14 @@ export function normalizeCountryName(name) {
 }
 
 function formatEventRow(type, item) {
-  if (type === "acled") {
+  if (type === "events") {
     const label = item.event_type || "Conflict event";
+    const sourceLabel = (item.corroborated_by && item.corroborated_by.length ? item.corroborated_by : [item.source])
+      .filter(Boolean)
+      .join("/")
+      .toUpperCase();
     return `<div class="event-row"><b>${esc(label)}</b>${item.fatalities ? ` (${item.fatalities} fatalities)` : ""}
-      <div class="event-meta">${esc(item.country || "")} &middot; ${esc(item.date || "")} &middot; ACLED</div></div>`;
+      <div class="event-meta">${esc(item.country || "")} &middot; ${esc(item.date || "")} &middot; ${esc(sourceLabel)}</div></div>`;
   }
   const headline = (item.real_title || "").trim();
   if (!headline) return ""; // defensive: server should never serve a title-less item, but never render a blank row if it slips through
@@ -51,9 +55,9 @@ const TREND_MONTHS = 6;
 
 // HDX's aggregate ACLED export (backend/sources/hdx_conflict_stats.py) --
 // country-month event/fatality counts with no registration or embargo, so
-// it stays current even when the point-level ACLED feed above is stuck on
-// an account's recency embargo. Keyed by ACLED's own country naming, same
-// as raw.acled, so normalizeCountryName's alias table covers both.
+// it stays current even when the point-level ACLED feed is stuck on an
+// account's recency embargo. Keyed by ACLED's own country naming, same as
+// raw.events, so normalizeCountryName's alias table covers both.
 function buildTrendSection(monthlySeries) {
   if (!monthlySeries || !monthlySeries.length) return "";
   const recent = monthlySeries.slice(-TREND_MONTHS);
@@ -66,9 +70,9 @@ function buildTrendSection(monthlySeries) {
   return `<div class="popup-trend"><div class="meta">Conflict trend (HDX/ACLED, monthly)</div>${rows}</div>`;
 }
 
-function buildEventsSection(acledItems, gdeltItems) {
+function buildEventsSection(eventItems, gdeltItems) {
   const rows = [
-    ...acledItems.map((i) => formatEventRow("acled", i)),
+    ...eventItems.map((i) => formatEventRow("events", i)),
     ...gdeltItems.map((i) => formatEventRow("gdelt", i)),
   ].filter(Boolean);
   if (!rows.length) {
@@ -80,7 +84,7 @@ function buildEventsSection(acledItems, gdeltItems) {
 export function countryPopupHtml(props, raw) {
   const name = props.name || "Unknown";
   const wanted = normalizeCountryName(name);
-  const acledMatches = raw.acled.filter((e) => normalizeCountryName(e.country) === wanted).slice(0, 3);
+  const eventMatches = raw.events.filter((e) => normalizeCountryName(e.country) === wanted).slice(0, 3);
   const gdeltMatches = raw.gdelt
     .filter((e) => {
       if (!e.location) return false;
@@ -95,14 +99,14 @@ export function countryPopupHtml(props, raw) {
     <div class="meta">Population: ${fmtNumber(props.population)}${props.pop_year ? ` (${esc(props.pop_year)})` : ""}</div>
     <div class="meta">Population density: ${props.density != null ? `${props.density} /km&sup2;` : "n/a"}</div>
     <div class="meta">Human Development Index: ${props.hdi != null ? props.hdi.toFixed(3) : "n/a"}</div>
-    ${buildEventsSection(acledMatches, gdeltMatches)}
+    ${buildEventsSection(eventMatches, gdeltMatches)}
     ${buildTrendSection(trendSeries)}
     <p class="meta">Population/density: World Bank. HDI: UNDP (via Our World in Data). Events matched by country name &mdash; naming differences can cause a miss.</p>`;
 }
 
 export function cityPopupHtml(city, raw, countryNameByIso2) {
   const countryName = countryNameByIso2[city.country_code] || city.country_code || "";
-  const acledMatches = raw.acled
+  const eventMatches = raw.events
     .filter((e) => typeof e.lat === "number" && haversineKm(city.lat, city.lon, e.lat, e.lon) <= 50)
     .slice(0, 3);
   const gdeltMatches = raw.gdelt
@@ -111,6 +115,6 @@ export function cityPopupHtml(city, raw, countryNameByIso2) {
   return `
     <h3>${esc(city.name)}</h3>
     <div class="meta">${esc(countryName)} &middot; Population: ${fmtNumber(city.population)}</div>
-    ${buildEventsSection(acledMatches, gdeltMatches)}
+    ${buildEventsSection(eventMatches, gdeltMatches)}
     <p class="meta">Population: GeoNames. Events within 50km, matched by distance.</p>`;
 }

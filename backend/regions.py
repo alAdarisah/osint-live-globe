@@ -65,10 +65,19 @@ def filter_points(items: list[dict], bounds: Bounds | None) -> list[dict]:
     return out
 
 
-# Per-feature bbox cache for the countries GeoJSON, keyed by id(feature_list)
-# so it's automatically invalidated whenever countries.py refreshes its data
-# with a new FeatureCollection (once/day) -- no manual cache-busting needed.
-_geojson_bbox_cache: dict[int, list[Bounds]] = {}
+# Per-feature bbox cache for the countries GeoJSON, invalidated whenever
+# countries.py swaps in a new FeatureCollection (once/day) -- no manual
+# cache-busting needed.
+#
+# Keyed by holding the feature list itself and comparing with `is`, not by
+# id(): CPython recycles id() values once an object is freed, so the old
+# id-keyed version could in principle hand a *new* feature list the bboxes
+# computed for a dead one that happened to land at the same address. The
+# length check that guarded it only caught the case where the country count
+# also changed. Keeping a reference costs nothing here -- the live dataset is
+# already held by the source registry.
+_bbox_cache_features: list | None = None
+_bbox_cache_bboxes: list[Bounds] = []
 
 
 def _walk_coords(coords):
@@ -111,12 +120,10 @@ def filter_geojson(fc: dict, bounds: Bounds | None) -> dict:
         return {"type": "FeatureCollection", "features": []}
     if bounds is None:
         return fc
+    global _bbox_cache_features, _bbox_cache_bboxes
     features = fc.get("features") or []
-    cache_key = id(features)
-    bboxes = _geojson_bbox_cache.get(cache_key)
-    if bboxes is None or len(bboxes) != len(features):
-        bboxes = [_feature_bbox(f) for f in features]
-        _geojson_bbox_cache.clear()  # only one countries dataset in play at a time
-        _geojson_bbox_cache[cache_key] = bboxes
-    kept = [f for f, bbox in zip(features, bboxes) if _bboxes_intersect(bbox, bounds)]
+    if _bbox_cache_features is not features:
+        _bbox_cache_features = features
+        _bbox_cache_bboxes = [_feature_bbox(f) for f in features]
+    kept = [f for f, bbox in zip(features, _bbox_cache_bboxes) if _bboxes_intersect(bbox, bounds)]
     return {"type": "FeatureCollection", "features": kept}

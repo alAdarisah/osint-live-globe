@@ -13,6 +13,18 @@ export const SVG = {
   planeMilitary: '<path fill="currentColor" d="M12 1 L22 19.5 L12 14.5 L2 19.5 Z"/>',
   planeOther: '<path fill="currentColor" d="M12 3 L15 19 L12 16.2 L9 19 Z"/>',
   helicopter: '<circle cx="12" cy="13" r="2" fill="currentColor"/><rect x="2" y="12" width="20" height="2" fill="currentColor"/><rect x="11" y="2" width="2" height="8" fill="currentColor"/><rect x="9" y="18" width="6" height="2" fill="currentColor"/>',
+
+  // ---- military aircraft, by role (decorators.js's MILITARY_ROLE_STYLE) --
+  // distinct silhouettes so e.g. a bomber and an AEW aircraft don't read as
+  // the same generic "military plane" glyph (planeMilitary above is kept as
+  // the fighter/no-role-known glyph).
+  planeBomber: '<path fill="currentColor" d="M12 2 L20 17 L12 13.5 L4 17 Z"/><path fill="currentColor" d="M9 13 L9 20 L12 18.5 L15 20 L15 13 Z"/>',
+  planeTanker: '<path fill="currentColor" d="M12 1 L20 17 L12 13.5 L4 17 Z"/><line x1="12" y1="13.5" x2="12" y2="23" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="23" r="1.4" fill="currentColor"/>',
+  planeAwacs: '<path fill="currentColor" d="M12 6 L18 19 L12 16 L6 19 Z"/><ellipse cx="12" cy="6" rx="5" ry="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/>',
+  planeRecon: '<path fill="currentColor" d="M12 1 L13.2 18 L12 21 L10.8 18 Z"/><path fill="currentColor" d="M8 14 L16 14 L12 16.5 Z"/>',
+  planePatrol: '<path fill="currentColor" d="M12 2 L19 17 L12 14 L5 17 Z"/><path fill="none" stroke="currentColor" stroke-width="1.4" d="M6 20 Q9 18.5 12 20 T18 20"/>',
+  planeDrone: '<path fill="currentColor" d="M12 5 L18 15 L12 12.5 L6 15 Z"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/>',
+  planeTransport: '<rect x="10" y="4" width="4" height="16" rx="1.5" fill="currentColor"/><rect x="3" y="12" width="18" height="3" rx="1" fill="currentColor"/>',
   // ---- critical infrastructure ----
   refinery: '<rect x="4" y="12" width="3" height="8" fill="currentColor"/><rect x="9" y="8" width="3" height="12" fill="currentColor"/><rect x="14" y="10" width="3" height="10" fill="currentColor"/><rect x="17" y="5" width="2" height="15" fill="currentColor"/><circle cx="18" cy="3.5" r="1.6" fill="currentColor"/>',
   pipeline: '<path fill="none" stroke="currentColor" stroke-width="2.4" d="M3 16 Q8 8 12 16 T21 16"/>',
@@ -28,6 +40,23 @@ export const SVG = {
   jointBase: '<path fill="currentColor" d="M12 2 L14.2 9.2 L21.5 9.2 L15.6 13.6 L17.8 20.8 L12 16.4 L6.2 20.8 L8.4 13.6 L2.5 9.2 L9.8 9.2 Z" fill-opacity="0.85"/>',
   logisticsBase: '<rect x="3" y="8" width="18" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" d="M3 8 L12 3 L21 8"/><line x1="12" y1="8" x2="12" y2="20" stroke="currentColor" stroke-width="1.6"/>',
   radarBase: '<path fill="none" stroke="currentColor" stroke-width="2" d="M4 18 A8 8 0 0 1 20 18"/><path fill="none" stroke="currentColor" stroke-width="2" d="M8 18 A4 4 0 0 1 16 18"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/><line x1="12" y1="18" x2="18" y2="7" stroke="currentColor" stroke-width="2"/>',
+  // Control tower + runway -- a hangar/tower silhouette distinct from
+  // planeMilitary, so an air base pin doesn't read as "an aircraft" at a
+  // glance (it's a ground facility, not a moving object).
+  airBase: '<rect x="10" y="4" width="4" height="10" fill="currentColor"/><rect x="8.5" y="2" width="7" height="3" rx="0.6" fill="currentColor"/><path fill="none" stroke="currentColor" stroke-width="2" d="M2 20 L22 20"/><path fill="none" stroke="currentColor" stroke-width="1.6" d="M5 20 L9 15 M19 20 L15 15"/>',
+
+  // ---- layer-ticker glyphs (LayersSection.jsx/PlacesSection.jsx/
+  // WeatherSection.jsx) -- these stand in for a layer that either has no
+  // single representative marker icon of its own (FIRMS/jamming render as
+  // heatmaps, weather layers are raster tiles, countries/cities aren't
+  // marker-based at all) or needs a generic category glyph.
+  fire: '<path fill="currentColor" d="M12 2 C8 7 5 10 5 14 a7 7 0 0 0 14 0 C19 10 16 7 12 2 Z"/><path fill="#0b0d10" d="M12 10 C10 13 9 14.5 9 16.5 a3 3 0 0 0 6 0 C15 14.5 14 13 12 10 Z"/>',
+  jammingSignal: '<path fill="none" stroke="currentColor" stroke-width="2" d="M4 18 A8 8 0 0 1 20 18"/><path fill="none" stroke="currentColor" stroke-width="2" d="M8 18 A4 4 0 0 1 16 18"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/><line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="2.4"/>',
+  globe: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/><ellipse cx="12" cy="12" rx="4" ry="9" fill="none" stroke="currentColor" stroke-width="1.4"/><line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="1.4"/>',
+  city: '<rect x="5" y="9" width="6" height="12" fill="currentColor"/><rect x="13" y="4" width="6" height="17" fill="currentColor"/>',
+  raindrop: '<path fill="currentColor" d="M12 2 C8 8 5 11 5 15 a7 7 0 0 0 14 0 C19 11 16 8 12 2 Z"/>',
+  cloud: '<path fill="currentColor" d="M7 18 a4 4 0 0 1 0 -8 a5 5 0 0 1 9.6 -1.5 A4.5 4.5 0 0 1 17 18 Z"/>',
+  wind: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M3 8 H14 a3 3 0 1 0 -3 -3"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M3 16 H17 a3 3 0 1 1 -3 3"/>',
   // ---- ACLED/UCDP/Conflict Watch event types (see decorators.js's
   // ACLED_EVENT_ICON) ----
   battle: '<path fill="currentColor" d="M3 3 L11 11 L9 13 L1 5 Z"/><path fill="currentColor" d="M21 3 L13 11 L15 13 L23 5 Z"/><rect x="10.9" y="13" width="2.2" height="9" fill="currentColor" transform="rotate(45 12 17.5)"/>',

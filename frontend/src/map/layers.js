@@ -52,18 +52,42 @@ export function createWeatherLayers(map) {
   return { precip: precipLayer, clouds: cloudsLayer };
 }
 
+// leaflet.heat paints by reading back its own canvas (getImageData), which
+// throws IndexSizeError the moment that canvas is 0 wide -- exactly what
+// happens if the layer is added while the map container has no laid-out
+// size yet. That throw propagates out of L.Map.addLayer, so it doesn't just
+// skip one paint: it takes the whole controller down and the app renders
+// its error boundary instead of a map. createMapController.js already
+// carries safeHeatSetLatLngs for the same library's redraw-without-a-map
+// crash; this is the add-path half of that same defence. A heatmap that
+// can't paint yet is a non-event -- the next moveend/setLatLngs repaints it
+// correctly -- so swallowing it is strictly better than losing the map.
+function makeHeatResilient(heatLayer) {
+  const originalRedraw = heatLayer._redraw?.bind(heatLayer);
+  if (!originalRedraw) return heatLayer;
+  heatLayer._redraw = function guardedRedraw(...args) {
+    try {
+      return originalRedraw(...args);
+    } catch (err) {
+      console.warn("Skipped a heat-layer redraw:", err?.message || err);
+      return undefined;
+    }
+  };
+  return heatLayer;
+}
+
 export function createFirmsLayers(map) {
   // FIRMS runs to 100k+ points globally, which as individual icons is just
   // clutter even when clustered -- a density heatmap is the standard way
   // fire-tracking dashboards show this, and it reads far cleaner at world
   // zoom. It trades away per-point click popups for that clarity.
-  const firmsHeat = L.heatLayer([], {
+  const firmsHeat = makeHeatResilient(L.heatLayer([], {
     radius: 16,
     blur: 22,
     maxZoom: 9,
     minOpacity: 0.35,
     gradient: { 0.2: "#5c1a00", 0.4: "#b34700", 0.6: "#ff6a00", 0.8: "#ff9500", 1: "#ffe066" },
-  });
+  }));
   // Near-invisible click/hover targets layered on top of the heat --
   // leaflet.heat itself has no interactivity, so this is what lets a hot
   // spot be inspected. Building one of these (plus a bound tooltip/popup)
@@ -89,13 +113,13 @@ export function createFirmsLayers(map) {
 // same kind of "too many cells to be individual icons, show density instead"
 // data, just with a distinct color so it doesn't read as fire.
 export function createJammingLayers(map) {
-  const jammingHeat = L.heatLayer([], {
+  const jammingHeat = makeHeatResilient(L.heatLayer([], {
     radius: 22,
     blur: 28,
     maxZoom: 7,
     minOpacity: 0.3,
     gradient: { 0.2: "#2a0845", 0.4: "#6a0dad", 0.6: "#b833e0", 0.8: "#e066ff", 1: "#ff6fd8" },
-  });
+  }));
   const jammingCanvasRenderer = L.canvas({ padding: 0.25 });
   const jammingPointsLayer = L.layerGroup();
   // Not added to the map directly -- wrapped together with the new-cell
@@ -111,19 +135,16 @@ export function createJammingLayers(map) {
 // while their civilian counterparts default to hidden (see
 // DEFAULT_LAYER_VISIBILITY in App.jsx), which only works if the map can
 // add/remove each half separately.
+// Only the two remaining DOM-marker point layers. AIS and ADS-B used to
+// have layerGroups here too, but their markers are Pixi sprites on a shared
+// WebGL canvas now (see webglLayer.js) -- the leftover groups sat on the map
+// holding nothing, so they're gone rather than kept as decoration.
 export function createEntityClusterGroups(map) {
   const groups = {
-    acled: L.layerGroup().addTo(map),
-    ais: L.layerGroup(), // civilian ships -- default hidden, see App.jsx
+    events: L.layerGroup().addTo(map), // fused ACLED+UCDP+GDELT conflict layer, see event_fusion.py
     gdelt: L.layerGroup().addTo(map),
-    adsb: L.layerGroup(), // civilian aircraft -- default hidden, see App.jsx
-    conflictWatch: L.layerGroup(), // ACLED-independent layer -- default hidden, see App.jsx
   };
-  // Military aircraft are never hidden by the ADS-B zoom gate (see
-  // renderAdsbLayer) -- a plain layerGroup keeps every one an individually
-  // visible icon no matter how far out the view is zoomed.
-  const militaryAdsbGroup = L.layerGroup().addTo(map);
-  return { groups, militaryAdsbGroup };
+  return { groups };
 }
 
 export function createCountriesLayer(map, onEachFeature) {
@@ -170,27 +191,15 @@ export function createPipelinesGroup() {
   return L.layerGroup();
 }
 
-// US Navy / Military Sealift Command ships (see decorators.js's
-// isNavyVessel) are always visible regardless of zoom, same exemption as
-// militaryAdsbGroup -- a plain, never-clustered, never-gated layerGroup.
-// Default-visible (see App.jsx), independent of the civilian AIS layer.
-export function createNavyAisGroup(map) {
-  return L.layerGroup().addTo(map);
-}
+// Navy and tanker AIS used to get their own layerGroups here. Both are Pixi
+// sprite buckets on the shared WebGL canvas now (see webglLayer.js's
+// aisNavy/aisTanker buckets), so the factories were removed rather than left
+// returning groups nothing ever added a marker to.
 
-// Oil/chemical tankers (see decorators.js's classifyShip) get their own
-// dedicated toggle/ticker instead of being mixed into "Civilian Ships" --
-// same never-clustered layerGroup shape as the Navy split above, just
-// default-hidden (see App.jsx) since it's opt-in like the rest of the
-// civilian-side layers.
-export function createTankerAisGroup() {
-  return L.layerGroup();
-}
-
-// Satellites: a small curated set (~46 objects), always visible at any
-// zoom, same reasoning as militaryAdsbGroup/createInfraGroup. Not added to
-// the map directly -- combined with satelliteTrailsLayer into one toggle in
-// createMapController.js, so hiding Satellites hides its trails too.
+// Satellites: a small curated set (~46 objects), always visible at any zoom,
+// same reasoning as createInfraGroup. Not added to the map directly --
+// createMapController.js adds it alongside satelliteTrailsLayer, which has
+// its own "Show satellite trails" sub-ticker.
 export function createSatelliteGroup() {
   return L.layerGroup();
 }
@@ -198,16 +207,18 @@ export function createSatelliteGroup() {
 export function createTrailLayers(map) {
   // Plain (non-clustered) layers for fading position-history lines behind
   // ships/aircraft/satellites/tankers. Kept separate from the marker cluster
-  // groups since lines shouldn't be clustered. Ship/aircraft trails only
-  // ever show for the one selected vehicle and are always-on layers (no
-  // toggle of their own); satelliteTrailsLayer and tankerTrailsLayer are
-  // deliberately NOT added here -- see createSatelliteGroup above and the
-  // "aisTanker" special-case in createMapController.js's setLayerVisible
-  // (tankers ride the same toggle as the tanker markers themselves).
+  // groups since lines shouldn't be clustered. shipTrailsLayer/
+  // aircraftTrailsLayer only ever show the one *selected* vehicle and are
+  // always-on layers (no toggle of their own); satelliteTrailsLayer/
+  // tankerTrailsLayer/militaryTrailsLayer track every visible vehicle in
+  // their category and are deliberately NOT added here -- each has its own
+  // dedicated sub-ticker (see the "*Trails" keys in createMapController.js's
+  // setLayerVisible, and the "Show ... trails" rows in LayersSection.jsx).
   return {
     shipTrailsLayer: L.layerGroup().addTo(map),
     aircraftTrailsLayer: L.layerGroup().addTo(map),
     satelliteTrailsLayer: L.layerGroup(),
+    militaryTrailsLayer: L.layerGroup(),
     tankerTrailsLayer: L.layerGroup(),
   };
 }

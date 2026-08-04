@@ -184,6 +184,7 @@ async def start():
             state.last_success = time.time()
             state.last_error = None
             await storage.record_snapshot("adsb", state.data, "icao24")
+            await storage.record_source_health("adsb", len(state.data), True)
             military_count = sum(1 for a in state.data if a.get("military"))
             log.info(
                 "ADS-B: %d aircraft (%s, %d flagged military)",
@@ -194,4 +195,5 @@ async def start():
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("ADS-B fetch failed: %s", exc)
+            await storage.record_source_health("adsb", None, False, str(exc))
         await asyncio.sleep(interval)

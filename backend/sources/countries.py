@@ -6,6 +6,7 @@ import time
 
 import httpx
 
+from backend import storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.countries")
@@ -120,9 +121,13 @@ async def start():
             state.last_error = None
             ok = True
             log.info("Countries: %d boundaries loaded", len(state.data["features"]))
+            # A GeoJSON FeatureCollection, not lat/lon rows -- stored whole.
+            await storage.record_reference("countries", state.data)
+            await storage.record_source_health("countries", len(state.data["features"]), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("Countries fetch failed: %s", exc)
+            await storage.record_source_health("countries", None, False, str(exc))
         # An empty exception message (e.g. a bare asyncio.TimeoutError) is
         # still a failure -- branch on whether the fetch itself succeeded,
         # not on the truthiness of the resulting error string.

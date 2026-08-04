@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 const MIN_VISIBLE_MS = 1400;
 const MAX_VISIBLE_MS = 9000;
 
-const STATUS_GLYPH = { pending: "⋯", ok: "✓", warn: "―" };
+const STATUS_GLYPH = { pending: "⋯", ok: "✓", warn: "―", timeout: "⚠" };
 
 export default function LoadingScreen({ sources }) {
   const [mountedAt] = useState(() => Date.now());
@@ -20,6 +20,15 @@ export default function LoadingScreen({ sources }) {
     const id = setTimeout(() => setForceDone(true), MAX_VISIBLE_MS);
     return () => clearTimeout(id);
   }, []);
+
+  // The safety timeout exists so one dead upstream API can't hang first
+  // paint forever -- but proceeding anyway shouldn't mean *pretending* every
+  // source came back. Anything still pending when the timeout fires is
+  // relabeled "timed out" (not silently counted as loaded) so the log stays
+  // honest about what actually happened; the app still boots either way.
+  const displaySources = forceDone
+    ? sources.map((s) => (s.status === "pending" ? { ...s, status: "timeout" } : s))
+    : sources;
 
   const loadedCount = sources.filter((s) => s.status !== "pending").length;
   const allLoaded = loadedCount >= sources.length;
@@ -53,7 +62,7 @@ export default function LoadingScreen({ sources }) {
         <div className="loading-title">OSINT LIVE GLOBE</div>
         <div className="loading-subtitle">Establishing live intelligence feeds&hellip;</div>
         <ul className="loading-log">
-          {sources.map((s) => (
+          {displaySources.map((s) => (
             <li key={s.key} className={`loading-log-line ${s.status}`}>
               <span className="loading-log-status">{STATUS_GLYPH[s.status]}</span>
               <span>{s.label}</span>

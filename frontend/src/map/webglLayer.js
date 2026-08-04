@@ -17,8 +17,31 @@
 // same primitive every other custom layer in layers.js is already built
 // from, and gets full control over hit-testing as a side benefit (needed
 // for click-to-select/hover anyway).
-import * as PIXI from "pixi.js";
 import { L } from "./leafletGlobal";
+import { declutterPoints } from "./declutter";
+
+// Pixi is loaded on demand rather than bundled into the main chunk: it is by
+// far the heaviest dependency here (~13 MB installed, and the dominant share
+// of the built bundle), yet nothing it draws exists until AIS/ADS-B data has
+// actually arrived. Keeping it out of the initial chunk means the map, panel
+// and basemap parse and paint without waiting on a renderer that has nothing
+// to render yet; Vite emits it as a separate chunk automatically.
+//
+// Every module-level use of PIXI below sits inside a function body, so a
+// mutable binding filled in after the import resolves is all that's needed --
+// the L.Layer subclass itself can still be declared eagerly.
+let PIXI = null;
+let pixiPromise = null;
+
+function loadPixi() {
+  if (!pixiPromise) {
+    pixiPromise = import("pixi.js").then((mod) => {
+      PIXI = mod;
+      return mod;
+    });
+  }
+  return pixiPromise;
+}
 
 // Rasterizes an SVG glyph (from svgIcons.js's SVG dict, `currentColor` swapped
 // for a real hex value) into a PIXI.Texture once per distinct (name, color,
@@ -27,7 +50,13 @@ import { L } from "./leafletGlobal";
 // instead of thousands of individual ones. ~14 total combinations across
 // ship/aircraft styles (see decorators.js's SHIP_STYLE/AIRCRAFT_STYLE), not
 // one per live entity.
-const SUPERSAMPLE = 3; // rasterize above the on-screen size so icons stay crisp when zoomed
+const SUPERSAMPLE = 3;
+
+// Minimum half-size of a sprite's tap target, regardless of how small the
+// sprite itself is drawn -- a 13px "other aircraft" icon is a ~6px radius
+// target, far below the ~44px finger-friendly minimum, and was effectively
+// untappable on a phone.
+const TOUCH_SLOP_PX = 11; // rasterize above the on-screen size so icons stay crisp when zoomed
 
 function loadTexture(svgInner, color, size) {
   const px = Math.round(size * SUPERSAMPLE);
@@ -92,8 +121,9 @@ function createEntry(app) {
   highlight.visible = false;
   const sprite = new PIXI.Sprite(PIXI.Texture.EMPTY);
   sprite.anchor.set(0.5);
-  sprite.eventMode = "static";
-  sprite.cursor = "pointer";
+  // No eventMode/cursor: Pixi's EventSystem never receives anything, since
+  // the canvas is pointer-events:none (see onAdd) -- hit-testing and cursor
+  // are handled from the map container instead.
   container.addChild(highlight, sprite);
   app.stage.addChild(container);
   return { container, highlight, sprite, size: 0 };
@@ -113,8 +143,30 @@ const EntityWebglLayer = L.Layer.extend({
 
     this._canvas = L.DomUtil.create("canvas", "leaflet-webgl-entity-layer");
     this._canvas.style.position = "absolute";
-    this._canvas.style.pointerEvents = "auto";
+    // Permanently click-through. The canvas is always sized to the FULL map
+    // viewport (see _reset below), so any other value puts it in front of
+    // every pixel -- including the vast majority with no sprite on them --
+    // and swallows clicks meant for whatever is underneath (country shapes,
+    // the map's own background-click deselect). Nothing about the gesture
+    // can be re-routed once the browser has hit-tested it, so the canvas
+    // must never be an event target in the first place; all sprite
+    // interaction is done by our own hit-testing on the map container
+    // instead (see _onContainerClick/_onContainerMove below), which is also
+    // why Pixi's own EventSystem is unused here.
+    this._canvas.style.pointerEvents = "none";
     this.getPane().appendChild(this._canvas);
+
+    // Capture phase on the map *container*: this fires before any country
+    // path's own handler and before Leaflet's own bubble-phase container
+    // click handler, so a sprite hit can stopPropagation() and take the
+    // gesture, while a miss propagates on to the country/map completely
+    // untouched. Works identically for mouse and touch, since a tap
+    // synthesizes a click.
+    this._container = map.getContainer();
+    this._onContainerClick = this._onContainerClick.bind(this);
+    this._onContainerMove = this._onContainerMove.bind(this);
+    this._container.addEventListener("click", this._onContainerClick, { capture: true });
+    this._container.addEventListener("mousemove", this._onContainerMove);
 
     this._app = new PIXI.Application({
       view: this._canvas,
@@ -125,10 +177,6 @@ const EntityWebglLayer = L.Layer.extend({
       resolution: Math.min(window.devicePixelRatio || 1, 2),
       autoDensity: true,
     });
-    // Container's default eventMode ("auto") already passes hit-testing
-    // through to children, so individual sprites setting eventMode="static"
-    // (see createEntry below) is enough -- Pixi's EventSystem attaches its
-    // own pointer listeners to the renderer's canvas automatically.
 
     this._textureCache = new TextureCache();
     this._buckets = new Map(); // bucketKey -> Map(entityId -> entry)
@@ -145,7 +193,16 @@ const EntityWebglLayer = L.Layer.extend({
     this._pendingSprites = new Map(); // styleKey -> Set(entry)
 
     this._reset = this._reset.bind(this);
+    this._onAnimZoom = this._onAnimZoom.bind(this);
     map.on("moveend resize", this._reset);
+    // Without this, the canvas stays static (unscaled) for the whole
+    // duration of a pinch/scroll-wheel zoom animation while the basemap
+    // tiles scale smoothly underneath -- sprites visually "swim" apart
+    // from the map instead of zooming with it, only snapping to their
+    // correct spot once the animation finishes and moveend's _reset()
+    // runs. This mirrors the CSS-transform-during-gesture technique
+    // Leaflet's own L.Renderer (the base of L.Canvas/L.SVG) uses.
+    map.on("zoomanim", this._onAnimZoom);
     this._reset();
     if (import.meta.env.DEV) window.__webglLayerDebug = this;
   },
@@ -176,6 +233,10 @@ const EntityWebglLayer = L.Layer.extend({
 
   onRemove() {
     this._map.off("moveend resize", this._reset);
+    this._map.off("zoomanim", this._onAnimZoom);
+    this._container.removeEventListener("click", this._onContainerClick, { capture: true });
+    this._container.removeEventListener("mousemove", this._onContainerMove);
+    this._hideTooltip();
     this._textureCache.destroy();
     // `true` tears down the WebGL context along with the view -- without
     // this, React StrictMode's dev-only mount->unmount->remount cycle (see
@@ -199,8 +260,96 @@ const EntityWebglLayer = L.Layer.extend({
       this._app.renderer.resize(size.x, size.y);
     }
     this._topLeft = map.containerPointToLayerPoint([0, 0]);
+    // setPosition alone (no scale) is also what clears any leftover
+    // zoom-animation transform from _onAnimZoom below once the gesture ends.
     L.DomUtil.setPosition(this._canvas, this._topLeft);
     this._repositionAll();
+    // Reference point _onAnimZoom scales/translates relative to during the
+    // *next* zoom gesture -- must be refreshed on every real reposition.
+    this._animZoom = map.getZoom();
+    this._animCenter = map.getCenter();
+  },
+
+  // Cheap bounding-box test against currently visible sprites (a handful to
+  // a few hundred, never the whole raw dataset -- buckets only ever hold
+  // what's already been bounds/zoom-filtered), returning the *nearest* hit
+  // so overlapping sprites resolve to the one actually aimed at rather than
+  // whichever bucket happened to be iterated first. Touch targets get a
+  // floor of TOUCH_SLOP_PX so a small sprite is still tappable on a phone.
+  // Returns {entry, opts} or null.
+  _hitTestAt(clientX, clientY) {
+    const rect = this._canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    let best = null;
+    let bestDist = Infinity;
+    for (const [bucketKey, entries] of this._buckets) {
+      if (!this._visibleBuckets.has(bucketKey)) continue;
+      const opts = this._optsByBucket?.get(bucketKey);
+      if (!opts) continue;
+      for (const entry of entries.values()) {
+        if (!entry.container.visible || !entry.sprite.visible) continue;
+        const half = Math.max((entry.sprite.width || 16) / 2, TOUCH_SLOP_PX);
+        const dx = x - entry.container.position.x;
+        const dy = y - entry.container.position.y;
+        if (Math.abs(dx) > half || Math.abs(dy) > half) continue;
+        const dist = dx * dx + dy * dy;
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = { entry, opts };
+        }
+      }
+    }
+    return best;
+  },
+
+  // Capture phase on the map container (see onAdd). A hit takes the gesture
+  // entirely -- stopPropagation here means neither the country path beneath
+  // nor Leaflet's own bubble-phase container click handler ever sees it, so
+  // tapping a plane can't also select the country under it. A miss does
+  // nothing at all, leaving the event to propagate exactly as it would if
+  // this layer didn't exist.
+  _onContainerClick(e) {
+    // Never steal a click that genuinely landed on a real DOM marker
+    // (infra/satellite/event pins, an open popup, a zoom control) -- those
+    // sit in panes above this canvas and own their own clicks. Country
+    // shapes are deliberately NOT excluded here: they're the case sprites
+    // *should* win over, since they cover whole landmasses.
+    if (e.target.closest?.(".leaflet-marker-icon, .leaflet-popup, .leaflet-control")) return;
+    const hit = this._hitTestAt(e.clientX, e.clientY);
+    if (!hit) return;
+    e.stopPropagation();
+    e.preventDefault();
+    this._hideTooltip();
+    hit.opts.onSelect(hit.entry.item);
+  },
+
+  _onContainerMove(e) {
+    const hit = this._hitTestAt(e.clientX, e.clientY);
+    if (hit) {
+      this._showTooltip(hit.entry, hit.opts.getTooltip(hit.entry.item));
+      this._container.style.cursor = "pointer";
+    } else {
+      this._hideTooltip();
+      this._container.style.cursor = "";
+    }
+  },
+
+  // Same technique L.Renderer._onAnimZoom/L.GridLayer._animateZoom use:
+  // CSS-transform the whole canvas to approximate the in-progress zoom
+  // level so it visually tracks the basemap during the animation, then let
+  // the moveend-triggered _reset() above snap it back to an exact,
+  // untransformed reprojection once the gesture settles.
+  _onAnimZoom(e) {
+    const map = this._map;
+    const scale = map.getZoomScale(e.zoom, this._animZoom);
+    const position = L.DomUtil.getPosition(this._canvas);
+    const viewHalf = map.getSize().multiplyBy(0.5);
+    const currentCenterPoint = map.project(this._animCenter, e.zoom);
+    const destCenterPoint = map.project(e.center, e.zoom);
+    const centerOffset = destCenterPoint.subtract(currentCenterPoint);
+    const topLeftOffset = viewHalf.multiplyBy(-scale).add(position).add(viewHalf).subtract(centerOffset);
+    L.DomUtil.setTransform(this._canvas, topLeftOffset, scale);
   },
 
   _project(lat, lon) {
@@ -212,10 +361,12 @@ const EntityWebglLayer = L.Layer.extend({
     for (const [bucketKey, entries] of this._buckets) {
       const items = this._lastItems?.get(bucketKey);
       if (!items) continue;
-      for (const item of items) {
-        const entry = entries.get(this._idOf(bucketKey, item));
+      const projected = items.map((item) => this._project(item.lat, item.lon));
+      const placed = declutterPoints(projected);
+      for (let idx = 0; idx < items.length; idx++) {
+        const entry = entries.get(this._idOf(bucketKey, items[idx]));
         if (!entry) continue;
-        const { x, y } = this._project(item.lat, item.lon);
+        const { x, y } = placed[idx];
         entry.container.position.set(x, y);
       }
     }
@@ -259,6 +410,10 @@ const EntityWebglLayer = L.Layer.extend({
     this._idFieldByBucket.set(bucketKey, opts.idField);
     this._lastItems = this._lastItems || new Map();
     this._lastItems.set(bucketKey, items);
+    // Read back by _hitTestAt to dispatch onSelect/getTooltip for whichever
+    // bucket the hit sprite belongs to (each bucket has its own callbacks).
+    this._optsByBucket = this._optsByBucket || new Map();
+    this._optsByBucket.set(bucketKey, opts);
 
     let entries = this._buckets.get(bucketKey);
     if (!entries) {
@@ -267,8 +422,18 @@ const EntityWebglLayer = L.Layer.extend({
     }
     const visible = this._visibleBuckets.has(bucketKey);
 
+    // Same declutter pass createMapController.js's renderMarkerLayer applies
+    // to plain Leaflet markers -- ships/aircraft cluster at ports/airports
+    // just as easily as conflict events cluster in a city, and this is the
+    // one bucket-scoped place per-bucket item positions are all known at
+    // once. Only affects the sprite's drawn position; entry.item (used for
+    // clicks/popups/tooltips) keeps the item's real lat/lon.
+    const projected = items.map((item) => this._project(item.lat, item.lon));
+    const placed = declutterPoints(projected);
+
     const seen = new Set();
-    for (const item of items) {
+    for (let idx = 0; idx < items.length; idx++) {
+      const item = items[idx];
       const id = opts.idField(item);
       seen.add(id);
       let entry = entries.get(id);
@@ -276,19 +441,6 @@ const EntityWebglLayer = L.Layer.extend({
         entry = createEntry(this._app);
         entry.container.visible = visible;
         entries.set(id, entry);
-        // entry persists across updateEntities calls (see the `if (!entry)`
-        // guard above) but these handlers are only attached once -- reading
-        // entry.item (refreshed on every call, below) rather than the `item`
-        // captured in this closure is what keeps clicks/hovers acting on
-        // the entity's current position/data instead of its position when
-        // the sprite was first created.
-        entry.sprite.on("pointertap", (e) => {
-          e.stopPropagation();
-          this._suppressMapClick = true;
-          opts.onSelect(entry.item);
-        });
-        entry.sprite.on("pointerover", () => this._showTooltip(entry, opts.getTooltip(entry.item)));
-        entry.sprite.on("pointerout", () => this._hideTooltip());
       }
 
       const style = opts.style(item);
@@ -300,7 +452,7 @@ const EntityWebglLayer = L.Layer.extend({
       entry.highlight.visible = selected;
       if (selected) drawHighlight(entry, style.size, 0xffffff);
 
-      const { x, y } = this._project(item.lat, item.lon);
+      const { x, y } = placed[idx];
       entry.container.position.set(x, y);
 
       entry.item = item;
@@ -339,20 +491,53 @@ const EntityWebglLayer = L.Layer.extend({
     if (this._tooltipEl) this._tooltipEl.style.display = "none";
   },
 
-  // Whether the most recent sprite tap should suppress the map's own
-  // background-click deselect handler -- Pixi's interaction manager doesn't
-  // share a stopPropagation chain with the DOM click Leaflet's map listener
-  // also receives on the same canvas element, so createMapController.js
-  // checks+clears this flag itself right after a map click.
+  // Kept for createMapController.js's map-click handler, but now always
+  // false: _onContainerClick stopPropagation()s a sprite hit during the
+  // container's capture phase, so Leaflet's own bubble-phase click handler
+  // never runs for a tap that hit a sprite -- there's nothing left to
+  // suppress after the fact.
   consumeSuppressedClick() {
-    const suppressed = this._suppressMapClick;
-    this._suppressMapClick = false;
-    return suppressed;
+    return false;
   },
 });
 
+// Returned synchronously so createMapController.js keeps its straight-line
+// construction, while Pixi itself loads in the background. Until it lands,
+// calls are recorded rather than queued as a growing list: every
+// updateEntities call carries a *complete* snapshot for its bucket, so only
+// the most recent one per bucket is worth replaying -- the same reason the
+// live layer can be rebuilt from any single poll.
 export function createEntityWebglLayer(map) {
-  const layer = new EntityWebglLayer();
-  layer.addTo(map);
-  return layer;
+  let layer = null;
+  const pendingEntities = new Map(); // bucketKey -> [items, opts]
+  const pendingVisibility = new Map(); // bucketKey -> boolean
+
+  loadPixi()
+    .then(() => {
+      layer = new EntityWebglLayer();
+      layer.addTo(map);
+      for (const [bucketKey, visible] of pendingVisibility) layer.setVisible(bucketKey, visible);
+      for (const [bucketKey, [items, opts]] of pendingEntities) layer.updateEntities(bucketKey, items, opts);
+      pendingVisibility.clear();
+      pendingEntities.clear();
+    })
+    .catch((err) => {
+      // A failed chunk load costs the ship/aircraft layers, not the map --
+      // every other layer is plain Leaflet and unaffected.
+      console.error("Failed to load the WebGL entity renderer:", err);
+    });
+
+  return {
+    setVisible(bucketKey, visible) {
+      if (layer) layer.setVisible(bucketKey, visible);
+      else pendingVisibility.set(bucketKey, visible);
+    },
+    updateEntities(bucketKey, items, opts) {
+      if (layer) layer.updateEntities(bucketKey, items, opts);
+      else pendingEntities.set(bucketKey, [items, opts]);
+    },
+    consumeSuppressedClick() {
+      return layer ? layer.consumeSuppressedClick() : false;
+    },
+  };
 }

@@ -22,19 +22,52 @@ ADSB_POLL_INTERVAL_AUTH = int(os.getenv("ADSB_POLL_INTERVAL_AUTH", "60"))     # 
 ACLED_POLL_INTERVAL = int(os.getenv("ACLED_POLL_INTERVAL", "1800"))
 UCDP_POLL_INTERVAL = int(os.getenv("UCDP_POLL_INTERVAL", "21600"))  # UCDP's candidate file only updates monthly
 
-# conflict_watch.py doesn't poll anything itself -- it re-derives from acled.py's
-# (UCDP rows) and gdelt.py's already-fetched state.data, so it has no interval
-# of its own to configure, only how long its local SQLite archive keeps rows.
-# Long relative to HISTORY_RETENTION_SECONDS since this table is meant to be
-# the durable "personal daily archive", not a short replay buffer.
+# event_fusion.py doesn't fetch anything itself -- it re-derives from
+# acled.py's (ACLED + UCDP rows) and gdelt.py's already-fetched state.data,
+# so it has no interval of its own to configure, only how long its local
+# SQLite archive of fused events keeps rows. Long relative to
+# HISTORY_RETENTION_SECONDS since this table is meant to be the durable
+# "personal daily archive", not a short replay buffer.
 CONFLICT_WATCH_RETENTION_DAYS = int(os.getenv("CONFLICT_WATCH_RETENTION_DAYS", "180"))
 
-# How long an entity can go without a fresh position report before
-# storage.py evicts it from entity_latest (see backend/storage.py). Separate
-# from ais.py's own STALE_AFTER, which governs the in-memory live layer
-# (/api/ships) -- these answer different questions and are allowed to diverge.
+# How long an entity can go without a fresh report before storage.py evicts
+# it from entity_latest (see backend/storage.py). Separate from ais.py's own
+# STALE_AFTER, which governs the in-memory live layer (/api/ships) -- these
+# answer different questions and are allowed to diverge.
 AIS_STALE_AFTER = int(os.getenv("AIS_STALE_AFTER", "1800"))
 ADSB_STALE_AFTER = int(os.getenv("ADSB_STALE_AFTER", "1800"))
+
+# Per-kind eviction windows, keyed by storage.py's `kind` column. Every point
+# source now writes there (see the record_snapshot calls across
+# backend/sources/), and they refresh on wildly different cadences -- a 30min
+# window that suits a live AIS stream would continuously evict the cities
+# index, which the backend only re-fetches once a day. Anything absent falls
+# back to ENTITY_STALE_AFTER_DEFAULT.
+ENTITY_STALE_AFTER = {
+    "ais": AIS_STALE_AFTER,
+    "adsb": ADSB_STALE_AFTER,
+    "satellites": 3600,
+    "gdelt": 86400,
+    "firms": 2 * 86400,
+    "jamming": 2 * 86400,
+    "acled": 7 * 86400,
+    "events": 7 * 86400,
+    "cities": 30 * 86400,
+}
+ENTITY_STALE_AFTER_DEFAULT = int(os.getenv("ENTITY_STALE_AFTER_DEFAULT", "86400"))
+
+# Postgres connection (see backend/storage.py). docker-compose.yml sets this
+# explicitly to reach the `postgres` service over the compose network, so
+# this default only applies to runs outside compose -- hence localhost,
+# which is the useful guess there (the compose hostname wouldn't resolve).
+# Nothing breaks if it's wrong: storage retries in the background and the
+# app runs live-only until it connects.
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://osint:osint@localhost:5432/osint")
+
+# How long per-poll source outcomes are kept in storage.py's source_health
+# table -- purely an operational log (what succeeded/failed, when, how many
+# items), so it doesn't need the long window the event archive gets.
+SOURCE_HEALTH_RETENTION_DAYS = int(os.getenv("SOURCE_HEALTH_RETENTION_DAYS", "14"))
 
 # How long entity_history rows are kept before storage.py's retention sweep
 # deletes them. 3 days, matching the replay timeline's range and ACLED's own

@@ -1,0 +1,87 @@
+# Three-container split: Postgres for durable storage, the FastAPI backend
+# as a pure API, and the React app behind nginx (which proxies /api to the
+# backend, so the browser only ever talks to one origin).
+#
+#   docker compose up --build      -> app at http://localhost:8080
+#
+# The root Dockerfile + render.yaml single-container path still exists and
+# still works -- it bakes the frontend into the backend image and serves
+# both from one process. This file is the local/self-hosted alternative.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-osint}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-osint}
+      POSTGRES_DB: ${POSTGRES_DB:-osint}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Exposed so the migration script and psql/GUI clients can reach it
+      # from the host. Drop this line if you don't need that.
+      - "5432:5432"
+    healthcheck:
+      # The backend depends on this rather than on the container merely
+      # existing -- Postgres accepts connections only after initdb finishes,
+      # which is well after the container starts.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-osint} -d ${POSTGRES_DB:-osint}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      # Repo root, so the image can COPY both requirements.txt and backend/.
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres:5432/${POSTGRES_DB:-osint}
+    env_file:
+      # API keys (FIRMS/AIS/OpenSky/ACLED/OWM). Optional: every source
+      # degrades to "unavailable" rather than crashing when its key is
+      # missing, so the stack still comes up without this file.
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  # One-off SQLite -> Postgres import. Not part of the default stack (it sits
+  # behind a profile), run explicitly once:
+  #
+  #   docker compose --profile migrate run --rm migrate
+  #
+  # data/ is bind-mounted rather than baked into the image: it's gitignored,
+  # excluded by .dockerignore, and 1.5 GB -- nothing that belongs in a layer.
+  # Read-only, and the script never deletes anything, so the SQLite file
+  # remains a rollback path afterwards.
+  migrate:
+    profiles: ["migrate"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres:5432/${POSTGRES_DB:-osint}
+    volumes:
+      - ./data:/app/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "backend.migrate_sqlite_to_postgres"]
+
+volumes:
+  pgdata:

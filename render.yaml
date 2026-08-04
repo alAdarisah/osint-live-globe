@@ -4,6 +4,11 @@ services:
     runtime: docker
     plan: free
     envVars:
+      # Durable storage is Postgres now (see backend/storage.py) -- point
+      # this at a managed instance. Without it the app still runs and the
+      # map still works, it just records nothing.
+      - key: DATABASE_URL
+        sync: false
       - key: FIRMS_MAP_KEY
         sync: false
       - key: AISSTREAM_API_KEY
