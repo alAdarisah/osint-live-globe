@@ -365,6 +365,8 @@ export function createMapController(container, initial, callbacks) {
   const counts = {
     acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
     aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
+    infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
   };
   // Total number loaded from the backend for each layer, independent of the
   // current viewport/zoom filtering that `counts` reflects -- shown in the
@@ -372,6 +374,16 @@ export function createMapController(container, initial, callbacks) {
   const totals = {
     acled: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
     aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
+    infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
+  };
+  // backend/infrastructure.py site "type" -> the counts/totals key it rolls
+  // up into, so Critical Infrastructure can show a per-type sub-ticker (see
+  // LayersSection.jsx) instead of just one lumped count.
+  const INFRA_TYPE_COUNT_KEY = {
+    military: "infraMilitary", refinery: "infraRefinery", lng_terminal: "infraLng",
+    port: "infraPort", desalination: "infraDesalination", nuclear: "infraNuclear",
+    fab: "infraFab", pipeline: "infraPipelineNode",
   };
   const zoomNotes = { adsb: false, cities: false, firms: false, acled: false, gdelt: false, ais: false, jamming: false };
   function reportCounts() {
@@ -839,6 +851,19 @@ export function createMapController(container, initial, callbacks) {
     syncLayerMarkers(markersByKey.infra, infraGroup, visible, (s) => s.id, buildInfraMarker, updateInfraMarker);
     counts.infra = visible.length;
     totals.infra = raw.infra.length;
+
+    for (const key of Object.values(INFRA_TYPE_COUNT_KEY)) {
+      counts[key] = 0;
+      totals[key] = 0;
+    }
+    for (const s of visible) {
+      const key = INFRA_TYPE_COUNT_KEY[s.type];
+      if (key) counts[key] += 1;
+    }
+    for (const s of raw.infra) {
+      const key = INFRA_TYPE_COUNT_KEY[s.type];
+      if (key) totals[key] += 1;
+    }
     reportCounts();
   }
 
@@ -858,6 +883,9 @@ export function createMapController(container, initial, callbacks) {
       line.bindPopup(`<h3>${esc(route.name)}</h3><p>${esc(route.note || "")}</p>`, { maxWidth: 280 });
       pipelinesGroup.addLayer(line);
     }
+    counts.pipelineRoutes = raw.pipelines.length;
+    totals.pipelineRoutes = raw.pipelines.length;
+    reportCounts();
   }
 
   function renderAll() {
