@@ -3,7 +3,7 @@
 // clock, health, viewport) together, then hands their state down to plain
 // presentational components. No component below this one talks to the
 // network or to Leaflet directly -- see src/map/ and src/hooks/ for that.
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useLeafletMap } from "./map/useLeafletMap";
 import { useOsintData } from "./hooks/useOsintData";
@@ -18,6 +18,7 @@ import MapView from "./components/MapView";
 import TitleBar from "./components/TitleBar";
 import RegionBar from "./components/RegionBar";
 import NewsBroadcastPanel from "./components/NewsBroadcastPanel";
+import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
 import TimelineBar from "./components/TimelineBar";
@@ -28,9 +29,9 @@ import CountryInfoCard from "./components/CountryInfoCard";
 // infrastructure, satellites, and the military-only halves of ADS-B/AIS --
 // everything else is opt-in rather than cluttering the map on first load.
 const DEFAULT_LAYER_VISIBILITY = {
-  acled: false, firms: false, aisCivilian: false, aisTanker: false, aisNavy: true, gdelt: false,
+  acled: false, firms: false, aisCivilian: false, aisTanker: false, aisNavy: true, gdelt: true,
   adsbCivilian: false, adsbMilitary: true,
-  countries: false, cities: false, infra: true, jamming: false, satellites: true,
+  countries: true, cities: false, infra: true, jamming: false, satellites: true,
   precip: false, clouds: false, windArrows: false,
 };
 
@@ -117,6 +118,45 @@ export default function App() {
     [mapApi.setLayerVisible]
   );
 
+  // Picking a conflict zone already drives country-highlight + cities-scope
+  // logic inside createMapController.js (activeConflictZoneBounds/
+  // citiesEnabled), but that's wasted if the countries/cities layers
+  // themselves are still switched off (both default off -- see
+  // DEFAULT_LAYER_VISIBILITY). Force them on here so a zone pick actually
+  // shows the highlighted countries + their cities without a second manual
+  // toggle in the panel; going back to "World" leaves the user's own choice
+  // alone rather than yanking the layers back off.
+  // Drives the ConflictBriefingCard popup -- null hides it. Only conflict
+  // zones (not "world") get one; cleared on going back to World, either by
+  // hand or via the map's own pan-away auto-reset (see the effect below).
+  const [briefingZone, setBriefingZone] = useState(null);
+
+  const onSelectRegion = useCallback(
+    (key) => {
+      dataApi.selectRegion(key);
+      if (key !== "world") {
+        setLayerVisibility((prev) => {
+          const next = { ...prev };
+          if (!prev.countries) { next.countries = true; mapApi.setLayerVisible("countries", true); }
+          if (!prev.cities) { next.cities = true; mapApi.setLayerVisible("cities", true); }
+          return next;
+        });
+        setBriefingZone({ key, ...dataApi.regions[key] });
+      } else {
+        setBriefingZone(null);
+      }
+    },
+    [dataApi.selectRegion, dataApi.regions, mapApi.setLayerVisible]
+  );
+
+  // The map snaps back to unscoped "World" data on its own when the user
+  // pans away from a selected zone (see createMapController.js's moveend
+  // handler) -- without this, the briefing card would keep showing a zone
+  // that's no longer actually selected.
+  useEffect(() => {
+    if (!dataApi.currentRegionKey) setBriefingZone(null);
+  }, [dataApi.currentRegionKey]);
+
   const [infraFilterText, setInfraFilterText] = useState("");
   const onInfraFilterChange = useCallback(
     (text) => {
@@ -150,7 +190,7 @@ export default function App() {
       <RegionBar
         regions={dataApi.regions}
         currentRegionKey={dataApi.currentRegionKey}
-        onSelect={dataApi.selectRegion}
+        onSelect={onSelectRegion}
         regionActivity={regionActivity}
       />
 
@@ -160,6 +200,16 @@ export default function App() {
         regionLabel={dataApi.currentRegionLabel}
         onLocate={onLocateNewsItem}
       />
+
+      {briefingZone && (
+        <ConflictBriefingCard
+          zone={briefingZone}
+          acledRaw={dataApi.acledRaw}
+          gdeltRaw={dataApi.gdeltRaw}
+          onClose={() => setBriefingZone(null)}
+          onLocate={onLocateNewsItem}
+        />
+      )}
 
       <PanelToggle open={panelOpen} onToggle={togglePanel} />
 
