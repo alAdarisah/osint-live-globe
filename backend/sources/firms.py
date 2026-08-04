@@ -25,12 +25,12 @@ VIIRS_CONFIDENCE_ALLOW = {"n", "h", "nominal", "high"}
 
 # A thermal anomaly only ships if it's also within this radius of a recent
 # ACLED/GDELT event -- "supporting metadata explaining likely cause" rather
-# than a bare, uncorrelated hotspot (the overwhelming majority of real FIRMS
-# detections are ordinary wildfires/agricultural burning with no conflict
-# link at all, so this is a deliberately strict filter, not a bug -- it
-# trades "shows most fires" for "only shows fires with a plausible link to
-# something already being tracked").
-EVENT_CORRELATION_RADIUS_KM = 50.0
+# than a bare, uncorrelated hotspot. Widened from 50km: with ACLED creds
+# unset (UCDP-only fallback) and GDELT's sparse per-poll event coverage, 50km
+# left the layer showing ~0 hotspots almost always, which defeated live
+# wildfire tracking -- the actual use case. 300km trades some false-positive
+# correlation for the layer actually showing fires.
+EVENT_CORRELATION_RADIUS_KM = 300.0
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

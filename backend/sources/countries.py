@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import io
 import logging
 import time
 
@@ -14,6 +16,11 @@ GEOJSON_URL = "https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector/geojson/
 # last few years ourselves (without mrnev) and pick the first non-null value.
 WB_POP_URL = "https://api.worldbank.org/v2/country/{code}/indicator/SP.POP.TOTL?format=json&per_page=6"
 WB_DENSITY_URL = "https://api.worldbank.org/v2/country/{code}/indicator/EN.POP.DNST?format=json&per_page=6"
+# World Bank doesn't carry HDI (it's a UNDP measure) -- OWID mirrors UNDP's
+# HDI series as one flat CSV (all countries/years in a single request), so
+# it's fetched and indexed once per refresh instead of per-country like the
+# World Bank indicators above.
+OWID_HDI_CSV_URL = "https://ourworldindata.org/grapher/human-development-index.csv"
 REFRESH_INTERVAL = 24 * 3600  # population/density/boundaries are annual-ish data, not "live"
 
 # World Bank's API is fast per-request but unreliable under concurrency --
@@ -46,7 +53,30 @@ async def _fetch_wb_value(client: httpx.AsyncClient, code: str, url_template: st
     return None, None
 
 
-async def _enrich(client: httpx.AsyncClient, feature: dict) -> dict:
+async def _fetch_hdi_by_code(client: httpx.AsyncClient) -> dict:
+    """One flat CSV (Entity,Code,Year,HDI,region) covering every country/year --
+    keep only the latest year's value per ISO3 code."""
+    try:
+        resp = await client.get(OWID_HDI_CSV_URL, timeout=30)
+        resp.raise_for_status()
+        reader = csv.DictReader(io.StringIO(resp.text))
+        latest: dict[str, tuple[int, float]] = {}
+        for row in reader:
+            code = row.get("Code")
+            year_raw = row.get("Year")
+            value_raw = row.get("Human Development Index")
+            if not code or not year_raw or not value_raw:
+                continue
+            year = int(year_raw)
+            if code not in latest or year > latest[code][0]:
+                latest[code] = (year, float(value_raw))
+        return {code: value for code, (_year, value) in latest.items()}
+    except Exception as exc:  # noqa: BLE001 - HDI is a bonus field, not worth failing the whole fetch over
+        log.warning("HDI fetch failed: %s", exc)
+        return {}
+
+
+async def _enrich(client: httpx.AsyncClient, feature: dict, hdi_by_code: dict) -> dict:
     props = feature["properties"]
     code = props.get("ADM0_A3") or props.get("ISO_A3")
     population = pop_year = density = None
@@ -63,6 +93,7 @@ async def _enrich(client: httpx.AsyncClient, feature: dict) -> dict:
             "population": population,
             "pop_year": pop_year,
             "density": round(density, 1) if isinstance(density, (int, float)) else None,
+            "hdi": hdi_by_code.get(code) if code else None,
         },
     }
 
@@ -72,7 +103,8 @@ async def _fetch() -> dict:
         resp = await client.get(GEOJSON_URL)
         resp.raise_for_status()
         raw = resp.json()
-        features = await asyncio.gather(*(_enrich(client, f) for f in raw["features"]))
+        hdi_by_code = await _fetch_hdi_by_code(client)
+        features = await asyncio.gather(*(_enrich(client, f, hdi_by_code) for f in raw["features"]))
     return {"type": "FeatureCollection", "features": list(features)}
 
 

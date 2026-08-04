@@ -70,8 +70,9 @@ export function countryPopupHtml(props, raw) {
     <h3>${esc(name)}</h3>
     <div class="meta">Population: ${fmtNumber(props.population)}${props.pop_year ? ` (${esc(props.pop_year)})` : ""}</div>
     <div class="meta">Population density: ${props.density != null ? `${props.density} /km&sup2;` : "n/a"}</div>
+    <div class="meta">Human Development Index: ${props.hdi != null ? props.hdi.toFixed(3) : "n/a"}</div>
     ${buildEventsSection(acledMatches, gdeltMatches)}
-    <p class="meta">Population/density: World Bank. Events matched by country name &mdash; naming differences can cause a miss.</p>`;
+    <p class="meta">Population/density: World Bank. HDI: UNDP (via Our World in Data). Events matched by country name &mdash; naming differences can cause a miss.</p>`;
 }
 
 export function cityPopupHtml(city, raw, countryNameByIso2) {
