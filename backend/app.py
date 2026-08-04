@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import os
 import time
 import webbrowser
 from contextlib import asynccontextmanager
@@ -362,18 +363,25 @@ async def index():
 def run():
     import uvicorn
 
-    threading_open_browser()
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    # Render (and most PaaS hosts) inject PORT and expect a bind on 0.0.0.0;
+    # local runs keep the old 127.0.0.1:8000 default with an auto-opened tab.
+    port = int(os.getenv("PORT", "8000"))
+    is_cloud = "PORT" in os.environ
+    host = "0.0.0.0" if is_cloud else "127.0.0.1"
+
+    if not is_cloud:
+        threading_open_browser(port)
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
-def threading_open_browser():
+def threading_open_browser(port: int):
     import threading
 
     def _open():
         import time
 
         time.sleep(1.5)
-        webbrowser.open("http://127.0.0.1:8000")
+        webbrowser.open(f"http://127.0.0.1:{port}")
 
     threading.Thread(target=_open, daemon=True).start()
 
