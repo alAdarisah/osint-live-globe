@@ -433,6 +433,27 @@ html, body {
 .sublegend .swatch { width: 8px; height: 8px; }
 .sublegend.wind-unavailable { color: #ff8c3a; }
 
+.subticker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 2px 6px 20px;
+}
+.subticker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+.subticker-row .swatch { width: 7px; height: 7px; }
+.subticker-row .count {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .infra-filter-input {
   display: block;
   width: calc(100% - 20px);
