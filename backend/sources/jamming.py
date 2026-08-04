@@ -24,6 +24,17 @@ REFRESH_INTERVAL = 6 * 3600  # the underlying data itself only updates once/day
 # reports (good+bad) in a cell before trusting its jam ratio.
 MIN_TRAFFIC = 2
 
+# Below this fraction of affected reports, a cell reads as background noise
+# rather than real interference -- gpsjam's raw daily dataset can carry
+# hundreds of barely-affected hexes worldwide, which buried the genuinely
+# jammed regions under map clutter. Only cells at/above this ratio are kept.
+MIN_JAM_RATIO = 0.25
+
+# Even after the ratio cutoff above, a bad day can still leave hundreds of
+# qualifying cells -- cap to the worst-affected ones so the map only ever
+# shows a manageable, most-severe slice, not every hex gpsjam reports.
+MAX_CELLS = 100
+
 
 async def _latest_date(client: httpx.AsyncClient) -> str:
     resp = await client.get(MANIFEST_URL)
@@ -45,6 +56,9 @@ def _parse_day(text: str) -> list[dict]:
         total = good + bad
         if bad <= 0 or total < MIN_TRAFFIC:
             continue
+        jam_ratio = bad / total
+        if jam_ratio < MIN_JAM_RATIO:
+            continue
         try:
             lat, lon = h3.cell_to_latlng(row["hex"])
         except Exception:  # noqa: BLE001 - a malformed hex just gets skipped
@@ -53,12 +67,13 @@ def _parse_day(text: str) -> list[dict]:
             {
                 "lat": lat,
                 "lon": lon,
-                "jam_ratio": bad / total,
+                "jam_ratio": jam_ratio,
                 "bad": bad,
                 "good": good,
             }
         )
-    return points
+    points.sort(key=lambda p: p["jam_ratio"], reverse=True)
+    return points[:MAX_CELLS]
 
 
 async def _fetch() -> tuple[list[dict], str]:
