@@ -34,6 +34,17 @@ export const SVG = {
   port: '<path fill="currentColor" d="M4 17 L20 17 L17 21 L7 21 Z"/><rect x="11" y="4" width="2" height="13" fill="currentColor"/><path fill="currentColor" d="M13 5 L19 8 L13 10 Z"/>',
   fab: '<rect x="4" y="7" width="16" height="13" rx="1" fill="none" stroke="currentColor" stroke-width="2"/><rect x="8" y="11" width="3" height="3" fill="currentColor"/><rect x="13" y="11" width="3" height="3" fill="currentColor"/><rect x="9" y="3" width="2" height="4" fill="currentColor"/><rect x="13" y="3" width="2" height="4" fill="currentColor"/>',
   satellite: '<rect x="9.5" y="9.5" width="5" height="5" rx="1" fill="currentColor" transform="rotate(45 12 12)"/><rect x="1" y="10.5" width="6" height="3" fill="currentColor" transform="rotate(45 4 12)"/><rect x="17" y="10.5" width="6" height="3" fill="currentColor" transform="rotate(45 20 12)"/><circle cx="17" cy="6" r="1.4" fill="currentColor"/>',
+  // Military/reconnaissance satellite: upright bus with gridded panels and a
+  // downward-looking sensor cone over a ground-scan arc -- deliberately a
+  // different silhouette from the tilted `satellite` glyph above (kept for
+  // stations/uncategorised objects) so a SAR-Lupe pin never reads as the ISS.
+  satelliteMilitary: '<rect x="10" y="6" width="4" height="7" rx="0.6" fill="currentColor"/>' +
+    '<rect x="2" y="7.2" width="7" height="4.6" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+    '<rect x="15" y="7.2" width="7" height="4.6" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+    '<line x1="5.5" y1="7.2" x2="5.5" y2="11.8" stroke="currentColor" stroke-width="1"/>' +
+    '<line x1="18.5" y1="7.2" x2="18.5" y2="11.8" stroke="currentColor" stroke-width="1"/>' +
+    '<path fill="currentColor" d="M10.4 13 L13.6 13 L15.4 17 L8.6 17 Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.3" d="M7 19 Q12 22.4 17 19"/>',
   // ---- military bases (subtype icons; air/naval reuse planeMilitary/ship) ----
   armyBase: '<path fill="currentColor" d="M12 2 L21 7 L21 13 C21 18 17 21.5 12 22 C7 21.5 3 18 3 13 L3 7 Z" fill-opacity="0.18" stroke="currentColor" stroke-width="1.6"/><path fill="currentColor" d="M12 6 L17 9 L12 12 L7 9 Z"/>',
   missileBase: '<path fill="currentColor" d="M12 2 C15 6 15.5 11 14.5 15 L9.5 15 C8.5 11 9 6 12 2 Z"/><path fill="currentColor" d="M9.5 15 L7 20 L10 18.5 Z"/><path fill="currentColor" d="M14.5 15 L17 20 L14 18.5 Z"/><rect x="10.5" y="15" width="3" height="5" fill="currentColor"/>',

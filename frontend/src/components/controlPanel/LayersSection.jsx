@@ -1,4 +1,5 @@
 import { SVG } from "../../map/svgIcons";
+import { SATELLITE_STYLE } from "../../map/decorators";
 import LayerIcon from "./LayerIcon";
 
 export default function LayersSection({
@@ -234,6 +235,22 @@ export default function LayersSection({
       <div className="sublegend">
         Position computed via SGP4 from CelesTrak's public orbital elements. Always shown, any zoom.
       </div>
+      <div className="sublegend">
+        <span>
+          <LayerIcon svg={SATELLITE_STYLE.stations.svg} color={SATELLITE_STYLE.stations.color} />Station
+        </span>
+        <span>
+          <LayerIcon svg={SATELLITE_STYLE.military.svg} color={SATELLITE_STYLE.military.color} />Military
+        </span>
+      </div>
+      <label className="layer-row sub-row" data-layer="satellitesMilitary">
+        <input
+          type="checkbox"
+          checked={layerVisibility.satellitesMilitary}
+          onChange={(e) => onToggleLayer("satellitesMilitary", e.target.checked)}
+        />
+        Show military satellites
+      </label>
       <label className="layer-row sub-row" data-layer="satellitesTrails">
         <input
           type="checkbox"

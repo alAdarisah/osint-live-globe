@@ -486,6 +486,76 @@ html, body {
 }
 .infra-filter-input:focus { outline: none; border-color: var(--accent); }
 
+/* ---------- country card: live situational snapshot ----------
+   Built by popups.js's countryPopupHtml and hosted in #countryInfoCard.
+   Compact by design: the card is 320px wide and pops out of the clicked
+   country, so these sections have to read at a glance rather than reward
+   study. */
+.csection {
+  margin: 8px 0 4px;
+  font-size: 8.5px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-top: 1px solid var(--panel-border);
+  padding-top: 6px;
+}
+
+.cstats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.cstat {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+.cstat-v {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+/* Counts that imply something is happening, rather than merely present. */
+.cstat.hot .cstat-v { color: #ff5c2a; }
+
+.cescalating {
+  margin: 7px 0 2px;
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: rgba(255, 92, 42, 0.16);
+  border: 1px solid rgba(255, 92, 42, 0.5);
+  color: #ff8c3a;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
+
+.cspark {
+  display: block;
+  width: 100%;
+  height: 26px;
+  margin: 3px 0 2px;
+}
+
+/* leaflet.heat paints into a full-viewport canvas in the overlay pane, and
+   unlike Leaflet's own renderers it never opts out of pointer events. That
+   canvas therefore sits on top of every country shape (countriesPane is
+   z-index 350, overlayPane 400) and swallows every click over the map --
+   countries became unclickable the moment any heat layer was switched on.
+   The heat layers are purely a visual density wash: FIRMS and jamming both
+   have separate, deliberately thin click-target layers (firmsPointsLayer /
+   jammingPointsLayer, see layers.js) that carry all their interactivity, so
+   making the heat canvas transparent to input costs nothing.
+   Scoped to leaflet.heat's own class -- L.Canvas renderers use different
+   classes and must keep their pointer events. */
+.leaflet-heatmap-layer {
+  pointer-events: none;
+}
+
 /* leaflet-velocity draws its own canvas particle field -- no custom marker
    CSS needed. Just keep it from intercepting clicks meant for the map. */
 .leaflet-velocity { pointer-events: none; }

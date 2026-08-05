@@ -340,19 +340,32 @@ export function decorateInfra(d, { hot, nearbyEvents } = {}) {
 
 // ---------- satellites ----------
 
-const SATELLITE_GROUP_LABEL = {
-  stations: "Space station",
-  military: "Military satellite",
+// Keyed by CelesTrak's own group name (see backend/sources/satellites.py's
+// GROUPS) -- military objects get their own glyph and colour instead of the
+// whole layer sharing one cyan satellite pin, so "which of these is a
+// reconnaissance bird" is answerable at a glance. Exported so
+// LayersSection.jsx's legend and the map draw from the same values.
+export const SATELLITE_STYLE = {
+  stations: { svg: SVG.satellite, color: "#6fe3ff", size: 24, label: "Space station" },
+  military: { svg: SVG.satelliteMilitary, color: "#ff4d4d", size: 26, label: "Military satellite" },
 };
+const SATELLITE_FALLBACK = { svg: SVG.satellite, color: "#6fe3ff", size: 24, label: "Satellite" };
+
+export function isMilitarySatellite(d) {
+  return d.group === "military";
+}
 
 export function decorateSatellite(d) {
-  const groupLabel = SATELLITE_GROUP_LABEL[d.group] || "Satellite";
-  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(groupLabel)} &middot; ${Math.round(d.alt_km || 0)} km`;
+  const style = SATELLITE_STYLE[d.group] || SATELLITE_FALLBACK;
+  const military = isMilitarySatellite(d);
+  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${Math.round(d.alt_km || 0)} km`;
   const detail = `
     <h3>${esc(d.name || `NORAD ${d.norad_id}`)}</h3>
-    <div class="meta">${esc(groupLabel)} &middot; NORAD catalog ID ${esc(d.norad_id)}</div>
+    <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(d.norad_id)}</div>
     <div>Altitude: ${Math.round(d.alt_km || 0)} km</div>
+    ${military ? '<p class="meta">Listed in CelesTrak\'s public "Miscellaneous Military" group (e.g. SAR-Lupe reconnaissance satellites) -- a catalogue classification, not a claim about what it is doing right now.</p>' : ""}
     <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- a real orbit, not a live telemetry confirmation.</p>
     <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
-  return { icon: icon(SVG.satellite, "#6fe3ff", 24, 0, "satellite-marker"), tooltip, detail };
+  const cls = `satellite-marker${military ? " satellite-military-marker" : ""}`;
+  return { icon: icon(style.svg, style.color, style.size, 0, cls), tooltip, detail };
 }

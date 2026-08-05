@@ -35,6 +35,7 @@ import {
   decorateAdsb,
   decorateInfra,
   decorateSatellite,
+  isMilitarySatellite,
   classifyAircraft,
   classifyShip,
   SHIP_STYLE,
@@ -221,6 +222,12 @@ export function createMapController(container, initial, callbacks) {
   let tankerTrailsVisible = true;
   let militaryTrailsVisible = true;
   let satellitesTrailsVisible = true;
+  // Sub-ticker under "Satellites": hides just the CelesTrak "military" group
+  // (see decorators.js's SATELLITE_STYLE) while leaving stations on, so the
+  // layer can be narrowed to the ISS/Tiangong-style objects without turning
+  // the whole thing off. Filters the pool renderSatellites works from, so
+  // both the markers and their orbital trails follow it.
+  let satellitesMilitaryVisible = true;
 
   // Free-text name filter for critical infrastructure/military bases (see
   // setInfraFilter in the public API and the search input in
@@ -256,7 +263,12 @@ export function createMapController(container, initial, callbacks) {
         selectedCountryIso = iso;
         selectedCountryLayer = layer;
         callbacks.onCountrySelect?.({
-          iso, name: feature.properties?.name, html: countryPopupHtml(feature.properties, raw),
+          iso,
+          name: feature.properties?.name,
+          // The country's own bbox drives every "inside this country" count
+          // in the card (see popups.js) -- taken from the rendered layer
+          // rather than recomputed from the geometry.
+          html: countryPopupHtml(feature.properties, raw, boundsToPlainObject(layer.getBounds())),
           point: countryAnchorPoint(layer),
         });
       }
@@ -311,6 +323,15 @@ export function createMapController(container, initial, callbacks) {
   };
 
   function setLayerVisible(key, visible) {
+    // Not a layer of its own -- a filter on the satellites layer's pool, so
+    // it re-renders in place instead of going through layerForKey (which has
+    // nothing to add/remove for this key).
+    if (key === "satellitesMilitary") {
+      satellitesMilitaryVisible = visible;
+      renderSatellites();
+      return;
+    }
+
     const trailToggle = TRAIL_TOGGLES[key];
     if (trailToggle) {
       trailToggle.setFlag(visible);
@@ -575,6 +596,12 @@ export function createMapController(container, initial, callbacks) {
       else totals.aisCivilian += 1;
     }
     reportCounts();
+    // Extend the selected ship's trail on every render, not just at the
+    // moment it was clicked. updateTrails appends at most one point per
+    // call, so seeding it once in selectShip() left the trail permanently
+    // one point long -- and renderTrailLayer skips anything under two
+    // points, so a selected ship's trail could never draw at all.
+    if (selectedMmsi) updateTrails(shipTrails, raw.ais, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
     renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set());
 
     // Every on-screen tanker gets a trail, not just a selected one -- same
@@ -644,6 +671,9 @@ export function createMapController(container, initial, callbacks) {
       else totals.adsbCivilian += 1;
     }
     reportCounts();
+    // Same per-render accumulation the selected ship needs -- see the note
+    // in renderAisLayer.
+    if (selectedIcao) updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
     renderTrailLayer(aircraftTrailsLayer, aircraftTrails, "#d8b9ff", selectedIcao ? new Set([selectedIcao]) : new Set());
 
     // Every on-screen military aircraft gets a trail, not just a selected
@@ -741,13 +771,21 @@ export function createMapController(container, initial, callbacks) {
     // trails nobody can see.
     if (!satellitesVisible) return;
 
+    // The "Show military satellites" sub-ticker narrows the whole layer, not
+    // just what's drawn -- counts, the "(total)" figure and the trails below
+    // all work off this pool so the panel never advertises objects the map is
+    // deliberately hiding.
+    const pool = satellitesMilitaryVisible
+      ? raw.satellites
+      : raw.satellites.filter((s) => !isMilitarySatellite(s));
+
     const bounds = map.getBounds().pad(0.25);
-    const visible = raw.satellites.filter(
+    const visible = pool.filter(
       (s) => typeof s.lat === "number" && typeof s.lon === "number" && bounds.contains([s.lat, s.lon])
     );
     syncLayerMarkers(markersByKey.satellites, satelliteGroup, visible, (s) => s.norad_id, buildSatelliteMarker, updateSatelliteMarker);
     counts.satellites = visible.length;
-    totals.satellites = raw.satellites.length;
+    totals.satellites = pool.length;
     reportCounts();
 
     // Satellites have no click-to-select model like ships/aircraft, so every
@@ -760,7 +798,7 @@ export function createMapController(container, initial, callbacks) {
     // the Satellites layer itself being on -- see the "satellitesTrails" key
     // in setLayerVisible.
     if (satellitesTrailsVisible) {
-      updateTrails(satelliteTrails, raw.satellites, "norad_id", SATELLITE_TRAIL_MAX_POINTS, undefined);
+      updateTrails(satelliteTrails, pool, "norad_id", SATELLITE_TRAIL_MAX_POINTS, undefined);
       renderTrailLayer(satelliteTrailsLayer, satelliteTrails, "#6fe3ff", new Set(satelliteTrails.keys()), {
         maxOpacity: 0.22,
         dashArray: "2 5",
@@ -1246,11 +1284,13 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "pipelines") renderPipelines();
       else if (key === "jamming") renderJamming();
       else if (key === "satellites") renderSatellites();
-      // conflictStats is a country->monthly-series dict (see
-      // hdx_conflict_stats.py), not a point array -- it's read directly out
-      // of raw.conflictStats by popups.js's buildTrendSection, and has no
-      // marker layer of its own to render.
-      else if (key === "conflictStats") { /* no-op */ }
+      // Neither of these is a point array with a layer of its own, so both
+      // would otherwise fall through to renderMarkerLayer and blow up on a
+      // missing group/marker map. conflictStats is a country->monthly-series
+      // dict (hdx_conflict_stats.py) and escalation is a ranked region list
+      // (escalation.py); both are read straight out of `raw` by popups.js
+      // when a country card is built.
+      else if (key === "conflictStats" || key === "escalation") { /* no marker layer */ }
       else renderMarkerLayer(key);
       if (key === "events") updateCountryWarFlare();
     },

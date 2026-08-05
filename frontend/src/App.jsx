@@ -33,6 +33,7 @@ const DEFAULT_LAYER_VISIBILITY = {
   events: true, firms: false, aisCivilian: false, aisTanker: true, aisTankerTrails: true, aisNavy: true, gdelt: true,
   adsbCivilian: false, adsbMilitary: true, adsbMilitaryTrails: true,
   countries: true, cities: true, infra: true, jamming: true, satellites: true, satellitesTrails: true,
+  satellitesMilitary: true,
   precip: false, clouds: false, windArrows: false,
 };
 
