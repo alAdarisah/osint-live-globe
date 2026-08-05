@@ -85,6 +85,10 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
     controllerRef.current?.setInfraFilter(text);
   }, []);
 
+  const setEventFilter = useCallback((next) => {
+    controllerRef.current?.setEventFilter(next);
+  }, []);
+
   const closeCountryCard = useCallback(() => {
     controllerRef.current?.deselectCountry();
     setSelectedCountry(null);
@@ -96,6 +100,6 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
 
   return {
     ready, counts, zoomNotes, mapBounds, windStatus, selectedCountry,
-    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, closeCountryCard,
+    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, closeCountryCard,
   };
 }

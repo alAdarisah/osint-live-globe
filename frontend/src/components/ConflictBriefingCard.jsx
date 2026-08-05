@@ -87,6 +87,12 @@ export default function ConflictBriefingCard({ zone, eventsRaw, gdeltRaw, onClos
 
   const briefing = useMemo(() => {
     const fatalities = eventsInZone.reduce((sum, e) => sum + (e.fatalities || 0), 0);
+    // Most events in a zone are GDELT-derived and carry no casualty count at
+    // all (see event_fusion's fatalities_reported). Summing them to 0 and
+    // printing "0 fatalities" would state that nobody died, when the truth is
+    // that nobody counted -- so the total is only shown when at least one
+    // event in the zone actually reported one.
+    const anyReported = eventsInZone.some((e) => e.fatalities_reported !== false);
     const typeCounts = {};
     for (const e of eventsInZone) {
       if (!e.event_type) continue;
@@ -96,7 +102,7 @@ export default function ConflictBriefingCard({ zone, eventsRaw, gdeltRaw, onClos
     const topEvents = [...eventsInZone]
       .sort((a, b) => (b.fatalities || 0) - (a.fatalities || 0) || (b.date || "").localeCompare(a.date || ""))
       .slice(0, TOP_EVENTS_MAX);
-    return { count: eventsInZone.length, fatalities, topType, topEvents };
+    return { count: eventsInZone.length, fatalities, anyReported, topType, topEvents };
   }, [eventsInZone]);
 
   if (!zone) return null;
@@ -123,8 +129,10 @@ export default function ConflictBriefingCard({ zone, eventsRaw, gdeltRaw, onClos
         <p className="briefing-summary">
           {briefing.count === 0
             ? "No recorded conflict events in this zone for the current window."
-            : `${briefing.count} conflict event${briefing.count === 1 ? "" : "s"} recorded, ${briefing.fatalities} fatalit${
-                briefing.fatalities === 1 ? "y" : "ies"
+            : `${briefing.count} conflict event${briefing.count === 1 ? "" : "s"} recorded${
+                briefing.anyReported
+                  ? `, ${briefing.fatalities} fatalit${briefing.fatalities === 1 ? "y" : "ies"}`
+                  : "; no casualty figures reported"
               }.${briefing.topType ? ` Dominant activity: ${briefing.topType}.` : ""}`}
         </p>
 

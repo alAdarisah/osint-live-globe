@@ -7,19 +7,73 @@
 import { L } from "./leafletGlobal";
 import { SVG, buildDivIcon } from "./svgIcons";
 import { esc, timeAgoFromDateAdded } from "../utils/format";
+import {
+  severityBand, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
+} from "./severity";
 
-function icon(svgInner, color, size, rotateDeg, extraClass) {
-  return buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass);
+function icon(svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset) {
+  return buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset);
+}
+
+// Icon sizes are needed twice: here, to draw the glyph, and in
+// createMapController's placement pass, which has to know how much room each
+// item takes before any of them are drawn. Exported so there is one formula
+// rather than a copy that can drift.
+//
+// 13px at severity 0 up to ~31px at 100 -- a visible hierarchy at a glance
+// without the largest pins swallowing their neighbours. Imprecise events are
+// drawn smaller as well as ringed: they should not compete for attention with
+// events we can actually place.
+export function eventIconSize(d) {
+  const severity = Number.isFinite(d.severity) ? d.severity : 0;
+  return (13 + (severity / 100) * 18) * (isImprecise(d) ? 0.8 : 1);
+}
+
+// Sized by deaths, since UCDP always reports them -- but capped well below the
+// live layer's largest pins so the record never dominates the map.
+export function historicalIconSize(d) {
+  return 10 + Math.min(Math.sqrt(d.fatalities || 0) * 2.2, 8);
+}
+
+export function gdeltIconSize(d) {
+  return 14 + Math.min(Math.log10((d.mentions || 1) + 1), 3) * 2.5;
+}
+
+export const INFRA_ICON_SIZE = 18;
+
+// ---------- cities ----------
+
+// Graduated symbols: population picks both the glyph and its size, so a
+// megacity and a 100k town are no longer the same anonymous dot. Thresholds
+// are the round numbers a reader already thinks in, and they split the ~6,200
+// cities we carry into usefully unequal bands (roughly 60 / 500 / 1,200 /
+// 3,800 at the time of writing) -- the rarest tier is the one that should
+// stand out. Ordered largest-first; cityTier() takes the first match.
+export const CITY_COLOR = "#ff6fb5";
+export const CITY_TIERS = [
+  { key: "mega", min: 5_000_000, label: "Megacity (5M+)", svg: SVG.city, size: 18 },
+  { key: "large", min: 1_000_000, label: "Large city (1M-5M)", svg: SVG.cityLarge, size: 14 },
+  { key: "medium", min: 250_000, label: "City (250k-1M)", svg: SVG.cityMedium, size: 11 },
+  { key: "town", min: 0, label: "Town (100k-250k)", svg: SVG.cityTown, size: 8 },
+];
+
+// Highest for the largest tier. Used as a placement priority, so a megacity
+// keeps its true position and the towns around it are the ones that yield.
+export function cityTierRank(tier) {
+  return CITY_TIERS.length - 1 - CITY_TIERS.indexOf(tier);
+}
+
+export function cityTier(population) {
+  const pop = Number.isFinite(population) ? population : 0;
+  return CITY_TIERS.find((t) => pop >= t.min) || CITY_TIERS[CITY_TIERS.length - 1];
+}
+
+export function decorateCity(city, { offset } = {}) {
+  const tier = cityTier(city.population);
+  return { tier, size: tier.size, icon: icon(tier.svg, CITY_COLOR, tier.size, 0, "city-marker", 1, "", offset) };
 }
 
 // ---------- ACLED / UCDP conflict events ----------
-
-function acledColor(d) {
-  const f = d.fatalities || 0;
-  if (f >= 10) return "#ff1a1a";
-  if (f >= 1) return "#ff8c3a";
-  return "#ffd11a";
-}
 
 // ACLED's own 6 top-level event_type categories, plus the UCDP violence-type
 // labels (see acled.py's UCDP_VIOLENCE_TYPE) and event_fusion.py's local
@@ -27,14 +81,24 @@ function acledColor(d) {
 // lookup covers every item this glyph function will ever see. Matched by
 // substring (lowercased) rather than exact string since UCDP/event_fusion
 // labels ("State-based armed conflict") don't spell ACLED's own wording.
+// Order matters: the first match wins, so the specific CAMEO labels
+// event_fusion now emits ("Aerial bombardment", "Mass killing") are listed
+// ahead of the broader taxonomy words they contain.
 const ACLED_EVENT_ICON = [
-  [/battle/i, SVG.battle],
-  [/explosion|remote violence/i, SVG.explosion],
-  [/violence against civilians|one-sided/i, SVG.violenceCivilians],
+  [/drone|uav|unmanned/i, SVG.droneStrike],
+  [/aerial bombardment|air ?strike|air raid/i, SVG.airstrike],
+  [/artillery|armou?r|shelling|mortar|rocket/i, SVG.artillery],
+  [/small-?arms|shooting|firefight|gun ?battle/i, SVG.smallArms],
+  [/bombing|\bied\b|explosion|remote violence|weapons of mass destruction/i, SVG.blast],
+  [/abduction|hostage|kidnap/i, SVG.abduction],
+  [/blockade|siege/i, SVG.siege],
+  [/occupation|territor/i, SVG.occupation],
+  [/mass killing|ethnic cleansing|mass expulsion|mass violence/i, SVG.civilianHarm],
+  [/violence against civilians|one-sided|assassination|killing|assault|torture/i, SVG.civilianHarm],
   [/riot/i, SVG.riot],
-  [/protest/i, SVG.protest],
-  [/strategic development/i, SVG.strategicDevelopment],
-  [/state-based|non-state/i, SVG.battle],
+  [/protest|demonstration/i, SVG.protest],
+  [/battle|conventional force|fighting|ceasefire|state-based|non-state|clash/i, SVG.clash],
+  [/strategic development/i, SVG.occupation],
 ];
 
 function acledIcon(d) {
@@ -42,7 +106,10 @@ function acledIcon(d) {
   for (const [re, svg] of ACLED_EVENT_ICON) {
     if (re.test(label)) return svg;
   }
-  return SVG.burst;
+  // Not a catch-all star: CAMEO's own 180 is "unconventional violence,
+  // unspecified", and everything that lands here is genuinely "violent, kind
+  // unknown". A hazard mark says that; a weapon glyph would be a guess.
+  return SVG.unknownViolence;
 }
 
 // ---------- fused conflict/violence events (ACLED + UCDP + GDELT) ----------
@@ -70,46 +137,159 @@ function goldsteinLabel(score) {
   return "low conflict intensity"; // 0..+10 still reached this classifier (quad_class 3/4), so never reads as "cooperative"
 }
 
-// Severity (0-100, computed server-side in event_fusion.py's _severity_for)
-// drives both size and colour, so a corroborated mass-casualty event is
-// unmistakably louder than a single-source skirmish. It supersedes the old
-// fatalities-only sizing, which rendered every GDELT event identically --
-// GDELT never reports casualties, so that was most of the layer.
-function severityBand(severity) {
-  if (severity >= 75) return { label: "Critical", color: "#ff1a1a" };
-  if (severity >= 55) return { label: "High", color: "#ff5c2a" };
-  if (severity >= 40) return { label: "Moderate", color: "#ff9500" };
-  return { label: "Low", color: "#ffd11a" };
+// How the two axes of corroboration read in prose. `multi_dataset` means two
+// independent datasets recorded the same incident; `multi_outlet` means one
+// dataset but several independent newsrooms. Collapsing them into a single
+// "corroborated by N sources" line (the old copy) conflated a count of
+// datasets with a count of outlets and could read "by 1 independent sources".
+function corroborationLine(d, sources) {
+  const outlets = d.outlet_count || 0;
+  const outletText = outlets > 1 ? `${outlets} independent outlets` : null;
+  if (d.corroboration === "multi_dataset") {
+    const datasets = `${sources.length} independent datasets`;
+    return outletText ? `Corroborated by ${datasets}, and carried by ${outletText}` : `Corroborated by ${datasets}`;
+  }
+  if (d.corroboration === "multi_outlet") return `Carried by ${outletText}`;
+  return outlets === 1 ? "Reported by a single outlet — uncorroborated" : "Uncorroborated";
 }
 
-export function decorateEvent(d) {
+// Which outlets, as opposed to how many. corroborationLine above owns the
+// count; this line answers the question that count immediately raises, and
+// which the popup used to leave unanswered for almost every event -- the old
+// copy could only name outlets on the allowlist (verified_outlets), so a story
+// carried by nine regional newsrooms listed none of them.
+//
+// The backend already caps and ranks the list (mastheads first -- see
+// backend/sources/outlets.py), so this only decides how many of them fit.
+// `outlets` is absent on records archived before it shipped, hence the
+// verified_outlets fallback: an old record replayed on the timeline still names
+// whatever it knew.
+const OUTLETS_SHOWN = 6;
+
+function outletLine(d) {
+  const names = (d.outlets && d.outlets.length ? d.outlets : d.verified_outlets) || [];
+  if (!names.length) return "";
+  const shown = names.slice(0, OUTLETS_SHOWN);
+  // Against the true total, not against the capped list -- "+31 more" is the
+  // honest gap between what is listed and what outlet_count already claims.
+  const more = Math.max((d.outlet_count || 0) - shown.length, 0);
+  return `<div class="meta outlets">Outlets: ${esc(shown.join(", "))}${more ? ` <span class="outlets-more">+${more} more</span>` : ""}</div>`;
+}
+
+// Casualties. The distinction between "reported as none" and "nobody counted"
+// is the whole point: GDELT never publishes a death toll, so a 0 on a
+// GDELT-derived pin was an assertion the data does not support, and it was
+// being printed on every one of them.
+function casualtyLine(d) {
+  if (d.fatalities_reported === false) return "Casualties: not reported by this source";
+  const n = d.fatalities ?? 0;
+  if (n === 0) return "Casualties: none reported";
+  return `Casualties: ${n} killed`;
+}
+
+// What kind of record this is and how much of it is inference. Blunt on
+// purpose: the summary sentence above it reads fluently, which is exactly why
+// the reader needs telling that a machine assembled it out of two actor codes
+// and an event code.
+function provenanceFor(d) {
+  if (d.source === "acled") return "Coded by ACLED from local and international reporting, and reviewed before release.";
+  if (d.source === "ucdp") return "Peer-reviewed record from UCDP's Georeferenced Event Dataset.";
+  if (d.source !== "gdelt") return null;
+  // "a single news article" would contradict the corroboration line directly
+  // above it when several outlets carried the story, so the wording follows the
+  // outlet count rather than being fixed.
+  const many = (d.outlet_count || 0) > 1;
+  return `Machine-coded by GDELT from ${many ? "news reporting" : "a single news article"}. The actors and the action are inferred from ${
+    many ? "that reporting's" : "that article's"
+  } wording, not taken from a verified report; the location is where ${many ? "it is" : "the article says it"} said to have happened.`;
+}
+
+export function decorateEvent(d, { offset } = {}) {
   const sources = (d.corroborated_by && d.corroborated_by.length ? d.corroborated_by : [d.source]).filter(Boolean);
   const sourceLine = sources.map((s) => SOURCE_LABEL[s] || s).join(", ");
   const severity = Number.isFinite(d.severity) ? d.severity : 0;
   const band = severityBand(severity);
-  const tooltip = `<b>${esc(d.event_type || "Event")}</b> &middot; ${esc(band.label)}<br/>${esc(d.country || d.notes || "")}${d.date ? " &middot; " + esc(d.date) : ""}<br/>Fatalities: ${d.fatalities ?? 0}`;
+  const imprecise = isImprecise(d);
+  const where = d.location || d.country || "";
+  const kind = d.event_type || "Conflict event";
+  // The lead is whatever actually says what happened: a real scraped headline
+  // first, then the sentence built from the coded fields, and only then the
+  // bare taxonomy label -- which is where this used to start, and which on its
+  // own ("Unconventional violence") tells a reader nothing.
+  const lead = (d.notes || "").trim() || (d.summary || "").trim() || kind;
+  const tooltip = `<b>${esc(kind)}</b> &middot; ${esc(band.label)}<br/>${esc(where)}${d.date ? " &middot; " + esc(d.date) : ""}` +
+    `${imprecise ? '<br/><i>approximate location</i>' : ""}<br/>${esc(casualtyLine(d))}`;
   const intensity = goldsteinLabel(d.goldstein);
   // event_fusion's classifier assigns the same label to both fields for
   // GDELT-derived events, so only show the subtype when it adds something.
   const subtype = d.sub_event_type && d.sub_event_type !== d.event_type ? d.sub_event_type : null;
+  const reasons = (d.severity_reasons || []).slice(0, 4);
+  const provenance = provenanceFor(d);
   const detail = `
-    <h3>${esc(d.event_type || "Conflict event")}${subtype ? " &mdash; " + esc(subtype) : ""}</h3>
-    <div class="meta">${esc(d.country || "")} &middot; ${esc(d.date || "")} &middot; Fatalities: ${d.fatalities ?? 0}</div>
-    <div class="meta">Severity: ${severity}/100 (${esc(band.label)})</div>
-    ${d.actor1 ? `<div>Actor 1: ${esc(d.actor1)}</div>` : ""}
-    ${d.actor2 ? `<div>Actor 2: ${esc(d.actor2)}</div>` : ""}
-    ${d.notes ? `<p>${esc(d.notes)}</p>` : `<p class="meta">No scraped headline for this incident yet -- shown from CAMEO actor/location data only.</p>`}
+    <h3>${esc(lead)}</h3>
+    <div class="meta">${esc(kind)}${subtype ? " &mdash; " + esc(subtype) : ""} &middot; ${esc(where)}${d.date ? " &middot; " + esc(d.date) : ""}</div>
+    <div class="meta">${esc(casualtyLine(d))}</div>
+    ${imprecise ? `<div class="meta imprecise-note">${esc(PRECISION_NOTE[d.geo_precision] || PRECISION_NOTE.unknown)}</div>` : ""}
+    <div class="sev-block">
+      <div class="sev-head">How much to trust this</div>
+      <div class="sev-bar"><span style="width:${Math.max(2, severity)}%;background:${band.color}"></span></div>
+      <div class="meta">Severity ${severity}/100 &mdash; ${esc(band.label)}</div>
+      <div class="meta">${esc(corroborationLine(d, sources))}</div>
+      ${reasons.length ? `<ul class="sev-reasons">${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+      ${outletLine(d)}
+      ${d.jamming_nearby ? `<div class="meta evidence">GPS interference detected within 60 km (${Math.round(d.jamming_nearby * 100)}% bad fixes)</div>` : ""}
+      ${d.thermal_nearby ? `<div class="meta evidence">Thermal anomaly detected within 10 km the same day</div>` : ""}
+    </div>
     ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
-    ${d.mentions ? `<div class="meta">Reported by ${d.mentions} GDELT mention${d.mentions === 1 ? "" : "s"}</div>` : ""}
-    ${intensity ? `<div class="meta">Goldstein intensity: ${esc(intensity)} (${d.goldstein})</div>` : ""}
-    <div class="meta">Source: ${esc(sourceLine)}${d.corroborated ? ` &middot; corroborated by ${sources.length} independent sources` : ""}</div>`;
-  // 13px at severity 0 up to ~31px at 100 -- a visible hierarchy at a glance
-  // without the largest pins swallowing their neighbours.
-  const size = 13 + (severity / 100) * 18;
+    ${!d.notes && d.summary ? '<p class="meta">Sentence above is assembled from the event’s coded fields, not quoted from an article.</p>' : ""}
+    ${provenance ? `<p class="meta">${esc(provenance)}</p>` : ""}
+    ${intensity ? `<div class="meta" title="CAMEO Goldstein scale, ${d.goldstein}">Coded intensity: ${esc(intensity)}</div>` : ""}
+    <div class="meta">Source: ${esc(sourceLine)}</div>`;
+  const size = eventIconSize(d);
   // Corroboration keeps its distinct blue: "confirmed by a second source" is
   // a different axis from "how bad", and both are worth seeing at once.
-  const color = d.corroborated ? "#3ac1ff" : band.color;
-  return { icon: icon(acledIcon(d), color, size), tooltip, detail };
+  const color = d.corroborated ? CORROBORATED_COLOR : band.color;
+  // Older events fade rather than disappear, so "what is happening now" is
+  // legible without hiding context.
+  const opacity = ageOpacity(ageHours(d));
+  return {
+    icon: icon(acledIcon(d), color, size, 0, "", opacity, imprecise ? "imprecise" : "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- UCDP verified historical record ----------
+//
+// A separate decorator rather than a flag on decorateEvent, because this data
+// answers a different question. UCDP's GED Candidate file is reviewed rather
+// than scraped, which makes it the most trustworthy conflict data available
+// without a paid key -- and it lags real time by a month or more, which makes
+// it the most misleading thing on the map if it is drawn like a live pin.
+//
+// So: hollow, desaturated, and every popup states the cut-off date. The layer
+// is off by default (see layers.js) and its own toggle says so too.
+const HISTORY_COLOR = "#8f9bb3";
+
+export function decorateHistoricalEvent(d, { offset } = {}) {
+  const asOf = d.as_of ? `Dataset current to ${d.as_of}` : "Historical record";
+  const lag = Number.isFinite(d.lag_days) ? ` (${d.lag_days} days behind today)` : "";
+  const tooltip = `<b>${esc(d.event_type || "Recorded event")}</b> &middot; verified record<br/>` +
+    `${esc(d.country || "")}${d.date ? " &middot; " + esc(d.date) : ""}<br/>Deaths: ${d.fatalities ?? 0}`;
+  const detail = `
+    <h3>${esc(d.event_type || "Recorded event")}</h3>
+    <div class="meta">${esc(d.country || "")} &middot; ${esc(d.date || "")} &middot; Deaths: ${d.fatalities ?? 0}</div>
+    <div class="meta history-note">${esc(asOf)}${esc(lag)} &mdash; reviewed record, not a live report.</div>
+    ${d.sub_event_type ? `<div>Conflict: ${esc(d.sub_event_type)}</div>` : ""}
+    ${d.actor1 ? `<div>Side A: ${esc(d.actor1)}</div>` : ""}
+    ${d.actor2 ? `<div>Side B: ${esc(d.actor2)}</div>` : ""}
+    ${d.notes ? `<p>${esc(d.notes)}</p>` : ""}
+    <div class="meta">Source: UCDP GED Candidate</div>`;
+  return {
+    icon: icon(SVG.recordMark, HISTORY_COLOR, historicalIconSize(d), 0, "", 0.75, "historical", offset),
+    tooltip,
+    detail,
+  };
 }
 
 // ---------- GDELT news ----------
@@ -121,7 +301,7 @@ export function decorateEvent(d) {
 // server-side guarantee was somehow violated (e.g. a stale cached
 // response), and a blank line is a far better failure mode than crashing
 // the whole map.
-export function decorateGdelt(d) {
+export function decorateGdelt(d, { offset } = {}) {
   const headline = (d.real_title || "").trim();
   const agency = d.source_name || null;
   const when = timeAgoFromDateAdded(d.date_added);
@@ -133,9 +313,8 @@ export function decorateGdelt(d) {
     <p class="news-sentence">${esc(headline)}</p>
     ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     <div class="meta">Source: ${agency ? esc(agency) : "GDELT"} &middot; ${esc(when)}${corroboratedNote}</div>`;
-  const size = 14 + Math.min(Math.log10((d.mentions || 1) + 1), 3) * 2.5;
   const color = d.corroborated ? "#3ac1ff" : "#ffd60a";
-  return { icon: icon(SVG.news, color, size), tooltip, detail };
+  return { icon: icon(SVG.news, color, gdeltIconSize(d), 0, "", 1, "", offset), tooltip, detail };
 }
 
 // ---------- AIS ships ----------
@@ -251,7 +430,7 @@ const MILITARY_ROLE_LABEL = {
 // AIRCRAFT_STYLE.military (SVG.planeMilitary) stays the fallback for
 // d.military===true/heuristic hits with no role guessed.
 export const MILITARY_ROLE_STYLE = {
-  fighter: { svg: SVG.planeMilitary, color: "#ff4d4d", size: 28, name: "plane-military-fighter" },
+  fighter: { svg: SVG.planeFighter, color: "#ff4d4d", size: 28, name: "plane-military-fighter" },
   bomber: { svg: SVG.planeBomber, color: "#ff4d4d", size: 30, name: "plane-military-bomber" },
   tanker: { svg: SVG.planeTanker, color: "#ff8c3a", size: 26, name: "plane-military-tanker" },
   awacs: { svg: SVG.planeAwacs, color: "#ffd60a", size: 28, name: "plane-military-awacs" },
@@ -294,7 +473,11 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
 
 // ---------- critical infrastructure ----------
 
-const INFRA_STYLE = {
+// Exported so the control panel's per-type sub-ticker draws its swatch from the
+// same object the map draws its pin from. It previously restated the colours by
+// hand and had drifted a whole row out of step -- every type except Refineries
+// advertised a colour that appears nowhere on the map.
+export const INFRA_STYLE = {
   refinery: { svg: SVG.refinery, color: "#ff9500", label: "Refinery" },
   pipeline: { svg: SVG.pipeline, color: "#ffb347", label: "Pipeline" },
   desalination: { svg: SVG.desalination, color: "#35c2ff", label: "Desalination plant" },
@@ -304,10 +487,15 @@ const INFRA_STYLE = {
   fab: { svg: SVG.fab, color: "#6fe3ff", label: "Semiconductor fab" },
 };
 
+// The colour the pipeline *routes* are drawn in (see renderPipelines), which is
+// a polyline rather than an INFRA_STYLE marker but still needs a legend entry
+// that matches.
+export const PIPELINE_ROUTE_COLOR = "#ffb347";
+
 // Military bases share the "infra" data shape/toggle but pick their icon
 // from `subtype` (air/naval/army/missile/joint/logistics/radar) instead of
 // `type` -- see backend/infrastructure.py's MILITARY_BASES.
-const MILITARY_SUBTYPE_STYLE = {
+export const MILITARY_SUBTYPE_STYLE = {
   air: { svg: SVG.airBase, color: "#ff4d4d", label: "Air base" },
   naval: { svg: SVG.ship, color: "#ffd60a", label: "Naval base" },
   army: { svg: SVG.armyBase, color: "#9be15d", label: "Army base" },
@@ -317,7 +505,7 @@ const MILITARY_SUBTYPE_STYLE = {
   radar: { svg: SVG.radarBase, color: "#6fe3ff", label: "Radar / early-warning site" },
 };
 
-export function decorateInfra(d, { hot, nearbyEvents } = {}) {
+export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
   const style = d.type === "military"
     ? MILITARY_SUBTYPE_STYLE[d.subtype] || MILITARY_SUBTYPE_STYLE.joint
     : INFRA_STYLE[d.type] || INFRA_STYLE.port;
@@ -335,7 +523,7 @@ export function decorateInfra(d, { hot, nearbyEvents } = {}) {
     ${activitySection}
     <p class="meta">Source: publicly documented location (open-source reference), approximate.</p>`;
   const cls = `infra-marker${hot ? " infra-hot" : ""}`;
-  return { icon: icon(style.svg, style.color, 18, 0, cls), tooltip, detail };
+  return { icon: icon(style.svg, style.color, INFRA_ICON_SIZE, 0, cls, 1, "", offset), tooltip, detail };
 }
 
 // ---------- satellites ----------
@@ -355,7 +543,7 @@ export function isMilitarySatellite(d) {
   return d.group === "military";
 }
 
-export function decorateSatellite(d) {
+export function decorateSatellite(d, { offset } = {}) {
   const style = SATELLITE_STYLE[d.group] || SATELLITE_FALLBACK;
   const military = isMilitarySatellite(d);
   const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${Math.round(d.alt_km || 0)} km`;
@@ -367,5 +555,5 @@ export function decorateSatellite(d) {
     <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- a real orbit, not a live telemetry confirmation.</p>
     <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
   const cls = `satellite-marker${military ? " satellite-military-marker" : ""}`;
-  return { icon: icon(style.svg, style.color, style.size, 0, cls), tooltip, detail };
+  return { icon: icon(style.svg, style.color, style.size, 0, cls, 1, "", offset), tooltip, detail };
 }

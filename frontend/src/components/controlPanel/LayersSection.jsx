@@ -1,9 +1,55 @@
 import { SVG } from "../../map/svgIcons";
-import { SATELLITE_STYLE } from "../../map/decorators";
+import {
+  SATELLITE_STYLE, INFRA_STYLE, MILITARY_SUBTYPE_STYLE, PIPELINE_ROUTE_COLOR,
+} from "../../map/decorators";
+import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import LayerIcon from "./LayerIcon";
+
+// What each conflict glyph means. Drawn from the same SVG table the map pins
+// use, so a shape can never appear in one place and not the other.
+const EVENT_TYPE_LEGEND = [
+  [SVG.airstrike, "Air strike"],
+  [SVG.artillery, "Artillery / shelling"],
+  [SVG.droneStrike, "Drone strike"],
+  [SVG.smallArms, "Small-arms fire"],
+  [SVG.blast, "Bombing / IED"],
+  [SVG.clash, "Armed clash"],
+  [SVG.civilianHarm, "Violence against civilians"],
+  [SVG.abduction, "Abduction / hostage-taking"],
+  [SVG.occupation, "Territory taken"],
+  [SVG.siege, "Siege / blockade"],
+  [SVG.riot, "Riot"],
+  [SVG.protest, "Protest"],
+  [SVG.unknownViolence, "Violence, kind unspecified"],
+];
+
+// Per-type sub-ticker rows. The swatch is the real glyph in the real colour,
+// read straight from INFRA_STYLE/MILITARY_SUBTYPE_STYLE, because the previous
+// hand-written colour squares had drifted a whole row out of step against the
+// map: only Refineries matched.
+// The spread comes first so the row's own `label` wins over INFRA_STYLE's
+// singular map-popup wording ("Refinery" vs "Oil Refineries").
+const INFRA_ROWS = [
+  // Military bases roll seven differently-coloured subtypes into one row, so
+  // this glyph deliberately inherits the panel's text colour rather than
+  // picking one subtype's colour and implying it stands for all of them. The
+  // per-subtype colours are in the legend directly below the list.
+  { key: "infraMilitary", label: "Military Bases", svg: SVG.armyBase, color: "currentColor" },
+  { ...INFRA_STYLE.refinery, key: "infraRefinery", label: "Oil Refineries" },
+  { ...INFRA_STYLE.lng_terminal, key: "infraLng", label: "LNG Terminals" },
+  { ...INFRA_STYLE.port, key: "infraPort", label: "Ports & Naval Terminals" },
+  { ...INFRA_STYLE.desalination, key: "infraDesalination", label: "Desalination Plants" },
+  { ...INFRA_STYLE.nuclear, key: "infraNuclear", label: "Nuclear Facilities" },
+  { ...INFRA_STYLE.fab, key: "infraFab", label: "Semiconductor Fabs" },
+  { ...INFRA_STYLE.pipeline, key: "infraPipelineNode", label: "Pipeline Nodes" },
+  { key: "pipelineRoutes", label: "Pipeline Routes", svg: SVG.pipeline, color: PIPELINE_ROUTE_COLOR },
+];
+
+const MILITARY_SUBTYPE_ORDER = ["air", "naval", "army", "missile", "joint", "logistics", "radar"];
 
 export default function LayersSection({
   counts, zoomNotes, layerVisibility, onToggleLayer, infraFilterText, onInfraFilterChange,
+  eventFilter, onEventFilterChange, historyAsOf,
 }) {
   return (
     <>
@@ -16,7 +62,7 @@ export default function LayersSection({
           checked={layerVisibility.events}
           onChange={(e) => onToggleLayer("events", e.target.checked)}
         />
-        <LayerIcon svg={SVG.burst} color="#ff3b30" /> Conflict &amp; Violence (ACLED + UCDP + GDELT)
+        <LayerIcon svg={SVG.clash} color="#ff3b30" /> Conflict &amp; Violence (ACLED + UCDP + GDELT)
         <span className="count">{counts.events} ({counts.eventsTotal})</span>
       </label>
       <div className="sublegend">
@@ -24,17 +70,81 @@ export default function LayersSection({
         into one pin per real incident. <b>Violence only</b> &mdash; armed clashes, assaults and mass
         violence; verbal and diplomatic conflict (accusations, demands, protests) is excluded here and
         appears under News instead. Pin size and colour follow severity; blue means independently
-        corroborated by 2+ sources. Only the last 3 days show on the map.
+        corroborated. Pins fade as they age. Only the last 3 days show on the map.
       </div>
       <div className="sublegend">
-        <span><LayerIcon svg={SVG.burst} color="#ff1a1a" />Critical</span>
-        <span><LayerIcon svg={SVG.burst} color="#ff5c2a" />High</span>
-        <span><LayerIcon svg={SVG.burst} color="#ff9500" />Moderate</span>
-        <span><LayerIcon svg={SVG.burst} color="#ffd11a" />Low</span>
-        <span><LayerIcon svg={SVG.burst} color="#3ac1ff" />Corroborated</span>
+        {SEVERITY_BANDS.map((band) => (
+          <span key={band.key}><LayerIcon svg={SVG.clash} color={band.color} />{band.label}</span>
+        ))}
+        <span><LayerIcon svg={SVG.clash} color={CORROBORATED_COLOR} />Corroborated</span>
       </div>
+      <div className="sublegend">Colour is severity; the shape is what happened.</div>
+      <div className="sublegend event-type-legend">
+        {EVENT_TYPE_LEGEND.map(([svg, label]) => (
+          <span key={label}><LayerIcon svg={svg} color="#ff9500" />{label}</span>
+        ))}
+      </div>
+      <div className="sublegend">
+        <span className="imprecise-swatch" /> Dashed ring &mdash; approximate location only
+      </div>
+
+      <div className="event-filters">
+        <label>
+          Window
+          <select
+            value={eventFilter.maxAgeHours ?? "all"}
+            onChange={(e) => onEventFilterChange({
+              maxAgeHours: e.target.value === "all" ? null : Number(e.target.value),
+            })}
+          >
+            <option value="6">Last 6 hours</option>
+            <option value="24">Last 24 hours</option>
+            <option value="72">Last 72 hours</option>
+            <option value="all">All available</option>
+          </select>
+        </label>
+        <label>
+          Minimum severity
+          <select
+            value={eventFilter.minSeverity}
+            onChange={(e) => onEventFilterChange({ minSeverity: Number(e.target.value) })}
+          >
+            <option value="0">Any</option>
+            <option value="40">Moderate and above</option>
+            <option value="55">High and above</option>
+            <option value="75">Critical only</option>
+          </select>
+        </label>
+        <label className="event-filter-check">
+          <input
+            type="checkbox"
+            checked={eventFilter.showImprecise}
+            onChange={(e) => onEventFilterChange({ showImprecise: e.target.checked })}
+          />
+          Show approximate locations
+        </label>
+      </div>
+
       <div id="conflictZoomNote" className={`sublegend${zoomNotes.events ? " visible" : ""}`}>
         Zoom in to show conflict events
+      </div>
+
+      <label className="layer-row" data-layer="conflictHistory">
+        <input
+          type="checkbox"
+          checked={layerVisibility.conflictHistory}
+          onChange={(e) => onToggleLayer("conflictHistory", e.target.checked)}
+        />
+        <LayerIcon svg={SVG.recordMark} color="#8f9bb3" /> Verified record (UCDP)
+        <span className="count">{counts.conflictHistory} ({counts.conflictHistoryTotal})</span>
+      </label>
+      <div className="sublegend">
+        UCDP GED Candidate &mdash; peer-reviewed conflict deaths, the most rigorous dataset available
+        without a paid key. <b>Not live:</b> it lags real time by a month or more{historyAsOf ? `, currently complete to ${historyAsOf}` : ""}.
+        Drawn hollow and grey so it can never be mistaken for a current report. Off by default.
+      </div>
+      <div id="historyZoomNote" className={`sublegend${zoomNotes.conflictHistory ? " visible" : ""}`}>
+        Zoom in to show the verified record
       </div>
 
       <label className="layer-row" data-layer="gdelt">
@@ -110,7 +220,7 @@ export default function LayersSection({
       <div className="sublegend">Shown at every zoom.</div>
       <div className="sublegend">
         <span>
-          <LayerIcon svg={SVG.planeMilitary} color="#ff4d4d" />Fighter
+          <LayerIcon svg={SVG.planeFighter} color="#ff4d4d" />Fighter
         </span>
         <span>
           <LayerIcon svg={SVG.planeBomber} color="#ff4d4d" />Bomber
@@ -191,42 +301,20 @@ export default function LayersSection({
         onChange={(e) => onInfraFilterChange(e.target.value)}
       />
       <div className="subticker-list">
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#ff4d4d" }} /> Military Bases
-          <span className="count">{counts.infraMilitary} ({counts.infraMilitaryTotal})</span>
-        </div>
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#ff9500" }} /> Oil Refineries
-          <span className="count">{counts.infraRefinery} ({counts.infraRefineryTotal})</span>
-        </div>
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#ffb347" }} /> LNG Terminals
-          <span className="count">{counts.infraLng} ({counts.infraLngTotal})</span>
-        </div>
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#35c2ff" }} /> Ports &amp; Naval Terminals
-          <span className="count">{counts.infraPort} ({counts.infraPortTotal})</span>
-        </div>
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#6fe3ff" }} /> Desalination Plants
-          <span className="count">{counts.infraDesalination} ({counts.infraDesalinationTotal})</span>
-        </div>
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#9be15d" }} /> Nuclear Facilities
-          <span className="count">{counts.infraNuclear} ({counts.infraNuclearTotal})</span>
-        </div>
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#d8b9ff" }} /> Semiconductor Fabs
-          <span className="count">{counts.infraFab} ({counts.infraFabTotal})</span>
-        </div>
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#8aa0ad" }} /> Pipeline Nodes
-          <span className="count">{counts.infraPipelineNode} ({counts.infraPipelineNodeTotal})</span>
-        </div>
-        <div className="subticker-row">
-          <span className="swatch" style={{ background: "#8aa0ad" }} /> Pipeline Routes
-          <span className="count">{counts.pipelineRoutes} ({counts.pipelineRoutesTotal})</span>
-        </div>
+        {INFRA_ROWS.map((row) => (
+          <div className="subticker-row" key={row.key}>
+            <LayerIcon svg={row.svg} color={row.color} /> {row.label}
+            <span className="count">{counts[row.key]} ({counts[`${row.key}Total`]})</span>
+          </div>
+        ))}
+      </div>
+      <div className="sublegend">
+        {MILITARY_SUBTYPE_ORDER.map((subtype) => (
+          <span key={subtype}>
+            <LayerIcon svg={MILITARY_SUBTYPE_STYLE[subtype].svg} color={MILITARY_SUBTYPE_STYLE[subtype].color} />
+            {MILITARY_SUBTYPE_STYLE[subtype].label}
+          </span>
+        ))}
       </div>
 
       <label className="layer-row" data-layer="firms">

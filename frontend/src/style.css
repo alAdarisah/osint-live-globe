@@ -214,12 +214,36 @@ html, body {
 }
 
 .entity-icon-wrap {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   filter: drop-shadow(0 0 2px var(--shadow-color)) drop-shadow(0 0 1px var(--shadow-color));
 }
 .entity-icon-wrap svg { display: block; overflow: visible; }
+
+/* Declutter (see declutter.js/buildDivIcon): the wrapper is nudged off the
+   marker's real point so overlapping icons stay individually clickable, while
+   the marker itself never moves. Leaflet positions the *outer* element at the
+   true point, so it has to stop being a hit target -- otherwise every nudged
+   icon left a second, invisible click target where nothing is drawn. The
+   wrapper, which is what actually moved, takes the events instead. */
+.leaflet-marker-icon.entity-marker { pointer-events: none; }
+.leaflet-marker-icon.entity-marker .entity-icon-wrap { pointer-events: auto; }
+
+/* Leader back to the true position, drawn whenever the nudge is big enough to
+   be misread as the thing's actual location. Anchored at the glyph's centre
+   and rotated to point home. */
+.pin-leader {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  height: 1px;
+  transform-origin: 0 50%;
+  background: currentColor;
+  opacity: 0.4;
+  pointer-events: none;
+}
 
 #titleBar {
   position: absolute;
@@ -471,6 +495,12 @@ html, body {
 .sublegend span { display: inline-flex; align-items: center; gap: 4px; }
 .sublegend .layer-icon { width: 11px; height: 11px; }
 .sublegend.wind-unavailable { color: #ff8c3a; }
+/* Thirteen entries, so give them room to breathe and a slightly larger glyph
+   than the inline legends -- these shapes are the map's whole vocabulary for
+   what kind of violence an event was, and a squinting-size swatch defeats the
+   point of having distinct silhouettes at all. */
+.event-type-legend { gap: 5px 12px; }
+.event-type-legend .layer-icon { width: 14px; height: 14px; }
 
 .subticker-list {
   display: flex;
@@ -486,16 +516,16 @@ html, body {
   color: var(--text-secondary);
   padding: 2px 0;
 }
-/* The base .swatch rule was dropped when the layer tickers moved from colour
-   dots to real glyphs (.layer-icon). The infra sub-tickers still use swatches
-   -- a 7px glyph would be unreadable, and a colour dot is the right weight
-   for a nested row -- so the base shape lives here now. Without it these
-   inherit no border-radius or flex behaviour and render as squares that
-   shrink under flex pressure. */
-.subticker-row .swatch {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+/* The infra sub-tickers used to be plain colour dots whose hex values were
+   written out by hand in LayersSection.jsx -- and they had drifted a whole row
+   out of step with the map, so every type but Refineries advertised a colour
+   that appeared nowhere on it. They are real glyphs now, read from the same
+   INFRA_STYLE object the pins are built from, which makes that class of bug
+   impossible rather than merely fixed. 12px is the smallest size at which the
+   detail in these glyphs still resolves. */
+.subticker-row .layer-icon {
+  width: 12px;
+  height: 12px;
   flex: none;
 }
 .subticker-row .count {
@@ -601,21 +631,25 @@ html, body {
   fill: var(--country-fill);
   stroke: rgba(var(--accent-rgb), 0.45);
   stroke-width: 1;
-  cursor: pointer;
   transition: fill 0.15s ease;
-  /* Browsers only hit-test a "painted" (nonzero-opacity) area by default
-     (pointer-events: visiblePainted) -- with the boundary now invisible
-     until hover (see createCountriesLayer in layers.js, fillOpacity: 0),
-     that left the whole shape unclickable. `all` decouples hit-testing
-     from paint so click/hover still fire regardless of current opacity.
-     !important because leaflet.css's own `.leaflet-interactive` rule
-     (element+class, higher specificity than this single class) sets
-     pointer-events: auto and would otherwise win regardless of source
-     order. */
-  pointer-events: all !important;
+  /* Paint only -- never an event target. Hover and click are hit-tested
+     against the geometry from the map's own mousemove/click (see
+     map/countryHitTest.js). The previous `pointer-events: all` arrangement
+     depended on the countries pane staying above every other interactive
+     overlay, which it does not: Leaflet's L.Canvas renderer (FIRMS/jamming
+     click targets) creates a full-viewport interactive canvas in overlayPane
+     the first time a point renders, and from then on it covered every country
+     and swallowed the clicks. `!important` beats leaflet.css's own
+     `.leaflet-interactive` rule, which is more specific than this one. */
+  pointer-events: none !important;
 }
-.country-shape:hover, .country-shape.hovered {
+/* Applied by setHoveredCountry in createMapController.js. There is no
+   `:hover` counterpart any more -- the shapes are not event targets, so the
+   browser would never match it. */
+.country-shape.hovered {
   fill: var(--country-hover-fill);
+  stroke: #aef0ff;
+  stroke-width: 2;
 }
 
 /* A country whose current ACLED activity crosses the war threshold (see
@@ -641,14 +675,10 @@ html, body {
   stroke-width: 1.6;
 }
 
-.city-dot {
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  background: #ff6fb5;
-  border: 1px solid rgba(0,0,0,0.5);
-  box-shadow: 0 0 3px rgba(0,0,0,0.8);
-}
+/* Cities are SVG glyphs sized by population tier (decorators.js's CITY_TIERS),
+   so they pick up .entity-icon-wrap's shared halo like every other marker --
+   the hand-rolled dot with its own border/box-shadow is gone. */
+.city-marker { cursor: pointer; }
 
 .popup-events { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(var(--accent-rgb), 0.2); }
 .popup-events .event-row { margin-bottom: 5px; font-size: 11.5px; }
@@ -1315,10 +1345,121 @@ html, body {
   min-width: 38px;
 }
 
-.notable-chip.critical { background: #ff1a1a; }
-.notable-chip.high { background: #ff5c2a; }
-.notable-chip.moderate { background: #ff9500; }
-.notable-chip.low { background: #ffd11a; }
+/* Chip background is set inline from map/severity.js's SEVERITY_BANDS -- CSS
+   cannot import JS, so this is the only way one definition can be
+   authoritative. This rule keeps layout only. */
+
+/* Approximate locations: a dashed ring reads as "somewhere in this area"
+   rather than "at this point". Applied to the icon's wrapper, which
+   svgIcons.js emits inside the icon HTML (not via className) so the
+   marker-repaint diff in createMapController actually sees it change. */
+.entity-icon-wrap.imprecise {
+  position: relative;
+}
+.entity-icon-wrap.imprecise::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border: 1px dashed currentColor;
+  border-radius: 50%;
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+/* UCDP's reviewed record: visually quieter than anything live, so a
+   month-old verified event can never be read as something happening now. */
+.entity-icon-wrap.historical {
+  filter: saturate(0.35);
+}
+
+.popup .meta.history-note { color: #8f9bb3; }
+
+.imprecise-swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 5px;
+  border: 1px dashed var(--text-dim);
+  border-radius: 50%;
+  vertical-align: -1px;
+}
+
+.popup .meta.imprecise-note { color: #ffb454; }
+.popup .meta.evidence { color: #7fd1ff; }
+
+/* "How much to trust this" -- the confidence half of a conflict popup, boxed
+   off from the description of the event itself so the two are not read as one
+   continuous set of facts. A bare "Severity: 24/100" said nothing about
+   whether 24 meant "minor incident" or "we barely know anything about this";
+   the bar plus the reasons underneath say which. */
+.leaflet-popup-content .sev-block {
+  margin: 8px 0;
+  padding: 7px 8px;
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.12));
+  border-radius: 4px;
+}
+.leaflet-popup-content .sev-head {
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+.leaflet-popup-content .sev-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.25);
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+.leaflet-popup-content .sev-bar span { display: block; height: 100%; }
+.leaflet-popup-content .sev-block .meta { margin-bottom: 3px; }
+.leaflet-popup-content .sev-reasons {
+  margin: 4px 0 0;
+  padding-left: 15px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.leaflet-popup-content .sev-reasons li { margin-bottom: 1px; }
+/* Who reported the event (decorators.js's outletLine). Up to six names on one
+   line, so it wraps rather than forcing the popup wider than its 320px max, and
+   the overflow count is dimmed -- it's a footnote to the names, not a name. */
+.leaflet-popup-content .meta.outlets {
+  margin-top: 4px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.leaflet-popup-content .outlets-more { color: var(--text-dim); }
+
+/* Conflict-layer filters. Same visual register as the infra name filter
+   directly below them in the panel. */
+.event-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+.event-filters label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.event-filters select {
+  flex: 1 1 auto;
+  max-width: 160px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+  padding: 3px 5px;
+  font-size: 11px;
+}
+.event-filters .event-filter-check {
+  justify-content: flex-start;
+}
 
 .news-empty {
   padding: 10px 0;
