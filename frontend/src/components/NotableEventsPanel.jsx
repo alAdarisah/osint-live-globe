@@ -5,9 +5,10 @@
 // useOsintData.js's eventsRaw), same as NewsBroadcastPanel does for GDELT:
 // no extra polling loop, and the list can never disagree with what the map
 // is drawing, because it's the same array.
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import LocateIcon from "./icons/LocateIcon";
-import { severityBand, isImprecise } from "../map/severity";
+import { severityBand, severityColor, isImprecise } from "../map/severity";
+import { useDraggablePanel } from "../hooks/useDraggablePanel";
 
 const MAX_ITEMS = 6;
 
@@ -70,6 +71,14 @@ export default function NotableEventsPanel({ eventsRaw, escalation, onLocate, is
   // where it would otherwise cover most of the map.
   const [collapsed, setCollapsed] = useState(() => !!isMobile);
 
+  // Same header-is-the-handle arrangement as the news ticker. Dragging is off
+  // on mobile, where this panel is a full-width overlay with nowhere to go.
+  const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
+  const { panelRef, style, handleProps } = useDraggablePanel("notableEvents", {
+    onClick: toggleCollapsed,
+    enabled: !isMobile,
+  });
+
   const items = useMemo(() => {
     const scored = [];
     for (const e of eventsRaw || []) {
@@ -93,18 +102,29 @@ export default function NotableEventsPanel({ eventsRaw, escalation, onLocate, is
   if (!items.length && !zones.length) return null;
 
   return (
-    <aside id="notableEvents" className={collapsed ? "collapsed" : ""}>
-      <button
-        type="button"
-        className="notable-header"
-        onClick={() => setCollapsed((c) => !c)}
+    <aside id="notableEvents" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+      {/* A div rather than the <button> it used to be: a drag handle that is
+          also a button gets a click fired at the end of every drag, and the
+          expanded/collapsed state now rides on the div's own ARIA instead. */}
+      <div
+        {...handleProps}
+        className={`notable-header ${handleProps.className || ""}`}
+        role="button"
+        tabIndex={0}
         aria-expanded={!collapsed}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggleCollapsed();
+          }
+        }}
+        onClick={isMobile ? toggleCollapsed : undefined}
       >
         <span className="notable-pulse" />
         <span className="notable-title">NOTABLE ACTIVITY</span>
         <span className="notable-count">{zones.length ? `${zones.length}↑ ${items.length}` : items.length}</span>
         <span className="notable-caret" aria-hidden="true">&#9662;</span>
-      </button>
+      </div>
       <div className="notable-list">
         {zones.length > 0 && (
           <>
@@ -145,7 +165,7 @@ function NotableItem({ event, onLocate }) {
       <div className="notable-item-row">
         <span
           className="notable-chip"
-          style={{ background: band.color }}
+          style={{ background: severityColor(band) }}
           title={`Severity ${severity}/100`}
         >
           {band.label.toUpperCase()}

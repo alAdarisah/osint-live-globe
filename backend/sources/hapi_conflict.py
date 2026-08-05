@@ -20,14 +20,14 @@ It is emphatically NOT live -- every record carries the month it covers, and
 nothing here should ever be rendered as a current event.
 
 `app_identifier` is a courtesy string HAPI asks callers to send (base64 of
-"name:email"), not an issued credential. It is read from the environment so a
-deployment identifies itself rather than this repo hard-coding an address.
+"name:email"), not an issued credential. It, and the retrying page fetch below,
+now live in backend/sources/hapi.py -- humanitarian.py reads the same API and
+needed both, and a poller importing a sibling poller for a helper is the
+coupling outlets.py and cameo.py were each pulled out to avoid.
 """
 
 import asyncio
-import base64
 import logging
-import os
 import time
 from datetime import datetime, timezone
 
@@ -35,15 +35,15 @@ import httpx
 
 from backend import storage
 from backend.cache import registry
+from backend.sources import hapi
 
 log = logging.getLogger("osint-globe.hapi_conflict")
 
 BASE_URL = "https://hapi.humdata.org/api/v2/coordination-context/conflict-events"
 POLL_INTERVAL = 6 * 3600  # the underlying data changes monthly; this only needs to notice within a day
 FAILURE_RETRY_INTERVAL = 300
-PAGE_SIZE = 10000  # HAPI's maximum
+PAGE_SIZE = hapi.PAGE_SIZE
 MAX_PAGES = 10     # Colombia needs 7 over a 24-month window; this is the safety valve above that
-RETRIES = 3        # a free public API will occasionally 429 under concurrent paging
 MONTHS_KEPT = 24
 
 # ACLED's own event-type buckets as HAPI exposes them.
@@ -60,60 +60,16 @@ COUNTRIES = (
 )
 
 
-def _app_identifier() -> str | None:
-    """HAPI's caller identifier: base64 of "appname:email".
-
-    Not a credential -- nothing is issued or approved -- but HAPI does validate
-    that the email is well-formed and rejects placeholders with
-    403 "Invalid app identifier", so there is no usable built-in default. Set
-    HAPI_CONTACT_EMAIL in .env (gitignored) rather than committing an address.
-    """
-    raw = os.getenv("HAPI_APP_IDENTIFIER", "").strip()
-    if raw:
-        return raw
-    contact = os.getenv("HAPI_CONTACT_EMAIL", "").strip()
-    if not contact:
-        return None
-    return base64.b64encode(f"osint-live-globe:{contact}".encode()).decode()
-
-
-def _month_key(value: str | None) -> str | None:
-    """"2026-07-01T00:00:00" -> "2026-07"."""
-    if not value:
-        return None
-    return value[:7] or None
+# Bound to the private names this module has always used, so its call sites are
+# unchanged (see backend/sources/hapi.py for both).
+_app_identifier = hapi.app_identifier
+_month_key = hapi.month_key
 
 
 def _months_ago(months: int) -> str:
     now = datetime.now(timezone.utc)
     total = now.year * 12 + (now.month - 1) - months
     return f"{total // 12:04d}-{total % 12 + 1:02d}"
-
-
-async def _get_page(client: httpx.AsyncClient, params: dict, code: str) -> list[dict]:
-    """One page, retrying the failures that are worth retrying.
-
-    Forty countries paged concurrently will occasionally draw a 429 or a
-    transient 5xx from a free public API, and without a retry those countries
-    silently vanish from the layer for six hours until the next poll -- which
-    is exactly the sort of quiet partial failure that makes a map lie.
-    """
-    delay = 2.0
-    for attempt in range(RETRIES):
-        try:
-            resp = await client.get(BASE_URL, params=params)
-            if resp.status_code in (429, 500, 502, 503, 504) and attempt < RETRIES - 1:
-                await asyncio.sleep(delay)
-                delay *= 2
-                continue
-            resp.raise_for_status()
-            return (resp.json() or {}).get("data") or []
-        except (httpx.TimeoutException, httpx.TransportError):
-            if attempt == RETRIES - 1:
-                raise
-            await asyncio.sleep(delay)
-            delay *= 2
-    return []
 
 
 async def _fetch_country(client: httpx.AsyncClient, code: str, identifier: str) -> list[dict]:
@@ -131,7 +87,7 @@ async def _fetch_country(client: httpx.AsyncClient, code: str, identifier: str) 
 
     rows: list[dict] = []
     for page in range(MAX_PAGES):
-        chunk = await _get_page(client, {**base_params, "offset": page * PAGE_SIZE}, code)
+        chunk = await hapi.get_page(client, BASE_URL, {**base_params, "offset": page * PAGE_SIZE})
         rows.extend(chunk)
         # A short page means the end. Sudan alone exceeds one page even over a
         # 24-month window, so paging is not optional.

@@ -479,6 +479,10 @@ const EntityWebglLayer = L.Layer.extend({
 
       const style = opts.style(item);
       this._applyStyle(entry, style);
+      // Per-layer opacity from Admin Mode (see map/iconTheme.js's themedStyle).
+      // Set on the container rather than baked into the texture, so turning a
+      // layer down does not mint a second texture for every glyph in it.
+      entry.container.alpha = Number.isFinite(style.opacity) ? style.opacity : 1;
       const heading = opts.heading(item);
       entry.sprite.rotation = Number.isFinite(heading) ? (heading * Math.PI) / 180 : entry.sprite.rotation;
 

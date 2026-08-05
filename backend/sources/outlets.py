@@ -15,6 +15,8 @@ that names eight outlets and says "+31 more" tells the reader everything a full
 list would.
 """
 
+import re
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 # GDELT's crawler indexes anything -- wire services, national papers, but also
@@ -121,6 +123,90 @@ def is_non_news_url(url: str | None) -> bool:
         return False
     segments = [s for s in path.lower().split("/") if s]
     return any(s in NON_NEWS_PATH_SEGMENTS for s in segments[:-1])
+
+
+# --- when does the URL say it was published -------------------------------
+#
+# The section filter above catches a piece a publisher *labelled* as
+# commentary. It cannot catch an ordinary news report from 2019 that GDELT
+# re-crawled today -- and GDELT stamps those with today's SQLDATE, so the
+# report-lag gate cannot see them either.
+#
+# Most newsrooms put the publication date in the URL. That is a claim the
+# publisher made at publication time, independent of anything GDELT did to the
+# row afterwards, which makes it the only genuinely independent age signal
+# available on a row with no scraped article text.
+#
+# This function reads the date and nothing else. Deciding what counts as too
+# old belongs to gdelt.py, which owns GDELT's date semantics -- this module
+# owns URL shape.
+_URL_DATE_PATH_RE = re.compile(r"/((?:19|20)\d{2})/(\d{1,2})(?:/|$)")
+_URL_DATE_ISO_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})-(\d{2})-(\d{2})(?!\d)")
+
+# Below this, a four-digit number in a URL is far more likely to be an id or a
+# section than a publication year. Nothing this pipeline shows is from the
+# 1990s anyway; the point of the floor is to make a false read impossible
+# rather than merely unlikely.
+_MIN_URL_YEAR = 1990
+
+
+def url_path_date(url: str | None) -> tuple[int, int] | None:
+    """(year, month) the URL claims it was published, or None.
+
+    Two shapes, because both are common and one of them is in this repo's own
+    test fixtures:
+
+        /2019/07/some-story          path segments
+        /world/strike-on-kherson-2026-08-05/   ISO date inside the slug
+
+    Note the second means is_non_news_url's "never match the final segment"
+    rule does NOT transfer here: the date very often *is* in the slug, which is
+    exactly where a section word would have been a false positive.
+
+    Returns None rather than guessing whenever the match is not unambiguous --
+    a caller that gets None simply learns nothing and applies no penalty, which
+    is the correct behaviour for the majority of URLs that carry no date.
+    """
+    if not url:
+        return None
+    try:
+        path = urlparse(url).path
+    except ValueError:
+        return None
+
+    # ISO first: it carries a day as well, so it is the stronger signal, and a
+    # path like /2026/08/05/ would otherwise be read by the looser pattern.
+    match = _URL_DATE_ISO_RE.search(path)
+    if not match:
+        match = _URL_DATE_PATH_RE.search(path)
+    if not match:
+        return None
+
+    year, month = int(match.group(1)), int(match.group(2))
+    if month < 1 or month > 12:
+        return None  # "/news/13/" is a section number, not a month
+    now = datetime.now(timezone.utc)
+    # Next year is allowed: a magazine dates its September issue in August, and
+    # a caller must never read a *future* date as evidence of staleness.
+    if year < _MIN_URL_YEAR or year > now.year + 1:
+        return None
+    return year, month
+
+
+def url_age_months(url: str | None, reference: datetime | None = None) -> int | None:
+    """How many months before `reference` the URL claims it was published.
+
+    None when the URL carries no readable date. Negative values are clamped to
+    0: a URL dated in the future is not evidence of anything, least of all
+    staleness, and letting it go negative would make a caller's "> threshold"
+    test accidentally true if the sign were ever flipped.
+    """
+    parsed = url_path_date(url)
+    if not parsed:
+        return None
+    year, month = parsed
+    reference = reference or datetime.now(timezone.utc)
+    return max(0, (reference.year - year) * 12 + (reference.month - month))
 
 
 def _known_domain(host: str) -> str | None:

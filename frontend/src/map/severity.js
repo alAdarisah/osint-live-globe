@@ -1,4 +1,5 @@
 import { parseGdeltDateAdded } from "../utils/format";
+import { paletteColor } from "./iconTheme";
 
 // The one severity scale.
 //
@@ -10,11 +11,16 @@ import { parseGdeltDateAdded } from "../utils/format";
 //
 // Scores come from backend/sources/event_fusion.py's _severity_for.
 
+// `color` is the shipped default; `token` is the palette entry Admin Mode can
+// override (see map/iconTheme.js). Always read a band's colour through
+// severityColor() below rather than off `.color` -- reading the field directly
+// is what would put the map's pins and a panel's chips back out of step, which
+// is the exact drift this module was created to end.
 export const SEVERITY_BANDS = [
-  { min: 75, key: "critical", label: "Critical", color: "#ff1a1a" },
-  { min: 55, key: "high", label: "High", color: "#ff5c2a" },
-  { min: 40, key: "moderate", label: "Moderate", color: "#ff9500" },
-  { min: 0, key: "low", label: "Low", color: "#ffd11a" },
+  { min: 75, key: "critical", label: "Critical", color: "#ff1a1a", token: "severity.critical" },
+  { min: 55, key: "high", label: "High", color: "#ff5c2a", token: "severity.high" },
+  { min: 40, key: "moderate", label: "Moderate", color: "#ff9500", token: "severity.moderate" },
+  { min: 0, key: "low", label: "Low", color: "#ffd11a", token: "severity.low" },
 ];
 
 // Corroboration keeps its own colour: "independently confirmed" is a different
@@ -24,6 +30,16 @@ export const CORROBORATED_COLOR = "#3ac1ff";
 export function severityBand(severity) {
   const score = Number.isFinite(severity) ? severity : 0;
   return SEVERITY_BANDS.find((b) => score >= b.min) || SEVERITY_BANDS[SEVERITY_BANDS.length - 1];
+}
+
+/** A band's current colour, honouring any Admin Mode override. */
+export function severityColor(band) {
+  return paletteColor(band?.token, band?.color);
+}
+
+/** The corroboration blue, honouring any Admin Mode override. */
+export function corroboratedColor() {
+  return paletteColor("event.corroborated", CORROBORATED_COLOR);
 }
 
 // How precisely an event is placed, from the backend's geo_precision field.
@@ -40,6 +56,13 @@ export const PRECISION_NOTE = {
     "Geocoded only to the country centroid — the true location within this country is unknown.",
   region: "Geocoded to a province or state, not a specific place.",
   unknown: "No usable geocode; position is approximate.",
+  // Officials only. Deliberately absent from IMPRECISE_PRECISIONS above: that
+  // set drives conflict-icon shrinking and the "hide imprecise" filter, neither
+  // of which applies to a layer that has no severity. The note still belongs
+  // here so there is one place a precision value is explained to a reader.
+  // Interpolated with the capital's name by decorateOfficials.
+  capital:
+    "Reported only at country level — shown at the capital, not where the act took place.",
 };
 
 const HOUR_MS = 3600 * 1000;

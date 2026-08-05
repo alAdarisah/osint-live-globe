@@ -17,11 +17,73 @@ REFRESH_INTERVAL = 6 * 3600  # cheap to refetch; city populations don't change f
 FAILURE_RETRY_INTERVAL = 60  # scaled by consecutive failures, capped at REFRESH_INTERVAL
 
 # Column indices in GeoNames' cities15000.txt (tab-separated, no header).
+# Read by position out of a headerless file, so a wrong index does not raise --
+# it silently returns a neighbouring field. Pinned by test_cities.py.
+COL_GEONAME_ID = 0
 COL_NAME = 1
 COL_LAT = 4
 COL_LON = 5
+COL_FEATURE_CODE = 7
 COL_COUNTRY_CODE = 8
 COL_POPULATION = 14
+
+# GeoNames' feature code for "capital of a political entity". This column was
+# in the file all along and simply never read, which is why the map had no
+# concept of a capital and the diplomacy layer had nowhere to anchor to.
+#
+# PPLC only. PPLCH is a *historical* capital and would put a capital pin on
+# Kyoto; PPLA is a first-order administrative capital, i.e. every provincial
+# seat on earth.
+CAPITAL_FEATURE_CODE = "PPLC"
+
+
+def _parse_cities(text: str) -> list[dict]:
+    """GeoNames' headerless TSV -> city records, largest first.
+
+    Split out from the download so the column indices above can be exercised
+    by position in a test, the same way gdelt._parse_events is.
+    """
+    cities = []
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) <= COL_POPULATION:
+            continue
+        try:
+            geonameid = int(parts[COL_GEONAME_ID])
+            population = int(parts[COL_POPULATION])
+            lat = float(parts[COL_LAT])
+            lon = float(parts[COL_LON])
+        except ValueError:
+            continue
+        feature_code = parts[COL_FEATURE_CODE].strip()
+        is_capital = feature_code == CAPITAL_FEATURE_CODE
+        # A national capital is context the map needs whatever its size, and it
+        # is what the diplomacy layer anchors to -- so it bypasses the
+        # population floor. Measured against the live file: 241 capitals, 78 of
+        # them under 100,000, down to Vatican City at 829 and Adamstown at 46.
+        # GeoNames' "cities15000" name notwithstanding, PPLC rows are present
+        # regardless of population, so the bypass really does recover all of
+        # them. Callers must still degrade when a capital is missing -- three
+        # countries (IL, PS, EH) carry no PPLC row at all, see capitals.py.
+        if population < MIN_POPULATION and not is_capital:
+            continue
+        cities.append(
+            {
+                # GeoNames' own stable id. Both the flag and the raw code are
+                # kept: the flag is what the frontend reads, the code is the
+                # evidence behind it.
+                "geonameid": geonameid,
+                "name": parts[COL_NAME],
+                "country_code": parts[COL_COUNTRY_CODE],
+                "feature_code": feature_code,
+                "is_capital": is_capital,
+                "lat": lat,
+                "lon": lon,
+                "population": population,
+            }
+        )
+    cities.sort(key=lambda c: c["population"], reverse=True)
+    return cities
 
 
 async def _fetch() -> list[dict]:
@@ -30,32 +92,9 @@ async def _fetch() -> list[dict]:
         resp.raise_for_status()
         zip_bytes = resp.content
 
-    cities = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         with zf.open("cities15000.txt") as f:
-            for raw_line in f:
-                parts = raw_line.decode("utf-8", errors="replace").split("\t")
-                if len(parts) <= COL_POPULATION:
-                    continue
-                try:
-                    population = int(parts[COL_POPULATION])
-                    lat = float(parts[COL_LAT])
-                    lon = float(parts[COL_LON])
-                except ValueError:
-                    continue
-                if population < MIN_POPULATION:
-                    continue
-                cities.append(
-                    {
-                        "name": parts[COL_NAME],
-                        "country_code": parts[COL_COUNTRY_CODE],
-                        "lat": lat,
-                        "lon": lon,
-                        "population": population,
-                    }
-                )
-    cities.sort(key=lambda c: c["population"], reverse=True)
-    return cities
+            return _parse_cities(f.read().decode("utf-8", errors="replace"))
 
 
 async def start():
@@ -68,10 +107,14 @@ async def start():
             state.last_success = time.time()
             state.last_error = None
             ok = True
-            log.info("Cities: %d with population >= %d", len(state.data), MIN_POPULATION)
-            # GeoNames rows have no stable id here -- synthesized from
-            # name/country_code/lat/lon (see storage.py's _synthetic_id).
-            await storage.record_snapshot("cities", state.data)
+            capitals = sum(1 for c in state.data if c["is_capital"])
+            log.info("Cities: %d with population >= %d, including %d national capitals",
+                     len(state.data), MIN_POPULATION, capitals)
+            # Keyed on GeoNames' own id. The synthesized fallback
+            # (storage._synthetic_id) hashes name/country_code/lat/lon, so a
+            # 0.001-degree coordinate revision upstream minted a brand-new
+            # entity row for a city that had not moved.
+            await storage.record_snapshot("cities", state.data, "geonameid")
             await storage.record_source_health("cities", len(state.data), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)

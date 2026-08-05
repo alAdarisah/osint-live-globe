@@ -63,6 +63,36 @@ def gdelt_tsv(*rows: list[str]) -> str:
     return "\n".join("\t".join(r) for r in rows) + "\n"
 
 
+# --- GeoNames -------------------------------------------------------------
+#
+# Same by-position discipline as gdelt_row: cities.py reads a headerless
+# tab-separated file, so a wrong column index does not raise, it silently
+# returns a neighbouring field. These build real 19-column lines.
+_GEONAMES_COLS = {
+    "geonameid": 0, "name": 1, "asciiname": 2, "alternatenames": 3,
+    "lat": 4, "lon": 5, "feature_class": 6, "feature_code": 7,
+    "country_code": 8, "cc2": 9, "admin1": 10, "admin2": 11, "admin3": 12,
+    "admin4": 13, "population": 14, "elevation": 15, "dem": 16,
+    "timezone": 17, "modification_date": 18,
+}
+
+_GEONAMES_DEFAULTS = {
+    "geonameid": "703448", "name": "Kyiv", "asciiname": "Kyiv",
+    "lat": "50.45466", "lon": "30.5238", "feature_class": "P",
+    "feature_code": "PPLC", "country_code": "UA", "admin1": "30",
+    "population": "2797553", "timezone": "Europe/Kiev",
+    "modification_date": "2026-01-01",
+}
+
+
+def geonames_row(**overrides) -> str:
+    """One 19-column GeoNames cities15000.txt line. Defaults describe Kyiv."""
+    row = [""] * 19
+    for name, value in {**_GEONAMES_DEFAULTS, **overrides}.items():
+        row[_GEONAMES_COLS[name]] = value
+    return "\t".join(row)
+
+
 # --- press-feed fixtures ---------------------------------------------------
 #
 # Real shapes, minus the bulk: RSS 2.0 as the White House and UN publish it,

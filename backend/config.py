@@ -73,9 +73,24 @@ ENTITY_STALE_AFTER = {
     "officials": 2 * 86400,
     "firms": 2 * 86400,
     "jamming": 2 * 86400,
+    # Earthquakes drop out of USGS's own 1-day feed after 24h, but the weekly
+    # volcano report in the same payload stays current for a full week -- the
+    # longer of the two governs, or every volcano pin would be evicted six days
+    # before its report is superseded.
+    "hazards": 8 * 86400,
     "acled": 7 * 86400,
     "events": 7 * 86400,
     "cities": 30 * 86400,
+    # Same reasoning as cities: reference data the backend only refetches once a
+    # day, so a 30-minute window would evict it continuously.
+    "airports": 30 * 86400,
+    "cable_landings": 30 * 86400,
+    # Long enough to outlive the "previous launches" window this source serves,
+    # which runs weeks back when launches are sparse.
+    "launches": 30 * 86400,
+    # Swept once a day and only when Overpass cooperates, so a short window
+    # would evict theatres between successful sweeps.
+    "osm_infra": 30 * 86400,
 }
 ENTITY_STALE_AFTER_DEFAULT = int(os.getenv("ENTITY_STALE_AFTER_DEFAULT", "86400"))
 

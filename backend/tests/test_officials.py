@@ -295,3 +295,133 @@ def test_recency_beats_reach_within_the_window():
         **_parsed(), "date_added": _stamp(NOW - timedelta(hours=18)), "outlet_count": 20,
     })
     assert officials._rank(fresh, now) > officials._rank(old_and_big, now)
+
+
+# --- capital snapping -------------------------------------------------------
+#
+# Roughly a third of GDELT's diplomatic rows are geocoded only to a country
+# centroid -- a point in the geometric middle of a landmass, which is an
+# artifact of the geocoder rather than a location. Diplomacy happens in
+# capitals, so those rows go there. These pin what must and must not move.
+
+KYIV = {"name": "Kyiv", "country_code": "UA", "lat": 50.4501, "lon": 30.5234,
+        "population": 2797553, "geonameid": 703448, "is_capital": True}
+
+
+def _with_capital(monkeypatch, capital=KYIV):
+    monkeypatch.setattr(officials.capitals, "capital_for_fips",
+                        lambda code: capital if code == "UP" else None)
+
+
+def _snapped(monkeypatch, **overrides) -> dict:
+    _with_capital(monkeypatch)
+    return officials._normalize_gdelt({
+        **_parsed(**overrides), "date_added": _stamp(NOW),
+    })
+
+
+def test_a_country_centroid_row_moves_to_the_capital(monkeypatch):
+    record = _snapped(monkeypatch, geo_type="1", geo_name="Ukraine",
+                      lat="49.0", lon="32.0")
+    assert (record["lat"], record["lon"]) == (KYIV["lat"], KYIV["lon"])
+    assert record["geo_precision"] == "capital"
+
+
+def test_a_locality_precision_row_is_left_where_it_is(monkeypatch):
+    """Beijing is a real place and strictly better than "the capital of China".
+    A summit in Geneva must not be redrawn in Bern."""
+    record = _snapped(monkeypatch)  # the fixture geocodes to Kyiv city, type 4
+    assert record["geo_precision"] == "locality"
+    assert record.get("snapped_to_capital") is None
+    assert record.get("anchor") is None
+
+
+def test_a_snapped_record_says_it_was_moved(monkeypatch):
+    """This codebase never asserts a precision it does not have. The popup
+    prints "shown at Kyiv, the capital, not where the act took place" off
+    exactly these fields."""
+    record = _snapped(monkeypatch, geo_type="1", geo_name="Ukraine",
+                      lat="49.0", lon="32.0")
+    assert record["snapped_to_capital"] is True
+    assert record["original_geo_precision"] == "country"
+    assert (record["original_lat"], record["original_lon"]) == (49.0, 32.0)
+    assert record["anchor"]["id"] == "capital:UA"
+    assert record["anchor"]["name"] == "Kyiv"
+
+
+def test_an_ungeocoded_row_is_snapped_too(monkeypatch):
+    record = _snapped(monkeypatch, geo_type="0", geo_name="Ukraine",
+                      lat="49.0", lon="32.0")
+    assert record["original_geo_precision"] == "unknown"
+    assert record["geo_precision"] == "capital"
+
+
+def test_a_region_precision_row_is_not_snapped_by_default(monkeypatch):
+    """GDELT did match an ADM1 here. "Khersons'ka Oblast'" moved to Kyiv is
+    worse than the oblast centroid, which is at least inside the place the
+    reporting named -- so this is behind OFFICIALS_SNAP_REGION, default off."""
+    record = _snapped(monkeypatch, geo_type="5", geo_name="Khersons'ka Oblast', Ukraine",
+                      lat="46.9", lon="33.3")
+    assert record["geo_precision"] == "region"
+    assert (record["lat"], record["lon"]) == (46.9, 33.3)
+
+
+def test_a_missing_capital_leaves_the_record_alone(monkeypatch):
+    """Microstate capitals below GeoNames' own 15,000 floor are not in the
+    source file at all. Degrade, never drop."""
+    monkeypatch.setattr(officials.capitals, "capital_for_fips", lambda code: None)
+    record = officials._normalize_gdelt({
+        **_parsed(geo_type="1", geo_name="Ukraine", lat="49.0", lon="32.0"),
+        "date_added": _stamp(NOW),
+    })
+    assert (record["lat"], record["lon"]) == (49.0, 32.0)
+    assert record["geo_precision"] == "country"
+    assert record.get("anchor") is None
+
+
+def test_snapping_never_mutates_the_incoming_gdelt_row(monkeypatch):
+    """gdelt._fetch routes the SAME dict objects into _ACCUMULATED and
+    _ACCUMULATED_OFFICIALS, so a row here can be the very row event_fusion is
+    about to read. Writing to it would silently move conflict pins as a side
+    effect of a diplomacy fix."""
+    _with_capital(monkeypatch)
+    row = {**_parsed(geo_type="1", geo_name="Ukraine", lat="49.0", lon="32.0"),
+           "date_added": _stamp(NOW)}
+    before = dict(row)
+    officials._normalize_gdelt(row)
+    assert row == before
+
+
+def test_records_sharing_a_capital_share_an_anchor_id(monkeypatch):
+    """The frontend's capital hub groups on this exact string."""
+    _with_capital(monkeypatch)
+    first = officials._normalize_gdelt({
+        **_parsed(event_id="1", geo_type="1", geo_name="Ukraine", lat="49.0", lon="32.0"),
+        "date_added": _stamp(NOW),
+    })
+    second = officials._normalize_gdelt({
+        **_parsed(event_id="2", event_code="046", base_code="046",
+                  geo_type="1", geo_name="Ukraine", lat="48.0", lon="31.0"),
+        "date_added": _stamp(NOW),
+    })
+    assert first["anchor"]["id"] == second["anchor"]["id"] == "capital:UA"
+    assert (first["lat"], first["lon"]) == (second["lat"], second["lon"])
+
+
+def test_an_official_feed_record_is_never_moved(monkeypatch):
+    """Press releases already sit at the seat of the issuing institution, which
+    is both correct and a different claim from "this is where it happened"."""
+    _with_capital(monkeypatch)
+    record = _feed_record()
+    assert (record["lat"], record["lon"]) == (55.75, 37.61)
+    assert record["geo_precision"] == "institution"
+    assert record.get("snapped_to_capital") is None
+
+
+def test_a_press_release_still_carries_an_anchor_for_the_hub():
+    """Every White House statement shares one coordinate by construction. The
+    same anchor shape lets the frontend group them without knowing which kind
+    of anchor it is looking at."""
+    record = _feed_record(feed_key="kremlin")
+    assert record["anchor"]["kind"] == "institution"
+    assert record["anchor"]["id"] == "institution:kremlin"

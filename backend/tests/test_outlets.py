@@ -68,6 +68,59 @@ def test_the_article_slug_is_never_matched():
     assert not ol.is_non_news_url("https://www.reviewjournal.com/news/shooting-on-the-strip")
 
 
+# --- when does the URL say it was published ---------------------------------
+#
+# The section filter above catches a piece a publisher *labelled* as
+# commentary. It cannot catch an ordinary 2019 news report that GDELT re-crawled
+# today -- and GDELT stamps those with today's SQLDATE, so the report-lag gate
+# cannot see them either. The date in the URL is the only signal independent of
+# GDELT entirely.
+
+def test_a_url_path_date_is_read_in_both_common_shapes():
+    assert ol.url_path_date("https://www.bbc.com/news/2019/07/some-story") == (2019, 7)
+    assert ol.url_path_date("https://example.com/2026/8/5/a-story") == (2026, 8)
+    # ISO form, including as a slug suffix -- which is why is_non_news_url's
+    # "never match the final segment" rule does not transfer here.
+    assert ol.url_path_date(
+        "https://www.reuters.com/world/europe/strike-on-kherson-2026-08-05/"
+    ) == (2026, 8)
+    assert ol.url_path_date("https://example.com/news/2026-01-31-headline") == (2026, 1)
+
+
+def test_a_section_number_is_not_mistaken_for_a_date():
+    assert ol.url_path_date("https://example.com/news/13/some-story") is None   # month 13
+    assert ol.url_path_date("https://example.com/section/2026/13/x") is None
+    assert ol.url_path_date("https://example.com/article/1234567") is None      # an id
+    assert ol.url_path_date("https://example.com/news/1889/03/x") is None       # before the floor
+
+
+def test_most_urls_carry_no_path_date():
+    """The common case. A caller that gets None learns nothing and applies no
+    penalty, which is the correct behaviour for the majority of URLs."""
+    assert ol.url_path_date("https://www.reuters.com/world/kherson-strike") is None
+    assert ol.url_path_date(None) is None
+    assert ol.url_path_date("") is None
+    assert ol.url_path_date("not a url") is None
+
+
+def test_a_future_url_date_is_never_treated_as_stale():
+    """Magazines date a September issue in August, and clocks skew. A future
+    date is not evidence of anything, least of all age."""
+    from datetime import datetime, timezone
+    reference = datetime(2026, 8, 5, tzinfo=timezone.utc)
+    assert ol.url_age_months("https://example.com/2026/12/x", reference) == 0
+    assert ol.url_age_months("https://example.com/2030/01/x", reference) is None  # past year+1
+
+
+def test_url_age_is_measured_in_whole_months():
+    from datetime import datetime, timezone
+    reference = datetime(2026, 8, 5, tzinfo=timezone.utc)
+    assert ol.url_age_months("https://example.com/2026/08/x", reference) == 0
+    assert ol.url_age_months("https://example.com/2026/05/x", reference) == 3
+    assert ol.url_age_months("https://example.com/2019/07/x", reference) == 85
+    assert ol.url_age_months("https://example.com/news/no-date", reference) is None
+
+
 # --- ranking and the cap ---------------------------------------------------
 
 def test_mastheads_rank_ahead_of_bare_domains():

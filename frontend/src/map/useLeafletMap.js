@@ -24,7 +24,12 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
   const [mapBounds, setMapBounds] = useState(null);
   const [ready, setReady] = useState(false);
   const [windStatus, setWindStatus] = useState({ ok: true });
+  // The country whose card is open (null when none is), and the full selection
+  // behind it -- one country can be read while several stay highlighted, so
+  // these are genuinely two pieces of state rather than one derived from the
+  // other. See createMapController's selectCountryEntry.
   const [selectedCountry, setSelectedCountry] = useState(null);
+  const [countrySelection, setCountrySelection] = useState([]);
 
   // onRegionAutoReset changes identity across renders (it closes over
   // region state) -- keep the latest one in a ref so the controller (created
@@ -45,6 +50,7 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
         onRegionAutoReset: () => onRegionAutoResetRef.current?.(),
         onWindStatusChange: setWindStatus,
         onCountrySelect: setSelectedCountry,
+        onCountrySelectionChange: setCountrySelection,
         onCountryPointChange: (point) => setSelectedCountry((prev) => (prev ? { ...prev, point } : prev)),
       }
     );
@@ -89,9 +95,36 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
     controllerRef.current?.setEventFilter(next);
   }, []);
 
+  // Closing the card leaves the country highlighted -- the selection is cleared
+  // by its own controls (the chips in CountrySelectionBar), never as a side
+  // effect of shutting a panel.
   const closeCountryCard = useCallback(() => {
-    controllerRef.current?.deselectCountry();
+    controllerRef.current?.closeCountryCard();
     setSelectedCountry(null);
+  }, []);
+
+  const focusCountry = useCallback((key) => {
+    controllerRef.current?.focusCountry(key);
+  }, []);
+
+  const deselectCountry = useCallback((key) => {
+    controllerRef.current?.deselectCountry(key);
+  }, []);
+
+  const clearCountrySelection = useCallback(() => {
+    controllerRef.current?.clearCountrySelection();
+  }, []);
+
+  const setIconTheme = useCallback((next) => {
+    controllerRef.current?.setIconTheme(next);
+  }, []);
+
+  const setLayerZoomOverrides = useCallback((next) => {
+    controllerRef.current?.setLayerZoomOverrides(next);
+  }, []);
+
+  const setImagery = useCallback((key, date) => {
+    controllerRef.current?.setImagery(key, date);
   }, []);
 
   useEffect(() => {
@@ -99,7 +132,9 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
   }, [theme]);
 
   return {
-    ready, counts, zoomNotes, mapBounds, windStatus, selectedCountry,
-    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, closeCountryCard,
+    ready, counts, zoomNotes, mapBounds, windStatus, selectedCountry, countrySelection,
+    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter,
+    closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
+    setIconTheme, setLayerZoomOverrides, setImagery,
   };
 }

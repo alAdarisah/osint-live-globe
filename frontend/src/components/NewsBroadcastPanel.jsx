@@ -3,9 +3,10 @@
 // viewport (same pattern the map controller's renderers use) so it always
 // reflects whatever region is currently in view/selected, not just the
 // initial selection.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { timeAgoFromDateAdded } from "../utils/format";
 import { padBounds, boundsContainsPoint } from "../utils/geo";
+import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import LocateIcon from "./icons/LocateIcon";
 
 const NEWS_MAX_ITEMS = 8;
@@ -16,49 +17,11 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
   // DEFAULT_LAYER_VISIBILITY.
   const [collapsed, setCollapsed] = useState(true);
 
-  // Widget-style dragging: header is the drag handle. `pos` is null until
-  // the user first drags, meaning "use the default fixed top-right CSS
-  // position" -- once set, inline style takes over and pins the panel
-  // wherever it was dropped (clamped to stay on-screen).
-  const [pos, setPos] = useState(null);
-  const dragRef = useRef(null); // { startX, startY, originX, originY, moved }
-
-  const onHeaderPointerDown = useCallback((e) => {
-    if (e.target.closest(".news-caret-btn")) return; // caret has its own click handler
-    const rect = e.currentTarget.closest("#newsBroadcast").getBoundingClientRect();
-    dragRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      originX: rect.left,
-      originY: rect.top,
-      width: rect.width,
-      height: rect.height,
-      moved: false,
-    };
-    e.currentTarget.setPointerCapture(e.pointerId);
-  }, []);
-
-  const onHeaderPointerMove = useCallback((e) => {
-    const drag = dragRef.current;
-    if (!drag) return;
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
-    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) drag.moved = true;
-    if (!drag.moved) return;
-    const maxX = window.innerWidth - drag.width - 4;
-    const maxY = window.innerHeight - drag.height - 4;
-    setPos({
-      x: Math.min(Math.max(drag.originX + dx, 4), Math.max(maxX, 4)),
-      y: Math.min(Math.max(drag.originY + dy, 4), Math.max(maxY, 4)),
-    });
-  }, []);
-
-  const onHeaderPointerUp = useCallback((e) => {
-    const drag = dragRef.current;
-    dragRef.current = null;
-    if (!drag) return;
-    if (!drag.moved) setCollapsed((c) => !c); // plain click -- toggle like before
-  }, []);
+  // Header doubles as drag handle and collapse toggle: a press that moves is a
+  // drag, one that doesn't is a click. See useDraggablePanel, which is also
+  // what remembers where this was dropped.
+  const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
+  const { panelRef, style, handleProps } = useDraggablePanel("newsBroadcast", { onClick: toggleCollapsed });
 
   const items = useMemo(() => {
     if (!mapBounds) return [];
@@ -96,17 +59,9 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
   const updatedSec = Math.max(0, Math.floor((Date.now() - lastUpdateTs) / 1000));
   const updatedText = updatedSec < 5 ? "updated just now" : `updated ${updatedSec}s ago`;
 
-  const style = pos ? { left: pos.x, top: pos.y, right: "auto" } : undefined;
-
   return (
-    <aside id="newsBroadcast" className={collapsed ? "collapsed" : ""} style={style}>
-      <div
-        className="news-header"
-        onPointerDown={onHeaderPointerDown}
-        onPointerMove={onHeaderPointerMove}
-        onPointerUp={onHeaderPointerUp}
-        title="Drag to move"
-      >
+    <aside id="newsBroadcast" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+      <div {...handleProps} className={`news-header ${handleProps.className || ""}`}>
         <span className="live-dot" />
         <span className="news-title">
           LIVE &mdash; <span>{regionLabel}</span>
@@ -117,7 +72,7 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
           className="news-caret-btn"
           aria-label={collapsed ? "Expand news feed" : "Collapse news feed"}
           title={collapsed ? "Expand" : "Collapse"}
-          onClick={() => setCollapsed((c) => !c)}
+          onClick={toggleCollapsed}
         >
           <span className="news-caret" aria-hidden="true">&#9662;</span>
         </button>

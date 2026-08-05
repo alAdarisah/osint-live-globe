@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from backend.sources import gdelt
+from backend.sources import gdelt, outlets
 
 # Column indices under test. Deliberately re-declared here rather than
 # imported: the point of this script is to check gdelt.py's constants, and
@@ -73,18 +73,57 @@ GEO_TYPE_NAME = {
 VIOLENCE_ROOT_CODES = {18, 19, 20}
 ARMED_ACTOR_TYPES = {"MIL", "REB", "INS", "SEP", "PAR", "UAF", "SPY"}
 
+# The other half of the CAMEO taxonomy, and the actor types that make someone
+# an official. Mirrors cameo.DIPLOMATIC_ROOT_CODES / OFFICIAL_ACTOR_TYPES,
+# re-declared here for the same non-circularity reason COL is.
+DIPLOMATIC_ROOT_CODES = set(range(1, 18))
+OFFICIAL_ACTOR_TYPES = {"GOV", "ELI", "LEG", "JUD", "OPP", "PTY", "MIL", "IGO"}
+
+
+def _root(row: list[str]) -> int | None:
+    try:
+        return int(row[COL["EventRootCode"]])
+    except (ValueError, IndexError):
+        return None
+
 
 def _is_violent(row: list[str]) -> bool:
     """Mirror of event_fusion._is_violent_gdelt_row, against raw columns."""
-    try:
-        root = int(row[COL["EventRootCode"]])
-    except (ValueError, IndexError):
-        return False
+    root = _root(row)
     if root not in VIOLENCE_ROOT_CODES:
         return False
     if row[COL["Actor1Type1Code"]] in ARMED_ACTOR_TYPES or row[COL["Actor2Type1Code"]] in ARMED_ACTOR_TYPES:
         return True
     return bool(row[COL["Actor1KnownGroupCode"]] or row[COL["Actor2KnownGroupCode"]])
+
+
+def _is_trusted(row: list[str]) -> bool:
+    """Approximate mirror of gdelt._is_trusted_row.
+
+    The real predicate also accepts a verified-domain URL found in the Mentions
+    table, which this script does not download -- so this undercounts. That is
+    the safe direction for what it is used for here: every row it *does* count
+    is genuinely servable as a News pin, so a hit rate measured on this
+    population is a lower bound on the real one, never an overstatement.
+    """
+    return outlets.matched_domain(row[COL["SOURCEURL"]]) is not None
+
+
+def _is_diplomatic(row: list[str]) -> bool:
+    """Approximate mirror of gdelt._is_officials_row, against raw columns.
+
+    Omits the cross-border check, which only narrows -- so like _is_trusted
+    this is a superset of the real population and the rates it produces are
+    conservative.
+    """
+    if _root(row) not in DIPLOMATIC_ROOT_CODES:
+        return False
+    official = (
+        row[COL["Actor1Type1Code"]] in OFFICIAL_ACTOR_TYPES
+        or row[COL["Actor2Type1Code"]] in OFFICIAL_ACTOR_TYPES
+        or bool(row[COL["Actor1KnownGroupCode"]] or row[COL["Actor2KnownGroupCode"]])
+    )
+    return official and _is_trusted(row)
 
 
 async def _fetch_raw_window(window_minutes: int) -> tuple[list[list[str]], str]:
@@ -134,6 +173,88 @@ def _histogram(counter: collections.Counter, total: int, limit: int = 25) -> lis
         bar = "#" * int(share / 2)
         out.append(f"  {str(key):<34} {count:>6}  {share:>5.1f}%  {bar}")
     return out
+
+
+def _report_lag(population: list[list[str]], label: str) -> None:
+    """DATEADDED minus SQLDATE -- how far behind ingest the event is dated."""
+    lags = []
+    for r in population:
+        try:
+            sql = datetime.strptime(r[COL["SQLDATE"]], "%Y%m%d").replace(tzinfo=timezone.utc)
+            added = datetime.strptime(r[COL["DATEADDED"]][:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+        except (ValueError, IndexError):
+            continue
+        lags.append((added - sql).days)
+    print(f"\nDATEADDED minus SQLDATE -- report lag on {label} rows ({len(lags)})")
+    if not lags:
+        print("  (none)")
+        return
+    buckets = collections.Counter(
+        "same day" if d == 0 else "1-3 days" if d <= 3 else "4-30 days" if d <= 30
+        else ">30 days (retrospective)"
+        for d in lags
+    )
+    print("\n".join(_histogram(buckets, len(lags))))
+    print(f"  mean {statistics.fmean(lags):.1f}d   median {statistics.median(lags):.0f}d   max {max(lags)}d")
+    over = sum(1 for d in lags if d > gdelt.MAX_REPORT_LAG_DAYS)
+    print(f"  would be dropped by MAX_REPORT_LAG_DAYS={gdelt.MAX_REPORT_LAG_DAYS}:  {over}"
+          f"  ({100.0 * over / len(lags):.1f}%)   <-- recall cost of the lag gate")
+
+
+def _report_non_news(population: list[list[str]], label: str) -> None:
+    """How much outlets.is_non_news_url removes, and exactly what.
+
+    Every match is printed rather than counted. The 6-of-124 figure this filter
+    was justified on was measured on the violence-gated subset; the news feed
+    admits far more section variety, so the rate here has to be re-derived and
+    eyeballed rather than assumed.
+    """
+    hits = [r for r in population if outlets.is_non_news_url(r[COL["SOURCEURL"]])]
+    print(f"\nis_non_news_url -- {label} rows: {len(hits)}/{len(population)}"
+          f"  ({100.0 * len(hits) / max(len(population), 1):.1f}%)   <-- eyeball every one")
+    for r in hits[:40]:
+        print(f"    {r[COL['EventCode']]:<5} {r[COL['ActionGeo_FullName']][:32]:<32} {r[COL['SOURCEURL']][:88]}")
+    if len(hits) > 40:
+        print(f"    ... and {len(hits) - 40} more")
+
+
+def _report_url_dates(population: list[list[str]]) -> None:
+    """Coverage and rejection dump for the URL-path-date heuristic.
+
+    This is the one gate whose false-positive rate is unknown, which is why it
+    ships behind NEWS_URL_DATE_GATE. Nobody should turn it on without reading
+    the rejection list below against a live window.
+    """
+    parsed = 0
+    ages: list[int] = []
+    rejected: list[tuple[int, list[str]]] = []
+    now = datetime.now(timezone.utc)
+    for r in population:
+        months = outlets.url_age_months(r[COL["SOURCEURL"]], now)
+        if months is None:
+            continue
+        parsed += 1
+        ages.append(months)
+        if months > gdelt.MAX_URL_AGE_MONTHS:
+            rejected.append((months, r))
+
+    print(f"\nURL-path publication date -- readable on {parsed}/{len(population)} trusted rows"
+          f"  ({100.0 * parsed / max(len(population), 1):.0f}%)")
+    if not ages:
+        return
+    buckets = collections.Counter(
+        "this month" if m == 0 else "1-2 months" if m <= 2 else "3-11 months" if m <= 11
+        else "1-2 years" if m <= 24 else "older"
+        for m in ages
+    )
+    print("\n".join(_histogram(buckets, len(ages))))
+    print(f"  would be dropped by MAX_URL_AGE_MONTHS={gdelt.MAX_URL_AGE_MONTHS}: {len(rejected)}"
+          f"  ({100.0 * len(rejected) / max(len(population), 1):.1f}% of all trusted rows)")
+    print("  every rejection, for manual review:")
+    for months, r in sorted(rejected, key=lambda kv: -kv[0])[:60]:
+        print(f"    {months:>4} months  {r[COL['ActionGeo_FullName']][:28]:<28} {r[COL['SOURCEURL']][:84]}")
+    if len(rejected) > 60:
+        print(f"    ... and {len(rejected) - 60} more")
 
 
 def _report(rows: list[list[str]], window_label: str, window_hours: float) -> None:
@@ -266,25 +387,21 @@ def _report(rows: list[list[str]], window_label: str, window_hours: float) -> No
     print(f"  IsRootEvent == 1            {root_events}/{len(violent)}")
 
     # --- date semantics ------------------------------------------------------
-    lags = []
-    for r in violent:
-        try:
-            sql = datetime.strptime(r[COL["SQLDATE"]], "%Y%m%d").replace(tzinfo=timezone.utc)
-            added = datetime.strptime(r[COL["DATEADDED"]][:8], "%Y%m%d").replace(tzinfo=timezone.utc)
-        except (ValueError, IndexError):
-            continue
-        lags.append((added - sql).days)
-    if lags:
-        buckets = collections.Counter(
-            "same day" if d == 0 else "1-3 days" if d <= 3 else "4-30 days" if d <= 30 else ">30 days (retrospective)"
-            for d in lags
-        )
-        print("\nDATEADDED minus SQLDATE -- report lag on violent rows")
-        print("\n".join(_histogram(buckets, len(lags))))
-        print(f"  mean {statistics.fmean(lags):.1f}d   median {statistics.median(lags):.0f}d   max {max(lags)}d")
-        over = sum(1 for d in lags if d > 30)
-        print(f"  would be dropped by _MAX_REPORT_LAG_DAYS=30:  {over}"
-              f"  ({100.0 * over / len(lags):.1f}%)")
+    #
+    # Reported for three populations, not one. The lag gate used to live only in
+    # event_fusion, so only the violent column was ever measured -- but the same
+    # gate now guards the News feed and the Officials & Diplomacy layer, and
+    # those are calibrated against numbers that did not previously exist.
+    trusted = [r for r in deduped if _is_trusted(r)]
+    diplomatic = [r for r in deduped if _is_diplomatic(r)]
+    for label, population in (("violent", violent), ("trusted/news", trusted),
+                              ("diplomatic", diplomatic)):
+        _report_lag(population, label)
+
+    # --- what the recency gate would remove ----------------------------------
+    for label, population in (("trusted/news", trusted), ("diplomatic", diplomatic)):
+        _report_non_news(population, label)
+    _report_url_dates(trusted)
 
     # --- sanity check on the indices ----------------------------------------
     print("\nColumn sanity -- a sample violent row, decoded")

@@ -44,13 +44,27 @@ export function parseGdeltDateAdded(s) {
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
+// Shared by both "how long ago" helpers below. GDELT stamps its own
+// YYYYMMDDHHMMSS string; every other source in the backend carries plain unix
+// seconds, and both should read the same way to a user.
+function timeAgoFromMillis(ms) {
+  const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
+}
+
 export function timeAgoFromDateAdded(s) {
   const dt = parseGdeltDateAdded(s);
   if (!dt) return "";
-  const diffSec = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  return `${Math.floor(diffSec / 3600)}h ago`;
+  return timeAgoFromMillis(dt.getTime());
+}
+
+/** "3h ago" from a unix timestamp in *seconds*, or "" if there isn't one. */
+export function timeAgoFromUnix(seconds) {
+  if (!Number.isFinite(seconds)) return "";
+  return timeAgoFromMillis(seconds * 1000);
 }
 
 export function haversineKm(lat1, lon1, lat2, lon2) {

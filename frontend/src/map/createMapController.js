@@ -20,6 +20,10 @@ import {
   createFirmsLayers,
   createJammingLayers,
   createJammingPingGroup,
+  createCablesGroup,
+  createImageryLayer,
+  gibsUrlFor,
+  GIBS_LAYERS,
   createEntityClusterGroups,
   createCountriesLayer,
   createCitiesGroup,
@@ -43,22 +47,43 @@ import {
   SHIP_STYLE,
   AIRCRAFT_STYLE,
   MILITARY_ROLE_STYLE,
-  SATELLITE_STYLE,
+  satelliteStyle,
   decorateOfficials,
   eventIconSize,
   gdeltIconSize,
+  officialsAgeHours,
   officialsIconSize,
   historicalIconSize,
-  INFRA_ICON_SIZE,
+  infraIconSize,
   decorateCity,
   cityTier,
   cityTierRank,
-  PIPELINE_ROUTE_COLOR,
+  pipelineRouteColor,
+  decorateHazard,
+  hazardIconSize,
+  aircraftFlagBucket,
+  isFlaggedAircraft,
+  withAircraftFlag,
+  isSanctioned,
+  withSanctionRing,
+  AIRCRAFT_FLAG_STYLE,
+  decorateAirport,
+  airportIconSize,
+  decorateDarkVessel,
+  darkVesselIconSize,
+  decorateCableLanding,
+  cableLandingIconSize,
+  cableRouteColor,
+  decorateLaunch,
+  launchIconSize,
+  decorateOsmInfra,
+  osmInfraIconSize,
 } from "./decorators";
+import { setIconTheme, themedStyle } from "./iconTheme";
 import { placeAll } from "./declutter";
-import { collapseByProximity, COLLAPSE_MAX_ZOOM } from "./collapse";
+import { collapseByProximity, collapseByKey, COLLAPSE_MAX_ZOOM } from "./collapse";
 import { buildCountryIndex, findCountryAt } from "./countryHitTest";
-import { countryPopupHtml, cityPopupHtml, normalizeCountryName } from "./popups";
+import { countryCardSections, cityPopupHtml, normalizeCountryName } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { createEntityWebglLayer } from "./webglLayer";
@@ -92,9 +117,25 @@ const AIS_MIN_ZOOM = 3;
 // AIS has its own dedicated renderAisLayer (civilian/Navy split, like ADS-B's
 // civilian/military split) so it isn't part of this generic lookup.
 const OFFICIALS_MIN_ZOOM = 3;
+const HAZARDS_MIN_ZOOM = 3;
+const AIRPORTS_MIN_ZOOM = 7;
+// 1,922 landing points, most of them within a few km of another one. The routes
+// themselves have no gate -- a cable is only legible as a whole line.
+const CABLE_LANDINGS_MIN_ZOOM = 5;
+// Thousands of features across the conflict theatres, and every one of them is
+// context rather than an event -- gated a step deeper than the curated
+// infrastructure layer, which has no gate at all.
+const OSM_INFRA_MIN_ZOOM = 6;
 const MARKER_LAYER_MIN_ZOOM = {
   events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictHistory: 4,
-  officials: OFFICIALS_MIN_ZOOM,
+  officials: OFFICIALS_MIN_ZOOM, hazards: HAZARDS_MIN_ZOOM,
+  // Hard gate: the served slice is still ~40k airfields worldwide, which below
+  // this zoom is a texture rather than a layer.
+  airports: AIRPORTS_MIN_ZOOM, cableLandings: CABLE_LANDINGS_MIN_ZOOM,
+  osmInfra: OSM_INFRA_MIN_ZOOM,
+  // Deliberately absent: darkVessels has no zoom gate. There are only ever a
+  // handful worldwide, and "somewhere a designated tanker went dark" is exactly
+  // the thing worth seeing at world zoom.
 };
 // Gates only the interactive per-point FIRMS layer -- the heat layer itself
 // always stays on regardless of zoom.
@@ -112,21 +153,34 @@ const TANKER_TRAIL_MAX_POINTS = 60;
 
 const ID_FIELD = {
   events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24", conflictHistory: "id",
-  officials: "id",
+  officials: "id", hazards: "id", airports: "id", darkVessels: "id", cableLandings: "id",
+  launches: "id", osmInfra: "id",
 };
 const DECORATORS = {
   events: decorateEvent, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
   conflictHistory: decorateHistoricalEvent, officials: decorateOfficials,
+  hazards: decorateHazard, airports: decorateAirport, darkVessels: decorateDarkVessel,
+  cableLandings: decorateCableLanding, launches: decorateLaunch,
+  osmInfra: decorateOsmInfra,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
 // both places rather than restated here.
 const ICON_SIZE_FOR = {
   events: eventIconSize, gdelt: gdeltIconSize, conflictHistory: historicalIconSize,
-  officials: officialsIconSize,
+  officials: officialsIconSize, hazards: hazardIconSize, airports: airportIconSize,
+  darkVessels: darkVesselIconSize, cableLandings: cableLandingIconSize,
+  launches: launchIconSize, osmInfra: osmInfraIconSize,
 };
 
 const REGION_FLY_DURATION = 1.2;
+
+// Which incoming feeds are worth rebuilding an open country card for. See
+// refreshFocusedCountryCard for why the fast-moving vehicle feeds are not here.
+const COUNTRY_CARD_FEEDS = new Set([
+  "events", "gdelt", "officials", "escalation", "conflictStats", "conflictDistricts",
+  "outages", "humanitarian",
+]);
 
 // leaflet.heat's setLatLngs() always calls its own redraw(), which
 // dereferences `this._map._animating` with no null check -- harmless when
@@ -172,6 +226,16 @@ export function createMapController(container, initial, callbacks) {
   const infraGroup = createInfraGroup();
   const pipelinesGroup = createPipelinesGroup();
   const infraLayer = L.layerGroup([infraGroup, pipelinesGroup]).addTo(map);
+  // Routes and landing points share one toggle, same as infra wraps its sites
+  // and its pipelines: a cable and the place it comes ashore are one fact, and
+  // being able to hide half of it helps nobody. NOT added to the map here --
+  // the layer is off by default (see DEFAULT_LAYER_VISIBILITY in App.jsx).
+  const cablesGroup = createCablesGroup();
+  const cablesLayer = L.layerGroup([cablesGroup, groups.cableLandings]);
+  // NASA GIBS imagery. Not added to the map until a reader picks a layer.
+  const imageryLayer = createImageryLayer(map);
+  let imageryKey = null;   // null == off; otherwise a key of GIBS_LAYERS
+  let imageryDate = null;  // "YYYY-MM-DD", UTC
   const satelliteGroup = createSatelliteGroup();
   const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer, tankerTrailsLayer, militaryTrailsLayer } =
     createTrailLayers(map);
@@ -197,13 +261,38 @@ export function createMapController(container, initial, callbacks) {
     // district-level monthly counts. Held here so country cards can show the
     // verified numbers next to the live picture, each labelled for what it is.
     conflictHistory: [], conflictDistricts: [], escalation: [],
+    // Earthquakes (USGS, ~5min) and volcanic activity (Smithsonian GVP, weekly)
+    // in one array, each row carrying its own `kind` -- see hazards.py.
+    hazards: [],
+    // Reference, not a feed: the OurAirports index (see airports.py). Also the
+    // only layer here whose *backend* copy is larger than the served one -- the
+    // wider set answers "nearest airfield" inside ADS-B popups and never
+    // reaches the browser.
+    airports: [],
+    // Derived from our own recorded AIS history, not fetched (see
+    // backend/sources/dark_vessels.py). Every row is an inference.
+    darkVessels: [],
+    // Orbital launches at their pads, upcoming and just-flown.
+    launches: [],
+    // OpenStreetMap-derived infrastructure. Kept in its own slot rather than
+    // appended to `infra`, because the curated list promises human-checked
+    // coordinates and this does not (see backend/sources/osm_infra.py).
+    osmInfra: [],
+    // Submarine cable routes (lines) and their landing points (markers), plus
+    // IODA's country-keyed internet-outage scores. `outages` is a dict, not an
+    // array -- it is a country-scoped measure and has no points of its own.
+    cables: [], cableLandings: [], outages: {},
+    // Country-keyed humanitarian aggregates (ISO3), read by the country card
+    // only -- see backend/sources/humanitarian.py for why none of it is drawn.
+    humanitarian: {},
   };
   // ais/aisNavy/aisTanker/adsb/adsbMilitary are no longer here -- their
   // markers live inside entityWebglLayer's own per-bucket entry maps now
   // (see webglLayer.js's updateEntities), not as L.marker instances.
   const markersByKey = {
     events: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
-    conflictHistory: new Map(), officials: new Map(),
+    conflictHistory: new Map(), officials: new Map(), hazards: new Map(), airports: new Map(), darkVessels: new Map(),
+    cableLandings: new Map(), launches: new Map(), osmInfra: new Map(),
   };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
@@ -224,11 +313,21 @@ export function createMapController(container, initial, callbacks) {
   // Cities only render once the user has opted into a scope (clicking a
   // country, or picking a conflict zone from the Region bar) -- world-zoom
   // city dots by default were just clutter with nothing to say about them.
-  // selectedCountryIso/activeConflictZoneBounds double as *which* countries
-  // get the `.country-selected` highlight, so both features share one state.
+  // The selection/activeConflictZoneBounds double as *which* countries get the
+  // `.country-selected` highlight, so both features share one state.
+  //
+  // A *set* rather than one iso code: comparing two theatres side by side is
+  // the thing this map is for, and that was impossible while selecting Ukraine
+  // silently dropped Russia. Plain click replaces the selection, ctrl/meta/shift
+  // click adds to it (see the map click handler), and nothing else clears it --
+  // panning away, picking a region, closing the card all leave it standing,
+  // because a highlight that vanishes on the next pan is not a selection.
   let citiesEnabled = false;
-  let selectedCountryIso = null;
-  let selectedCountryLayer = null; // the L.Path currently selected -- lets the card's screen anchor track it across pan/zoom
+  const selectedCountryKeys = new Set();
+  // Which of the selected countries the info card is currently showing. Only
+  // this one gets its screen anchor tracked across pan/zoom.
+  let focusedCountryKey = null;
+  let focusedCountryLayer = null;
   let activeConflictZoneBounds = null; // {south,west,north,east} or null
 
   // Viewport-pixel anchor for the country info card (see CountryInfoCard.jsx)
@@ -268,11 +367,30 @@ export function createMapController(container, initial, callbacks) {
   // both the markers and their orbital trails follow it.
   let satellitesMilitaryVisible = true;
 
+  // News is a sub-ticker of Conflict & Violence, not a layer of its own (see
+  // LayersSection.jsx): it draws only when both its own checkbox and its
+  // parent's are on, so the two halves are tracked separately and combined by
+  // syncNewsLayer. Initialised from the caller's defaults rather than assumed
+  // true, because the initial-visibility sweep at the bottom of this function
+  // walks the keys in object order and either one can arrive first.
+  let eventsVisible = initial.layerVisibility?.events !== false;
+  let newsVisible = initial.layerVisibility?.gdelt !== false;
+
   // Free-text name filter for critical infrastructure/military bases (see
   // setInfraFilter in the public API and the search input in
   // LayersSection.jsx) -- scoped to just this one layer, not a global
   // cross-layer search.
   let infraNameFilter = "";
+
+  // Admin Mode's per-layer zoom gates, keyed the same way the layer toggles
+  // are. An absent (or null) entry means "use the shipped gate", so resetting
+  // one is deleting an entry rather than restoring a remembered number.
+  let layerZoomOverrides = {};
+
+  function minZoomFor(key, shipped) {
+    const override = layerZoomOverrides[key];
+    return Number.isFinite(override) ? override : shipped;
+  }
 
   // ---------- conflict-event filters ----------
   //
@@ -330,7 +448,24 @@ export function createMapController(container, initial, callbacks) {
     return !(Number.isFinite(age) && age > NEWS_WINDOW_HOURS);
   }
 
-  const LAYER_ITEM_FILTER = { events: passesEventFilter, gdelt: passesNewsFilter };
+  // Diplomacy gets the same hard cutoff news has, on the same window. Until now
+  // officials only faded with age (see newsAgeOpacity in decorators.js) and
+  // never dropped, so a backgrounded tab or a stalled poller kept yesterday's
+  // statements on screen at 30% opacity indefinitely -- readable, clickable and
+  // wrong. Fading answers "how fresh is this"; it was never an answer to "is
+  // this still current".
+  function passesOfficialsFilter(item) {
+    const age = officialsAgeHours(item);
+    // Undated items are kept, matching the other two filters: hiding one would
+    // be dropping data on a missing field rather than on anything a user chose.
+    return !(Number.isFinite(age) && age > NEWS_WINDOW_HOURS);
+  }
+
+  const LAYER_ITEM_FILTER = {
+    events: passesEventFilter,
+    gdelt: passesNewsFilter,
+    officials: passesOfficialsFilter,
+  };
 
   // At world zoom the map should read as "where is the significant activity",
   // not as an undifferentiated smear. A rank-based cap rather than an absolute
@@ -372,6 +507,43 @@ export function createMapController(container, initial, callbacks) {
     );
   }
 
+  // Diplomacy groups too, but on an exact anchor rather than on pixels -- see
+  // collapseByKey. Every record the backend snapped to a given capital, and
+  // every press release from a given institution, shares one coordinate by
+  // construction, so "are these on top of each other" has an exact answer and
+  // does not need to be measured.
+  //
+  // Must be above DECLUTTER_MIN_ZOOM. Expanded members share an *exact*
+  // LatLng, so every one of them collides and depends on the declutter spiral
+  // to be reachable at all; expanding below the zoom at which that spiral runs
+  // would produce an unclickable stack.
+  const OFFICIALS_EXPAND_MIN_ZOOM = 8;
+
+  // declutter.js gives up after MAX_TRIES ring positions. A group larger than
+  // that cannot be fully spread, and the leftovers would sit invisibly on the
+  // true point -- so an oversized hub stays collapsed at every zoom rather than
+  // pretending to expand.
+  const DECLUTTER_CAPACITY = 40;
+
+  // Mirrors officials._rank: reach, decayed by age, with primary sources
+  // weighted up. Recency-first is the point -- a capital's hub should show what
+  // was said today, not whatever was most widely carried yesterday.
+  function officialsRank(item) {
+    const hours = officialsAgeHours(item);
+    const reach = (item.outlet_count || 0) + 2 + (item.origin === "official_feed" ? 4 : 0);
+    return Number.isFinite(hours) ? reach * 0.5 ** (hours / 6) : reach;
+  }
+
+  function collapseOfficials(items, zoom) {
+    const collapsed = collapseByKey(items, (item) => item.anchor?.id ?? null, officialsRank);
+    if (zoom < OFFICIALS_EXPAND_MIN_ZOOM) return collapsed;
+    // Zoomed in: hand every member back as its own marker, except where the
+    // group is too big for the spiral to place.
+    return collapsed.flatMap((item) =>
+      item.collapsedCount > DECLUTTER_CAPACITY ? [item] : (item.collapsed || [item])
+    );
+  }
+
   // ---------- country/city popups ----------
 
   // Country click drives a persistent React info card (see CountryInfoCard.jsx/
@@ -398,45 +570,130 @@ export function createMapController(container, initial, callbacks) {
   // Same shape as updateCountryWarFlare below: iterate the already-rendered
   // countriesLayer and toggle a CSS class per feature, rather than rebuilding
   // anything -- cheap enough to re-run on every selection change.
+  //
+  // Two classes, because a multi-selection has to say which country the open
+  // card belongs to: `.country-selected` is every member, `.country-focused`
+  // is the one being read.
   function updateCountryHighlights() {
     countriesLayer.eachLayer((layer) => {
       const props = layer.feature?.properties;
       if (!props) return;
-      let selected = props.iso_a2 && props.iso_a2 === selectedCountryIso;
+      const key = countryKeyOfProps(props);
+      let selected = key != null && selectedCountryKeys.has(key);
+      const focused = key != null && key === focusedCountryKey;
       if (!selected && activeConflictZoneBounds) {
         const center = layer.getBounds().getCenter();
         selected = boundsContainsPoint(activeConflictZoneBounds, center.lat, center.lng);
       }
       const el = layer.getElement?.();
-      if (el) el.classList.toggle("country-selected", !!selected);
+      if (el) {
+        el.classList.toggle("country-selected", !!selected);
+        el.classList.toggle("country-focused", focused);
+      }
     });
   }
 
-  function selectCountryEntry(entry) {
-    const key = entry?.key ?? null;
-    if (key != null && key === selectedCountryIso) {
-      selectedCountryIso = null;
-      selectedCountryLayer = null;
-      if (!activeConflictZoneBounds) citiesEnabled = false; // no other active scope -- fully closing means fully closing
-      callbacks.onCountrySelect?.(null);
-    } else if (entry) {
-      const layer = countryLayerFor(key);
-      citiesEnabled = true;
-      selectedCountryIso = key;
-      selectedCountryLayer = layer;
-      callbacks.onCountrySelect?.({
-        iso: entry.iso,
-        name: entry.name,
-        // The country's own bbox drives every "inside this country" count in
-        // the card (see popups.js).
-        html: countryPopupHtml(entry.props, raw, layer ? boundsToPlainObject(layer.getBounds()) : null),
-        point: layer ? countryAnchorPoint(layer) : null,
-      });
-    } else {
-      return false;
-    }
-    renderCities();
+  // The same fallback buildCountryIndex uses for its `key`, restated here
+  // because this side only ever has the raw GeoJSON properties. Territories
+  // with no ISO code ("-99" in Natural Earth) key on their name so their shapes
+  // still select and highlight.
+  function countryKeyOfProps(props) {
+    if (props.iso_a2 && props.iso_a2 !== "-99") return props.iso_a2;
+    return props.name || null;
+  }
+
+  /** The card payload for one country index entry, built from current data. */
+  function countryCardFor(entry) {
+    const layer = countryLayerFor(entry.key);
+    // The country's own bbox drives every "inside this country" count in the
+    // card (see popups.js).
+    const { sections } = countryCardSections(
+      entry.props,
+      raw,
+      layer ? boundsToPlainObject(layer.getBounds()) : null
+    );
+    return {
+      key: entry.key,
+      iso: entry.iso,
+      name: entry.name,
+      sections,
+      point: layer ? countryAnchorPoint(layer) : null,
+    };
+  }
+
+  /**
+   * Rebuild the open card against data that has just landed.
+   *
+   * Only for the feeds the card actually reports on, and deliberately not for
+   * AIS/ADS-B/FIRMS: those poll every 10-20 seconds, and re-rendering the card
+   * that often to move a "military aircraft" tally by one would fight anyone
+   * trying to read or select text in it. Their numbers refresh on the next
+   * conflict/news poll instead.
+   */
+  function refreshFocusedCountryCard() {
+    if (!focusedCountryKey) return;
+    const entry = countryEntryFor(focusedCountryKey);
+    if (entry) callbacks.onCountrySelect?.(countryCardFor(entry));
+  }
+
+  function countryEntryFor(key) {
+    return key == null ? null : countryIndex.find((e) => e.key === key) || null;
+  }
+
+  /** Tell React which countries are selected, in click order. */
+  function reportCountrySelection() {
+    callbacks.onCountrySelectionChange?.(
+      [...selectedCountryKeys].map((key) => {
+        const entry = countryEntryFor(key);
+        return { key, iso: entry?.iso ?? null, name: entry?.name || key };
+      })
+    );
+  }
+
+  /** Open (or close) the card on one already-selected country. */
+  function focusCountry(key) {
+    const entry = countryEntryFor(key);
+    focusedCountryKey = entry ? key : null;
+    focusedCountryLayer = entry ? countryLayerFor(key) : null;
+    callbacks.onCountrySelect?.(entry ? countryCardFor(entry) : null);
     updateCountryHighlights();
+  }
+
+  /**
+   * @param entry     a country index entry, or null
+   * @param additive  ctrl/meta/shift was held -- add to the selection instead
+   *                  of replacing it
+   */
+  function selectCountryEntry(entry, additive = false) {
+    const key = entry?.key ?? null;
+    if (key == null) return false;
+
+    if (selectedCountryKeys.has(key)) {
+      // Clicking a selected country again deselects it, additive or not: it is
+      // the only gesture that reads as "not this one" without hunting for a
+      // control, and it is what this map has always done for a single country.
+      selectedCountryKeys.delete(key);
+      if (!additive && selectedCountryKeys.size > 1) {
+        // A plain click on one member of a multi-selection means "just this
+        // one", so a second plain click on it can only mean "none" -- keeping
+        // the others would make the first click look like it did nothing.
+        selectedCountryKeys.clear();
+      }
+    } else {
+      if (!additive) selectedCountryKeys.clear();
+      selectedCountryKeys.add(key);
+    }
+
+    citiesEnabled = selectedCountryKeys.size > 0 || !!activeConflictZoneBounds;
+    // The card follows the last country touched; if that one was just removed,
+    // it falls back to whatever is still selected rather than closing outright.
+    const nextFocus = selectedCountryKeys.has(key)
+      ? key
+      : [...selectedCountryKeys][selectedCountryKeys.size - 1] ?? null;
+
+    renderCities();
+    focusCountry(nextFocus);
+    reportCountrySelection();
     return true;
   }
 
@@ -454,6 +711,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "countries") return countriesLayer;
     if (key === "cities") return citiesGroup;
     if (key === "infra") return infraLayer; // wraps infraGroup + pipelinesGroup together
+    if (key === "cables") return cablesLayer; // wraps cablesGroup + the landing-point markers
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
     if (key === "clouds") return weatherLayers.clouds;
@@ -465,7 +723,9 @@ export function createMapController(container, initial, callbacks) {
   // The five AIS/ADS-B bucket keys route through entityWebglLayer's own
   // per-bucket visibility instead of a Leaflet layerForKey lookup -- see the
   // comment where entityWebglLayer is created above.
-  const WEBGL_BUCKET_KEYS = new Set(["adsbCivilian", "adsbMilitary", "aisCivilian", "aisNavy", "aisTanker"]);
+  const WEBGL_BUCKET_KEYS = new Set([
+    "adsbCivilian", "adsbMilitary", "adsbFlagged", "aisCivilian", "aisNavy", "aisTanker",
+  ]);
 
   // Each entry: the trail flag it drives, the trail layer to add/remove, the
   // trail Map to clear, and the render fn to catch up with once switched
@@ -483,8 +743,32 @@ export function createMapController(container, initial, callbacks) {
   // map, and those markers are real but invisible.
   const layerOnMap = {};
 
+  // The news group's real state is the AND of its own sub-ticker and the
+  // Conflict & Violence parent it now hangs off. layerOnMap gets that combined
+  // answer rather than the raw checkbox, so settlePlacement doesn't reserve
+  // room for pins that aren't on the map.
+  function syncNewsLayer() {
+    const show = eventsVisible && newsVisible;
+    layerOnMap.gdelt = show;
+    if (show) map.addLayer(groups.gdelt);
+    else map.removeLayer(groups.gdelt);
+  }
+
   function setLayerVisible(key, visible) {
     layerOnMap[key] = visible;
+
+    // The landing-point markers live inside the combined "cables" layer and
+    // have no toggle of their own, but the placement pass keys off the layer
+    // name each marker was registered under -- without this they would be
+    // treated as permanently hidden and take up no room, so visible pins would
+    // be free to sit on top of them.
+    if (key === "cables") layerOnMap.cableLandings = visible;
+
+    if (key === "gdelt") {
+      newsVisible = visible;
+      syncNewsLayer();
+      return;
+    }
     // Not a layer of its own -- a filter on the satellites layer's pool, so
     // it re-renders in place instead of going through layerForKey (which has
     // nothing to add/remove for this key).
@@ -524,6 +808,14 @@ export function createMapController(container, initial, callbacks) {
     if (!layer) return;
     if (visible) map.addLayer(layer);
     else map.removeLayer(layer);
+
+    // Parent of the news sub-ticker: switching the conflict layer off takes
+    // the headlines with it, switching it back on restores whatever the
+    // sub-ticker itself was left set to.
+    if (key === "events") {
+      eventsVisible = visible;
+      syncNewsLayer();
+    }
 
     if (key === "countries") {
       countriesVisible = visible;
@@ -643,6 +935,12 @@ export function createMapController(container, initial, callbacks) {
     satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
+    hazards: 0, hazardsQuake: 0, hazardsVolcano: 0,
+    adsbFlagged: 0, adsbEmergency: 0, adsbHidden: 0, airports: 0,
+    aisSanctioned: 0, adsbSanctioned: 0,
+    darkVessels: 0, darkGaps: 0, darkSts: 0,
+    cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
+    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
   };
   // Total number loaded from the backend for each layer, independent of the
   // current viewport/zoom filtering that `counts` reflects -- shown in the
@@ -652,6 +950,12 @@ export function createMapController(container, initial, callbacks) {
     satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
+    hazards: 0, hazardsQuake: 0, hazardsVolcano: 0,
+    adsbFlagged: 0, adsbEmergency: 0, adsbHidden: 0, airports: 0,
+    aisSanctioned: 0, adsbSanctioned: 0,
+    darkVessels: 0, darkGaps: 0, darkSts: 0,
+    cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
+    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
   };
   // backend/infrastructure.py site "type" -> the counts/totals key it rolls
   // up into, so Critical Infrastructure can show a per-type sub-ticker (see
@@ -663,7 +967,37 @@ export function createMapController(container, initial, callbacks) {
   };
   const zoomNotes = {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
-    officials: false,
+    officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
+  };
+
+  // Layers that report a breakdown as well as a total, so the control panel can
+  // show a sub-ticker per category without a bespoke render function (the way
+  // INFRA_TYPE_COUNT_KEY does for infrastructure). Each entry maps an item to
+  // the counts key it rolls up into, or null to roll up into nothing.
+  const LAYER_SUBCOUNT_KEY = {
+    hazards: {
+      keys: ["hazardsQuake", "hazardsVolcano"],
+      of: (item) => (item.kind === "volcano" ? "hazardsVolcano" : "hazardsQuake"),
+    },
+    darkVessels: {
+      keys: ["darkGaps", "darkSts"],
+      of: (item) => (item.kind === "sts_pair" ? "darkSts" : "darkGaps"),
+    },
+    osmInfra: {
+      keys: ["osmMilitary", "osmPower", "osmBorder"],
+      of: (item) => {
+        if (item.kind === "power_plant") return "osmPower";
+        if (item.kind === "border_control") return "osmBorder";
+        return "osmMilitary"; // airfields and areas roll up together
+      },
+    },
+    launches: {
+      keys: ["launchesUpcoming"],
+      // Flown launches roll up into nothing: the sub-ticker answers "how many
+      // are still to come", and counting the past ones there would answer a
+      // question nobody asked.
+      of: (item) => (item.upcoming ? "launchesUpcoming" : null),
+    },
   };
   function reportCounts() {
     const totalsSuffixed = {};
@@ -690,20 +1024,42 @@ export function createMapController(container, initial, callbacks) {
   // claim being made; cities are lowest because a city dot is context, and its
   // real position is already labelled by the basemap underneath it.
   const LAYER_PLACEMENT_PRIORITY = {
+    // Above conflict events, and it is the only thing on this map that is: an
+    // aircraft squawking 7500 is both rare and the single most time-critical
+    // marker the map can draw, so it never gets nudged off its own position.
+    adsbFlagged: 110,
+    // Just under conflict events: a dark-vessel pin marks a place something was
+    // last seen, which is a real position, but it is an inference about it.
+    darkVessels: 95,
     events: 100, infra: 80, satellites: 70, aisNavy: 65, adsbMilitary: 65,
     // Above news: several officials pins sit on a capital's coordinate by
     // construction (a press release has no location of its own), so they are
     // the ones that most need to keep their true point rather than being
     // pushed off it by whatever news happens to share the pixel.
-    aisTanker: 50, officials: 45, gdelt: 40, conflictHistory: 30, aisCivilian: 20,
-    adsbCivilian: 20, cities: 10,
+    // A hazard's coordinate is an instrument solution (a USGS epicentre) or a
+    // volcano's own summit, so it is a measured position rather than an
+    // editorial one -- above news and the historical record, below the live
+    // conflict layer this map is primarily for.
+    aisTanker: 50, officials: 45, hazards: 42, gdelt: 40, conflictHistory: 30, aisCivilian: 20,
+    // Below cities: an airfield is background context for the aircraft above
+    // it, and it is the one layer here that is allowed to be nudged by anything.
+    // Below the curated infrastructure it sits alongside: where the two
+    // disagree about the same site, the hand-checked coordinate keeps its pixel.
+    adsbCivilian: 20, cities: 10, airports: 5, cableLandings: 15, osmInfra: 25,
   };
 
   // Buckets that share one render function, so a settle pass triggered by any
   // of them redraws the group once rather than once per bucket.
+  // Which counts/totals key each flagged-aircraft bucket rolls up into, read
+  // straight off the same table the legend draws from so a bucket added there
+  // cannot silently stop being counted here.
+  const AIRCRAFT_FLAG_COUNT_KEY = Object.fromEntries(
+    Object.entries(AIRCRAFT_FLAG_STYLE).map(([bucket, style]) => [bucket, style.countKey])
+  );
+
   const REDRAW_GROUP = {
     aisCivilian: "ais", aisTanker: "ais", aisNavy: "ais",
-    adsbCivilian: "adsb", adsbMilitary: "adsb",
+    adsbCivilian: "adsb", adsbMilitary: "adsb", adsbFlagged: "adsb",
   };
 
   // Layer keys are plain identifiers, so splitting a uid on its FIRST "::"
@@ -818,7 +1174,7 @@ export function createMapController(container, initial, callbacks) {
     const sizeOf = ICON_SIZE_FOR[key];
     const bounds = map.getBounds().pad(0.25);
     const idField = ID_FIELD[key];
-    const minZoom = MARKER_LAYER_MIN_ZOOM[key];
+    const minZoom = minZoomFor(key, MARKER_LAYER_MIN_ZOOM[key]);
     const belowMinZoom = minZoom != null && map.getZoom() < minZoom;
     if (minZoom != null) {
       zoomNotes[key] = belowMinZoom;
@@ -836,6 +1192,7 @@ export function createMapController(container, initial, callbacks) {
     }
     if (key === "events") visible = capBySeverity(visible, map.getZoom());
     if (key === "gdelt") visible = collapseNews(visible, map.getZoom());
+    if (key === "officials") visible = collapseOfficials(visible, map.getZoom());
     registerPlacement(
       key,
       visible.map((item) => ({ id: item[idField], lat: item.lat, lon: item.lon, size: sizeOf(item) }))
@@ -850,6 +1207,23 @@ export function createMapController(container, initial, callbacks) {
     );
     counts[key] = visible.length;
     totals[key] = raw[key].length;
+    const subcount = LAYER_SUBCOUNT_KEY[key];
+    if (subcount) {
+      for (const bucket of subcount.keys) {
+        counts[bucket] = 0;
+        totals[bucket] = 0;
+      }
+      // `of` may return null -- a layer is allowed to have items that belong in
+      // none of its sub-tickers (a flown launch, say).
+      for (const item of visible) {
+        const bucket = subcount.of(item);
+        if (bucket) counts[bucket] += 1;
+      }
+      for (const item of raw[key]) {
+        const bucket = subcount.of(item);
+        if (bucket) totals[bucket] += 1;
+      }
+    }
     reportCounts();
     settlePlacement();
   }
@@ -859,7 +1233,11 @@ export function createMapController(container, initial, callbacks) {
   function renderAisLayer() {
     const decorate = DECORATORS.ais;
     const bounds = map.getBounds().pad(0.25);
-    const belowAisMinZoom = map.getZoom() < AIS_MIN_ZOOM;
+    // Civilian and tanker share a shipped gate but read it separately, so an
+    // Admin Mode override on one does not silently move the other.
+    const zoom = map.getZoom();
+    const belowAisMinZoom = zoom < minZoomFor("aisCivilian", AIS_MIN_ZOOM);
+    const belowTankerMinZoom = zoom < minZoomFor("aisTanker", AIS_MIN_ZOOM);
     zoomNotes.ais = belowAisMinZoom;
     reportZoomNotes();
 
@@ -875,8 +1253,8 @@ export function createMapController(container, initial, callbacks) {
       const type = classifyShip(item);
       if (type === "navy") {
         navyVisible.push(item);
-      } else if (!belowAisMinZoom && type === "tanker") {
-        tankerVisible.push(item);
+      } else if (type === "tanker") {
+        if (!belowTankerMinZoom) tankerVisible.push(item);
       } else if (!belowAisMinZoom) {
         civilianVisible.push(item);
       }
@@ -894,21 +1272,37 @@ export function createMapController(container, initial, callbacks) {
     const headingFn = (item) => (Number.isFinite(item.heading) && item.heading !== 511 ? item.heading : item.course);
     const tooltipFn = (item) => decorate(item, { selectedMmsi }).tooltip;
     const isSelectedFn = (item) => item.mmsi === selectedMmsi;
-    registerVehiclePlacement("aisCivilian", civilianVisible, idFn, () => SHIP_STYLE.other.size);
-    registerVehiclePlacement("aisTanker", tankerVisible, idFn, () => SHIP_STYLE.tanker.size);
-    registerVehiclePlacement("aisNavy", navyVisible, idFn, () => SHIP_STYLE.navy.size);
+    // Resolved once per render rather than per ship: the theme cannot change
+    // mid-pass, and these three objects are handed to every sprite in their
+    // bucket (see map/iconTheme.js on why the shipped constants are not read
+    // directly at a drawing site).
+    // One resolved style per class, plus a per-ship function that swaps in the
+    // designation ring. It has to be per-ship rather than per-class: an
+    // OFAC-listed hull is a handful of vessels inside a bucket of thousands,
+    // and webglLayer's texture cache keys on name|color|size, so the ringed
+    // variant simply resolves to its own texture (see withSanctionRing).
+    const civilianShipStyle = themedStyle(SHIP_STYLE.other, "aisCivilian");
+    const tankerShipStyle = themedStyle(SHIP_STYLE.tanker, "aisTanker");
+    const navyShipStyle = themedStyle(SHIP_STYLE.navy, "aisNavy");
+    const shipStyleFor = (base) => (item) => (isSanctioned(item) ? withSanctionRing(base) : base);
+    const civilianStyleFn = shipStyleFor(civilianShipStyle);
+    const tankerStyleFn = shipStyleFor(tankerShipStyle);
+    const navyStyleFn = shipStyleFor(navyShipStyle);
+    registerVehiclePlacement("aisCivilian", civilianVisible, idFn, (item) => civilianStyleFn(item).size);
+    registerVehiclePlacement("aisTanker", tankerVisible, idFn, (item) => tankerStyleFn(item).size);
+    registerVehiclePlacement("aisNavy", navyVisible, idFn, (item) => navyStyleFn(item).size);
     entityWebglLayer.updateEntities("aisCivilian", civilianVisible, {
-      idField: idFn, heading: headingFn, style: () => SHIP_STYLE.other,
+      idField: idFn, heading: headingFn, style: civilianStyleFn,
       isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
       offsets: offsetsForBucket("aisCivilian"),
     });
     entityWebglLayer.updateEntities("aisTanker", tankerVisible, {
-      idField: idFn, heading: headingFn, style: () => SHIP_STYLE.tanker,
+      idField: idFn, heading: headingFn, style: tankerStyleFn,
       isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
       offsets: offsetsForBucket("aisTanker"),
     });
     entityWebglLayer.updateEntities("aisNavy", navyVisible, {
-      idField: idFn, heading: headingFn, style: () => SHIP_STYLE.navy,
+      idField: idFn, heading: headingFn, style: navyStyleFn,
       isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
       offsets: offsetsForBucket("aisNavy"),
     });
@@ -916,11 +1310,17 @@ export function createMapController(container, initial, callbacks) {
     counts.aisCivilian = civilianVisible.length;
     counts.aisTanker = tankerVisible.length;
     counts.aisNavy = navyVisible.length;
+    // Cuts across all three classes rather than being one of them: a designated
+    // hull is most often an ordinary cargo ship, and the question "how many
+    // listed vessels can I see" is asked of the whole feed at once.
+    counts.aisSanctioned = [...civilianVisible, ...tankerVisible, ...navyVisible].filter(isSanctioned).length;
     totals.aisCivilian = 0;
     totals.aisTanker = 0;
     totals.aisNavy = 0;
+    totals.aisSanctioned = 0;
     for (const item of raw.ais) {
       const type = classifyShip(item);
+      if (isSanctioned(item)) totals.aisSanctioned += 1;
       if (type === "navy") totals.aisNavy += 1;
       else if (type === "tanker") totals.aisTanker += 1;
       else totals.aisCivilian += 1;
@@ -960,16 +1360,25 @@ export function createMapController(container, initial, callbacks) {
   function renderAdsbLayer() {
     const decorate = DECORATORS.adsb;
     const bounds = map.getBounds().pad(0.25);
-    const belowAdsbMinZoom = map.getZoom() < ADSB_MIN_ZOOM;
+    const belowAdsbMinZoom = map.getZoom() < minZoomFor("adsbCivilian", ADSB_MIN_ZOOM);
     zoomNotes.adsb = belowAdsbMinZoom;
     reportZoomNotes();
 
     const civilianVisible = [];
     const militaryVisible = [];
+    // Aircraft squawking an emergency code, or listed under LADD/PIA, get their
+    // own bucket rather than staying in whichever class they belong to. Two
+    // reasons, and both are about not losing the signal: civilian aircraft are
+    // off by default, so a 7700 on an airliner would be invisible; and the
+    // bucket has no zoom gate, because "somewhere in the world an aircraft is
+    // squawking 7500" is worth seeing at world zoom.
+    const flaggedVisible = [];
     for (const item of raw.adsb) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!bounds.contains([item.lat, item.lon])) continue;
-      if (classifyAircraft(item) === "military") {
+      if (isFlaggedAircraft(item)) {
+        flaggedVisible.push(item);
+      } else if (classifyAircraft(item) === "military") {
         militaryVisible.push(item);
       } else if (!belowAdsbMinZoom) {
         civilianVisible.push(item);
@@ -987,11 +1396,29 @@ export function createMapController(container, initial, callbacks) {
     const idFn = (item) => item.icao24;
     const tooltipFn = (item) => decorate(item, { selectedIcao }).tooltip;
     const isSelectedFn = (item) => item.icao24 === selectedIcao;
-    const civilianStyle = (item) => AIRCRAFT_STYLE[classifyAircraft(item)];
+    // Themed here rather than at the sprite: webglLayer's texture cache keys on
+    // name|color|size, so a recoloured or rescaled style simply resolves to a
+    // different texture with no invalidation needed (see map/iconTheme.js).
+    const civilianStyle = (item) => themedStyle(AIRCRAFT_STYLE[classifyAircraft(item)], "adsbCivilian");
     const militaryStyle = (item) =>
-      (item.military_role && MILITARY_ROLE_STYLE[item.military_role]) || AIRCRAFT_STYLE.military;
+      themedStyle((item.military_role && MILITARY_ROLE_STYLE[item.military_role]) || AIRCRAFT_STYLE.military, "adsbMilitary");
+    // The airframe glyph an aircraft would otherwise have, wearing its status
+    // ring -- so a flagged tanker still reads as a tanker (see
+    // withAircraftFlag). Themed through its own layer key so the flagged bucket
+    // can be scaled independently of the two it draws from.
+    const flaggedStyle = (item) =>
+      withAircraftFlag(
+        themedStyle(
+          classifyAircraft(item) === "military"
+            ? (item.military_role && MILITARY_ROLE_STYLE[item.military_role]) || AIRCRAFT_STYLE.military
+            : AIRCRAFT_STYLE[classifyAircraft(item)],
+          "adsbFlagged"
+        ),
+        item
+      );
     registerVehiclePlacement("adsbCivilian", civilianVisible, idFn, (item) => civilianStyle(item).size);
     registerVehiclePlacement("adsbMilitary", militaryVisible, idFn, (item) => militaryStyle(item).size);
+    registerVehiclePlacement("adsbFlagged", flaggedVisible, idFn, (item) => flaggedStyle(item).size);
     entityWebglLayer.updateEntities("adsbCivilian", civilianVisible, {
       idField: idFn, heading: (item) => item.heading, style: civilianStyle,
       isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
@@ -1002,13 +1429,33 @@ export function createMapController(container, initial, callbacks) {
       isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
       offsets: offsetsForBucket("adsbMilitary"),
     });
+    entityWebglLayer.updateEntities("adsbFlagged", flaggedVisible, {
+      idField: idFn, heading: (item) => item.heading, style: flaggedStyle,
+      isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
+      offsets: offsetsForBucket("adsbFlagged"),
+    });
 
     counts.adsbCivilian = civilianVisible.length;
     counts.adsbMilitary = militaryVisible.length;
+    counts.adsbFlagged = flaggedVisible.length;
+    // Exclusive buckets, resolved by one function so the sub-ticker counts
+    // always sum to the layer's own count (see aircraftFlagBucket).
+    counts.adsbSanctioned = 0;
+    counts.adsbEmergency = 0;
+    counts.adsbHidden = 0;
+    for (const item of flaggedVisible) counts[AIRCRAFT_FLAG_COUNT_KEY[aircraftFlagBucket(item)]] += 1;
     totals.adsbCivilian = 0;
     totals.adsbMilitary = 0;
+    totals.adsbFlagged = 0;
+    totals.adsbEmergency = 0;
+    totals.adsbHidden = 0;
+    totals.adsbSanctioned = 0;
     for (const item of raw.adsb) {
-      if (classifyAircraft(item) === "military") totals.adsbMilitary += 1;
+      const bucket = aircraftFlagBucket(item);
+      if (bucket) {
+        totals.adsbFlagged += 1;
+        totals[AIRCRAFT_FLAG_COUNT_KEY[bucket]] += 1;
+      } else if (classifyAircraft(item) === "military") totals.adsbMilitary += 1;
       else totals.adsbCivilian += 1;
     }
     reportCounts();
@@ -1084,7 +1531,7 @@ export function createMapController(container, initial, callbacks) {
   }
 
   function satelliteIconSize(sat) {
-    return (SATELLITE_STYLE[sat.group] || SATELLITE_STYLE.stations).size;
+    return satelliteStyle(sat.group).size;
   }
 
   function buildSatelliteMarker(sat) {
@@ -1167,7 +1614,7 @@ export function createMapController(container, initial, callbacks) {
       renderTrailLayer(
         satelliteTrailsLayer,
         satelliteTrails,
-        (id) => (militaryIds.has(id) ? SATELLITE_STYLE.military.color : SATELLITE_STYLE.stations.color),
+        (id) => (militaryIds.has(id) ? satelliteStyle("military").color : satelliteStyle("stations").color),
         new Set(satelliteTrails.keys()),
         { maxOpacity: 0.22, dashArray: "2 5" }
       );
@@ -1283,7 +1730,7 @@ export function createMapController(container, initial, callbacks) {
         if (key != null) layerByCountryKey.set(key, layer);
       });
       hoveredCountryKey = null;
-      selectedCountryLayer = countryLayerFor(selectedCountryIso);
+      focusedCountryLayer = countryLayerFor(focusedCountryKey);
       counts.countries = features.length;
       totals.countries = features.length;
       reportCounts();
@@ -1306,7 +1753,8 @@ export function createMapController(container, initial, callbacks) {
       const props = layer.feature?.properties;
       const name = props?.name;
       if (!name) return;
-      let inScope = props.iso_a2 && props.iso_a2 === selectedCountryIso;
+      const key = countryKeyOfProps(props);
+      let inScope = key != null && selectedCountryKeys.has(key);
       if (!inScope && activeConflictZoneBounds) {
         const center = layer.getBounds().getCenter();
         inScope = boundsContainsPoint(activeConflictZoneBounds, center.lat, center.lng);
@@ -1329,7 +1777,12 @@ export function createMapController(container, initial, callbacks) {
   }
 
   function cityKey(city) {
-    return `${city.name}|${city.country_code}|${city.lat}|${city.lon}`;
+    // GeoNames' own id when present. The composite fallback is kept so a
+    // browser holding a cached /api/cities response from before the id was
+    // served still renders instead of collapsing every city onto one key.
+    return city.geonameid != null
+      ? `geo:${city.geonameid}`
+      : `${city.name}|${city.country_code}|${city.lat}|${city.lon}`;
   }
 
   // Glyph and size both come from the city's population tier (see
@@ -1341,7 +1794,13 @@ export function createMapController(container, initial, callbacks) {
     marker._iconHtml = icon.options.html;
     applyStacking(marker, size);
     marker.bindPopup(() => cityPopupHtml(city, raw, countryNameByIso2), { maxWidth: 320 });
-    marker.bindTooltip(`${esc(city.name)} &middot; ${esc(tier.label)}<br/>Population: ${fmtNumber(city.population)}`, {
+    // Capitals name both facts -- "Capital city" alone loses the size band a
+    // reader is comparing against, and the population tier alone loses the
+    // reason it is drawn with a star.
+    const label = city.is_capital
+      ? `${esc(tier.label)} &middot; ${esc(cityTier(city.population).label)}`
+      : esc(tier.label);
+    marker.bindTooltip(`${esc(city.name)} &middot; ${label}<br/>Population: ${fmtNumber(city.population)}`, {
       className: "map-tooltip",
       direction: "top",
     });
@@ -1357,7 +1816,7 @@ export function createMapController(container, initial, callbacks) {
   }
 
   function renderCities() {
-    const belowCitiesMinZoom = map.getZoom() < CITIES_MIN_ZOOM;
+    const belowCitiesMinZoom = map.getZoom() < minZoomFor("cities", CITIES_MIN_ZOOM);
     // citiesScoped tells the UI *which* note to show (see PlacesSection.jsx)
     // -- "select a country/zone" takes priority over "zoom in", since
     // zooming in without a scope selected still shows nothing.
@@ -1365,20 +1824,20 @@ export function createMapController(container, initial, callbacks) {
     zoomNotes.cities = !citiesEnabled || belowCitiesMinZoom;
     reportZoomNotes();
     const bounds = map.getBounds().pad(0.25);
-    // Scoped to the in-scope country/zone, not just whatever's in the
-    // viewport -- a single selected country only shows *its own* cities
-    // (matched by country_code, same ISO2 selectedCountryIso holds), and a
-    // conflict-zone selection only shows cities inside that zone's own
-    // bounds, even in world view where the map viewport itself spans the
-    // whole globe. Falls back to `false` if citiesEnabled is somehow true
-    // without either scope set, which shouldn't happen (see flyToRegion and
-    // the country click handler, the only two places that set it).
+    // Scoped to the in-scope countries/zone, not just whatever's in the
+    // viewport -- selected countries only show *their own* cities (matched by
+    // country_code, the same ISO2 the selection holds), and a conflict-zone
+    // selection only shows cities inside that zone's own bounds, even in world
+    // view where the map viewport itself spans the whole globe. Falls back to
+    // `false` if citiesEnabled is somehow true without either scope set, which
+    // shouldn't happen (see flyToRegion and selectCountryEntry, the only two
+    // places that set it).
     const visible =
       !citiesEnabled || belowCitiesMinZoom
         ? []
         : raw.cities.filter((c) => {
             if (!bounds.contains([c.lat, c.lon])) return false;
-            if (selectedCountryIso) return c.country_code === selectedCountryIso;
+            if (selectedCountryKeys.size) return selectedCountryKeys.has(c.country_code);
             if (activeConflictZoneBounds) return boundsContainsPoint(activeConflictZoneBounds, c.lat, c.lon);
             return false;
           });
@@ -1454,7 +1913,7 @@ export function createMapController(container, initial, callbacks) {
     const marker = L.marker([site.lat, site.lon], { icon: d.icon });
     marker._item = site;
     marker._iconHtml = d.icon.options.html;
-    applyStacking(marker, INFRA_ICON_SIZE);
+    applyStacking(marker, infraIconSize());
     marker.bindPopup(() => infraDecoration(marker._item).detail, { maxWidth: 320 });
     marker.bindTooltip(() => infraDecoration(marker._item).tooltip, {
       className: "map-tooltip",
@@ -1480,7 +1939,7 @@ export function createMapController(container, initial, callbacks) {
     );
     registerPlacement(
       "infra",
-      visible.map((s) => ({ id: s.id, lat: s.lat, lon: s.lon, size: INFRA_ICON_SIZE }))
+      visible.map((s) => ({ id: s.id, lat: s.lat, lon: s.lon, size: infraIconSize() }))
     );
     // Diff-sync like every other point layer -- re-runs on every ACLED/GDELT
     // update too (see renderAll) so a flare turns on/off promptly, without
@@ -1512,7 +1971,7 @@ export function createMapController(container, initial, callbacks) {
     pipelinesGroup.clearLayers();
     for (const route of raw.pipelines) {
       const line = L.polyline(route.coords, {
-        color: PIPELINE_ROUTE_COLOR,
+        color: pipelineRouteColor(),
         weight: 2,
         opacity: 0.65,
         dashArray: "6 6",
@@ -1524,6 +1983,49 @@ export function createMapController(container, initial, callbacks) {
     counts.pipelineRoutes = raw.pipelines.length;
     totals.pipelineRoutes = raw.pipelines.length;
     reportCounts();
+  }
+
+  // Cable routes are drawn once and never re-drawn on pan or zoom: unlike every
+  // marker layer, a polyline is already clipped by Leaflet and a cable only
+  // makes sense as a whole line, so bounds-filtering it would cut cables in
+  // half at the edge of the viewport for no saving.
+  function renderCables() {
+    cablesGroup.clearLayers();
+    const color = cableRouteColor();
+    for (const cable of raw.cables) {
+      for (const path of cable.paths || []) {
+        const line = L.polyline(path, {
+          // The publisher's own per-cable colour where there is one, so a cable
+          // looks the same here as on the map most readers have already seen.
+          color: cable.color || color,
+          weight: 1.4,
+          opacity: 0.5,
+        });
+        line.bindTooltip(esc(cable.name), { className: "map-tooltip", direction: "top", sticky: true });
+        line.bindPopup(
+          `<h3>${esc(cable.name)}</h3>` +
+          '<p class="meta">Route drawn schematically, for legibility &mdash; roughly where the cable runs, ' +
+          "not its surveyed position on the seabed.</p>" +
+          '<div class="meta">Source: TeleGeography submarine cable map</div>',
+          { maxWidth: 300 }
+        );
+        cablesGroup.addLayer(line);
+      }
+    }
+    counts.cables = raw.cables.length;
+    totals.cables = raw.cables.length;
+    reportCounts();
+  }
+
+  // A country-scoped measure gets a country-scoped rendering: the shape is
+  // tinted, and nothing is drawn at a point. IODA reports at national
+  // resolution and a pin on a capital would claim a precision it does not have.
+  function updateCountryOutageTint() {
+    countriesLayer.eachLayer((layer) => {
+      const key = countryKeyOfProps(layer.feature?.properties || {});
+      const el = layer.getElement?.();
+      if (el) el.classList.toggle("country-offline", !!(key && raw.outages[key]));
+    });
   }
 
   function renderAll() {
@@ -1548,6 +2050,16 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("conflictHistory");
     renderMarkerLayer("gdelt");
     renderMarkerLayer("officials");
+    // Same reasoning as conflictHistory above: bounds-filtered, and its own
+    // poll is five minutes apart (the volcano half of it, a whole week), so
+    // without a pan/zoom re-render the layer sits empty everywhere the map
+    // moved to since the last poll.
+    renderMarkerLayer("hazards");
+    renderMarkerLayer("airports");
+    renderMarkerLayer("darkVessels");
+    renderMarkerLayer("cableLandings");
+    renderMarkerLayer("launches");
+    renderMarkerLayer("osmInfra");
     renderMarkerLayer("ais");
     renderMarkerLayer("adsb");
     renderFirms();
@@ -1623,20 +2135,19 @@ export function createMapController(container, initial, callbacks) {
       regionFlightActive = false;
     }, REGION_FLY_DURATION * 1000 + 250);
 
-    // Cities (and the country-selected highlight) stay off until the user
-    // opts into a scope -- picking any conflict zone from the Region bar
-    // counts as one; explicitly going back to "World" clears both the
-    // individually-clicked country and the zone highlight, same as never
-    // having selected anything.
-    citiesEnabled = key !== "world";
+    // Cities stay off until the user opts into a scope -- picking any conflict
+    // zone from the Region bar counts as one, and going back to "World" drops
+    // the zone's own highlight.
+    //
+    // A hand-picked country selection survives all of this. It used to be
+    // cleared here, which meant a comparison a reader had built up could be
+    // wiped out by a stray region click; selections now go away only when the
+    // reader says so (clicking the country again, or Clear -- see
+    // clearCountrySelection).
     activeConflictZoneBounds = entry && entry.bounds
       ? { south: entry.bounds[0], west: entry.bounds[1], north: entry.bounds[2], east: entry.bounds[3] }
       : null;
-    if (key === "world" && selectedCountryIso) {
-      selectedCountryIso = null;
-      selectedCountryLayer = null;
-      callbacks.onCountrySelect?.(null);
-    }
+    citiesEnabled = key !== "world" || selectedCountryKeys.size > 0;
     renderCities();
     updateCountryHighlights();
   }
@@ -1669,7 +2180,7 @@ export function createMapController(container, initial, callbacks) {
   // keeps the card glued to its country instead of drifting off during a
   // drag or zoom gesture.
   map.on("move zoom", () => {
-    if (selectedCountryLayer) callbacks.onCountryPointChange?.(countryAnchorPoint(selectedCountryLayer));
+    if (focusedCountryLayer) callbacks.onCountryPointChange?.(countryAnchorPoint(focusedCountryLayer));
   });
 
   // No separate zoomend handler: Leaflet always fires moveend right after
@@ -1700,7 +2211,14 @@ export function createMapController(container, initial, callbacks) {
     if (countriesVisible) {
       const entry = findCountryAt(countryIndex, e.latlng.lat, e.latlng.lng);
       if (entry) {
-        selectCountryEntry(entry);
+        // Ctrl (Windows/Linux), Cmd (macOS) or Shift adds to the selection
+        // instead of replacing it -- the same modifier every file manager and
+        // map editor uses for multi-select, so it needs no instruction. Read
+        // from originalEvent because Leaflet's own event object carries no
+        // modifier state.
+        const native = e.originalEvent;
+        const additive = !!(native && (native.ctrlKey || native.metaKey || native.shiftKey));
+        selectCountryEntry(entry, additive);
         return;
       }
     }
@@ -1788,6 +2306,10 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "cities") renderCities();
       else if (key === "infra") renderInfra();
       else if (key === "pipelines") renderPipelines();
+    else if (key === "cables") renderCables();
+    // Country-keyed, like conflictStats: read straight out of `raw` by the
+    // country card and by the outage tint, with no marker layer of its own.
+    else if (key === "outages") updateCountryOutageTint();
       else if (key === "jamming") renderJamming();
       else if (key === "satellites") renderSatellites();
       // Neither of these is a point array with a layer of its own, so both
@@ -1796,12 +2318,18 @@ export function createMapController(container, initial, callbacks) {
       // dict (hdx_conflict_stats.py) and escalation is a ranked region list
       // (escalation.py); both are read straight out of `raw` by popups.js
       // when a country card is built.
-      else if (key === "conflictStats" || key === "escalation" || key === "conflictDistricts") {
+      else if (key === "conflictStats" || key === "escalation" || key === "conflictDistricts"
+             || key === "humanitarian") {
         /* reference data read on demand by popups.js -- no marker layer */
       }
       else if (key === "conflictHistory") renderMarkerLayer("conflictHistory");
       else renderMarkerLayer(key);
       if (key === "events") updateCountryWarFlare();
+      // An open country card is built from `raw` at the moment it opens, so
+      // without this it would keep showing the counts that were true when it
+      // was clicked -- indefinitely, since the card outlives pans and zooms
+      // now. See refreshFocusedCountryCard for which feeds qualify.
+      if (COUNTRY_CARD_FEEDS.has(key)) refreshFocusedCountryCard();
     },
 
     flyToRegion,
@@ -1819,20 +2347,89 @@ export function createMapController(container, initial, callbacks) {
       renderMarkerLayer("events");
     },
 
-    // Mirrors the country layer's own toggle-off branch -- called from the
-    // info card's own close button, so the controller's selection state
-    // stays in sync with what React is actually showing.
-    deselectCountry() {
-      if (!selectedCountryIso) return;
-      selectedCountryIso = null;
-      selectedCountryLayer = null;
-      if (!activeConflictZoneBounds) citiesEnabled = false;
+    // Closes the info card without touching the selection. The country stays
+    // highlighted, which is the whole point of a selection that outlives a
+    // glance: shutting a card is not the same gesture as deselecting.
+    closeCountryCard() {
+      focusCountry(null);
+    },
+
+    /** Open the card on an already-selected country (the selection chips). */
+    focusCountry(key) {
+      if (!selectedCountryKeys.has(key)) return;
+      focusCountry(key);
+    },
+
+    /** Drop one country from the selection. */
+    deselectCountry(key) {
+      if (!selectedCountryKeys.delete(key)) return;
+      citiesEnabled = selectedCountryKeys.size > 0 || !!activeConflictZoneBounds;
       renderCities();
-      updateCountryHighlights();
+      if (focusedCountryKey === key) focusCountry([...selectedCountryKeys].pop() ?? null);
+      else updateCountryHighlights();
+      reportCountrySelection();
+    },
+
+    /** Drop the whole selection -- the "Clear" the highlight waits for. */
+    clearCountrySelection() {
+      if (!selectedCountryKeys.size) return;
+      selectedCountryKeys.clear();
+      citiesEnabled = !!activeConflictZoneBounds;
+      renderCities();
+      focusCountry(null);
+      reportCountrySelection();
     },
 
     setTheme(theme) {
       baseLayer.setUrl(basemapUrlFor(theme));
+    },
+
+    /**
+     * Satellite imagery under the map, for a given day.
+     *
+     * @param {string|null} key   a GIBS_LAYERS key, or null to switch it off
+     * @param {string} date       "YYYY-MM-DD" in UTC
+     *
+     * Called both when a reader picks a layer and whenever the replay scrubber
+     * moves (see App.jsx), which is what makes scrubbing back three days change
+     * the imagery along with everything else rather than leaving today's pass
+     * sitting under a three-day-old conflict picture.
+     */
+    setImagery(key, date) {
+      const wanted = key && GIBS_LAYERS[key] ? key : null;
+      if (wanted === imageryKey && date === imageryDate) return;
+      imageryKey = wanted;
+      imageryDate = date || null;
+      if (!imageryKey || !imageryDate) {
+        map.removeLayer(imageryLayer);
+        return;
+      }
+      const layer = GIBS_LAYERS[imageryKey];
+      // Each GIBS product has its own deepest zoom, and asking past it returns
+      // an error *image* rather than a 404 -- so the cap has to move with the
+      // layer, not be set once at construction.
+      imageryLayer.options.maxNativeZoom = layer.maxNativeZoom;
+      imageryLayer.setUrl(gibsUrlFor(imageryKey, imageryDate));
+      if (!map.hasLayer(imageryLayer)) map.addLayer(imageryLayer);
+    },
+
+    // Admin Mode's icon settings. The theme itself lives in a module (see
+    // map/iconTheme.js) because decorators read it directly; this entry point
+    // exists so the change is followed by the repaint that makes it visible --
+    // nothing else in the pipeline watches for a palette change.
+    setIconTheme(next) {
+      setIconTheme(next);
+      renderAll();
+      renderCountries();
+    },
+
+    // Per-layer zoom gates from Admin Mode: { [layerKey]: minZoom|null }.
+    // Applied as an override table rather than by mutating the shipped
+    // constants, so "reset" is dropping the entry rather than remembering what
+    // the original number was.
+    setLayerZoomOverrides(next) {
+      layerZoomOverrides = next || {};
+      renderAll();
     },
 
     invalidateSize() {

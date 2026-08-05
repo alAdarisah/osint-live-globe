@@ -33,6 +33,15 @@ export const SVG = {
   planePatrol: '<path fill="currentColor" d="M12 2 L19 17 L12 14 L5 17 Z"/><path fill="none" stroke="currentColor" stroke-width="1.4" d="M6 20 Q9 18.5 12 20 T18 20"/>',
   planeDrone: '<path fill="currentColor" d="M12 5 L18 15 L12 12.5 L6 15 Z"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/>',
   planeTransport: '<rect x="10" y="4" width="4" height="16" rx="1.5" fill="currentColor"/><rect x="3" y="12" width="18" height="3" rx="1" fill="currentColor"/>',
+  // Trainer: a small straight-winged aircraft. It is the largest single group
+  // in the live military feed (96 of 310 -- T-6 Texans, T-38 Talons, T-45
+  // Goshawks), and every one of them used to draw as the generic red wedge, so
+  // the busiest thing on the military layer was also the least informative.
+  // Straight wings and a stubby fuselage read as "not a combat aircraft" at a
+  // glance, which is the distinction that matters here.
+  planeTrainer: '<path fill="currentColor" d="M12 3 C12.8 4.6 13.1 6.4 13.1 8.4 L13.1 17.4 L12.6 20.6 L11.4 20.6 L10.9 17.4 L10.9 8.4 C10.9 6.4 11.2 4.6 12 3 Z"/>' +
+    '<rect x="3.2" y="11.2" width="17.6" height="2.2" rx="1.1" fill="currentColor"/>' +
+    '<rect x="7.6" y="18.6" width="8.8" height="1.8" rx="0.9" fill="currentColor"/>',
   // ---- critical infrastructure ----
   refinery: '<rect x="4" y="12" width="3" height="8" fill="currentColor"/><rect x="9" y="8" width="3" height="12" fill="currentColor"/><rect x="14" y="10" width="3" height="10" fill="currentColor"/><rect x="17" y="5" width="2" height="15" fill="currentColor"/><circle cx="18" cy="3.5" r="1.6" fill="currentColor"/>',
   pipeline: '<path fill="none" stroke="currentColor" stroke-width="2.4" d="M3 16 Q8 8 12 16 T21 16"/>',
@@ -81,6 +90,73 @@ export const SVG = {
   fire: '<path fill="currentColor" d="M12 2 C8 7 5 10 5 14 a7 7 0 0 0 14 0 C19 10 16 7 12 2 Z"/><path fill="#0b0d10" d="M12 10 C10 13 9 14.5 9 16.5 a3 3 0 0 0 6 0 C15 14.5 14 13 12 10 Z"/>',
   jammingSignal: '<path fill="none" stroke="currentColor" stroke-width="2" d="M4 18 A8 8 0 0 1 20 18"/><path fill="none" stroke="currentColor" stroke-width="2" d="M8 18 A4 4 0 0 1 16 18"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/><line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="2.4"/>',
   globe: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/><ellipse cx="12" cy="12" rx="4" ry="9" fill="none" stroke="currentColor" stroke-width="1.4"/><line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="1.4"/>',
+  // ---- aircraft status rings (backend/sources/adsb.py) ----
+  //
+  // Appended to whatever airframe glyph an aircraft already has, rather than
+  // replacing it: an emergency does not stop a KC-135 being a tanker, and the
+  // role glyph is still what a reader needs. Both are drawn at the very edge of
+  // the 24x24 box so the wingtips stay readable underneath.
+  alertRing: '<circle cx="12" cy="12" r="11.2" fill="none" stroke="currentColor" stroke-width="1.8"/>',
+  // A designation ring, for an OFAC-listed hull or airframe. Double-struck so
+  // it cannot be confused with the single emergency ring above at a glance.
+  sanctionRing: '<circle cx="12" cy="12" r="11.3" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+    '<circle cx="12" cy="12" r="9.1" fill="none" stroke="currentColor" stroke-width="1.1" stroke-opacity="0.7"/>',
+  // A runway seen from above, for the OurAirports reference layer. Deliberately
+  // unlike every aircraft glyph: this is a place, not a contact.
+  airfield: '<rect x="2" y="10.4" width="20" height="3.2" rx="0.6" fill="currentColor" transform="rotate(-30 12 12)"/>' +
+    '<circle cx="12" cy="12" r="9.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-opacity="0.55"/>',
+  airfieldMilitary: '<rect x="2" y="10.4" width="20" height="3.2" rx="0.6" fill="currentColor" transform="rotate(-30 12 12)"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.6" d="M12 2.4 20.6 6.9v5.4c0 4.5-3.6 7.7-8.6 9.3-5-1.6-8.6-4.8-8.6-9.3V6.9Z"/>',
+  // Dashed, deliberately: the aircraft is *not* fully shown, and a broken
+  // outline says that without a word.
+  hiddenRing: '<circle cx="12" cy="12" r="11.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="3 2.6" stroke-opacity="0.9"/>',
+  // ---- OpenStreetMap-derived infrastructure (backend/sources/osm_infra.py) ----
+  //
+  // Deliberately simpler and flatter than the curated infrastructure glyphs
+  // above: these are crowd-sourced and are meant to read as a quieter,
+  // second-tier layer sitting underneath them.
+  powerPlant: '<path fill="none" stroke="currentColor" stroke-width="1.8" d="M4.6 20.4V9.2l7.4-5.6 7.4 5.6v11.2Z"/>' +
+    '<path fill="currentColor" d="M12.9 8.4 9 14.2h2.4L10.9 19l4.1-6.2h-2.6Z"/>',
+  borderCrossing: '<path fill="none" stroke="currentColor" stroke-width="1.8" d="M6 3.4v17.2M18 3.4v17.2"/>' +
+    '<path fill="currentColor" d="M6 8.2h12v3.2H6Z"/>',
+  // ---- orbital launches (backend/sources/launches.py) ----
+  //
+  // A rocket on the pad rather than in flight: the pin marks a place on the
+  // ground, and a streaking rocket would read as something moving.
+  launchPad: '<path fill="currentColor" d="M12 1.4c2.1 2.6 3.1 5.8 3.1 9.2v5.2H8.9v-5.2c0-3.4 1-6.6 3.1-9.2Z"/>' +
+    '<path fill="currentColor" d="M8.9 12.4 6.2 17.8h2.7Zm6.2 0 2.7 5.4h-2.7Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M6.6 21.4h10.8"/>',
+  // ---- submarine cables (backend/sources/cables.py) ----
+  //
+  // A cable coming ashore: the line ends at a shore, the shore is the pin.
+  cableLanding: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M2.4 16.4h7.2"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M14.4 16.4h7.2"/>' +
+    '<circle cx="12" cy="16.4" r="2.6" fill="currentColor"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M12 13.8V5.6M8.6 8.4 12 5 15.4 8.4"/>',
+  // ---- derived from our own AIS history (backend/sources/dark_vessels.py) ----
+  //
+  // Both are drawn broken or doubled rather than solid, because both mark an
+  // inference rather than a report. A reader should be able to tell at a glance
+  // that these two are a different kind of claim from every other pin.
+  darkShip: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3.4 2.4" ' +
+    'd="M3 14.6h18l-3 5.4H6Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3.4 2.4" d="M11.4 3.6v11"/>' +
+    '<line x1="4" y1="4" x2="20" y2="20" stroke="currentColor" stroke-width="2.2"/>',
+  stsTransfer: '<path fill="currentColor" d="M1.4 13.6h9l-1.6 4.4H3Z"/>' +
+    '<path fill="currentColor" d="M13.6 13.6h9l-1.6 4.4H15.2Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.4 1.8" d="M10.4 11.4h3.2"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.6" d="M5.4 13.6V7.4M18.6 13.6V7.4"/>',
+  // ---- natural hazards (backend/sources/hazards.py) ----
+  //
+  // A seismograph trace and a cone with a plume: both read as themselves at
+  // 13px, and neither can be mistaken for the fire drop or the conflict
+  // glyphs they will sit beside.
+  earthquake: '<circle cx="12" cy="12" r="9.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.45"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M2.6 12h3.2l1.9-5.4 2.5 10.4 2.4-8.2 1.8 4.6 1.4-2.4h5.6"/>',
+  volcano: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M2.8 20.4 9 9.6h6l6.2 10.8Z"/>' +
+    '<path fill="currentColor" d="M9 9.6h6l-1.5 2.6h-3Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M12 8.4V5.2M9 7.2 7.4 4.6M15 7.2l1.6-2.6"/>',
   // ---- cities, as graduated symbols by population (decorators.js's
   // CITY_TIERS) ----
   //
@@ -94,6 +170,16 @@ export const SVG = {
   cityLarge: '<rect x="3.4" y="3.4" width="17.2" height="17.2" rx="1.6" fill="none" stroke="currentColor" stroke-width="2.8"/><circle cx="12" cy="12" r="3.4" fill="currentColor"/>',
   // Also the Places-ticker glyph for the cities layer as a whole.
   city: '<rect x="3" y="11" width="5.4" height="10" fill="currentColor"/><rect x="9.8" y="5.5" width="5" height="15.5" fill="currentColor"/><rect x="16.2" y="8.5" width="4.8" height="12.5" fill="currentColor"/>',
+  // A national capital: cityLarge's rounded square with a star in it, so the
+  // family relationship reads at a glance -- a capital is a city, marked. The
+  // star is the near-universal cartographic convention for a seat of
+  // government, which means it needs no legend to be understood (it has one
+  // anyway, see PlacesSection).
+  //
+  // Doubles as the Officials & Diplomacy hub glyph: when several diplomatic
+  // items are collapsed onto a capital, this is the shape that says where they
+  // are. A single kind glyph would be a lie for a mixed group.
+  capital: '<rect x="2.6" y="2.6" width="18.8" height="18.8" rx="1.8" fill="none" stroke="currentColor" stroke-width="2.4"/><path fill="currentColor" d="M12 5.8 L13.85 10.6 L19 10.9 L15 14.1 L16.3 19 L12 16.25 L7.7 19 L9 14.1 L5 10.9 L10.15 10.6 Z"/>',
   raindrop: '<path fill="currentColor" d="M12 2 C8 8 5 11 5 15 a7 7 0 0 0 14 0 C19 11 16 8 12 2 Z"/>',
   cloud: '<path fill="currentColor" d="M7 18 a4 4 0 0 1 0 -8 a5 5 0 0 1 9.6 -1.5 A4.5 4.5 0 0 1 17 18 Z"/>',
   wind: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M3 8 H14 a3 3 0 1 0 -3 -3"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M3 16 H17 a3 3 0 1 1 -3 3"/>',

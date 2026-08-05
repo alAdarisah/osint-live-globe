@@ -5,52 +5,16 @@
 // Zone" activity ranking) plus that zone's latest headlines, so picking a
 // zone answers "what's actually happening here" without also opening the
 // separate news ticker.
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
 import { timeAgoFromDateAdded } from "../utils/format";
 import { boundsContainsPoint } from "../utils/geo";
+import { useDraggablePanel } from "../hooks/useDraggablePanel";
 
 const NEWS_MAX_ITEMS = 5;
 const TOP_EVENTS_MAX = 4;
 
 export default function ConflictBriefingCard({ zone, eventsRaw, gdeltRaw, onClose, onLocate }) {
-  // Same widget-style dragging as NewsBroadcastPanel: header is the drag
-  // handle, `pos` null means "use default fixed CSS position".
-  const [pos, setPos] = useState(null);
-  const dragRef = useRef(null);
-
-  const onHeaderPointerDown = useCallback((e) => {
-    if (e.target.closest(".briefing-close")) return;
-    const rect = e.currentTarget.closest("#conflictBriefing").getBoundingClientRect();
-    dragRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      originX: rect.left,
-      originY: rect.top,
-      width: rect.width,
-      height: rect.height,
-      moved: false,
-    };
-    e.currentTarget.setPointerCapture(e.pointerId);
-  }, []);
-
-  const onHeaderPointerMove = useCallback((e) => {
-    const drag = dragRef.current;
-    if (!drag) return;
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
-    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) drag.moved = true;
-    if (!drag.moved) return;
-    const maxX = window.innerWidth - drag.width - 4;
-    const maxY = window.innerHeight - drag.height - 4;
-    setPos({
-      x: Math.min(Math.max(drag.originX + dx, 4), Math.max(maxX, 4)),
-      y: Math.min(Math.max(drag.originY + dy, 4), Math.max(maxY, 4)),
-    });
-  }, []);
-
-  const onHeaderPointerUp = useCallback(() => {
-    dragRef.current = null;
-  }, []);
+  const { panelRef, style, handleProps } = useDraggablePanel("conflictBriefing");
 
   const bounds = useMemo(() => {
     if (!zone?.bounds) return null;
@@ -107,17 +71,9 @@ export default function ConflictBriefingCard({ zone, eventsRaw, gdeltRaw, onClos
 
   if (!zone) return null;
 
-  const style = pos ? { left: pos.x, top: pos.y, right: "auto" } : undefined;
-
   return (
-    <aside id="conflictBriefing" style={style}>
-      <div
-        className="briefing-header"
-        onPointerDown={onHeaderPointerDown}
-        onPointerMove={onHeaderPointerMove}
-        onPointerUp={onHeaderPointerUp}
-        title="Drag to move"
-      >
+    <aside id="conflictBriefing" ref={panelRef} style={style}>
+      <div {...handleProps} className={`briefing-header ${handleProps.className || ""}`}>
         <span className="live-dot" />
         <span className="briefing-title">BRIEFING &mdash; {zone.label}</span>
         <button type="button" className="briefing-close" onClick={onClose} aria-label="Close">

@@ -7,6 +7,7 @@ import websockets
 
 from backend import config, storage
 from backend.cache import registry
+from backend.sources import sanctions
 
 log = logging.getLogger("osint-globe.ais")
 
@@ -23,6 +24,50 @@ _snapshot_task = None  # strong reference to the snapshot loop -- see start()
 # than position reports, and on its own schedule) and merged onto each ship's
 # record in _snapshot_loop below.
 _ship_types: dict[int, int] = {}
+
+# The rest of ShipStaticData worth keeping: the IMO number and the call sign.
+# Both are only broadcast in the static message -- which arrives every few
+# minutes at best, and for some vessels never -- so they are cached per MMSI
+# exactly like the type above rather than read off a position report.
+#
+# The IMO number is the reason this cache exists: it is the only permanent,
+# hull-specific identifier AIS carries, and it is what makes an OFAC match
+# something better than a guess (see backend/sources/sanctions.py).
+_ship_static: dict[int, dict] = {}
+
+
+def _identity_from_static(static: dict) -> dict:
+    """IMO number and call sign out of a ShipStaticData message.
+
+    Both are optional and both are routinely broadcast as zero or whitespace by
+    vessels that have not configured their transponder -- an IMO of 0 is "not
+    set", not a hull, and matching on it would designate every badly-configured
+    ship in the Gulf at once.
+    """
+    identity = {}
+    imo = static.get("ImoNumber")
+    if isinstance(imo, int) and imo > 0:
+        identity["imo"] = str(imo)
+    callsign = (static.get("CallSign") or "").strip()
+    if callsign:
+        identity["callsign"] = callsign
+    return identity
+
+
+def _sanctions_for(mmsi: int, name: str | None) -> dict | None:
+    """Whether this hull is on the OFAC SDN list, and on what evidence.
+
+    Called on every position report, so it has to be a dict lookup and nothing
+    more -- see backend/sources/sanctions.py, which pre-indexes by identifier
+    for exactly this. Deliberately not matched on `name`: a vessel name is the
+    easiest field in AIS to change and the most duplicated.
+    """
+    identity = _ship_static.get(mmsi) or {}
+    return sanctions.for_vessel(
+        imo=identity.get("imo"),
+        mmsi=str(mmsi),
+        callsign=identity.get("callsign"),
+    )
 
 
 def _bboxes_payload():
@@ -60,6 +105,13 @@ async def _consume(state):
                     _ship_types[mmsi] = ship_type
                     if mmsi in _ships:
                         _ships[mmsi]["ship_type"] = ship_type
+                identity = _identity_from_static(static)
+                if identity:
+                    _ship_static.setdefault(mmsi, {}).update(identity)
+                    if mmsi in _ships:
+                        _ships[mmsi].update(identity)
+                        _ships[mmsi]["sanctions"] = _sanctions_for(mmsi, _ships[mmsi].get("name"))
+                        _dirty = True
                 continue
 
             if msg_type != "PositionReport":
@@ -79,6 +131,8 @@ async def _consume(state):
                 "heading": report.get("TrueHeading"),
                 "nav_status": report.get("NavigationalStatus"),
                 "ship_type": _ship_types.get(mmsi),
+                **(_ship_static.get(mmsi) or {}),
+                "sanctions": _sanctions_for(mmsi, (meta.get("ShipName") or "").strip() or None),
                 "updated": time.time(),
             }
             _dirty = True
@@ -86,8 +140,22 @@ async def _consume(state):
 
 async def _snapshot_loop(state):
     global _dirty
+    # The OFAC list downloads on its own schedule and lands well after the AIS
+    # stream is already running, so every ship annotated before it arrived
+    # carries `sanctions: None` -- correct at the time and wrong afterwards.
+    # Re-annotating whenever the index changes size is what makes the first
+    # successful download (and every later update) reach ships already on the
+    # map, instead of only new arrivals.
+    last_sanctions_len = -1
     while True:
         await asyncio.sleep(5)
+        sanctions_len = len(sanctions.current())
+        if sanctions_len != last_sanctions_len:
+            last_sanctions_len = sanctions_len
+            for mmsi, ship in _ships.items():
+                ship["sanctions"] = _sanctions_for(mmsi, ship.get("name"))
+            if _ships:
+                _dirty = True
         cutoff = time.time() - STALE_AFTER
         stale = [m for m, ship in _ships.items() if ship["updated"] < cutoff]
         for mmsi in stale:
@@ -119,6 +187,13 @@ async def _preload_from_storage():
         ship_type = ship.get("ship_type")
         if ship_type is not None:
             _ship_types[mmsi] = ship_type
+        # ShipStaticData arrives minutes apart at best and for some vessels
+        # never, so an IMO number learned before the restart is worth keeping:
+        # without this the OFAC cross-reference silently drops back to the
+        # weaker MMSI/call-sign match for every preloaded hull.
+        identity = {k: ship[k] for k in ("imo", "callsign") if ship.get(k)}
+        if identity:
+            _ship_static[mmsi] = identity
     if _ships:
         _dirty = True
 

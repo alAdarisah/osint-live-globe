@@ -26,7 +26,10 @@
   --text-heading: #ffffff;
   --accent: #6fe3ff;
   --accent-rgb: 111, 227, 255;
-  --panel-bg: rgba(6, 14, 22, 0.94);
+  /* --panel-alpha is Admin Mode's "panel opacity" (hooks/useAppSettings.js
+     writes it onto <html>); the fallback here is what the panels have always
+     been, so nothing changes until it is set. */
+  --panel-bg: rgba(6, 14, 22, var(--panel-alpha, 0.94));
   --panel-border: rgba(111, 227, 255, 0.25);
   --header-fade: linear-gradient(to bottom, rgba(0,4,10,0.85), transparent);
   --footer-fade: linear-gradient(to top, rgba(0,4,10,0.85), transparent);
@@ -50,7 +53,7 @@
   --text-heading: #0c141c;
   --accent: #0089ad;
   --accent-rgb: 0, 137, 173;
-  --panel-bg: rgba(255, 255, 255, 0.94);
+  --panel-bg: rgba(255, 255, 255, var(--panel-alpha, 0.94));
   --panel-border: rgba(0, 137, 173, 0.28);
   --header-fade: linear-gradient(to bottom, rgba(255,255,255,0.92), transparent);
   --footer-fade: linear-gradient(to top, rgba(255,255,255,0.92), transparent);
@@ -435,6 +438,14 @@ html, body {
 
 #controlPanel h2:first-child { margin-top: 0; }
 
+/* --- the panel's two folds (components/controlPanel/Collapsible.jsx) -------
+ *
+ * The panel was 5.3 screens tall: 22 layer toggles wrapped in 34 legend blocks
+ * and 18 explanatory paragraphs, so the controls were outnumbered roughly two
+ * to one by material read once and never again. Both folds are native
+ * <details>, so the disclosure triangles below are drawn by hand and the
+ * browser default marker is suppressed. */
+
 /* Groups LayersSection.jsx's rows into scannable sections (Conflict & Events,
    Air & Sea Traffic, Infrastructure & Environment, Space) instead of one
    flat undifferentiated list -- one notch below h2 in weight/size. */
@@ -447,6 +458,99 @@ html, body {
   margin: 16px 0 6px;
 }
 .layer-group-heading:first-of-type { margin-top: 4px; }
+
+.panel-group > summary.layer-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+  padding: 4px 2px;
+  border-radius: 4px;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+.panel-group > summary::-webkit-details-marker { display: none; }
+.panel-group > summary:hover { background: rgba(var(--accent-rgb), 0.08); opacity: 1; }
+/* Keyboard focus has to stay visible: <summary> is the only control here that
+   is not a checkbox, so losing its ring would make the groups unreachable
+   without a mouse. */
+.panel-group > summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Hand-drawn triangle, rotating on open. A CSS-drawn caret rather than a glyph
+   so it inherits the heading's colour and needs no font to be present. */
+.panel-group > summary::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.15s ease;
+}
+.panel-group[open] > summary::before { transform: rotate(90deg); }
+
+.panel-group-title { flex: 1; }
+
+/* How many of the group's layers are on. Present on the collapsed heading so a
+   shut group still says whether it is contributing anything to the map. */
+.panel-group-count {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  opacity: 0.8;
+}
+
+.panel-group-body { padding-bottom: 2px; }
+
+/* One layer's reference material. Deliberately quieter than a layer row -- it
+   is an offer to explain, not a control, and it must not compete with the
+   toggle directly above it. */
+.layer-details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 4px 20px;
+  padding: 2px 4px;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  list-style: none;
+  border-radius: 3px;
+  opacity: 0.72;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.layer-details > summary::-webkit-details-marker { display: none; }
+.layer-details > summary:hover { opacity: 1; background: rgba(var(--accent-rgb), 0.08); }
+.layer-details > summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+  opacity: 1;
+}
+.layer-details > summary::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 3.5px solid currentColor;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transition: transform 0.15s ease;
+}
+.layer-details[open] > summary::before { transform: rotate(90deg); }
+.layer-details[open] > summary { opacity: 1; }
+
+/* A hairline back to the layer the text belongs to, so an expanded block reads
+   as part of that row rather than as the start of the next one. */
+.layer-details-body {
+  margin-left: 20px;
+  padding-left: 8px;
+  border-left: 1px solid var(--panel-border);
+}
+.layer-details-body .sublegend { padding-left: 0; }
 
 .layer-row {
   display: flex;
@@ -467,14 +571,17 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Indented, checkbox-only sub-tickers nested under a parent layer row (e.g.
-   "Show tanker trails" under Oil Tankers) -- same row shape, no icon/count,
-   smaller and dimmer since it's a secondary control, not its own layer. */
+/* Indented sub-tickers nested under a parent layer row (e.g. "Show tanker
+   trails" under Oil Tankers) -- same row shape, smaller and dimmer since it's a
+   secondary control, not its own layer. Most carry only a label; the ones that
+   draw their own markers (news, under Conflict & Violence) also carry a glyph
+   and a live count, scaled down to match the row. */
 .layer-row.sub-row {
   padding-left: 20px;
   font-size: 11px;
   color: var(--text-dim);
 }
+.layer-row.sub-row .layer-icon { width: 12px; height: 12px; }
 
 /* Replaces the old plain colored dot -- an actual glyph matching the
    marker/tile that layer draws on the map, tinted via `color` (see
@@ -1374,6 +1481,107 @@ html, body {
 
 .popup .meta.history-note { color: #8f9bb3; }
 
+/* Derived from our own AIS history rather than reported by anyone (see
+   backend/sources/dark_vessels.py). Desaturated for the same reason the UCDP
+   record above is: a reader must be able to tell at a glance that this pin is a
+   different kind of claim from the ones around it. */
+.entity-icon-wrap.inferred {
+  filter: saturate(0.6);
+}
+
+.inferred-block {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-left: 3px dashed var(--text-dim, #8f9bb3);
+  border-radius: 3px;
+}
+
+/* On the layer row itself, so the word is visible before the fold is opened. */
+/* A country whose connectivity has collapsed in the last 24 hours (IODA). A
+   tint on the shape rather than a pin, because the measurement is national and
+   a pin on the capital would claim a precision it does not have. */
+.country-shape.country-offline {
+  stroke: #4fd1c5;
+  stroke-width: 1.4;
+  fill: #4fd1c5;
+  fill-opacity: 0.14;
+}
+
+.outage-block {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-left: 3px solid #4fd1c5;
+  background: rgba(79, 209, 197, 0.09);
+  border-radius: 3px;
+}
+
+.outage-head {
+  color: #4fd1c5;
+  font-weight: 700;
+}
+
+.imagery-select {
+  display: block;
+  margin: 4px 0 6px;
+}
+
+.imagery-select select {
+  width: 100%;
+}
+
+.inferred-tag {
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px dashed var(--text-dim, #8f9bb3);
+  border-radius: 3px;
+  color: var(--text-dim, #8f9bb3);
+  font-size: 0.78em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* A tsunami evaluation is the one line in an earthquake popup that changes what
+   a reader should do, so it is the one line allowed to shout. */
+.popup .hazard-tsunami {
+  color: #3ac1ff;
+  font-weight: 600;
+}
+
+/* Same reasoning for a live emergency squawk: it goes at the top of the popup
+   and is the only thing in it printed in the alert colour. */
+.aircraft-emergency {
+  color: #ff3b30;
+  font-weight: 600;
+}
+
+/* An OFAC designation is the strongest claim any popup on this map makes, so
+   it is boxed rather than left as another line in the list -- and boxed in the
+   same colour as the ring on the marker that was clicked. */
+.sanction-block {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-left: 3px solid #ff3b30;
+  background: rgba(255, 59, 48, 0.08);
+  border-radius: 3px;
+}
+
+.sanction-head {
+  color: #ff3b30;
+  font-weight: 700;
+}
+
+.sanction-flag {
+  color: #ff3b30;
+  font-weight: 600;
+}
+
+/* Airfields are reference, not a feed -- they sit behind everything else and
+   must never compete with a contact for the eye. */
+.entity-icon-wrap .airfield-marker,
+.airfield-marker .entity-icon-wrap {
+  filter: saturate(0.7);
+}
+
 .imprecise-swatch {
   display: inline-block;
   width: 11px;
@@ -1749,4 +1957,537 @@ html, body {
   width: 0%;
   background: var(--accent);
   transition: width 0.4s ease;
+}
+
+/* ============================================================
+   Admin Mode, draggable panels, country selection
+   ============================================================
+
+   Everything below is driven from settings state rather than from a
+   stylesheet edit -- see hooks/useAppSettings.js, which writes
+   --ui-text-scale / --panel-alpha / --accent onto <html> and toggles the
+   .reduce-motion / .hide-leaders / .admin-mode classes there. */
+
+:root {
+  --ui-text-scale: 1;
+  --panel-alpha: 0.94;
+}
+
+/* Panel drag handles. `touch-action: none` is what stops a touch drag from
+   scrolling the page out from under the pointer capture. */
+.panel-drag-handle {
+  cursor: move;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* "Reduce motion": kills the decorative loops (pulsing dots, jamming pings,
+   hot-zone flares) without touching the transitions that tell you a control
+   responded. */
+:root.reduce-motion .live-dot,
+:root.reduce-motion .notable-pulse,
+:root.reduce-motion .jamming-ping-ring,
+:root.reduce-motion .infra-hot .entity-icon-wrap,
+:root.reduce-motion .country-shape.country-hot {
+  animation: none !important;
+}
+
+:root.hide-leaders .pin-leader { display: none; }
+
+/* --- Admin Mode toggle in the title bar --- */
+#adminToggle {
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 9.5px;
+  letter-spacing: 1.4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+#adminToggle:hover { color: var(--text-bright); border-color: var(--accent); }
+/* Unmistakably on: an editing mode that looks like the reading mode is how
+   accidental edits happen. */
+#adminToggle.active {
+  background: #ff8c3a;
+  border-color: #ff8c3a;
+  color: #1a0d00;
+  font-weight: 700;
+}
+/* A hairline along the top of the viewport for as long as Admin Mode is on,
+   visible even when the panel is scrolled away or dragged to an edge. */
+:root.admin-mode body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #ff8c3a;
+  z-index: 2000;
+  pointer-events: none;
+}
+
+/* --- the admin panel --- */
+#adminPanel {
+  position: fixed;
+  top: 92px;
+  left: 336px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 76vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid #ff8c3a;
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 22px var(--shadow-color);
+  z-index: 1200;
+  font-size: calc(11.5px * var(--ui-text-scale));
+}
+
+.admin-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+.admin-badge {
+  font-size: 9px;
+  letter-spacing: 1.4px;
+  font-weight: 700;
+  background: #ff8c3a;
+  color: #1a0d00;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.admin-title {
+  font-size: calc(11px * var(--ui-text-scale));
+  letter-spacing: 1.2px;
+  color: var(--text-bright);
+  text-transform: uppercase;
+}
+/* Save state, in the header so it is readable from any section. */
+.admin-sync {
+  margin-left: auto;
+  font-size: calc(9.5px * var(--ui-text-scale));
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.admin-sync-saved { color: #34c759; }
+.admin-sync-saving { color: var(--accent); }
+.admin-sync-local-only { color: #ff9500; }
+.admin-sync-error { color: #ff5c5c; }
+
+.admin-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.admin-close:hover { color: var(--text-bright); }
+
+.admin-body {
+  overflow-y: auto;
+  padding: 6px 10px 10px;
+}
+
+.admin-subhead {
+  margin: 10px 0 4px;
+  font-size: calc(10px * var(--ui-text-scale));
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.admin-note {
+  margin: 4px 0 6px;
+  font-size: calc(10px * var(--ui-text-scale));
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+.admin-field-note {
+  display: block;
+  font-size: calc(9.5px * var(--ui-text-scale));
+  color: var(--text-dim);
+}
+
+.admin-field {
+  display: block;
+  margin: 6px 0;
+  color: var(--text-secondary);
+}
+.admin-field-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.admin-field-value {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* A value that is no longer the shipped one says so, so a panel of thirty
+   sliders can be scanned for "what have I changed" without a diff. */
+.admin-field-value.modified { color: #ff8c3a; font-weight: 700; }
+
+.admin-field input[type="text"],
+.admin-field input[type="number"],
+.admin-row input[type="text"],
+.admin-row select {
+  width: 100%;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: calc(11px * var(--ui-text-scale));
+}
+.admin-field input:focus, .admin-row input:focus, .admin-row select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.admin-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.admin-slider-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.admin-reset-btn {
+  flex: none;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-dim);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+}
+.admin-reset-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+.admin-color-group { margin-bottom: 6px; }
+.admin-color-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+.admin-color-field input[type="color"] {
+  flex: none;
+  width: 26px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+.admin-color-label { flex: 1 1 auto; min-width: 0; }
+
+.admin-check-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 6px 0;
+  color: var(--text-secondary);
+}
+.admin-check-field input { margin-top: 2px; accent-color: var(--accent); }
+
+.admin-layer-block {
+  padding: 4px 0 6px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
+}
+.admin-layer-block:last-child { border-bottom: none; }
+
+.admin-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+}
+.admin-row button,
+.admin-wide-btn,
+.admin-add-btn {
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: calc(10.5px * var(--ui-text-scale));
+  cursor: pointer;
+}
+.admin-row button:hover,
+.admin-wide-btn:hover,
+.admin-add-btn:hover { color: var(--text-bright); border-color: var(--accent); }
+.admin-row button:disabled { opacity: 0.45; cursor: not-allowed; }
+.admin-wide-btn, .admin-add-btn { width: 100%; margin-top: 6px; }
+.admin-wide-btn.danger { border-color: rgba(255, 61, 61, 0.5); color: #ff8080; }
+.admin-wide-btn.danger:hover { border-color: #ff3d3d; color: #ffb3b3; }
+
+/* --- data editor --- */
+.admin-record-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid rgba(var(--accent-rgb), 0.14);
+  border-radius: 4px;
+}
+.admin-record { border-bottom: 1px solid rgba(var(--accent-rgb), 0.1); }
+.admin-record:last-child { border-bottom: none; }
+.admin-record.edited { background: rgba(255, 140, 58, 0.07); }
+.admin-record-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 7px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: calc(10.5px * var(--ui-text-scale));
+  text-align: left;
+  cursor: pointer;
+}
+.admin-record-head:hover { background: rgba(var(--accent-rgb), 0.08); color: var(--text-bright); }
+.admin-record-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-tag {
+  flex: none;
+  font-size: 9px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #ff8c3a;
+  border: 1px solid rgba(255, 140, 58, 0.5);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.admin-record-body { padding: 4px 8px 8px; }
+.admin-hidden-list { margin-top: 8px; }
+.admin-hidden-id {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: calc(10px * var(--ui-text-scale));
+}
+.admin-add-form {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px dashed var(--panel-border);
+  border-radius: 4px;
+}
+
+/* An edited record says so wherever it is rendered -- see editedNote in
+   decorators.js. Orange rather than the accent: this is the one line in a
+   popup that is about the map's own honesty. */
+.edited-note {
+  color: #ff8c3a !important;
+  border-left: 2px solid #ff8c3a;
+  padding-left: 6px;
+  margin: 4px 0;
+}
+
+/* --- country selection bar --- */
+#countrySelection {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 52px;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(760px, calc(100vw - 28px));
+  padding: 5px 10px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px var(--shadow-color);
+  font-size: calc(11px * var(--ui-text-scale));
+}
+.country-selection-label {
+  flex: none;
+  color: var(--text-dim);
+  font-size: calc(10px * var(--ui-text-scale));
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+.country-selection-chips {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+  min-width: 0;
+}
+.country-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.1);
+  overflow: hidden;
+}
+/* The chip for the country whose card is open, so the card and the bar agree
+   about what is being read. */
+.country-chip.focused {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.24);
+}
+.country-chip-name,
+.country-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: calc(10.5px * var(--ui-text-scale));
+  cursor: pointer;
+  padding: 3px 4px 3px 8px;
+  white-space: nowrap;
+}
+.country-chip-remove { padding: 3px 7px 3px 3px; font-size: 12px; line-height: 1; }
+.country-chip-name:hover, .country-chip-remove:hover { color: var(--text-bright); }
+.country-selection-clear {
+  flex: none;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  font: inherit;
+  font-size: calc(10px * var(--ui-text-scale));
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.country-selection-clear:hover { border-color: var(--accent); color: var(--text-bright); }
+.country-selection-hint {
+  flex: none;
+  color: var(--text-dim);
+  font-size: calc(9.5px * var(--ui-text-scale));
+  white-space: nowrap;
+}
+
+/* The focused country reads brighter than the rest of the selection -- the
+   same distinction the chips make, on the map itself. */
+.country-shape.country-focused {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  stroke-opacity: 1;
+}
+
+/* --- country card: draggable header + folded sections --- */
+.country-info-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -4px -4px 6px;
+  padding: 2px 2px 6px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.country-info-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: calc(13px * var(--ui-text-scale));
+  font-weight: 700;
+  color: var(--text-heading);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Once dragged the card is its own window: no tail, and it no longer tracks
+   the country's screen position (see CountryInfoCard.jsx). */
+#countryInfoCard.detached { animation: none; }
+
+.country-section { border-bottom: 1px solid rgba(var(--accent-rgb), 0.12); }
+.country-section:last-child { border-bottom: none; }
+.country-section > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 5px 2px 5px 14px;
+  position: relative;
+  font-size: calc(10.5px * var(--ui-text-scale));
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.85;
+}
+.country-section > summary::-webkit-details-marker { display: none; }
+.country-section > summary:hover { opacity: 1; background: rgba(var(--accent-rgb), 0.08); }
+.country-section > summary:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.country-section > summary::before {
+  content: "\25B8";
+  position: absolute;
+  left: 2px;
+  transition: transform 0.15s ease;
+  display: inline-block;
+}
+.country-section[open] > summary::before { transform: rotate(90deg); }
+.country-section[open] > summary { opacity: 1; }
+.country-section-body { padding: 0 2px 8px; }
+.country-section-body .meta { color: var(--text-secondary); font-size: calc(11px * var(--ui-text-scale)); }
+.csection-body { margin-top: 2px; }
+.csection-h {
+  font-size: calc(10px * var(--ui-text-scale));
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+/* --- text size -------------------------------------------------------
+   Admin Mode's text scale, applied to the HUD's own type.
+   Every size in this stylesheet is an absolute px (the panels are dense,
+   fixed-width HUD furniture, not a document), so a root font-size would move
+   nothing. These rules restate the base sizes of the text a reader actually
+   reads as a multiple of --ui-text-scale instead; the map's own markers are
+   not affected, since those scale through the icon size slider.
+   Ordered after the rules they override, and no more specific than they are,
+   so the cascade takes them on equal specificity by position. */
+.layer-row, .subticker-row { font-size: calc(11.5px * var(--ui-text-scale)); }
+.sublegend, .key-note { font-size: calc(10.5px * var(--ui-text-scale)); }
+.panel-group > summary.layer-group-heading { font-size: calc(11px * var(--ui-text-scale)); }
+.news-item a, .news-item-row > span { font-size: calc(12px * var(--ui-text-scale)); }
+.news-item .news-item-meta { font-size: calc(10px * var(--ui-text-scale)); }
+.notable-line { font-size: calc(11.5px * var(--ui-text-scale)); }
+.notable-item-meta { font-size: calc(10px * var(--ui-text-scale)); }
+.briefing-summary, .briefing-events { font-size: calc(11.5px * var(--ui-text-scale)); }
+.leaflet-popup-content { font-size: calc(12px * var(--ui-text-scale)); }
+
+@media (max-width: 720px) {
+  /* Dragging is off on phones (see useDraggablePanel's `enabled`), and the
+     admin panel becomes a full-width sheet rather than a floating window in a
+     viewport with no room to float one. */
+  #adminPanel {
+    left: 10px;
+    right: 10px;
+    top: 84px;
+    width: auto;
+    max-width: none;
+    max-height: 70vh;
+  }
+  #countrySelection { bottom: 92px; }
+  .country-selection-hint { display: none; }
 }

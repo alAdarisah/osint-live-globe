@@ -6,14 +6,18 @@
 
 import { L } from "./leafletGlobal";
 import { SVG, OFFICIALS_KIND_ICON, buildDivIcon } from "./svgIcons";
-import { esc, timeAgoFromDateAdded } from "../utils/format";
+import { esc, fmtNumber, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
 import {
-  severityBand, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
+  severityBand, severityColor, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
   ageHoursFromDateAdded, newsAgeOpacity, newsAgeScale,
 } from "./severity";
+import { paletteColor, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
 
-function icon(svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset) {
-  return buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset);
+// `badge` was missing from this forwarder, so decorateGdelt's collapsed-pin
+// count was passed in and silently dropped: buildDivIcon has supported the
+// chip all along, and a pin standing for nine stories drew as a plain pin.
+function icon(svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset, badge) {
+  return buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset, badge);
 }
 
 // Icon sizes are needed twice: here, to draw the glyph, and in
@@ -21,19 +25,25 @@ function icon(svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, 
 // item takes before any of them are drawn. Exported so there is one formula
 // rather than a copy that can drift.
 //
+// Every one of these ends in scaledSize(), which applies Admin Mode's global
+// and per-layer size multipliers (see map/iconTheme.js). Doing it here rather
+// than at the point the glyph is built is what keeps the declutter/placement
+// pass working off the size a pin is actually drawn at -- scaling only the
+// drawing would leave 30px icons being routed around a 15px reservation.
+//
 // 13px at severity 0 up to ~31px at 100 -- a visible hierarchy at a glance
 // without the largest pins swallowing their neighbours. Imprecise events are
 // drawn smaller as well as ringed: they should not compete for attention with
 // events we can actually place.
 export function eventIconSize(d) {
   const severity = Number.isFinite(d.severity) ? d.severity : 0;
-  return (13 + (severity / 100) * 18) * (isImprecise(d) ? 0.8 : 1);
+  return scaledSize((13 + (severity / 100) * 18) * (isImprecise(d) ? 0.8 : 1), "events");
 }
 
 // Sized by deaths, since UCDP always reports them -- but capped well below the
 // live layer's largest pins so the record never dominates the map.
 export function historicalIconSize(d) {
-  return 10 + Math.min(Math.sqrt(d.fatalities || 0) * 2.2, 8);
+  return scaledSize(10 + Math.min(Math.sqrt(d.fatalities || 0) * 2.2, 8), "conflictHistory");
 }
 
 // Reach sets the base size; age shrinks it. Rounded to whole pixels for the
@@ -44,7 +54,7 @@ export function historicalIconSize(d) {
 export function gdeltIconSize(d) {
   const base = 14 + Math.min(Math.log10((d.mentions || 1) + 1), 3) * 2.5;
   const scaled = base * newsAgeScale(ageHoursFromDateAdded(d.date_added));
-  return Math.round(d.collapsedCount > 1 ? scaled + 4 : scaled);
+  return scaledSize(d.collapsedCount > 1 ? scaled + 4 : scaled, "gdelt");
 }
 
 // Officials pins are sized by how widely the act was carried, not by severity:
@@ -53,10 +63,19 @@ export function gdeltIconSize(d) {
 // own release has no outlet count by construction and sits at the base size.
 export function officialsIconSize(d) {
   const base = 15 + Math.min(Math.log10((d.outlet_count || 0) + 1), 2) * 3.5;
-  return Math.round(base * newsAgeScale(officialsAgeHours(d)));
+  const scaled = base * newsAgeScale(officialsAgeHours(d));
+  // Room for the count badge, same +4 gdeltIconSize gives a collapsed news pin.
+  return scaledSize(d.collapsedCount > 1 ? scaled + 4 : scaled, "officials");
 }
 
 export const INFRA_ICON_SIZE = 18;
+
+// Same shipped size, put through the icon theme. A function rather than a
+// second const because the multipliers change at runtime, and both the pin and
+// the placement pass have to read the current value (see createMapController).
+export function infraIconSize() {
+  return scaledSize(INFRA_ICON_SIZE, "infra");
+}
 
 // ---------- cities ----------
 
@@ -74,9 +93,27 @@ export const CITY_TIERS = [
   { key: "town", min: 0, label: "Town (100k-250k)", svg: SVG.cityTown, size: 8 },
 ];
 
+// Capital status is orthogonal to population, so it is not another row in
+// CITY_TIERS -- Tokyo is a megacity *and* a capital, and a tier list can only
+// answer one of those. It is a separate tier the population tier defers to,
+// and it carries a floor size rather than a fixed one (see decorateCity) so a
+// capital is never drawn smaller than the population band it belongs to.
+//
+// This is also what the Officials & Diplomacy layer anchors to: a capital
+// snapped record (backend/sources/capitals.py) lands on exactly this point.
+export const CAPITAL_TIER = {
+  key: "capital",
+  label: "Capital city",
+  svg: SVG.capital,
+  size: 15,
+};
+
 // Highest for the largest tier. Used as a placement priority, so a megacity
 // keeps its true position and the towns around it are the ones that yield.
+// A capital outranks every population tier: it is the point diplomacy pins are
+// drawn on, so it is the one that must not be nudged off its true coordinate.
 export function cityTierRank(tier) {
+  if (tier === CAPITAL_TIER) return CITY_TIERS.length;
   return CITY_TIERS.length - 1 - CITY_TIERS.indexOf(tier);
 }
 
@@ -86,8 +123,15 @@ export function cityTier(population) {
 }
 
 export function decorateCity(city, { offset } = {}) {
-  const tier = cityTier(city.population);
-  return { tier, size: tier.size, icon: icon(tier.svg, CITY_COLOR, tier.size, 0, "city-marker", 1, "", offset) };
+  const populationTier = cityTier(city.population);
+  const tier = city.is_capital ? CAPITAL_TIER : populationTier;
+  // max, not the capital tier's own size: shrinking Tokyo below Osaka because
+  // it happens to be a capital would invert the one thing the graduated
+  // symbols exist to show.
+  const base = city.is_capital ? Math.max(CAPITAL_TIER.size, populationTier.size) : tier.size;
+  const size = scaledSize(base, "cities");
+  const color = paletteColor("city.marker", CITY_COLOR);
+  return { tier, size, icon: icon(tier.svg, color, size, 0, "city-marker", layerOpacity("cities"), "", offset) };
 }
 
 // ---------- ACLED / UCDP conflict events ----------
@@ -249,6 +293,16 @@ function coverageBlock(d) {
     </div>`;
 }
 
+// A record the operator has changed in Admin Mode (or added outright) says so,
+// in every popup that can show it. The whole point of this map is that a pin
+// states what kind of evidence it is; a locally-edited pin that looked exactly
+// like a fetched one would break that in the least recoverable way.
+function editedNote(d) {
+  if (!d.__edited) return "";
+  const what = d.__added ? "added locally in Admin Mode" : "edited locally in Admin Mode";
+  return `<div class="meta edited-note">Modified: this record was ${what} and no longer matches the source feed.</div>`;
+}
+
 export function decorateEvent(d, { offset } = {}) {
   const sources = (d.corroborated_by && d.corroborated_by.length ? d.corroborated_by : [d.source]).filter(Boolean);
   const sourceLine = sources.map((s) => SOURCE_LABEL[s] || s).join(", ");
@@ -277,7 +331,7 @@ export function decorateEvent(d, { offset } = {}) {
     ${imprecise ? `<div class="meta imprecise-note">${esc(PRECISION_NOTE[d.geo_precision] || PRECISION_NOTE.unknown)}</div>` : ""}
     <div class="sev-block">
       <div class="sev-head">How much to trust this</div>
-      <div class="sev-bar"><span style="width:${Math.max(2, severity)}%;background:${band.color}"></span></div>
+      <div class="sev-bar"><span style="width:${Math.max(2, severity)}%;background:${severityColor(band)}"></span></div>
       <div class="meta">Severity ${severity}/100 &mdash; ${esc(band.label)}</div>
       <div class="meta">${esc(corroborationLine(d, sources))}</div>
       ${reasons.length ? `<ul class="sev-reasons">${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
@@ -285,6 +339,7 @@ export function decorateEvent(d, { offset } = {}) {
       ${d.jamming_nearby ? `<div class="meta evidence">GPS interference detected within 60 km (${Math.round(d.jamming_nearby * 100)}% bad fixes)</div>` : ""}
       ${d.thermal_nearby ? `<div class="meta evidence">Thermal anomaly detected within 10 km the same day</div>` : ""}
     </div>
+    ${editedNote(d)}
     ${coverageBlock(d)}
     ${!d.coverage?.length && d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     ${!d.notes && d.summary ? '<p class="meta">Sentence above is assembled from the event’s coded fields, not quoted from an article.</p>' : ""}
@@ -294,10 +349,10 @@ export function decorateEvent(d, { offset } = {}) {
   const size = eventIconSize(d);
   // Corroboration keeps its distinct blue: "confirmed by a second source" is
   // a different axis from "how bad", and both are worth seeing at once.
-  const color = d.corroborated ? CORROBORATED_COLOR : band.color;
+  const color = d.corroborated ? paletteColor("event.corroborated", CORROBORATED_COLOR) : severityColor(band);
   // Older events fade rather than disappear, so "what is happening now" is
   // legible without hiding context.
-  const opacity = ageOpacity(ageHours(d));
+  const opacity = ageOpacity(ageHours(d)) * layerOpacity("events");
   return {
     icon: icon(acledIcon(d), color, size, 0, "", opacity, imprecise ? "imprecise" : "", offset),
     tooltip,
@@ -332,7 +387,121 @@ export function decorateHistoricalEvent(d, { offset } = {}) {
     ${d.notes ? `<p>${esc(d.notes)}</p>` : ""}
     <div class="meta">Source: UCDP GED Candidate</div>`;
   return {
-    icon: icon(SVG.recordMark, HISTORY_COLOR, historicalIconSize(d), 0, "", 0.75, "historical", offset),
+    icon: icon(
+      SVG.recordMark,
+      paletteColor("event.history", HISTORY_COLOR),
+      historicalIconSize(d),
+      0,
+      "",
+      0.75 * layerOpacity("conflictHistory"),
+      "historical",
+      offset
+    ),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- natural hazards (backend/sources/hazards.py) ----------
+
+// Two publishers under one layer key, told apart by `kind` all the way to the
+// popup. Exported so LayersSection.jsx's legend draws the same glyphs the map
+// does rather than restating them.
+//
+// Deliberately no palette token: a hazard pin is coloured by severity (see
+// decorateHazard), exactly like a conflict pin, so the legend rows below draw
+// in the panel's own text colour and the severity swatches carry the colour
+// meaning. Giving these an overridable colour would offer a control that does
+// not change what the map paints.
+export const HAZARD_STYLE = {
+  earthquake: { svg: SVG.earthquake, label: "Earthquake (USGS)" },
+  volcano: { svg: SVG.volcano, label: "Volcanic activity (Smithsonian GVP)" },
+};
+const HAZARD_FALLBACK = { svg: SVG.earthquake, label: "Hazard" };
+export const HAZARD_KIND_ORDER = ["earthquake", "volcano"];
+
+export function hazardStyle(kind) {
+  return HAZARD_STYLE[kind] || HAZARD_FALLBACK;
+}
+
+// Same 13-31px severity ramp the conflict layer uses, from the same field --
+// the backend puts both publishers on the shared 0-100 scale (see
+// _severity_for_quake) precisely so one size formula can serve both.
+export function hazardIconSize(d) {
+  const severity = Number.isFinite(d.severity) ? d.severity : 0;
+  return scaledSize(13 + (severity / 100) * 18, "hazards");
+}
+
+// What the severity score was actually derived from, in the reader's words.
+// A magnitude and a PAGER alert are different claims and the popup has to say
+// which one coloured the pin -- otherwise an M7.1 drawn amber next to an M5.4
+// drawn red just looks broken.
+const HAZARD_SEVERITY_BASIS = {
+  pager: "Coloured by USGS PAGER alert level (estimated impact), which outranks magnitude here.",
+  magnitude: "Coloured by magnitude &mdash; USGS has not issued a PAGER impact alert for this event.",
+  gvp_report_type: "Coloured by GVP's own report type; the weekly report carries no finer severity scale.",
+};
+
+function decorateEarthquake(d) {
+  const magnitude = Number.isFinite(d.magnitude) ? `M${d.magnitude.toFixed(1)}` : "Magnitude unknown";
+  const when = timeAgoFromUnix(d.time);
+  const depth = Number.isFinite(d.depth_km) ? `${Math.round(d.depth_km)} km deep` : "depth unknown";
+  const tooltip = `<b>${esc(magnitude)}</b> earthquake &middot; ${esc(depth)}<br/>` +
+    `${esc(d.place || "")}${when ? ` &middot; ${esc(when)}` : ""}`;
+  const detail = `
+    <h3>${esc(magnitude)} earthquake</h3>
+    <div class="meta">${esc(d.place || "Location not described")}${when ? ` &middot; ${esc(when)}` : ""}</div>
+    <div>Depth: ${esc(depth)}</div>
+    ${d.alert ? `<div>PAGER alert: <b>${esc(d.alert)}</b></div>` : ""}
+    ${d.tsunami ? '<div class="hazard-tsunami">Tsunami evaluation issued for this event.</div>' : ""}
+    ${Number.isFinite(d.felt) ? `<div>${fmtNumber(d.felt)} "Did You Feel It?" reports</div>` : ""}
+    <p class="meta">${HAZARD_SEVERITY_BASIS[d.severity_basis] || ""}</p>
+    <div class="meta">Source: ${esc(d.publisher || "USGS")}${
+      d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">event page</a>` : ""
+    }</div>`;
+  return { tooltip, detail };
+}
+
+function decorateVolcano(d) {
+  const name = d.name || "Volcano";
+  const headline = d.headline || "Activity report";
+  const tooltip = `<b>${esc(name)}</b>${d.country ? ` (${esc(d.country)})` : ""}<br/>${esc(headline)}`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(d.country || "")}${d.report_period ? ` &middot; ${esc(d.report_period)}` : ""}</div>
+    <div><b>${esc(headline)}</b></div>
+    ${d.summary ? `<p>${esc(d.summary)}</p>` : ""}
+    <p class="meta">A <b>weekly</b> report, not a live sensor reading &mdash; the Global Volcanism Program
+      issues these once every Thursday, so this describes a period rather than this moment.</p>
+    ${
+      d.geo_precision !== "locality"
+        ? `<p class="meta">${esc(PRECISION_NOTE.region)} No coordinate was published with this report.</p>`
+        : ""
+    }
+    <div class="meta">Source: ${esc(d.publisher || "Smithsonian GVP / USGS")}${
+      d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">weekly report</a>` : ""
+    }</div>`;
+  return { tooltip, detail };
+}
+
+export function decorateHazard(d, { offset } = {}) {
+  const style = hazardStyle(d.kind);
+  const { tooltip, detail } = d.kind === "volcano" ? decorateVolcano(d) : decorateEarthquake(d);
+  // Severity picks the colour the same way it does for conflict pins, so the
+  // two layers' colours mean the same thing side by side. The glyph, not the
+  // colour, is what says which hazard it is.
+  const band = severityBand(d.severity);
+  return {
+    icon: icon(
+      style.svg,
+      severityColor(band),
+      hazardIconSize(d),
+      0,
+      `hazard-marker hazard-${esc(d.kind || "unknown")}`,
+      layerOpacity("hazards"),
+      "",
+      offset
+    ),
     tooltip,
     detail,
   };
@@ -389,16 +558,19 @@ export function decorateGdelt(d, { offset } = {}) {
     : `
     <p class="news-sentence">${esc(headline)}</p>
     ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
+    ${editedNote(d)}
     <div class="meta">Source: ${agency ? esc(agency) : "GDELT"} &middot; ${esc(when)}${corroboratedNote}</div>`;
 
-  const color = d.corroborated ? "#3ac1ff" : "#ffd60a";
+  const color = d.corroborated
+    ? paletteColor("event.corroborated", CORROBORATED_COLOR)
+    : paletteColor("news.pin", "#ffd60a");
   // News pins used to be drawn at a flat opacity of 1 regardless of age, which
   // was tolerable over a two-hour window and is not over twenty-four: without
   // this, a story from yesterday morning is as loud as one from ten minutes
   // ago and the map stops saying anything about what is happening now.
   const hours = ageHoursFromDateAdded(d.date_added);
   return {
-    icon: icon(SVG.news, color, gdeltIconSize(d), 0, "", newsAgeOpacity(hours), "", offset, d.collapsedCount),
+    icon: icon(SVG.news, color, gdeltIconSize(d), 0, "", newsAgeOpacity(hours) * layerOpacity("gdelt"), "", offset, d.collapsedCount),
     tooltip,
     detail,
   };
@@ -443,14 +615,18 @@ export const OFFICIALS_KIND_LABEL = {
 };
 
 function officialsColor(d) {
-  if (COOPERATIVE_KINDS.has(d.kind)) return OFFICIALS_COOPERATIVE_COLOR;
-  if (HOSTILE_KINDS.has(d.kind)) return OFFICIALS_HOSTILE_COLOR;
-  return OFFICIALS_NEUTRAL_COLOR;
+  if (COOPERATIVE_KINDS.has(d.kind)) return paletteColor("officials.cooperative", OFFICIALS_COOPERATIVE_COLOR);
+  if (HOSTILE_KINDS.has(d.kind)) return paletteColor("officials.hostile", OFFICIALS_HOSTILE_COLOR);
+  return paletteColor("officials.neutral", OFFICIALS_NEUTRAL_COLOR);
 }
 
 // published_at is unix seconds here rather than GDELT's packed string, because
 // officials.py normalises both origins onto one timestamp.
-function officialsAgeHours(d) {
+//
+// Exported because createMapController needs the same number for its age
+// filter and its hub ranking. One formula read from three places beats three
+// that agree today -- the same rule gdeltIconSize and eventIconSize follow.
+export function officialsAgeHours(d) {
   if (!Number.isFinite(d?.published_at)) return NaN;
   return (Date.now() - d.published_at * 1000) / 3600000;
 }
@@ -460,6 +636,25 @@ function officialsTimeAgo(d) {
   if (!Number.isFinite(hours)) return "";
   if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}m ago`;
   return `${Math.round(hours)}h ago`;
+}
+
+// Why this pin is where it is. Three genuinely different claims, and the map
+// must not make the wrong one: before capital-snapping existed this said
+// "Placed where the reporting says the act took place" for every GDELT record,
+// which became false the moment a country-centroid row was moved to a capital.
+// Asserting a precision we do not have is the failure geo_precision exists to
+// prevent.
+function officialsPlacement(d) {
+  if (d.origin === "official_feed") {
+    return "Placed at the seat of the issuing institution, not at the site of any event.";
+  }
+  if (d.snapped_to_capital) {
+    const where = d.anchor?.name;
+    return where
+      ? `Reported only at country level — shown at ${where}, the capital, not where the act took place.`
+      : PRECISION_NOTE.capital;
+  }
+  return "Placed where the reporting says the act took place.";
 }
 
 // The one line that tells a reader how to weigh this. Deliberately blunt in
@@ -475,6 +670,27 @@ function officialsProvenance(d) {
     "The actors and the action are inferred from that wording, not quoted from it.";
 }
 
+// One line in a capital hub's list. The counterpart of newsLine above.
+function officialsLine(item) {
+  const kindLabel = OFFICIALS_KIND_LABEL[item.kind] || "Diplomatic activity";
+  const lead = esc((item.headline || "").trim() || item.label || kindLabel);
+  const meta = [
+    kindLabel,
+    item.outlet || item.government,
+    officialsTimeAgo(item),
+    item.origin === "official_feed" ? "official source" : null,
+  ].filter(Boolean).map(esc).join(" &middot; ");
+  const link = item.url
+    ? `<a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${lead}</a>`
+    : lead;
+  return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
+}
+
+// How many items a capital hub lists. Same count the collapsed news pin uses,
+// for the same reason: these are genuinely different events rather than repeat
+// coverage of one, so truncating loses more than it does on a conflict popup.
+const OFFICIALS_COLLAPSED_SHOWN = 8;
+
 export function decorateOfficials(d, { offset } = {}) {
   const kindLabel = OFFICIALS_KIND_LABEL[d.kind] || "Diplomatic activity";
   // A real headline first, then the CAMEO label -- same precedence the
@@ -485,6 +701,13 @@ export function decorateOfficials(d, { offset } = {}) {
   const when = officialsTimeAgo(d);
   const publisher = d.outlet || d.government || (d.origin === "gdelt" ? "GDELT" : "");
   const primary = d.origin === "official_feed";
+
+  // Set by collapseByKey when several diplomatic items share an anchor -- a
+  // capital they were all snapped to, or one institution's press feed. Unlike
+  // the news layer's pixel proximity this is an exact grouping: they really are
+  // one point, so the hub is describing a place rather than approximating one.
+  const collapsed = d.collapsed || null;
+  if (collapsed) return decorateOfficialsHub(d, collapsed, { offset });
 
   const tooltip = `<b>${esc(lead)}</b><br/>${esc(kindLabel)}${where ? " &middot; " + esc(where) : ""}` +
     `<br/>${esc(publisher)}${when ? " &middot; " + esc(when) : ""}` +
@@ -501,10 +724,9 @@ export function decorateOfficials(d, { offset } = {}) {
     ${d.corroborated_by_primary_source
       ? '<div class="meta evidence">Also published by the government itself — primary source and news reporting agree.</div>' : ""}
     ${d.url ? `<div><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${primary ? "Read the statement" : "Open source article"}</a></div>` : ""}
+    ${editedNote(d)}
     <p class="meta">${esc(officialsProvenance(d))}</p>
-    <div class="meta">${primary
-      ? "Placed at the seat of the issuing institution, not at the site of any event."
-      : "Placed where the reporting says the act took place."}</div>`;
+    <div class="meta">${esc(officialsPlacement(d))}</div>`;
 
   return {
     icon: icon(
@@ -513,7 +735,7 @@ export function decorateOfficials(d, { offset } = {}) {
       officialsIconSize(d),
       0,
       "",
-      newsAgeOpacity(officialsAgeHours(d)),
+      newsAgeOpacity(officialsAgeHours(d)) * layerOpacity("officials"),
       // The ring is what separates "the Kremlin said this" from "Reuters
       // reported the Kremlin said this" at a glance, without a second colour
       // axis fighting the cooperative/hostile one.
@@ -523,6 +745,119 @@ export function decorateOfficials(d, { offset } = {}) {
     tooltip,
     detail,
   };
+}
+
+// A capital (or an institution) standing for everything said there.
+//
+// The glyph is the capital star rather than any one kind's icon: a hub whose
+// members are a state visit, two demands and a sanctions announcement has no
+// single kind, and picking one would be a lie about the other three. Colour
+// follows the members only when they agree -- a capital showing nothing but
+// threats should read as hostile at a glance; a mixed one should not pretend to.
+function decorateOfficialsHub(d, members, { offset } = {}) {
+  const anchorName = d.anchor?.name || d.country || d.location || "this location";
+  const institution = d.anchor?.kind === "institution";
+  const kinds = new Set(members.map((m) => m.kind));
+  const color = kinds.size === 1 ? officialsColor(d) : paletteColor("officials.neutral", OFFICIALS_NEUTRAL_COLOR);
+  // Newest first, which is a different question from which item won the head
+  // slot: the pin answers "what matters most here", the list answers "what has
+  // been happening here".
+  const newest = [...members].sort((a, b) => (b.published_at || 0) - (a.published_at || 0));
+  const extra = members.length - OFFICIALS_COLLAPSED_SHOWN;
+  const noun = institution ? "statements" : "diplomatic items";
+
+  const tooltip =
+    `<b>${esc(anchorName)}</b><br/>${members.length} ${esc(noun)}` +
+    `<br/><i>${officialsTimeAgo(newest[0]) ? `latest ${esc(officialsTimeAgo(newest[0]))}` : "click to read"}</i>`;
+
+  const detail = `
+    <div class="coverage-head">${members.length} ${esc(noun)} &mdash; ${esc(anchorName)}</div>
+    <ul class="coverage-list">${newest.slice(0, OFFICIALS_COLLAPSED_SHOWN).map(officialsLine).join("")}</ul>
+    ${extra > 0 ? `<div class="meta">+${extra} more</div>` : ""}
+    <div class="meta">${esc(
+      institution
+        ? "Grouped at the seat of the issuing institution, not at the site of any event."
+        : `Grouped at ${anchorName}. Each of these was reported only at country level, so the map shows them at the capital rather than where they took place.`
+    )}</div>`;
+
+  return {
+    icon: icon(
+      SVG.capital,
+      color,
+      officialsIconSize(d),
+      0,
+      "",
+      newsAgeOpacity(officialsAgeHours(newest[0])) * layerOpacity("officials"),
+      institution ? "official-primary" : "",
+      offset,
+      members.length,
+    ),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- OFAC designation (backend/sources/sanctions.py) ----------
+//
+// Applies to both ships and aircraft, so it lives above both. It is drawn as a
+// ring on whatever glyph the vessel or airframe already has, never as a glyph
+// of its own: a designated tanker is still a tanker, and losing that would cost
+// more than the designation adds.
+
+export const SANCTION_COLOR = "#ff3b30";
+
+/** How strong the identifier behind a match actually is, in a reader's words. */
+export const SANCTION_MATCH_NOTE = {
+  imo: "Matched on <b>IMO number</b> &mdash; permanent and specific to the hull. It survives renaming, " +
+    "reflagging and resale, which makes this the strongest match available.",
+  mmsi: "Matched on <b>MMSI</b>. An MMSI belongs to the radio licence, not the hull, and is reissued when a " +
+    "ship changes flag &mdash; something designated vessels do often. Treat as strong but not conclusive.",
+  callsign: "Matched on <b>call sign</b> only, which AIS broadcasts as free text entered by the crew. This is " +
+    "the weakest match this map will make and can be wrong; check the IMO before relying on it.",
+  registration: "Matched on <b>registration</b> (tail number), which is how OFAC lists an aircraft. Tail " +
+    "numbers are reassigned after a sale, so a match is the airframe OFAC named, not necessarily this operator.",
+};
+
+const SANCTION_MATCH_LABEL = {
+  imo: "IMO number",
+  mmsi: "MMSI",
+  callsign: "call sign",
+  registration: "registration",
+};
+
+export function isSanctioned(d) {
+  return !!d?.sanctions;
+}
+
+/** A style wearing the designation ring, as its own sprite texture. */
+export function withSanctionRing(style) {
+  return {
+    ...style,
+    svg: `${style.svg}${SVG.sanctionRing}`,
+    color: paletteColor("sanctions.designated", SANCTION_COLOR),
+    size: (style.size || 16) + 6,
+    name: `${style.name || "marker"}-sanctioned`,
+  };
+}
+
+/** The popup block for a designated ship or aircraft, or "". */
+export function sanctionDetail(d) {
+  const listing = d?.sanctions;
+  if (!listing) return "";
+  const aliases = (listing.aliases || []).slice(0, 4);
+  return `
+    <div class="sanction-block">
+      <div class="sanction-head">OFAC-designated &mdash; ${esc(listing.program || "programme not stated")}</div>
+      <div>Listed as: ${esc(listing.listed_as)}</div>
+      ${aliases.length ? `<div>Also listed as: ${aliases.map((a) => esc(a)).join(", ")}</div>` : ""}
+      ${listing.flag ? `<div>Listed flag: ${esc(listing.flag)}</div>` : ""}
+      ${listing.owner ? `<div>Listed owner: ${esc(listing.owner)}</div>` : ""}
+      <div>Matched on: ${esc(SANCTION_MATCH_LABEL[listing.matched_on] || listing.matched_on)}</div>
+      <p class="meta">${SANCTION_MATCH_NOTE[listing.matched_on] || ""}</p>
+      <p class="meta">Source: US Treasury OFAC Specially Designated Nationals list, refreshed daily. A match
+        is against the list as published; it is not legal advice and not a claim about what this
+        ${esc(listing.sdn_type === "aircraft" ? "aircraft" : "vessel")} is doing now.</p>
+    </div>`;
 }
 
 // ---------- AIS ships ----------
@@ -552,38 +887,310 @@ export function classifyShip(d) {
   return "other";
 }
 
-// Same {svg,color,size} triples decorateAis picks inline below, pulled out
-// so webglLayer.js can build its sprite texture cache from the same source
-// of truth instead of re-deriving these values.
+// Same {svg,color,size} triples decorateAis picks below, pulled out so
+// webglLayer.js can build its sprite texture cache from the same source of
+// truth instead of re-deriving these values.
+//
+// `token` is the palette entry Admin Mode recolours (see map/iconTheme.js);
+// `color` stays the shipped default and the fallback. Read these through
+// themedStyle() wherever a marker is actually drawn -- reading the raw object
+// gets the shipped colour and the shipped size, which is right for
+// documentation (the control panel's legend explains what ships look like by
+// default) and wrong for painting.
 export const SHIP_STYLE = {
-  navy: { svg: SVG.ship, color: "#ffd60a", size: 26, name: "ship-navy" },
-  tanker: { svg: SVG.tanker, color: "#ffb347", size: 20, name: "ship-tanker" },
-  other: { svg: SVG.ship, color: "#35c2ff", size: 16, name: "ship-other" },
+  navy: { svg: SVG.ship, color: "#ffd60a", size: 26, name: "ship-navy", token: "ship.navy" },
+  tanker: { svg: SVG.tanker, color: "#ffb347", size: 20, name: "ship-tanker", token: "ship.tanker" },
+  other: { svg: SVG.ship, color: "#35c2ff", size: 16, name: "ship-other", token: "ship.other" },
 };
+
+/** Which layer key a ship class belongs to -- its opacity/scale settings. */
+export const SHIP_LAYER_KEY = { navy: "aisNavy", tanker: "aisTanker", other: "aisCivilian" };
 
 export function decorateAis(d, { selectedMmsi } = {}) {
   const type = classifyShip(d);
   const navy = type === "navy";
   const tanker = type === "tanker";
   const typeLabel = navy ? " &middot; US Navy / MSC" : tanker ? " &middot; Oil/chemical tanker" : "";
-  const tooltip = `<b>${esc(d.name || "Unknown vessel")}</b>${typeLabel}<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn`;
+  const designated = isSanctioned(d);
+  const tooltip = `<b>${esc(d.name || "Unknown vessel")}</b>${typeLabel}` +
+    `${designated ? `<br/><span class="sanction-flag">OFAC-designated &middot; ${esc(d.sanctions.program || "")}</span>` : ""}` +
+    `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn`;
   const detail = `
     <h3>${esc(d.name || "Unknown vessel")}</h3>
-    <div class="meta">MMSI ${esc(d.mmsi)}</div>
+    <div class="meta">MMSI ${esc(d.mmsi)}${d.imo ? ` &middot; IMO ${esc(d.imo)}` : ""}${
+      d.callsign ? ` &middot; call sign ${esc(d.callsign)}` : ""
+    }</div>
+    ${sanctionDetail(d)}
     <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg;</div>
     <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
     ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS ship-type code (or USS/USNS naming when static data hasn\'t arrived yet). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
     ${tanker ? '<p class="meta">Identified as an oil/chemical tanker from its AIS ship-type code.</p>' : ""}
-    <div class="meta">Source: aisstream.io (AIS)</div>`;
+    <div class="meta">Source: aisstream.io (AIS)${designated ? " &middot; designations: US Treasury OFAC" : ""}</div>`;
   const heading = Number.isFinite(d.heading) && d.heading !== 511 ? d.heading : d.course;
   let cls = "ship-marker";
   if (navy) cls += " navy-marker";
   if (tanker) cls += " tanker-marker";
+  if (designated) cls += " sanctioned-marker";
   if (d.mmsi === selectedMmsi) cls += " selected";
-  const size = navy ? 26 : tanker ? 20 : 16;
-  const color = navy ? "#ffd60a" : tanker ? "#ffb347" : "#35c2ff";
-  const svg = tanker ? SVG.tanker : SVG.ship;
-  return { icon: icon(svg, color, size, heading, cls), tooltip, detail };
+  // One table rather than three parallel ternaries -- the previous form
+  // restated SHIP_STYLE's colours and sizes inline, which is how a themed
+  // colour would have reached the sprites and not this icon.
+  const base = themedStyle(SHIP_STYLE[type], SHIP_LAYER_KEY[type]);
+  const style = designated ? withSanctionRing(base) : base;
+  return { icon: icon(style.svg, style.color, style.size, heading, cls, style.opacity), tooltip, detail };
+}
+
+// ---------- OpenStreetMap infrastructure (backend/sources/osm_infra.py) ----
+//
+// A separate layer from the curated one above, and drawn to look like it:
+// hollow, quieter, and with every popup naming OpenStreetMap. The curated list
+// promises human-checked coordinates and this does not, so the two must never
+// be mistaken for each other.
+export const OSM_INFRA_STYLE = {
+  military_airfield: { svg: SVG.airfieldMilitary, color: "#ff8c3a", size: 15, label: "Military airfield", token: "osm.military" },
+  military_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 14, label: "Military area", token: "osm.military" },
+  power_plant: { svg: SVG.powerPlant, color: "#9be15d", size: 14, label: "Power plant", token: "osm.power" },
+  border_control: { svg: SVG.borderCrossing, color: "#c9b6ff", size: 13, label: "Border crossing", token: "osm.border" },
+};
+const OSM_INFRA_FALLBACK = OSM_INFRA_STYLE.military_area;
+export const OSM_INFRA_ORDER = ["military_airfield", "military_area", "power_plant", "border_control"];
+
+export function osmInfraStyle(kind) {
+  return themedStyle(OSM_INFRA_STYLE[kind] || OSM_INFRA_FALLBACK, "osmInfra");
+}
+
+export function osmInfraIconSize(d) {
+  return osmInfraStyle(d?.kind).size;
+}
+
+export function decorateOsmInfra(d, { offset } = {}) {
+  const style = osmInfraStyle(d.kind);
+  const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)} &middot; OpenStreetMap`;
+  const detail = `
+    <h3>${esc(d.name)}</h3>
+    <div class="meta">${esc(style.label)}${d.operator ? ` &middot; ${esc(d.operator)}` : ""}</div>
+    ${Number.isFinite(d.output_mw) ? `<div>Output: ${esc(Math.round(d.output_mw))} MW</div>` : ""}
+    ${d.source_tag ? `<div>Generating from: ${esc(d.source_tag)}</div>` : ""}
+    ${!d.named ? '<p class="meta">Unnamed in OpenStreetMap &mdash; the label above is its type, not its name.</p>' : ""}
+    <p class="meta">From <b>OpenStreetMap</b>, contributed by its mappers and not checked by hand. The
+      separate Critical Infrastructure layer is the curated one; this is the wider, noisier picture.
+      Position is the feature's computed centre, so for a large site it is the middle of the area rather
+      than any particular building.</p>
+    <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass &middot;
+      <a href="https://www.openstreetmap.org/${esc(d.osm_type)}/${esc(d.osm_id)}" target="_blank" rel="noopener noreferrer">view the raw feature</a></div>`;
+  return {
+    icon: icon(style.svg, style.color, style.size, 0, "osm-infra-marker", 0.75 * layerOpacity("osmInfra"), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- orbital launches (backend/sources/launches.py) ----------
+
+export const LAUNCH_STYLE = {
+  upcoming: { svg: SVG.launchPad, color: "#ffd60a", size: 20, label: "Upcoming launch", token: "launch.upcoming" },
+  flown: { svg: SVG.launchPad, color: "#8aa0ad", size: 15, label: "Recent launch (flown)", token: "launch.flown" },
+};
+export const LAUNCH_ORDER = ["upcoming", "flown"];
+
+export function launchStyle(d) {
+  return themedStyle(d?.upcoming ? LAUNCH_STYLE.upcoming : LAUNCH_STYLE.flown, "launches");
+}
+
+export function launchIconSize(d) {
+  return launchStyle(d).size;
+}
+
+// How firm the scheduled T-0 actually is, in Launch Library's own vocabulary.
+// A launch scheduled to the month must never be drawn with a live countdown.
+const NET_PRECISION_LABEL = {
+  SEC: "to the second",
+  MIN: "to the minute",
+  HOUR: "to the hour",
+  DAY: "to the day",
+  WEEK: "to the week",
+  MONTH: "to the month",
+  MO: "to the month",
+  QUARTER: "to the quarter",
+  YEAR: "to the year",
+};
+
+// Only these are precise enough for a countdown to mean anything.
+const COUNTDOWN_PRECISIONS = new Set(["SEC", "MIN", "HOUR"]);
+
+function launchTiming(d) {
+  if (!Number.isFinite(d.net)) return "Launch time not set";
+  const precise = COUNTDOWN_PRECISIONS.has(d.net_precision);
+  const when = new Date(d.net * 1000).toISOString().replace("T", " ").slice(0, 16);
+  if (!d.upcoming) return `${when} UTC`;
+  if (!precise) {
+    const note = NET_PRECISION_LABEL[d.net_precision];
+    return `No earlier than ${when} UTC${note ? ` (${note})` : ""}`;
+  }
+  const seconds = d.net - Date.now() / 1000;
+  if (seconds <= 0) return `${when} UTC &mdash; T-0 passed`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `T-${hours}h ${minutes}m &middot; ${when} UTC`;
+}
+
+export function decorateLaunch(d, { offset } = {}) {
+  const style = launchStyle(d);
+  const timing = launchTiming(d);
+  const tooltip = `<b>${esc(d.name || "Launch")}</b><br/>${timing}<br/>${esc(d.site || d.pad || "")}`;
+  const detail = `
+    <h3>${esc(d.name || "Launch")}</h3>
+    <div class="meta">${esc(style.label)}${d.status ? ` &middot; ${esc(d.status)}` : ""}</div>
+    <div><b>${timing}</b></div>
+    ${d.rocket ? `<div>Vehicle: ${esc(d.rocket)}</div>` : ""}
+    ${d.provider ? `<div>Provider: ${esc(d.provider)}</div>` : ""}
+    ${d.mission ? `<div>Mission: ${esc(d.mission)}${d.mission_type ? ` (${esc(d.mission_type)})` : ""}</div>` : ""}
+    ${d.orbit ? `<div>Target orbit: ${esc(d.orbit)}</div>` : ""}
+    <div class="meta">${esc(d.pad || "")}${d.site ? ` &middot; ${esc(d.site)}` : ""}</div>
+    ${d.upcoming && !COUNTDOWN_PRECISIONS.has(d.net_precision)
+      ? '<p class="meta">Scheduled dates this far out routinely move. The time above is the earliest the ' +
+        "provider has committed to, not a countdown.</p>"
+      : ""}
+    <div class="meta">Source: Launch Library 2 (The Space Devs)</div>`;
+  return {
+    icon: icon(style.svg, style.color, style.size, 0, "launch-marker", layerOpacity("launches"), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- submarine cables (backend/sources/cables.py) ----------
+
+export const CABLE_ROUTE_COLOR = "#4fd1c5";
+export const CABLE_LANDING_STYLE = {
+  svg: SVG.cableLanding, color: "#4fd1c5", size: 14, label: "Cable landing point", token: "cable.landing",
+};
+export const CABLE_PLANNED_STYLE = {
+  svg: SVG.cableLanding, color: "#7f93a8", size: 12, label: "Planned landing (site not settled)", token: "cable.planned",
+};
+
+export function cableRouteColor() {
+  return paletteColor("cable.route", CABLE_ROUTE_COLOR);
+}
+
+export function cableLandingStyle(d) {
+  return themedStyle(d?.planned ? CABLE_PLANNED_STYLE : CABLE_LANDING_STYLE, "cables");
+}
+
+export function cableLandingIconSize(d) {
+  return cableLandingStyle(d).size;
+}
+
+export function decorateCableLanding(d, { offset } = {}) {
+  const style = cableLandingStyle(d);
+  const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)}`;
+  const detail = `
+    <h3>${esc(d.name)}</h3>
+    <div class="meta">${esc(style.label)}</div>
+    ${d.planned
+      ? '<p class="meta">TeleGeography lists this landing as <b>to be determined</b> &mdash; a cable is planned to come ashore near here and the site is not settled. It is not an existing facility.</p>'
+      : ""}
+    <p class="meta">Cable routes on this map are drawn schematically, for legibility. They show roughly where
+      a cable runs, not its surveyed position on the seabed.</p>
+    <div class="meta">Source: TeleGeography submarine cable map</div>`;
+  return {
+    icon: icon(style.svg, style.color, style.size, 0, "cable-landing-marker", 0.85 * layerOpacity("cables"), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- dark vessels (backend/sources/dark_vessels.py) ----------
+//
+// The only layer on this map derived from our own recorded history rather than
+// fetched from a publisher, and the only one whose evidence is an *absence*.
+// Everything about how it is drawn says so: dashed glyphs, a muted palette, and
+// a popup that leads with what else could explain the same signature.
+
+export const DARK_VESSEL_STYLE = {
+  ais_gap: { svg: SVG.darkShip, color: "#c9b6ff", size: 22, label: "Went dark (AIS gap)", token: "dark.gap" },
+  sts_pair: { svg: SVG.stsTransfer, color: "#7ee0c9", size: 22, label: "Possible ship-to-ship transfer", token: "dark.sts" },
+};
+const DARK_VESSEL_FALLBACK = DARK_VESSEL_STYLE.ais_gap;
+export const DARK_VESSEL_ORDER = ["ais_gap", "sts_pair"];
+
+export function darkVesselStyle(kind) {
+  return themedStyle(DARK_VESSEL_STYLE[kind] || DARK_VESSEL_FALLBACK, "darkVessels");
+}
+
+export function darkVesselIconSize(d) {
+  const style = darkVesselStyle(d.kind);
+  // A designated hull is why anyone turned this layer on; it gets the larger
+  // pin so it is findable among the ordinary gaps.
+  return scaledSize((style.size || 22) * (d.sanctions ? 1.25 : 1), "darkVessels");
+}
+
+function decorateAisGap(d) {
+  const vessel = d.name || `MMSI ${d.mmsi}`;
+  const tooltip = `<b>${esc(vessel)}</b> &middot; went dark<br/>` +
+    `${esc(d.gap_hours)} h silent &middot; reappeared ${esc(d.resumed_km_away)} km away`;
+  // An implied speed a merchant hull cannot make is the one number here that
+  // rules out the innocent explanation, so it is called out rather than listed.
+  const impossible = Number(d.implied_speed_kn) > 25;
+  const detail = `
+    <h3>${esc(vessel)}</h3>
+    <div class="meta">MMSI ${esc(d.mmsi)}${d.imo ? ` &middot; IMO ${esc(d.imo)}` : ""}</div>
+    ${sanctionDetail(d)}
+    <div class="inferred-block">
+      <div><b>${esc(d.gap_hours)} hours</b> with no position reported.</div>
+      <div>Reappeared ${esc(d.resumed_km_away)} km away, implying ${esc(d.implied_speed_kn)} knots${
+        impossible ? " &mdash; faster than a merchant vessel makes" : ""
+      }.</div>
+      <div class="meta">Last heard ${esc(timeAgoFromUnix(d.went_dark_at))}, back ${esc(timeAgoFromUnix(d.resumed_at))}.</div>
+    </div>
+    <p class="meta"><b>This is an inference from our own AIS history, not a detection.</b> A receiver or
+      upstream outage produces the identical signature; gaps spanning a measured drop in our own feed are
+      suppressed, but thin coverage offshore is not something that check can fix.</p>
+    <div class="meta">Derived from: aisstream.io position history recorded by this backend</div>`;
+  return { tooltip, detail };
+}
+
+function decorateStsPair(d) {
+  const vessels = d.vessels || [];
+  const names = vessels.map((v) => v.name || `MMSI ${v.mmsi}`);
+  const tooltip = `<b>Possible ship-to-ship transfer</b><br/>${esc(names.join(" + "))}<br/>` +
+    `${esc(d.separation_m)} m apart for ${esc(d.together_hours)} h`;
+  const detail = `
+    <h3>Possible ship-to-ship transfer</h3>
+    ${sanctionDetail(d)}
+    <div class="inferred-block">
+      <div>${esc(d.separation_m)} m apart, both under way at almost zero speed, for <b>${esc(d.together_hours)} hours</b>.</div>
+      <ul class="coverage-list">
+        ${vessels.map((v) => `<li>${esc(v.name || "Unknown vessel")} &middot; MMSI ${esc(v.mmsi)}${
+          v.imo ? ` &middot; IMO ${esc(v.imo)}` : ""
+        }${v.sanctions ? ' <span class="sanction-flag">OFAC-designated</span>' : ""}</li>`).join("")}
+      </ul>
+    </div>
+    <p class="meta"><b>This is an inference, not a detection.</b> Two vessels close together may be rafted for
+      a pilot transfer, waiting out weather, or sitting in an anchorage this map does not know about &mdash;
+      only a small curated list of ports is excluded, so an unlisted anchorage will appear here.</p>
+    <div class="meta">Derived from: aisstream.io position history recorded by this backend</div>`;
+  return { tooltip, detail };
+}
+
+export function decorateDarkVessel(d, { offset } = {}) {
+  const style = darkVesselStyle(d.kind);
+  const { tooltip, detail } = d.kind === "sts_pair" ? decorateStsPair(d) : decorateAisGap(d);
+  const color = d.sanctions ? paletteColor("sanctions.designated", SANCTION_COLOR) : style.color;
+  return {
+    icon: icon(
+      style.svg,
+      color,
+      darkVesselIconSize(d),
+      0,
+      `dark-vessel-marker dark-${esc(d.kind || "unknown")}`,
+      0.9 * layerOpacity("darkVessels"),
+      "inferred",
+      offset
+    ),
+    tooltip,
+    detail,
+  };
 }
 
 // ---------- ADS-B aircraft ----------
@@ -614,10 +1221,15 @@ export function classifyAircraft(d) {
 // Exported so webglLayer.js's sprite texture cache draws from the same
 // source of truth decorateAdsb below uses for its divIcon.
 export const AIRCRAFT_STYLE = {
-  military: { svg: SVG.planeMilitary, color: "#ff4d4d", size: 28, label: "Military", name: "plane-military" },
-  helicopter: { svg: SVG.helicopter, color: "#9be15d", size: 18, label: "Helicopter", name: "plane-helicopter" },
-  commercial: { svg: SVG.planeCommercial, color: "#d8b9ff", size: 16, label: "Commercial / airline", name: "plane-commercial" },
-  other: { svg: SVG.planeOther, color: "#8aa0ad", size: 13, label: "General aviation / other", name: "plane-other" },
+  military: { svg: SVG.planeMilitary, color: "#ff4d4d", size: 19, label: "Military", name: "plane-military", token: "aircraft.military" },
+  helicopter: { svg: SVG.helicopter, color: "#9be15d", size: 16, label: "Helicopter", name: "plane-helicopter", token: "aircraft.helicopter" },
+  commercial: { svg: SVG.planeCommercial, color: "#d8b9ff", size: 15, label: "Commercial / airline", name: "plane-commercial", token: "aircraft.commercial" },
+  other: { svg: SVG.planeOther, color: "#8aa0ad", size: 13, label: "General aviation / other", name: "plane-other", token: "aircraft.other" },
+};
+
+/** Which layer key an aircraft class belongs to -- its opacity/scale settings. */
+export const AIRCRAFT_LAYER_KEY = {
+  military: "adsbMilitary", helicopter: "adsbCivilian", commercial: "adsbCivilian", other: "adsbCivilian",
 };
 
 const MILITARY_ROLE_LABEL = {
@@ -628,6 +1240,7 @@ const MILITARY_ROLE_LABEL = {
   recon: "Reconnaissance",
   patrol: "Maritime patrol",
   drone: "Unmanned / drone",
+  trainer: "Trainer",
   transport: "Transport",
   helicopter: "Military helicopter",
 };
@@ -637,21 +1250,151 @@ const MILITARY_ROLE_LABEL = {
 // instead of every military aircraft sharing one generic plane icon.
 // AIRCRAFT_STYLE.military (SVG.planeMilitary) stays the fallback for
 // d.military===true/heuristic hits with no role guessed.
+//
+// Sizes were 24-30px against 16 for an airliner and 13 for general aviation,
+// which made a single tanker visually outweigh a whole airport and left the
+// military layer dominating every view it appeared in. They now run 15-21,
+// so a bomber is still the biggest aircraft on the map and still reads as
+// bigger than an airliner -- the ordering is the information, not the absolute
+// size. Both renderers take these numbers (webglLayer.js's sprite cache keys
+// on style.size, and it also drives declutter's spacing), so this is the one
+// place to change them.
+// `label` is the short legend caption; MILITARY_ROLE_LABEL above is the long
+// form the popup prints. The control panel maps straight over this object, so
+// a role added here appears in the legend without a second edit -- the legend
+// used to restate every svg and colour by hand, which is exactly how the cities
+// swatch drifted a whole row out of step with the map.
 export const MILITARY_ROLE_STYLE = {
-  fighter: { svg: SVG.planeFighter, color: "#ff4d4d", size: 28, name: "plane-military-fighter" },
-  bomber: { svg: SVG.planeBomber, color: "#ff4d4d", size: 30, name: "plane-military-bomber" },
-  tanker: { svg: SVG.planeTanker, color: "#ff8c3a", size: 26, name: "plane-military-tanker" },
-  awacs: { svg: SVG.planeAwacs, color: "#ffd60a", size: 28, name: "plane-military-awacs" },
-  recon: { svg: SVG.planeRecon, color: "#d8b9ff", size: 24, name: "plane-military-recon" },
-  patrol: { svg: SVG.planePatrol, color: "#6fe3ff", size: 26, name: "plane-military-patrol" },
-  drone: { svg: SVG.planeDrone, color: "#9be15d", size: 18, name: "plane-military-drone" },
-  transport: { svg: SVG.planeTransport, color: "#8aa0ad", size: 26, name: "plane-military-transport" },
-  helicopter: { svg: SVG.helicopter, color: "#ff4d4d", size: 20, name: "plane-military-helicopter" },
+  fighter: { svg: SVG.planeFighter, color: "#ff4d4d", size: 19, label: "Fighter", name: "plane-military-fighter" },
+  bomber: { svg: SVG.planeBomber, color: "#ff4d4d", size: 21, label: "Bomber", name: "plane-military-bomber" },
+  tanker: { svg: SVG.planeTanker, color: "#ff8c3a", size: 19, label: "Tanker", name: "plane-military-tanker" },
+  awacs: { svg: SVG.planeAwacs, color: "#ffd60a", size: 20, label: "AWACS", name: "plane-military-awacs" },
+  recon: { svg: SVG.planeRecon, color: "#d8b9ff", size: 18, label: "Recon", name: "plane-military-recon" },
+  patrol: { svg: SVG.planePatrol, color: "#6fe3ff", size: 19, label: "Patrol", name: "plane-military-patrol" },
+  drone: { svg: SVG.planeDrone, color: "#9be15d", size: 15, label: "Drone", name: "plane-military-drone" },
+  // Trainers are the most numerous military type in the air on any given day
+  // and the least consequential, so they sit at the bottom of the size range.
+  trainer: { svg: SVG.planeTrainer, color: "#c9b6ff", size: 15, label: "Trainer", name: "plane-military-trainer" },
+  transport: { svg: SVG.planeTransport, color: "#8aa0ad", size: 18, label: "Transport", name: "plane-military-transport" },
+  helicopter: { svg: SVG.helicopter, color: "#ff4d4d", size: 16, label: "Helicopter", name: "plane-military-helicopter" },
+};
+
+// Legend order: combat first, then support, then the numerous-but-routine.
+// Explicit rather than Object.keys so reordering the styles above for any other
+// reason cannot silently reshuffle the panel.
+export const MILITARY_ROLE_ORDER = [
+  "fighter", "bomber", "tanker", "awacs", "recon", "patrol",
+  "drone", "transport", "helicopter", "trainer",
+];
+
+// ---------- aircraft status: emergencies and display-limited programmes ----
+//
+// Two things the backend now reads that are about an aircraft's *status* rather
+// than its position or its type (see backend/sources/adsb.py): the reserved
+// emergency squawks, and the two programmes an operator can use to keep an
+// aircraft out of public feeds. Both are rare, both outrank whatever else the
+// aircraft is, and both get their own always-on layer for that reason -- a
+// hijack squawk on a civil airliner must not be hidden by the civilian toggle.
+export const AIRCRAFT_FLAG_STYLE = {
+  sanctioned: {
+    ring: SVG.sanctionRing,
+    color: SANCTION_COLOR,
+    suffix: "-sanctioned",
+    countKey: "adsbSanctioned",
+    label: "OFAC-designated airframe",
+  },
+  emergency: {
+    ring: SVG.alertRing,
+    color: "#ff1a1a",
+    suffix: "-emergency",
+    countKey: "adsbEmergency",
+    label: "Emergency squawk (7500/7600/7700)",
+  },
+  displayLimited: {
+    ring: SVG.hiddenRing,
+    color: "#c9b6ff",
+    suffix: "-hidden",
+    countKey: "adsbHidden",
+    label: "Display-limited (LADD / PIA)",
+  },
+};
+// Most consequential first, which is also the precedence aircraftFlagBucket
+// applies -- so the legend reads in the same order the buckets resolve.
+export const AIRCRAFT_FLAG_ORDER = ["sanctioned", "emergency", "displayLimited"];
+
+/** Which status flag an aircraft carries, most urgent first, or null. */
+export function aircraftFlag(d) {
+  if (d?.emergency || d?.emergency_squawk) return "emergency";
+  if (d?.display_limited) return "displayLimited";
+  return null;
+}
+
+/** Whether an aircraft belongs in the always-on flagged bucket. A designation
+ *  qualifies on its own: an OFAC-listed airframe is usually a civil registration
+ *  and would otherwise sit in the layer that is off by default. */
+export function isFlaggedAircraft(d) {
+  return aircraftFlagBucket(d) !== null;
+}
+
+/**
+ * Which single sub-ticker an aircraft counts towards, or null.
+ *
+ * One aircraft can carry several of these at once (a designated airframe
+ * squawking 7700 is exactly the case worth seeing), so the buckets are ordered
+ * and exclusive rather than overlapping -- otherwise the sub-ticker counts
+ * would sum to more than the layer's own total and the panel would look broken.
+ * The precedence matches the ring the marker actually wears (see
+ * withAircraftFlag), so the count and the glyph can never disagree.
+ */
+export function aircraftFlagBucket(d) {
+  if (isSanctioned(d)) return "sanctioned";
+  return aircraftFlag(d);
+}
+
+/**
+ * A base aircraft style with its status ring applied.
+ *
+ * Returns a distinct `name` so webglLayer's texture cache (keyed on
+ * name|color|size) treats the ringed variant as its own texture rather than
+ * repainting the plain one. The airframe glyph is kept underneath: the ring
+ * says what is happening, the silhouette still says what it is.
+ */
+export function withAircraftFlag(style, d) {
+  const flag = aircraftFlag(d);
+  // An OFAC designation outranks both: it is the rarest thing on this map and
+  // the only one that says something about who the aircraft belongs to rather
+  // than what it is doing this minute.
+  if (isSanctioned(d)) return withSanctionRing(style);
+  if (!flag) return style;
+  const { ring, color, suffix } = AIRCRAFT_FLAG_STYLE[flag];
+  return {
+    ...style,
+    svg: `${style.svg}${ring}`,
+    // An emergency recolours the whole glyph -- it is the one status worth
+    // taking the colour channel for. A display-limited aircraft keeps its own
+    // colour and only gains the dashed outline, because "quietly listed" is
+    // not "in trouble".
+    color: flag === "emergency" ? color : style.color,
+    size: (style.size || 16) + 5, // room for the ring, or it clips the wingtips
+    name: `${style.name || "plane"}${suffix}`,
+  };
+}
+
+const AIRCRAFT_FLAG_NOTE = {
+  emergency:
+    "Reserved emergency transponder codes: 7500 unlawful interference, 7600 radio failure, 7700 general " +
+    "emergency. Squawks are occasionally set by mistake and cleared moments later &mdash; this is what the " +
+    "aircraft is broadcasting, not a confirmed incident.",
+  displayLimited:
+    "The operator has asked for this aircraft to be limited in public feeds, or it is flying under a " +
+    "rotating temporary address. airplanes.live publishes it anyway. That request is a fact about the " +
+    "registry entry and says nothing about the flight itself.",
 };
 
 export function decorateAdsb(d, { selectedIcao } = {}) {
   const type = classifyAircraft(d);
-  const style = (type === "military" && d.military_role && MILITARY_ROLE_STYLE[d.military_role]) || AIRCRAFT_STYLE[type];
+  const base = (type === "military" && d.military_role && MILITARY_ROLE_STYLE[d.military_role]) || AIRCRAFT_STYLE[type];
+  const style = withAircraftFlag(themedStyle(base, AIRCRAFT_LAYER_KEY[type]), d);
   const label = type === "military" ? (d.military === true ? "Military (confirmed)" : "Military (heuristic)") : style.label;
   // airplanes.live supplies a real type/description for aircraft it has
   // reference data for -- OpenSky has no such field at all, so this is
@@ -659,9 +1402,23 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
   const hasRealType = !!(d.type_desc && d.type_desc.trim());
   const roleLabel = d.military_role ? MILITARY_ROLE_LABEL[d.military_role] : null;
   const aircraftLine = hasRealType ? `${d.type_desc}${roleLabel ? ` (${roleLabel})` : ""}` : null;
-  const tooltip = `<b>${esc(d.callsign || d.icao24)}</b>${aircraftLine ? ` &middot; ${esc(aircraftLine)}` : ` &middot; ${esc(label)}`}<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h`;
+  const flag = aircraftFlag(d);
+  // The two emergency signals are independent (see backend/sources/adsb.py):
+  // the squawk is a code the aircraft is transmitting, the decoded status is a
+  // separate transponder field only newer units send. Naming both, when both
+  // are present, is the difference between "it says 7700" and "we inferred".
+  const emergencyLine = [
+    d.emergency_squawk ? `squawk ${esc(d.squawk)} &mdash; ${esc(d.emergency_squawk)}` : null,
+    d.emergency ? `transponder reports ${esc(d.emergency)}` : null,
+  ].filter(Boolean).join("; ");
+  const airfield = d.nearest_airfield;
+  const tooltip = `<b>${esc(d.callsign || d.icao24)}</b>${aircraftLine ? ` &middot; ${esc(aircraftLine)}` : ` &middot; ${esc(label)}`}` +
+    `${emergencyLine ? `<br/><span class="aircraft-emergency">${emergencyLine}</span>` : ""}` +
+    `<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h`;
   const detail = `
     <h3>${esc(d.callsign || d.icao24)}</h3>
+    ${emergencyLine ? `<div class="aircraft-emergency"><b>Emergency:</b> ${emergencyLine}</div>` : ""}
+    ${sanctionDetail(d)}
     ${aircraftLine ? `<div class="meta">Aircraft: ${esc(aircraftLine)}</div>` : ""}
     <div class="meta">Type: ${esc(label)} &middot; ${esc(d.origin_country || "")} &middot; ICAO24 ${esc(d.icao24)}</div>
     ${d.registration ? `<div>Registration: ${esc(d.registration)}</div>` : ""}
@@ -669,14 +1426,79 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
     <div>Altitude: ${esc(Math.round(d.altitude || 0))} m</div>
     <div>Ground speed: ${esc(Math.round((d.velocity || 0) * 3.6))} km/h</div>
     <div>On ground: ${d.on_ground ? "yes" : "no"}</div>
+    ${d.squawk && !d.emergency_squawk ? `<div>Squawk: ${esc(d.squawk)}</div>` : ""}
+    ${d.display_limited ? `<div class="meta">Listed as: ${esc(d.display_limited_note || d.display_limited)}</div>` : ""}
+    ${airfield
+      ? `<div>Nearest airfield: ${esc(airfield.name)}${airfield.code ? ` (${esc(airfield.code)})` : ""} &middot; ${esc(airfield.km)} km` +
+        `${airfield.military_name ? " &middot; military by name" : ""}</div>` +
+        '<p class="meta">Nearest airfield is our own proximity lookup against the OurAirports index, not a ' +
+        "filed origin or destination. Only shown below 10,000 ft or on the ground, where it means something.</p>"
+      : ""}
     ${hasRealType
       ? '<p class="meta">Aircraft type/description from airplanes.live reference data.</p>'
       : '<p class="meta">Aircraft type is a best-effort guess from callsign pattern and ADS-B category when no confirmed source flag is available.</p>'}
-    <div class="meta">Source: OpenSky Network + airplanes.live (ADS-B)</div>`;
+    ${flag ? `<p class="meta">${AIRCRAFT_FLAG_NOTE[flag]}</p>` : ""}
+    <div class="meta">Source: OpenSky Network + airplanes.live (ADS-B)${
+      airfield ? " &middot; airfields: OurAirports" : ""
+    }</div>`;
   let cls = "aircraft-marker";
   if (type === "military") cls += " military-marker";
+  if (flag) cls += ` aircraft-flagged aircraft-${flag === "emergency" ? "emergency" : "hidden"}`;
+  if (isSanctioned(d)) cls += " aircraft-flagged sanctioned-marker";
   if (d.icao24 === selectedIcao) cls += " selected";
-  return { icon: icon(style.svg, style.color, style.size, d.heading, cls), tooltip, detail };
+  return { icon: icon(style.svg, style.color, style.size, d.heading, cls, style.opacity), tooltip, detail };
+}
+
+// ---------- airfields (backend/sources/airports.py) ----------
+
+// Reference context, not a feed: these do not move and nothing about them is
+// live, so they are drawn quietly and sized by how much traffic the field
+// actually takes. Exported for the control panel's legend.
+export const AIRFIELD_STYLE = {
+  large_airport: { svg: SVG.airfield, size: 17, label: "Large airport", token: "airfield.civil", color: "#7f93a8" },
+  medium_airport: { svg: SVG.airfield, size: 14, label: "Medium airport", token: "airfield.civil", color: "#7f93a8" },
+  small_airport: { svg: SVG.airfield, size: 11, label: "Small airfield", token: "airfield.civil", color: "#7f93a8" },
+};
+const AIRFIELD_FALLBACK = AIRFIELD_STYLE.small_airport;
+// Its own colour, because "which of these is military" is the whole reason an
+// aircraft-watcher turns this layer on.
+export const AIRFIELD_MILITARY_STYLE = {
+  svg: SVG.airfieldMilitary, size: 16, label: "Military by name", token: "airfield.military", color: "#ff8c3a",
+};
+export const AIRFIELD_ORDER = ["large_airport", "medium_airport", "small_airport"];
+
+export function airfieldStyle(d) {
+  const base = d?.military_name ? AIRFIELD_MILITARY_STYLE : AIRFIELD_STYLE[d?.type] || AIRFIELD_FALLBACK;
+  return themedStyle(base, "airports");
+}
+
+export function airportIconSize(d) {
+  return airfieldStyle(d).size;
+}
+
+export function decorateAirport(d, { offset } = {}) {
+  const style = airfieldStyle(d);
+  const code = d.icao || d.iata || d.id;
+  const tooltip = `<b>${esc(d.name)}</b>${code ? ` &middot; ${esc(code)}` : ""}<br/>${esc(style.label)}`;
+  const detail = `
+    <h3>${esc(d.name)}</h3>
+    <div class="meta">${esc(style.label)}${d.municipality ? ` &middot; ${esc(d.municipality)}` : ""}${
+      d.country ? ` &middot; ${esc(d.country)}` : ""
+    }</div>
+    ${d.icao ? `<div>ICAO: ${esc(d.icao)}</div>` : ""}
+    ${d.iata ? `<div>IATA: ${esc(d.iata)}</div>` : ""}
+    <div>Scheduled airline service: ${d.scheduled_service ? "yes" : "no"}</div>
+    ${d.military_name
+      ? '<p class="meta">Flagged military because its <b>name</b> says so (&ldquo;Air Base&rdquo;, &ldquo;RAF&rdquo;, ' +
+        "&ldquo;AFB&rdquo; and similar). OurAirports has no military field, so this both misses civil-named " +
+        "military fields and can over-reach &mdash; it is a reading of the name, nothing more.</p>"
+      : ""}
+    <div class="meta">Source: OurAirports (public domain)</div>`;
+  return {
+    icon: icon(style.svg, style.color, style.size, 0, "airfield-marker", 0.8 * layerOpacity("airports"), "", offset),
+    tooltip,
+    detail,
+  };
 }
 
 // ---------- critical infrastructure ----------
@@ -686,19 +1508,25 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
 // hand and had drifted a whole row out of step -- every type except Refineries
 // advertised a colour that appears nowhere on the map.
 export const INFRA_STYLE = {
-  refinery: { svg: SVG.refinery, color: "#ff9500", label: "Refinery" },
-  pipeline: { svg: SVG.pipeline, color: "#ffb347", label: "Pipeline" },
-  desalination: { svg: SVG.desalination, color: "#35c2ff", label: "Desalination plant" },
-  lng_terminal: { svg: SVG.lng, color: "#9be15d", label: "LNG terminal" },
-  nuclear: { svg: SVG.nuclear, color: "#ffd60a", label: "Nuclear power plant" },
-  port: { svg: SVG.port, color: "#d8b9ff", label: "Port / oil terminal" },
-  fab: { svg: SVG.fab, color: "#6fe3ff", label: "Semiconductor fab" },
+  refinery: { svg: SVG.refinery, color: "#ff9500", label: "Refinery", token: "infra.refinery" },
+  pipeline: { svg: SVG.pipeline, color: "#ffb347", label: "Pipeline", token: "infra.pipeline" },
+  desalination: { svg: SVG.desalination, color: "#35c2ff", label: "Desalination plant", token: "infra.desalination" },
+  lng_terminal: { svg: SVG.lng, color: "#9be15d", label: "LNG terminal", token: "infra.lng_terminal" },
+  nuclear: { svg: SVG.nuclear, color: "#ffd60a", label: "Nuclear power plant", token: "infra.nuclear" },
+  port: { svg: SVG.port, color: "#d8b9ff", label: "Port / oil terminal", token: "infra.port" },
+  fab: { svg: SVG.fab, color: "#6fe3ff", label: "Semiconductor fab", token: "infra.fab" },
 };
 
 // The colour the pipeline *routes* are drawn in (see renderPipelines), which is
 // a polyline rather than an INFRA_STYLE marker but still needs a legend entry
-// that matches.
+// that matches. It shares the pipeline node's palette token for exactly that
+// reason: a recoloured node on a differently-coloured line would read as two
+// unrelated things.
 export const PIPELINE_ROUTE_COLOR = "#ffb347";
+
+export function pipelineRouteColor() {
+  return paletteColor("infra.pipeline", PIPELINE_ROUTE_COLOR);
+}
 
 // Military bases share the "infra" data shape/toggle but pick their icon
 // from `subtype` (air/naval/army/missile/joint/logistics/radar) instead of
@@ -714,9 +1542,10 @@ export const MILITARY_SUBTYPE_STYLE = {
 };
 
 export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
-  const style = d.type === "military"
+  const base = d.type === "military"
     ? MILITARY_SUBTYPE_STYLE[d.subtype] || MILITARY_SUBTYPE_STYLE.joint
     : INFRA_STYLE[d.type] || INFRA_STYLE.port;
+  const style = themedStyle(base, "infra");
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)}${hot ? " &middot; HOT ZONE" : ""}`;
   const events = nearbyEvents || [];
   const activitySection = hot
@@ -731,7 +1560,11 @@ export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
     ${activitySection}
     <p class="meta">Source: publicly documented location (open-source reference), approximate.</p>`;
   const cls = `infra-marker${hot ? " infra-hot" : ""}`;
-  return { icon: icon(style.svg, style.color, INFRA_ICON_SIZE, 0, cls, 1, "", offset), tooltip, detail };
+  return {
+    icon: icon(style.svg, style.color, infraIconSize(), 0, cls, layerOpacity("infra"), "", offset),
+    tooltip,
+    detail,
+  };
 }
 
 // ---------- satellites ----------
@@ -742,17 +1575,23 @@ export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
 // reconnaissance bird" is answerable at a glance. Exported so
 // LayersSection.jsx's legend and the map draw from the same values.
 export const SATELLITE_STYLE = {
-  stations: { svg: SVG.satellite, color: "#6fe3ff", size: 24, label: "Space station" },
-  military: { svg: SVG.satelliteMilitary, color: "#ff4d4d", size: 26, label: "Military satellite" },
+  stations: { svg: SVG.satellite, color: "#6fe3ff", size: 24, label: "Space station", token: "satellite.stations" },
+  military: { svg: SVG.satelliteMilitary, color: "#ff4d4d", size: 26, label: "Military satellite", token: "satellite.military" },
 };
-const SATELLITE_FALLBACK = { svg: SVG.satellite, color: "#6fe3ff", size: 24, label: "Satellite" };
+const SATELLITE_FALLBACK = { svg: SVG.satellite, color: "#6fe3ff", size: 24, label: "Satellite", token: "satellite.stations" };
+
+/** A satellite group's style with the current theme applied -- also what the
+ *  controller's placement pass and trail colours read. */
+export function satelliteStyle(group) {
+  return themedStyle(SATELLITE_STYLE[group] || SATELLITE_FALLBACK, "satellites");
+}
 
 export function isMilitarySatellite(d) {
   return d.group === "military";
 }
 
 export function decorateSatellite(d, { offset } = {}) {
-  const style = SATELLITE_STYLE[d.group] || SATELLITE_FALLBACK;
+  const style = satelliteStyle(d.group);
   const military = isMilitarySatellite(d);
   const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${Math.round(d.alt_km || 0)} km`;
   const detail = `
@@ -763,5 +1602,9 @@ export function decorateSatellite(d, { offset } = {}) {
     <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- a real orbit, not a live telemetry confirmation.</p>
     <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
   const cls = `satellite-marker${military ? " satellite-military-marker" : ""}`;
-  return { icon: icon(style.svg, style.color, style.size, 0, cls, 1, "", offset), tooltip, detail };
+  return {
+    icon: icon(style.svg, style.color, style.size, 0, cls, layerOpacity("satellites"), "", offset),
+    tooltip,
+    detail,
+  };
 }
