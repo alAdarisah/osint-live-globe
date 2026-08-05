@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -195,6 +196,26 @@ async def init_pool(retries: int = 30, delay: float = 2.0) -> None:
                 log.warning("Postgres not ready (attempt %d/%d): %s", attempt, retries, exc)
                 await asyncio.sleep(delay)
     log.error("Giving up connecting to Postgres: %s -- running without durable storage", last_error)
+
+
+async def wait_for_pool(timeout: float = 30.0) -> bool:
+    """Block until the pool is up, for the few readers that actually need it.
+
+    init_pool is deliberately not awaited by app.py's lifespan (see above), and
+    every *write* path no-ops harmlessly while `_pool` is None. Reads at
+    startup are the exception: a source rehydrating its window gets an empty
+    list instead of an error, so the race is silent -- the layer simply comes
+    back cold and nothing says why. Both rehydrate paths (gdelt.py's news
+    window and event_fusion.py's violence window) hit this.
+
+    Bounded, and returns a bool rather than raising: a run with no database at
+    all must still start promptly rather than stalling every source for the
+    full connect budget.
+    """
+    deadline = time.monotonic() + timeout
+    while _pool is None and time.monotonic() < deadline:
+        await asyncio.sleep(0.25)
+    return _pool is not None
 
 
 def get_pool() -> asyncpg.Pool | None:

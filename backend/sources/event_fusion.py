@@ -1185,6 +1185,13 @@ async def _rehydrate_violent_gdelt() -> None:
 
     Rows already fetched live win on the next poll, so this only fills gaps.
     """
+    # Same race gdelt._rehydrate hits: app.py starts init_pool as a background
+    # task rather than awaiting it, so an unguarded read here returns [] --
+    # which reads as "nothing stored" and left this accumulator cold on every
+    # restart, silently costing escalation.py its 36-hour baseline.
+    if not await storage.wait_for_pool():
+        log.info("No storage available; the violence window starts from the live feed only")
+        return
     try:
         stored = await storage.entity_latest("gdelt_conflict")
     except Exception as exc:  # noqa: BLE001 - a cold start is not a failure

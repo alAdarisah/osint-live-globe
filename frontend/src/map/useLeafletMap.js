@@ -7,7 +7,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { createMapController } from "./createMapController";
 
 const COUNT_KEYS = [
-  "events", "firms", "gdelt", "countries", "cities", "infra", "jamming", "satellites",
+  "events", "firms", "gdelt", "officials", "countries", "cities", "infra", "jamming", "satellites",
   "aisCivilian", "aisNavy", "aisTanker", "adsbCivilian", "adsbMilitary",
   "infraMilitary", "infraRefinery", "infraLng", "infraPort", "infraDesalination",
   "infraNuclear", "infraFab", "infraPipelineNode", "pipelineRoutes",
@@ -15,7 +15,7 @@ const COUNT_KEYS = [
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
 );
-const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false, ais: false, jamming: false };
+const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false, ais: false, jamming: false, officials: false };
 
 export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialLayerVisibility }) {
   const controllerRef = useRef(null);

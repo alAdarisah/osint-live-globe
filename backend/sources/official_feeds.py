@@ -130,7 +130,13 @@ _DC = "{http://purl.org/dc/elements/1.1/}"
 # "Sanctions imposed after talks collapse" is a rupture, not a meeting.
 _KIND_PATTERNS = (
     ("rupture", re.compile(
-        r"\b(sanction|sanctions|expel|expels|expelled|expulsion|recall(?:s|ed)? (?:its |the )?ambassador"
+        r"\b(sanction|sanctions|expel|expels|expelled|expulsion"
+        # Both word orders: press offices write "Russia recalls its ambassador"
+        # and "Ambassador recalled for consultations" about equally often, and
+        # the second reads as a meeting to any pattern that only handles the
+        # first -- which is close to the opposite of what it means.
+        r"|(?:recall|summon)(?:s|ed|ing)? (?:its |the |our )?(?:ambassador|charg)"
+        r"|ambassador (?:recalled|summoned|expelled|withdrawn)"
         r"|sever(?:s|ed)? (?:diplomatic )?(?:ties|relations)|suspend(?:s|ed)? (?:diplomatic )?relations"
         r"|embargo|withdraw(?:s|n|al) from)\b", re.I)),
     ("threat", re.compile(

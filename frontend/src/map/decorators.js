@@ -5,10 +5,11 @@
 // self-contained reference for each data source.
 
 import { L } from "./leafletGlobal";
-import { SVG, buildDivIcon } from "./svgIcons";
+import { SVG, OFFICIALS_KIND_ICON, buildDivIcon } from "./svgIcons";
 import { esc, timeAgoFromDateAdded } from "../utils/format";
 import {
   severityBand, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
+  ageHoursFromDateAdded, newsAgeOpacity, newsAgeScale,
 } from "./severity";
 
 function icon(svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset) {
@@ -35,8 +36,24 @@ export function historicalIconSize(d) {
   return 10 + Math.min(Math.sqrt(d.fatalities || 0) * 2.2, 8);
 }
 
+// Reach sets the base size; age shrinks it. Rounded to whole pixels for the
+// same reason opacity is quantised -- the number goes into the icon's HTML
+// string, which updateMarker compares to decide whether to rebuild the DOM.
+// A collapsed pin (see collapse.js) is drawn a little larger, because it now
+// stands for several stories and has to carry a count badge.
 export function gdeltIconSize(d) {
-  return 14 + Math.min(Math.log10((d.mentions || 1) + 1), 3) * 2.5;
+  const base = 14 + Math.min(Math.log10((d.mentions || 1) + 1), 3) * 2.5;
+  const scaled = base * newsAgeScale(ageHoursFromDateAdded(d.date_added));
+  return Math.round(d.collapsedCount > 1 ? scaled + 4 : scaled);
+}
+
+// Officials pins are sized by how widely the act was carried, not by severity:
+// this layer has no severity scale, and "how many newsrooms picked this up" is
+// the closest available read on whether a statement mattered. A government's
+// own release has no outlet count by construction and sits at the base size.
+export function officialsIconSize(d) {
+  const base = 15 + Math.min(Math.log10((d.outlet_count || 0) + 1), 2) * 3.5;
+  return Math.round(base * newsAgeScale(officialsAgeHours(d)));
 }
 
 export const INFRA_ICON_SIZE = 18;
@@ -204,6 +221,34 @@ function provenanceFor(d) {
   } wording, not taken from a verified report; the location is where ${many ? "it is" : "the article says it"} said to have happened.`;
 }
 
+// The headlines this incident was reported under -- see event_fusion's
+// _coverage_for. These used to be *deleted*: the backend dropped any news item
+// it had folded into a conflict pin, so the article vanished from the news feed
+// without ever appearing on the pin that absorbed it. The pin owns them now,
+// which is what makes suppressing the duplicate marker honest.
+const COVERAGE_SHOWN = 4;
+
+function coverageBlock(d) {
+  const items = d.coverage || [];
+  if (!items.length) return "";
+  const rows = items.slice(0, COVERAGE_SHOWN).map((c) => {
+    const when = timeAgoFromDateAdded(c.published);
+    const meta = [c.outlet, when].filter(Boolean).map(esc).join(" &middot; ");
+    const title = esc(c.title || "");
+    const link = c.url
+      ? `<a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${title}</a>`
+      : title;
+    return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
+  }).join("");
+  const more = items.length - Math.min(items.length, COVERAGE_SHOWN);
+  return `
+    <div class="coverage-block">
+      <div class="coverage-head">Coverage</div>
+      <ul class="coverage-list">${rows}</ul>
+      ${more > 0 ? `<div class="meta">+${more} more ${more === 1 ? "report" : "reports"}</div>` : ""}
+    </div>`;
+}
+
 export function decorateEvent(d, { offset } = {}) {
   const sources = (d.corroborated_by && d.corroborated_by.length ? d.corroborated_by : [d.source]).filter(Boolean);
   const sourceLine = sources.map((s) => SOURCE_LABEL[s] || s).join(", ");
@@ -240,7 +285,8 @@ export function decorateEvent(d, { offset } = {}) {
       ${d.jamming_nearby ? `<div class="meta evidence">GPS interference detected within 60 km (${Math.round(d.jamming_nearby * 100)}% bad fixes)</div>` : ""}
       ${d.thermal_nearby ? `<div class="meta evidence">Thermal anomaly detected within 10 km the same day</div>` : ""}
     </div>
-    ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
+    ${coverageBlock(d)}
+    ${!d.coverage?.length && d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     ${!d.notes && d.summary ? '<p class="meta">Sentence above is assembled from the event’s coded fields, not quoted from an article.</p>' : ""}
     ${provenance ? `<p class="meta">${esc(provenance)}</p>` : ""}
     ${intensity ? `<div class="meta" title="CAMEO Goldstein scale, ${d.goldstein}">Coded intensity: ${esc(intensity)}</div>` : ""}
@@ -301,6 +347,21 @@ export function decorateHistoricalEvent(d, { offset } = {}) {
 // server-side guarantee was somehow violated (e.g. a stale cached
 // response), and a blank line is a far better failure mode than crashing
 // the whole map.
+function newsLine(item) {
+  const headline = esc((item.real_title || "").trim());
+  const meta = [item.source_name, timeAgoFromDateAdded(item.date_added)]
+    .filter(Boolean).map(esc).join(" &middot; ");
+  const link = item.source_url
+    ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener noreferrer">${headline}</a>`
+    : headline;
+  return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
+}
+
+// How many headlines a collapsed pin lists before it stops. Higher than the
+// conflict popup's COVERAGE_SHOWN because these are genuinely different
+// stories rather than repeat coverage of one, so truncating loses more.
+const COLLAPSED_SHOWN = 8;
+
 export function decorateGdelt(d, { offset } = {}) {
   const headline = (d.real_title || "").trim();
   const agency = d.source_name || null;
@@ -308,13 +369,160 @@ export function decorateGdelt(d, { offset } = {}) {
   const corroboratedNote = d.corroborated
     ? ` &middot; corroborated by ${esc((d.corroborated_by || []).join(", "))}`
     : "";
-  const tooltip = `<b>${esc(headline)}</b><br/>${agency ? `${esc(agency)} &middot; ` : ""}${esc(when)}`;
-  const detail = `
+  // Set by collapse.js when several stories share a spot on screen -- see the
+  // note there on why the news layer clusters and nothing else does.
+  const collapsed = d.collapsed || null;
+  const extra = collapsed ? collapsed.length - 1 : 0;
+
+  const tooltip = collapsed
+    ? `<b>${esc(headline)}</b><br/>${agency ? `${esc(agency)} &middot; ` : ""}${esc(when)}` +
+      `<br/><i>+${extra} more ${extra === 1 ? "story" : "stories"} here</i>`
+    : `<b>${esc(headline)}</b><br/>${agency ? `${esc(agency)} &middot; ` : ""}${esc(when)}`;
+
+  const detail = collapsed
+    ? `
+    <div class="coverage-head">${collapsed.length} stories at this location</div>
+    <ul class="coverage-list">${collapsed.slice(0, COLLAPSED_SHOWN).map(newsLine).join("")}</ul>
+    ${collapsed.length > COLLAPSED_SHOWN
+        ? `<div class="meta">+${collapsed.length - COLLAPSED_SHOWN} more &mdash; zoom in to separate them</div>`
+        : '<div class="meta">Zoom in to see these as separate pins.</div>'}`
+    : `
     <p class="news-sentence">${esc(headline)}</p>
     ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     <div class="meta">Source: ${agency ? esc(agency) : "GDELT"} &middot; ${esc(when)}${corroboratedNote}</div>`;
+
   const color = d.corroborated ? "#3ac1ff" : "#ffd60a";
-  return { icon: icon(SVG.news, color, gdeltIconSize(d), 0, "", 1, "", offset), tooltip, detail };
+  // News pins used to be drawn at a flat opacity of 1 regardless of age, which
+  // was tolerable over a two-hour window and is not over twenty-four: without
+  // this, a story from yesterday morning is as loud as one from ten minutes
+  // ago and the map stops saying anything about what is happening now.
+  const hours = ageHoursFromDateAdded(d.date_added);
+  return {
+    icon: icon(SVG.news, color, gdeltIconSize(d), 0, "", newsAgeOpacity(hours), "", offset, d.collapsedCount),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- Officials & Diplomacy ----------
+//
+// Statements, meetings, state visits, demands and threats by heads of state,
+// foreign ministries and international bodies. See backend/sources/officials.py.
+//
+// Two origins reach this decorator and it must keep them visibly apart:
+//
+//   official_feed  the government's own press release. Certain about who said
+//                  it, published with no editor in between.
+//   gdelt          CAMEO-coded from a trusted newsroom's reporting. Has reach
+//                  and corroboration; can be wrong about who did what.
+//
+// Blending them into one "diplomacy" pin would hide the single thing a reader
+// most needs in order to weigh a statement about a war, so the popup always
+// says which it is, and the primary-source pins get their own ring.
+
+// Cooperative acts read cool, hostile acts read warm. This is a description of
+// the act's direction, not a judgement about whether it is good: a signed
+// ceasefire and a signed arms deal are both teal.
+const OFFICIALS_COOPERATIVE_COLOR = "#7ee0c9";
+const OFFICIALS_HOSTILE_COLOR = "#ff9500";
+const OFFICIALS_NEUTRAL_COLOR = "#c9b6ff";
+
+const COOPERATIVE_KINDS = new Set(["meeting", "agreement", "aid"]);
+const HOSTILE_KINDS = new Set(["demand", "threat", "rupture", "posture", "protest"]);
+
+export const OFFICIALS_KIND_LABEL = {
+  meeting: "Meeting, call or state visit",
+  agreement: "Agreement signed / de-escalation",
+  aid: "Aid or material support",
+  statement: "Statement or remarks",
+  demand: "Demand, criticism or rejection",
+  threat: "Threat or ultimatum",
+  rupture: "Sanctions, expulsions, ties cut",
+  posture: "Force posture / mobilisation",
+  protest: "Protest",
+};
+
+function officialsColor(d) {
+  if (COOPERATIVE_KINDS.has(d.kind)) return OFFICIALS_COOPERATIVE_COLOR;
+  if (HOSTILE_KINDS.has(d.kind)) return OFFICIALS_HOSTILE_COLOR;
+  return OFFICIALS_NEUTRAL_COLOR;
+}
+
+// published_at is unix seconds here rather than GDELT's packed string, because
+// officials.py normalises both origins onto one timestamp.
+function officialsAgeHours(d) {
+  if (!Number.isFinite(d?.published_at)) return NaN;
+  return (Date.now() - d.published_at * 1000) / 3600000;
+}
+
+function officialsTimeAgo(d) {
+  const hours = officialsAgeHours(d);
+  if (!Number.isFinite(hours)) return "";
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}m ago`;
+  return `${Math.round(hours)}h ago`;
+}
+
+// The one line that tells a reader how to weigh this. Deliberately blunt in
+// both directions: a press release is not journalism, and a CAMEO code is not
+// a quote.
+function officialsProvenance(d) {
+  if (d.origin === "official_feed") {
+    return `Published by ${d.government || d.outlet || "the issuing body"} itself — a primary source, ` +
+      "not independently verified and not edited by a newsroom.";
+  }
+  const many = (d.outlet_count || 0) > 1;
+  return `Machine-coded by GDELT from ${many ? "news reporting" : "a single news article"}. ` +
+    "The actors and the action are inferred from that wording, not quoted from it.";
+}
+
+export function decorateOfficials(d, { offset } = {}) {
+  const kindLabel = OFFICIALS_KIND_LABEL[d.kind] || "Diplomatic activity";
+  // A real headline first, then the CAMEO label -- same precedence the
+  // conflict popup uses, and for the same reason: "Consultation" on its own
+  // tells a reader nothing.
+  const lead = (d.headline || "").trim() || d.label || kindLabel;
+  const where = d.location || d.country || "";
+  const when = officialsTimeAgo(d);
+  const publisher = d.outlet || d.government || (d.origin === "gdelt" ? "GDELT" : "");
+  const primary = d.origin === "official_feed";
+
+  const tooltip = `<b>${esc(lead)}</b><br/>${esc(kindLabel)}${where ? " &middot; " + esc(where) : ""}` +
+    `<br/>${esc(publisher)}${when ? " &middot; " + esc(when) : ""}` +
+    (primary ? "<br/><i>official source</i>" : "");
+
+  const actors = [d.actor1, d.actor2].filter(Boolean);
+  const detail = `
+    <h3>${esc(lead)}</h3>
+    <div class="meta">${esc(kindLabel)}${where ? " &middot; " + esc(where) : ""}${when ? " &middot; " + esc(when) : ""}</div>
+    ${d.summary && d.summary !== d.headline ? `<p class="news-sentence">${esc(d.summary)}</p>` : ""}
+    ${actors.length ? `<div class="meta">Parties: ${esc(actors.join(" &rarr; ").replace("&rarr;", "→"))}</div>` : ""}
+    ${d.origin === "gdelt" && (d.outlet_count || 0) > 1
+      ? `<div class="meta">Carried by ${d.outlet_count} independent outlets</div>` : ""}
+    ${d.corroborated_by_primary_source
+      ? '<div class="meta evidence">Also published by the government itself — primary source and news reporting agree.</div>' : ""}
+    ${d.url ? `<div><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${primary ? "Read the statement" : "Open source article"}</a></div>` : ""}
+    <p class="meta">${esc(officialsProvenance(d))}</p>
+    <div class="meta">${primary
+      ? "Placed at the seat of the issuing institution, not at the site of any event."
+      : "Placed where the reporting says the act took place."}</div>`;
+
+  return {
+    icon: icon(
+      OFFICIALS_KIND_ICON[d.kind] || SVG.podium,
+      officialsColor(d),
+      officialsIconSize(d),
+      0,
+      "",
+      newsAgeOpacity(officialsAgeHours(d)),
+      // The ring is what separates "the Kremlin said this" from "Reuters
+      // reported the Kremlin said this" at a glance, without a second colour
+      // axis fighting the cooperative/hostile one.
+      primary ? "official-primary" : "",
+      offset,
+    ),
+    tooltip,
+    detail,
+  };
 }
 
 // ---------- AIS ships ----------

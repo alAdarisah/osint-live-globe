@@ -1387,6 +1387,83 @@ html, body {
 .popup .meta.imprecise-note { color: #ffb454; }
 .popup .meta.evidence { color: #7fd1ff; }
 
+/* An officials pin published by the government itself rather than reported by
+   a newsroom. A solid ring, deliberately unlike .imprecise's dashed one: that
+   marks a location we are unsure of, this marks a source we are certain of. */
+.entity-icon-wrap.official-primary {
+  position: relative;
+}
+.entity-icon-wrap.official-primary::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* Count chip on a collapsed news pin (collapse.js). Emitted inside the icon's
+   HTML rather than via className, same as .imprecise above, so the marker
+   repaint diff in createMapController sees the number change. */
+.pin-badge {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: currentColor;
+  color: #06080d;
+  font: 700 9px/14px system-ui, sans-serif;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+
+/* The headlines a conflict or officials pin absorbed, and the story list on a
+   collapsed news pin. Same markup for both, since they answer the same
+   question: what was actually reported here. */
+.leaflet-popup-content .coverage-block {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--panel-border, rgba(255, 255, 255, 0.14));
+}
+.leaflet-popup-content .coverage-head {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+.leaflet-popup-content .coverage-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  /* A busy incident can carry eight headlines; the popup must not grow past
+     the map. */
+  max-height: 168px;
+  overflow-y: auto;
+}
+.leaflet-popup-content .coverage-list li {
+  margin: 0 0 6px;
+  line-height: 1.35;
+}
+.leaflet-popup-content .coverage-list li:last-child { margin-bottom: 0; }
+.leaflet-popup-content .coverage-meta {
+  display: block;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.officials-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+}
+
 /* "How much to trust this" -- the confidence half of a conflict popup, boxed
    off from the description of the event itself so the two are not read as one
    continuous set of facts. A bare "Severity: 24/100" said nothing about

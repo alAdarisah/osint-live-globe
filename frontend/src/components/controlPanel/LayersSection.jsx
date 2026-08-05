@@ -1,4 +1,4 @@
-import { SVG } from "../../map/svgIcons";
+import { SVG, OFFICIALS_KIND_ICON } from "../../map/svgIcons";
 import {
   SATELLITE_STYLE, INFRA_STYLE, MILITARY_SUBTYPE_STYLE, PIPELINE_ROUTE_COLOR,
 } from "../../map/decorators";
@@ -21,6 +21,24 @@ const EVENT_TYPE_LEGEND = [
   [SVG.riot, "Riot"],
   [SVG.protest, "Protest"],
   [SVG.unknownViolence, "Violence, kind unspecified"],
+];
+
+// The Officials & Diplomacy glyphs, read from the same table the map uses
+// (OFFICIALS_KIND_ICON) with the same two-colour scheme decorators.js applies:
+// cool for cooperative acts, warm for hostile ones. The colour describes the
+// act's direction, not whether it is good -- a signed arms deal is teal.
+const OFFICIALS_COOPERATIVE = "#7ee0c9";
+const OFFICIALS_HOSTILE = "#ff9500";
+const OFFICIALS_NEUTRAL = "#c9b6ff";
+const OFFICIALS_LEGEND = [
+  [OFFICIALS_KIND_ICON.meeting, "Meeting, call or visit", OFFICIALS_COOPERATIVE],
+  [OFFICIALS_KIND_ICON.agreement, "Agreement / de-escalation", OFFICIALS_COOPERATIVE],
+  [OFFICIALS_KIND_ICON.aid, "Aid or support", OFFICIALS_COOPERATIVE],
+  [OFFICIALS_KIND_ICON.statement, "Statement or remarks", OFFICIALS_NEUTRAL],
+  [OFFICIALS_KIND_ICON.demand, "Demand or condemnation", OFFICIALS_HOSTILE],
+  [OFFICIALS_KIND_ICON.threat, "Threat or ultimatum", OFFICIALS_HOSTILE],
+  [OFFICIALS_KIND_ICON.rupture, "Sanctions / ties cut", OFFICIALS_HOSTILE],
+  [OFFICIALS_KIND_ICON.posture, "Force posture", OFFICIALS_HOSTILE],
 ];
 
 // Per-type sub-ticker rows. The swatch is the real glyph in the real colour,
@@ -68,9 +86,10 @@ export default function LayersSection({
       <div className="sublegend">
         ACLED (where an account is configured) + UCDP GED Candidate + GDELT, cross-referenced and merged
         into one pin per real incident. <b>Violence only</b> &mdash; armed clashes, assaults and mass
-        violence; verbal and diplomatic conflict (accusations, demands, protests) is excluded here and
-        appears under News instead. Pin size and colour follow severity; blue means independently
-        corroborated. Pins fade as they age. Only the last 3 days show on the map.
+        violence; verbal and diplomatic conflict (accusations, demands, threats) is excluded here and
+        has its own layer, Officials &amp; Diplomacy, below. Pin size and colour follow severity; blue
+        means independently corroborated. Pins fade as they age. Only the last 3 days show on the map.
+        Where a pin absorbed the news coverage of its incident, the headlines are listed inside it.
       </div>
       <div className="sublegend">
         {SEVERITY_BANDS.map((band) => (
@@ -157,11 +176,47 @@ export default function LayersSection({
         <span className="count">{counts.gdelt} ({counts.gdeltTotal})</span>
       </label>
       <div className="sublegend">
-        Verified-outlet headlines. Excludes anything already shown as a Conflict &amp; Violence pin above --
-        no headline shows twice.
+        Headlines from vetted outlets only, for the last 24 hours. Older stories fade rather than
+        disappear. Where several land on the same spot they share one pin showing how many -- click it
+        for the list, or zoom in to separate them.
+      </div>
+      <div className="sublegend">
+        A headline already shown as a Conflict &amp; Violence or Officials pin is not drawn twice: it
+        appears inside that pin's own popup instead, under "Coverage".
       </div>
       <div id="gdeltZoomNote" className={`sublegend${zoomNotes.gdelt ? " visible" : ""}`}>
         Zoom in to show news
+      </div>
+
+      <label className="layer-row" data-layer="officials">
+        <input
+          type="checkbox"
+          checked={layerVisibility.officials}
+          onChange={(e) => onToggleLayer("officials", e.target.checked)}
+        />
+        <LayerIcon svg={SVG.handshake} color="#7ee0c9" /> Officials &amp; Diplomacy
+        <span className="count">{counts.officials} ({counts.officialsTotal})</span>
+      </label>
+      <div className="sublegend">
+        What presidents, foreign ministries and international bodies are saying and doing -- statements,
+        calls, state visits, demands, threats, sanctions. Cool glyphs are cooperative acts, warm ones
+        hostile.
+      </div>
+      <div className="legend officials-legend">
+        {OFFICIALS_LEGEND.map(([svg, label, color]) => (
+          <span className="legend-item" key={label}>
+            <LayerIcon svg={svg} color={color} /> {label}
+          </span>
+        ))}
+      </div>
+      <div className="sublegend">
+        A ringed pin is the government's own press release -- a primary source, published with no
+        newsroom in between and not independently verified. Unringed pins are machine-coded from
+        vetted reporting, so the actors and the action are inferred from an article's wording rather
+        than quoted from it. Every popup says which it is.
+      </div>
+      <div id="officialsZoomNote" className={`sublegend${zoomNotes.officials ? " visible" : ""}`}>
+        Zoom in to show officials &amp; diplomacy
       </div>
 
       <h3 className="layer-group-heading">Air &amp; Sea Traffic</h3>

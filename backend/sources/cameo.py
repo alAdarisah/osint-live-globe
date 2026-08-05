@@ -642,12 +642,22 @@ KIND_BY_CODE = {
 # belongs to the Conflict & Violence layer -- an event must be in exactly one.
 DIPLOMATIC_ROOT_CODES = frozenset(KIND_BY_ROOT)
 
-# Actor types that make someone "an official" for this layer's purposes. GOV
-# and ELI carry heads of state and ministers; LEG/JUD/OPP/PTY carry the rest of
-# a political system; MIL is included because a defence ministry statement is
-# exactly the kind of thing this layer exists to show. COP is deliberately
-# absent -- a police spokesman is not a country official in this sense.
-OFFICIAL_ACTOR_TYPES = frozenset({"GOV", "ELI", "LEG", "JUD", "OPP", "PTY", "MIL", "IGO"})
+# Actor types that make someone "an official" for this layer's purposes: the
+# ones that act *for a state*. GOV and ELI carry heads of state and ministers,
+# MIL a defence ministry, IGO the UN and NATO.
+#
+# LEG, JUD, OPP and PTY were included at first and measured badly. CAMEO fills
+# an actor country code for domestic actors just as readily as for foreign
+# ones, so admitting parties and legislatures filled a diplomacy layer with
+# national party politics -- "Democratic Party consulted Michigan (government)"
+# was a real row from a live window. That is the same way the conflict layer
+# ended up 42% inside the United States (see event_fusion's ARMED_ACTOR_TYPES
+# note); the fix is the same, and it is to narrow the actor types rather than
+# to filter by country afterwards.
+#
+# COP is absent for the same reason it is absent there: a police spokesman is
+# not a country official in this sense.
+OFFICIAL_ACTOR_TYPES = frozenset({"GOV", "ELI", "MIL", "IGO"})
 
 # Which kinds read as cooperative rather than hostile. Drives the layer's
 # two-colour scheme; it is not a judgement about whether the act is good.

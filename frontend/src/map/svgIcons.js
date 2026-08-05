@@ -167,6 +167,63 @@ export const SVG = {
   // never read like something that just happened (see decorateHistoricalEvent).
   recordMark: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 2.8 21.2 12 12 21.2 2.8 12Z"/>' +
     '<circle cx="12" cy="12" r="2.4" fill="currentColor"/>',
+
+  // --- Officials & Diplomacy -------------------------------------------
+  //
+  // Deliberately drawn from a different visual vocabulary than the conflict
+  // glyphs above: no weapons, no blast shapes. These are things people said
+  // and did in rooms, and a reader must never mistake one for an attack.
+  //
+  // A speaker behind a lectern.
+  podium: '<circle cx="12" cy="3.6" r="2.2" fill="currentColor"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 6.6v4.2M8.4 8.6h7.2"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M6.6 11.4h10.8l-1.6 10.2H8.2Z"/>',
+  // Two hands clasped -- the meeting glyph.
+  handshake: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M2.4 10.4 6 7.4h4l2 1.8 2-1.8h4l3.6 3v4.4L18 17.6l-2.6-2.4-1.8 1.4-1.6-1.4-1.8 1.4L8 17.6l-3.6-2.8Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M12 9.2v5"/>',
+  // A sealed document -- a signed agreement or treaty.
+  treaty: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M5.4 2.4h9.2l4 4v11.4H5.4Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M8.4 7.6h5M8.4 11h7.2"/>' +
+    '<circle cx="16.4" cy="18.8" r="3" fill="currentColor"/>',
+  // A pointing hand: something demanded of somebody else.
+  demandHand: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M10.4 12.2V4.6a1.8 1.8 0 0 1 3.6 0v5.8"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" ' +
+    'd="M14 10.4a1.7 1.7 0 0 1 3.4 0v1a1.7 1.7 0 0 1 3.2.8v3.4c0 3.4-2.6 6-6 6h-2.2c-2.4 0-3.6-1.2-5-3.2l-2.6-3.8a1.8 1.8 0 0 1 2.8-2.2l2.8 2.8"/>',
+  // A raised, closed fist -- a threat, without depicting a weapon.
+  threatFist: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" ' +
+    'd="M5.2 9.4a2 2 0 0 1 4 0m0 0a2 2 0 0 1 4 0m0 0a2 2 0 0 1 4 0v4.8c0 3.6-2.6 6.4-6.2 6.4S4.6 17.8 4.6 14.2v-2.6a1.9 1.9 0 0 1 3.8 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M8.6 5.2 7.4 2.6M12 4.4V2M15.4 5.2l1.2-2.6"/>',
+  // A broken link -- relations cut, an ambassador expelled, sanctions imposed.
+  severedTies: '<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" ' +
+    'd="M9.6 14.4 7.4 16.6a3.6 3.6 0 0 1-5-5l2.2-2.2M14.4 9.6l2.2-2.2a3.6 3.6 0 0 1 5 5l-2.2 2.2"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12.4 3.4 13.6 6M3.4 12.4 6 13.6M18 10.4l2.6-1.2"/>',
+  // Chevrons: forces moved, readiness raised. Force posture, not force used.
+  mobilize: '<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M4 9.6 12 3.4l8 6.2M4 15 12 8.8 20 15M4 20.6 12 14.4l8 6.2"/>',
+  // An open hand offering -- aid provided.
+  aidHand: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M3 13.6h3.4l3 2.4h4a1.5 1.5 0 0 0 0-3h-3l-2-1.6h-5.4"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M10.4 16h4.2l6-3.4a1.6 1.6 0 0 1 1.6 2.8l-6.4 4.4H6.4l-3.4-2"/>' +
+    '<path fill="currentColor" d="M12 2.4c1.6 1.6 2.6 2.6 2.6 3.8a2.6 2.6 0 1 1-5.2 0c0-1.2 1-2.2 2.6-3.8Z"/>',
+};
+
+// Which glyph an Officials & Diplomacy record gets, keyed on the `kind` the
+// backend assigns (cameo.KIND_BY_ROOT for CAMEO-coded rows,
+// official_feeds.classify_kind for press releases). One table so the map and
+// the control panel's legend can never disagree about what a shape means.
+export const OFFICIALS_KIND_ICON = {
+  statement: SVG.podium,
+  meeting: SVG.handshake,
+  agreement: SVG.treaty,
+  demand: SVG.demandHand,
+  threat: SVG.threatFist,
+  rupture: SVG.severedTies,
+  posture: SVG.mobilize,
+  aid: SVG.aidHand,
+  protest: SVG.protest,
 };
 
 // A small crosshair/target glyph used by the news panel's "show on map"
@@ -189,13 +246,22 @@ export const NEWS_LOCATE_SVG =
 // point rather than letting the map quietly misplace things.
 const LEADER_MIN_PX = 8;
 
-export function buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset) {
+// `badge` is the count on a collapsed news pin (see collapse.js). Rendered into
+// the same HTML string as everything else, for the same repaint reason -- a
+// badge expressed through a class or a data attribute would never trigger
+// setIcon when the count changed.
+export function buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset, badge) {
   const rot = Number.isFinite(rotateDeg) ? rotateDeg : 0;
   const alpha = Number.isFinite(opacity) ? opacity : 1;
   const dx = offset?.dx || 0;
   const dy = offset?.dy || 0;
   const cls = wrapClass ? `entity-icon-wrap ${wrapClass}` : "entity-icon-wrap";
   const shift = dx || dy ? `translate(${dx}px,${dy}px) ` : "";
+  // Capped at "99+": past that the exact number tells a reader nothing they
+  // can act on, and a four-digit chip is wider than the pin it sits on.
+  const chip = badge > 1
+    ? `<span class="pin-badge">${badge > 99 ? "99+" : badge}</span>`
+    : "";
 
   // Suppressed on rotated glyphs (ships/aircraft): the wrapper's rotation would
   // spin the leader too, so it would point somewhere meaningless.
@@ -209,7 +275,7 @@ export function buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass, op
   const html =
     `<div class="${cls}" style="width:${size}px;height:${size}px;color:${color};opacity:${alpha};transform:${shift}rotate(${rot}deg);">` +
     leader +
-    `<svg viewBox="0 0 24 24" width="${size}" height="${size}">${svgInner}</svg></div>`;
+    `<svg viewBox="0 0 24 24" width="${size}" height="${size}">${svgInner}</svg>${chip}</div>`;
   // `entity-marker` makes the Leaflet-positioned outer element click-through so
   // the only hit target is the wrapper at its shifted position -- otherwise a
   // nudged icon left a second, invisible target sitting at its true point.

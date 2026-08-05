@@ -32,6 +32,10 @@ const POLL_CONFIG = [
   { key: "events", url: "/api/events", intervalMs: 60000 }, // GDELT-driven (event_fusion.py), same cadence as gdelt below
   { key: "firms", url: "/api/fires", intervalMs: 180000 },
   { key: "gdelt", url: "/api/news", intervalMs: 60000 },
+  // Officials & Diplomacy. Slower than news on purpose: its GDELT half moves on
+  // the same 15-minute poll as everything else GDELT, and its other half is
+  // government press feeds that publish a handful of times a day.
+  { key: "officials", url: "/api/officials", intervalMs: 2 * 60000 },
   { key: "countries", url: "/api/countries", intervalMs: 5 * 60000 },
   { key: "cities", url: "/api/cities", intervalMs: 5 * 60000 },
   { key: "ais", url: "/api/ships", intervalMs: 10000 },

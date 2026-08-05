@@ -12,7 +12,7 @@
 // layers -> selection/trails -> per-source renderers -> event wiring.
 
 import { L } from "./leafletGlobal";
-import { isImprecise, ageHours } from "./severity";
+import { isImprecise, ageHours, ageHoursFromDateAdded, NEWS_WINDOW_HOURS } from "./severity";
 import {
   createBaseLayer,
   basemapUrlFor,
@@ -44,8 +44,10 @@ import {
   AIRCRAFT_STYLE,
   MILITARY_ROLE_STYLE,
   SATELLITE_STYLE,
+  decorateOfficials,
   eventIconSize,
   gdeltIconSize,
+  officialsIconSize,
   historicalIconSize,
   INFRA_ICON_SIZE,
   decorateCity,
@@ -54,6 +56,7 @@ import {
   PIPELINE_ROUTE_COLOR,
 } from "./decorators";
 import { placeAll } from "./declutter";
+import { collapseByProximity, COLLAPSE_MAX_ZOOM } from "./collapse";
 import { buildCountryIndex, findCountryAt } from "./countryHitTest";
 import { countryPopupHtml, cityPopupHtml, normalizeCountryName } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
@@ -88,7 +91,11 @@ const GDELT_MIN_ZOOM = 3;
 const AIS_MIN_ZOOM = 3;
 // AIS has its own dedicated renderAisLayer (civilian/Navy split, like ADS-B's
 // civilian/military split) so it isn't part of this generic lookup.
-const MARKER_LAYER_MIN_ZOOM = { events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictHistory: 4 };
+const OFFICIALS_MIN_ZOOM = 3;
+const MARKER_LAYER_MIN_ZOOM = {
+  events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictHistory: 4,
+  officials: OFFICIALS_MIN_ZOOM,
+};
 // Gates only the interactive per-point FIRMS layer -- the heat layer itself
 // always stays on regardless of zoom.
 const FIRMS_DETAIL_MIN_ZOOM = 5;
@@ -103,16 +110,20 @@ const SATELLITE_TRAIL_MAX_POINTS = 36;
 // polls back" length as ship trails, not satellites' longer arc.
 const TANKER_TRAIL_MAX_POINTS = 60;
 
-const ID_FIELD = { events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24", conflictHistory: "id" };
+const ID_FIELD = {
+  events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24", conflictHistory: "id",
+  officials: "id",
+};
 const DECORATORS = {
   events: decorateEvent, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
-  conflictHistory: decorateHistoricalEvent,
+  conflictHistory: decorateHistoricalEvent, officials: decorateOfficials,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
 // both places rather than restated here.
 const ICON_SIZE_FOR = {
   events: eventIconSize, gdelt: gdeltIconSize, conflictHistory: historicalIconSize,
+  officials: officialsIconSize,
 };
 
 const REGION_FLY_DURATION = 1.2;
@@ -179,7 +190,7 @@ export function createMapController(container, initial, callbacks) {
   // All internal to the controller: nothing outside the map needs to know
   // which aircraft is selected, so it never needs to be React state.
   const raw = {
-    events: [], firms: [], ais: [], gdelt: [], adsb: [],
+    events: [], firms: [], ais: [], gdelt: [], adsb: [], officials: [],
     countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
     conflictStats: {},
     // Not live: UCDP's reviewed record (a month or more behind) and ACLED's
@@ -192,7 +203,7 @@ export function createMapController(container, initial, callbacks) {
   // (see webglLayer.js's updateEntities), not as L.marker instances.
   const markersByKey = {
     events: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
-    conflictHistory: new Map(),
+    conflictHistory: new Map(), officials: new Map(),
   };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
@@ -282,7 +293,44 @@ export function createMapController(container, initial, callbacks) {
     return true;
   }
 
-  const LAYER_ITEM_FILTER = { events: passesEventFilter };
+  // ---------- news filter ----------
+  //
+  // News ids that already have a pin of their own -- because a fused conflict
+  // record absorbed the headline (event_fusion._coverage_for) or an Officials &
+  // Diplomacy record did (officials.py). Drawing them again would put a second
+  // marker on top of the first for the same story.
+  //
+  // The backend used to solve this by deleting those items from /api/news
+  // outright, which removed the duplicate marker by removing the article: it
+  // then appeared nowhere, not even on the pin that had absorbed it. Now the
+  // absorbing record carries the headline *and* names the id, so the feed stays
+  // complete (the news panel and the country card both read it unfiltered) and
+  // only the redundant marker is suppressed.
+  //
+  // Built from the full raw arrays rather than from what is currently visible:
+  // a conflict pin cut by capBySeverity at world zoom must not cause its news
+  // counterpart to blink back into existence.
+  let mergedNewsIds = new Set();
+
+  function rebuildMergedNewsIds() {
+    const ids = new Set();
+    for (const source of [raw.events, raw.officials]) {
+      for (const record of source || []) {
+        for (const id of record.coverage_event_ids || []) ids.add(id);
+      }
+    }
+    mergedNewsIds = ids;
+  }
+
+  function passesNewsFilter(item) {
+    if (mergedNewsIds.has(item.event_id)) return false;
+    const age = ageHoursFromDateAdded(item.date_added);
+    // Undated items are kept, matching passesEventFilter: hiding one would be
+    // dropping data on a missing field rather than on anything the user chose.
+    return !(Number.isFinite(age) && age > NEWS_WINDOW_HOURS);
+  }
+
+  const LAYER_ITEM_FILTER = { events: passesEventFilter, gdelt: passesNewsFilter };
 
   // At world zoom the map should read as "where is the significant activity",
   // not as an undifferentiated smear. A rank-based cap rather than an absolute
@@ -301,6 +349,27 @@ export function createMapController(container, initial, callbacks) {
     const rule = ZOOM_MARKER_CAP.find((r) => zoom <= r.maxZoom);
     if (!rule || items.length <= rule.cap) return items;
     return [...items].sort((a, b) => (b.severity || 0) - (a.severity || 0)).slice(0, rule.cap);
+  }
+
+  // News is the one layer that groups rather than merely spreading out -- see
+  // collapse.js for why it earns the exception. Reach decides which story
+  // becomes the visible head, decayed by age so a busy city shows what broke
+  // most recently rather than whatever was biggest yesterday.
+  function newsRank(item) {
+    const hours = ageHoursFromDateAdded(item.date_added);
+    const reach = (item.mentions || 0) + 1;
+    return Number.isFinite(hours) ? reach * 0.5 ** (hours / 6) : reach;
+  }
+
+  function collapseNews(items, zoom) {
+    if (zoom > COLLAPSE_MAX_ZOOM) return items;
+    return collapseByProximity(
+      items,
+      // The same projection registerPlacement uses, so what collapse considers
+      // "on top of each other" is what the reader actually sees.
+      (item) => map.latLngToLayerPoint([item.lat, item.lon]),
+      newsRank
+    );
   }
 
   // ---------- country/city popups ----------
@@ -570,8 +639,8 @@ export function createMapController(container, initial, callbacks) {
   // literally "only show what you're looking at."
 
   const counts = {
-    events: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
-    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
+    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
   };
@@ -579,8 +648,8 @@ export function createMapController(container, initial, callbacks) {
   // current viewport/zoom filtering that `counts` reflects -- shown in the
   // UI as the "(total)" figure next to the live on-screen tick.
   const totals = {
-    events: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
-    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
+    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
   };
@@ -594,6 +663,7 @@ export function createMapController(container, initial, callbacks) {
   };
   const zoomNotes = {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
+    officials: false,
   };
   function reportCounts() {
     const totalsSuffixed = {};
@@ -621,7 +691,11 @@ export function createMapController(container, initial, callbacks) {
   // real position is already labelled by the basemap underneath it.
   const LAYER_PLACEMENT_PRIORITY = {
     events: 100, infra: 80, satellites: 70, aisNavy: 65, adsbMilitary: 65,
-    aisTanker: 50, gdelt: 40, conflictHistory: 30, aisCivilian: 20,
+    // Above news: several officials pins sit on a capital's coordinate by
+    // construction (a press release has no location of its own), so they are
+    // the ones that most need to keep their true point rather than being
+    // pushed off it by whatever news happens to share the pixel.
+    aisTanker: 50, officials: 45, gdelt: 40, conflictHistory: 30, aisCivilian: 20,
     adsbCivilian: 20, cities: 10,
   };
 
@@ -761,6 +835,7 @@ export function createMapController(container, initial, callbacks) {
       }
     }
     if (key === "events") visible = capBySeverity(visible, map.getZoom());
+    if (key === "gdelt") visible = collapseNews(visible, map.getZoom());
     registerPlacement(
       key,
       visible.map((item) => ({ id: item[idField], lat: item.lat, lon: item.lon, size: sizeOf(item) }))
@@ -1472,6 +1547,7 @@ export function createMapController(container, initial, callbacks) {
     // it would render once and then be empty everywhere the map moved to.
     renderMarkerLayer("conflictHistory");
     renderMarkerLayer("gdelt");
+    renderMarkerLayer("officials");
     renderMarkerLayer("ais");
     renderMarkerLayer("adsb");
     renderFirms();
@@ -1700,6 +1776,13 @@ export function createMapController(container, initial, callbacks) {
       // Invalidates nearbyEventsFor's cache -- these are the only two
       // sources it reads, so nothing else needs to bust it.
       if (key === "events" || key === "gdelt") eventsDataVersion += 1;
+      // Both feeds name the news ids they have absorbed, so the set has to be
+      // rebuilt whenever either lands -- and the news layer redrawn with it,
+      // or a suppressed pin lingers until the next pan. See passesNewsFilter.
+      if (key === "events" || key === "officials") {
+        rebuildMergedNewsIds();
+        renderMarkerLayer("gdelt");
+      }
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();
       else if (key === "cities") renderCities();

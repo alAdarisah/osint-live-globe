@@ -143,6 +143,10 @@ export function createEntityClusterGroups(map) {
   const groups = {
     events: L.layerGroup().addTo(map), // fused ACLED+UCDP+GDELT conflict layer, see event_fusion.py
     gdelt: L.layerGroup().addTo(map),
+    // Statements, meetings and state visits by heads of state and foreign
+    // ministries -- CAMEO-coded from trusted newsrooms plus the governments'
+    // own press feeds. See backend/sources/officials.py.
+    officials: L.layerGroup().addTo(map),
     // UCDP's reviewed record. NOT added to the map here: it is off by default
     // precisely because it is a month or more out of date, and a verified
     // historical dataset sitting unlabelled among live pins would be the most

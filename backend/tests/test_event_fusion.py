@@ -599,3 +599,88 @@ def test_the_section_filter_does_not_thin_ordinary_reporting():
     ):
         row = _gdelt(event_root_code=19, event_code="195", actor1_type="MIL", source_url=url)
         assert ef._is_violent_gdelt_row(row) is True, url
+
+
+# --- coverage: merged headlines are relocated, not deleted ------------------
+#
+# The old behaviour deduplicated the map by deleting the article: any GDELT
+# headline folded into a fused record was dropped from /api/news, so it then
+# appeared nowhere -- not in the news feed, not in the country card, and not on
+# the pin that had absorbed it. The record carries the headlines now, plus the
+# news ids behind them so the frontend can suppress just the redundant marker.
+
+def _titled(event_id, title, url, outlet="Reuters", added="20260805101500", **over):
+    return _gdelt(event_id=event_id, real_title=title, source_url=url,
+                  source_name=outlet, date_added=added, **over)
+
+
+def test_a_merged_headline_survives_on_the_record():
+    record = ef._merge_cluster([
+        ef._normalize_gdelt(_titled("1", "Strike hits Kherson apartment block",
+                                    "https://www.reuters.com/a", "Reuters")),
+    ])
+    assert record["coverage"] == [{
+        "event_id": "1",
+        "title": "Strike hits Kherson apartment block",
+        "url": "https://www.reuters.com/a",
+        "outlet": "Reuters",
+        "published": "20260805101500",
+    }]
+
+
+def test_every_gdelt_member_is_named_for_marker_suppression():
+    """Including members with no headline of their own: an untitled row still
+    owns a news id, and leaving it out puts a bare News pin back on top of the
+    conflict pin it belongs to."""
+    record = ef._merge_cluster([
+        ef._normalize_gdelt(_titled("1", "A headline", "https://www.reuters.com/a", "Reuters")),
+        ef._normalize_gdelt(_gdelt(event_id="2", real_title=None)),
+    ])
+    assert sorted(record["coverage_event_ids"]) == ["1", "2"]
+    assert len(record["coverage"]) == 1
+
+
+def test_an_acled_only_cluster_carries_no_coverage():
+    record = ef._merge_cluster([ef._normalize_structured("acled", _structured())])
+    assert record["coverage"] == []
+    assert record["coverage_event_ids"] == []
+
+
+def test_a_singleton_gdelt_cluster_still_owns_its_headline():
+    """This is the case the old len(sources) > 1 condition excluded, and it is
+    the common one: most conflict pins are GDELT-only, so most headlines were
+    rendering twice -- once as a News pin and once as the pin's own notes."""
+    record = ef._merge_cluster([
+        ef._normalize_gdelt(_titled("7", "Shelling reported", "https://apnews.com/x", "AP News")),
+    ])
+    assert record["coverage_event_ids"] == ["7"]
+
+
+def test_two_rows_citing_one_article_are_one_piece_of_coverage():
+    """GDELT codes different actor pairs out of the same article as separate
+    rows. That is two ids and one report."""
+    record = ef._merge_cluster([
+        ef._normalize_gdelt(_titled("1", "Same story", "https://www.reuters.com/same")),
+        ef._normalize_gdelt(_titled("2", "Same story", "https://www.reuters.com/same")),
+    ])
+    assert len(record["coverage"]) == 1
+    assert sorted(record["coverage_event_ids"]) == ["1", "2"]
+
+
+def test_coverage_is_newest_first_and_bounded():
+    members = [
+        ef._normalize_gdelt(_titled(str(i), f"Report {i}", f"https://www.reuters.com/{i}",
+                                    "Reuters", added=f"202608051{i:02d}00"))
+        for i in range(12)
+    ]
+    record = ef._merge_cluster(members)
+    assert len(record["coverage"]) == ef.MAX_COVERAGE_ITEMS
+    published = [c["published"] for c in record["coverage"]]
+    assert published == sorted(published, reverse=True)
+
+
+def test_the_outlet_falls_back_to_the_domain_when_gdelt_named_none():
+    record = ef._merge_cluster([
+        ef._normalize_gdelt(_titled("1", "A headline", "https://www.bbc.com/news/x", None)),
+    ])
+    assert record["coverage"][0]["outlet"] == "BBC News"

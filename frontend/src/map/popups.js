@@ -75,6 +75,24 @@ function buildTrendSection(monthlySeries) {
   return `<div class="popup-trend"><div class="meta">Conflict trend (HDX/ACLED, monthly)</div>${rows}</div>`;
 }
 
+// News ids already represented by a conflict or officials record in the same
+// card. Without this the country card lists one story twice -- once as the
+// incident and once as the headline underneath it -- which is the duplication
+// the map itself now avoids, reappearing in a different panel.
+//
+// Recomputed per card rather than shared with the controller's own set: this
+// module is called with `raw` and nothing else, and a card is built on click,
+// not on every render.
+function mergedNewsIdsIn(raw) {
+  const ids = new Set();
+  for (const source of [raw.events, raw.officials]) {
+    for (const record of source || []) {
+      for (const id of record.coverage_event_ids || []) ids.add(id);
+    }
+  }
+  return ids;
+}
+
 function buildEventsSection(eventItems, gdeltItems) {
   const rows = [
     ...eventItems.map((i) => formatEventRow("events", i)),
@@ -262,8 +280,10 @@ export function countryPopupHtml(props, raw, bounds) {
   const name = props.name || "Unknown";
   const wanted = normalizeCountryName(name);
   const eventMatches = raw.events.filter((e) => normalizeCountryName(e.country) === wanted).slice(0, 3);
+  const merged = mergedNewsIdsIn(raw);
   const gdeltMatches = raw.gdelt
     .filter((e) => {
+      if (merged.has(e.event_id)) return false;
       if (!e.location) return false;
       const parts = e.location.split(",");
       return normalizeCountryName(parts[parts.length - 1]) === wanted;
@@ -302,8 +322,10 @@ export function cityPopupHtml(city, raw, countryNameByIso2) {
   const eventMatches = raw.events
     .filter((e) => typeof e.lat === "number" && haversineKm(city.lat, city.lon, e.lat, e.lon) <= 50)
     .slice(0, 3);
+  const merged = mergedNewsIdsIn(raw);
   const gdeltMatches = raw.gdelt
-    .filter((e) => typeof e.lat === "number" && haversineKm(city.lat, city.lon, e.lat, e.lon) <= 50)
+    .filter((e) => !merged.has(e.event_id)
+      && typeof e.lat === "number" && haversineKm(city.lat, city.lon, e.lat, e.lon) <= 50)
     .slice(0, 3);
   return `
     <h3>${esc(city.name)}</h3>

@@ -361,6 +361,22 @@ def _title_url_for(candidate: dict) -> str | None:
     return None
 
 
+def _is_trusted_row(candidate: dict) -> bool:
+    """Can this row ever be published as a News pin?
+
+    Only if a newsroom on the allowlist is attached to it -- its own
+    source_url, or an article from the Mentions table covering the same event.
+    That is the same condition a headline can be scraped under, which is what
+    /api/news requires before it will serve anything.
+
+    Deliberately not "has a real_title": a title is downstream evidence of this
+    condition rather than a substitute for it, and testing the condition itself
+    means a title arriving by any other route can never smuggle an
+    unattributable story onto the map.
+    """
+    return _title_url_for(candidate) is not None
+
+
 async def _attach_titles(candidates: list[dict]) -> None:
     targets = [(c, _title_url_for(c)) for c in candidates]
     targets = [(c, u) for c, u in targets if u]
@@ -705,9 +721,9 @@ def _is_officials_row(ev: dict) -> bool:
          group counts too, since CAMEO frequently leaves the type blank for
          organisations it has a code for.
       3. A country on at least one actor. This is what makes it *country*
-         officials rather than a mayor or a company: without it the layer fills
-         with domestic politics from whichever media market GDELT indexed most.
-      4. A verified-domain article, same rule the news feed applies. An
+         officials rather than a mayor or a company.
+      4. Not one country talking to itself -- see _is_cross_border.
+      5. A verified-domain article, same rule the news feed applies. An
          unattributable claim about what a president said is worth less than
          nothing.
     """
@@ -720,9 +736,45 @@ def _is_officials_row(ev: dict) -> bool:
     )
     if not official:
         return False
-    if not (ev.get("actor1_country") or ev.get("actor2_country")):
+    return _is_cross_border(ev) and _is_trusted_row(ev)
+
+
+def _is_cross_border(ev: dict) -> bool:
+    """Is this a country acting outward, rather than domestic politics?
+
+    Narrowing the actor types is not enough on its own. CAMEO fills a country
+    code for domestic actors exactly as readily as for foreign ones, and it
+    codes US states and Canadian provinces as GOV -- so a live window still
+    produced "Democratic Party praised Michigan (government)" and "Bangladesh
+    cooperated diplomatically with Prime Minister (government)". Neither is
+    what a reader opens a diplomacy layer to see.
+
+    Two rules, matching the two shapes a real row takes:
+
+      both actors carry a country  -- they must differ. This is the summit,
+                                      the state visit, the demand made of a
+                                      neighbour: the layer's core case.
+      only one carries a country   -- the other slot must be empty, i.e. a
+                                      national actor acting with no coded
+                                      counterpart. "Israel (government)
+                                      threatened the use of force" is exactly
+                                      that, and is precisely what the layer is
+                                      for; "X praised Michigan" is not.
+
+    The known cost: a genuinely cross-border act whose counterpart is an
+    individual CAMEO left uncoded (the US sanctioning a named Brazilian
+    diplomat) is rejected. Accepted deliberately -- the alternative admits the
+    entire domestic political blotter of whichever media market GDELT indexed
+    most heavily, which is the failure the conflict layer already had to fix
+    once.
+    """
+    country1, country2 = ev.get("actor1_country"), ev.get("actor2_country")
+    if country1 and country2:
+        return country1 != country2
+    if not (country1 or country2):
         return False
-    return bool(ev.get("real_title")) or _title_url_for(ev) is not None
+    # Exactly one country. The uncoded side must also be unnamed.
+    return not (ev.get("actor2") if country1 else ev.get("actor1"))
 
 
 def _news_age_hours(ev: dict, now: datetime) -> float:
@@ -759,7 +811,7 @@ def _news_slice(rows: list[dict]) -> list[dict]:
     now = datetime.now(timezone.utc)
     by_article: dict[str, dict] = {}
     for ev in rows:
-        if not ev.get("real_title") and _title_url_for(ev) is None:
+        if not _is_trusted_row(ev):
             continue
         key = _dedup_key(ev)
         existing = by_article.get(key)
@@ -822,11 +874,9 @@ def _prune(store: dict[str, dict], label: str) -> None:
         added = _parse_date_added(row.get("date_added"))
         if not added:
             continue  # undated rows are only ever evicted by the hard cap below
-        # A row earns the long window by being publishable: it already has a
-        # scraped headline, or _title_url_for can still find it one from a
-        # newsroom on the allowlist. Everything else is fusion input only.
-        trusted = bool(row.get("real_title")) or _title_url_for(row) is not None
-        if added < (news_cutoff if trusted else fusion_cutoff):
+        # A row earns the long window by being publishable at all. Everything
+        # else is fusion input only, and fusion keeps its own 3-day copy.
+        if added < (news_cutoff if _is_trusted_row(row) else fusion_cutoff):
             del store[key]
 
     if len(store) > _ACCUMULATED_HARD_CAP:
@@ -883,6 +933,45 @@ async def _fetch() -> tuple[list[dict], list[dict], list[dict]]:
     return result, conflict_rows, officials_rows
 
 
+async def _rehydrate() -> None:
+    """Refill both accumulators from Postgres after a restart.
+
+    Each poll only reads WINDOW_MINUTES of export files, so without this the
+    news layer restarts at two hours deep and takes a full day to grow back
+    into the 24-hour window the UI advertises -- and every deploy resets it.
+    The same reasoning event_fusion._rehydrate_violent_gdelt already applies to
+    its 3-day violence window; the entity table keeps `gdelt_conflict` for four
+    days (config.ENTITY_STALE_AFTER), comfortably outliving both.
+
+    Rows fetched live on the first poll overwrite these, so this only fills
+    gaps. _prune runs immediately afterwards, so anything already past its own
+    window is dropped rather than restored.
+    """
+    # app.py starts init_pool as a background task rather than awaiting it, so
+    # without this the read below races the connection and returns [] -- which
+    # is indistinguishable from "nothing stored" and left the window cold on
+    # every restart while appearing to work.
+    if not await storage.wait_for_pool():
+        log.info("No storage available; the GDELT window starts from the live feed only")
+        return
+    try:
+        conflict_rows = await storage.entity_latest("gdelt_conflict")
+        officials_rows = await storage.entity_latest("gdelt_officials")
+    except Exception as exc:  # noqa: BLE001 - a cold start is not a failure
+        log.warning("Could not rehydrate the GDELT window: %s", exc)
+        return
+    for store, rows in ((_ACCUMULATED, conflict_rows), (_ACCUMULATED_OFFICIALS, officials_rows)):
+        for row in rows:
+            key = _conflict_key(row)
+            if key not in store:
+                store[key] = row
+    _prune(_ACCUMULATED, "conflict")
+    _prune(_ACCUMULATED_OFFICIALS, "officials")
+    if _ACCUMULATED or _ACCUMULATED_OFFICIALS:
+        log.info("Rehydrated %d conflict and %d diplomatic rows from storage",
+                 len(_ACCUMULATED), len(_ACCUMULATED_OFFICIALS))
+
+
 async def start():
     global _news_state, _conflict_state, _officials_state
     state = registry.register("gdelt", key_configured=True)  # no key required
@@ -899,6 +988,7 @@ async def start():
     # Shared with the detached title backfill so it can publish what it scraped
     # instead of mutating already-served dicts -- see _republish.
     _news_state, _conflict_state, _officials_state = state, conflict_state, officials_state
+    await _rehydrate()
     while True:
         try:
             candidates, conflict_rows, officials_rows = await _fetch()
