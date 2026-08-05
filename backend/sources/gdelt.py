@@ -7,72 +7,33 @@ import re
 import time
 import zipfile
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 
 import httpx
 
 from backend import config, storage
 from backend.cache import registry
+# The CAMEO taxonomy, shared with event_fusion.py and officials.py. Only the
+# routing constants are needed here -- which roots and actor types make a row
+# diplomacy rather than violence.
+from backend.sources import cameo
+# The domain allowlist and the outlet-name helpers moved to their own module:
+# acled.py needs the same labelling for the sources ACLED and UCDP publish, and
+# importing a sibling poller for a string helper would be backwards. Bound to
+# the private names this module has always used so its call sites are unchanged.
+from backend.sources.outlets import (  # noqa: F401 - VERIFIED_NEWS_DOMAINS is re-exported for callers
+    VERIFIED_LABELS as _VERIFIED_LABELS,
+    VERIFIED_NEWS_DOMAINS,
+    agency_name as _agency_name,
+    label_for_url,
+    matched_domain as _matched_domain,
+    outlet_label,
+    rank_outlets,
+)
 
 log = logging.getLogger("osint-globe.gdelt")
 
 LASTUPDATE_URL = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
 GDELT_BASE_URL = "http://data.gdeltproject.org/gdeltv2/"
-
-# GDELT's crawler indexes anything -- wire services, national papers, but also
-# SEO blogs, content farms and unlabeled AI-generated aggregator sites. Rather
-# than trying to detect "AI-generated" after the fact, we only accept
-# source_urls from domains of known, editorially-staffed news organizations,
-# and the display name doubles as the on-map "which outlet is this" label.
-# Subdomains of these (e.g. edition.cnn.com) match too.
-VERIFIED_NEWS_DOMAINS = {
-    "reuters.com": "Reuters", "apnews.com": "AP News", "afp.com": "AFP",
-    "bbc.com": "BBC News", "bbc.co.uk": "BBC News",
-    "aljazeera.com": "Al Jazeera", "npr.org": "NPR", "pbs.org": "PBS",
-    "theguardian.com": "The Guardian", "nytimes.com": "The New York Times",
-    "washingtonpost.com": "The Washington Post", "wsj.com": "The Wall Street Journal",
-    "ft.com": "Financial Times", "economist.com": "The Economist",
-    "bloomberg.com": "Bloomberg", "cnbc.com": "CNBC", "cnn.com": "CNN",
-    "cbsnews.com": "CBS News", "nbcnews.com": "NBC News",
-    "abcnews.go.com": "ABC News", "usatoday.com": "USA Today",
-    "time.com": "TIME", "newsweek.com": "Newsweek", "politico.com": "Politico",
-    "axios.com": "Axios", "thehill.com": "The Hill", "dw.com": "DW",
-    "france24.com": "France 24", "euronews.com": "Euronews",
-    "skynews.com": "Sky News", "independent.co.uk": "The Independent",
-    "telegraph.co.uk": "The Telegraph", "spiegel.de": "Der Spiegel",
-    "lemonde.fr": "Le Monde", "elpais.com": "El País", "corriere.it": "Corriere della Sera",
-    "asahi.com": "The Asahi Shimbun", "japantimes.co.jp": "The Japan Times",
-    "scmp.com": "South China Morning Post", "straitstimes.com": "The Straits Times",
-    "timesofindia.indiatimes.com": "The Times of India", "hindustantimes.com": "Hindustan Times",
-    "ndtv.com": "NDTV", "haaretz.com": "Haaretz", "timesofisrael.com": "The Times of Israel",
-    "jpost.com": "The Jerusalem Post", "arabnews.com": "Arab News",
-    "middleeasteye.net": "Middle East Eye", "kyivindependent.com": "The Kyiv Independent",
-    "themoscowtimes.com": "The Moscow Times", "abc.net.au": "ABC News (Australia)",
-    "cbc.ca": "CBC News", "globalnews.ca": "Global News", "rnz.co.nz": "RNZ",
-    "voanews.com": "Voice of America", "csmonitor.com": "The Christian Science Monitor",
-    "foreignpolicy.com": "Foreign Policy", "defensenews.com": "Defense News",
-    "military.com": "Military.com", "janes.com": "Janes",
-    "understandingwar.org": "Institute for the Study of War",
-}
-
-
-def _matched_domain(url: str) -> str | None:
-    try:
-        host = urlparse(url).hostname or ""
-    except ValueError:
-        return None
-    host = host.lower()
-    if host.startswith("www."):
-        host = host[4:]
-    for domain in VERIFIED_NEWS_DOMAINS:
-        if host == domain or host.endswith("." + domain):
-            return domain
-    return None
-
-
-def _agency_name(url: str) -> str | None:
-    domain = _matched_domain(url)
-    return VERIFIED_NEWS_DOMAINS.get(domain) if domain else None
 
 # GDELT publishes a new export file every 15 minutes. Fetching only the
 # latest one (the old behavior) meant a quiet 15-minute window could leave
@@ -80,35 +41,108 @@ def _agency_name(url: str) -> str | None:
 # still-relevant items vanished the moment the next poll landed. Instead we
 # roll up a trailing window of files into a persistent accumulator (see
 # _ACCUMULATED below) that items age out of gradually.
-WINDOW_MINUTES = 120  # roughly 2 hours of rolling history
+WINDOW_MINUTES = 120  # how much history each poll re-reads
 FILE_STEP_MINUTES = 15  # GDELT's export cadence
 
-# Served/returned count. Raised from the old 150 (tuned for a single 15-min
-# file) since the rolling window can surface several times that many
-# candidates, and title-scraping is no longer on the blocking serve path
-# (see _backfill_titles) so a larger cap doesn't cost first-paint latency.
-MAX_ITEMS = 400
-_ACCUMULATED_HARD_CAP = MAX_ITEMS * 4  # safety valve for an unusually newsy window
+# --- how long a row stays in the accumulator ------------------------------
+#
+# Two consumers, two answers, which is why this is not one number.
+#
+# event_fusion re-reads the whole accumulator every poll and keeps its own
+# 3-day copy of anything violent (_VIOLENT_RETENTION_SECONDS), rehydrating it
+# from Postgres after a restart. A poll happens every 15 minutes and the window
+# below is 135 minutes, so fusion sees every row roughly nine times before it
+# expires here -- it loses nothing to a short retention.
+#
+# The news layer is the opposite: a headline is worth showing for the rest of
+# the day, and 2h15m meant the map went quiet on any story more than one lunch
+# break old. Trusted-domain rows therefore stay for a full day.
+#
+# Untrusted rows keep the short window. They can never become News pins
+# (app.py's _gdelt_filter requires a real_title, and titles are only ever
+# scraped from VERIFIED_NEWS_DOMAINS -- see _title_url_for), so retaining them
+# for 24h would multiply the accumulator by roughly ten to serve nobody.
+FUSION_RETENTION_MINUTES = WINDOW_MINUTES + FILE_STEP_MINUTES  # 135
+NEWS_RETENTION_MINUTES = 24 * 60
+
+# Served/returned count. Raised alongside NEWS_RETENTION_MINUTES: 400 was sized
+# for a two-hour window, and keeping it while widening to 24h would have meant
+# the feed silently became "the biggest stories of the day" -- the cut, not the
+# window, deciding what a live map shows.
+NEWS_MAX_ITEMS = 1200
+
+# Half-life of a story's rank, in hours. Reach alone is the wrong sort key over
+# a 24-hour window: a wire story picked up by 40 outlets overnight would
+# permanently outrank everything that broke in the last hour, so the map's most
+# recent news would be the news it never showed. Six hours means a 12-hour-old
+# story needs 4x the mentions of a fresh one to sit above it, which keeps big
+# ongoing stories visible without letting them own the whole feed.
+NEWS_HALF_LIFE_HOURS = 6.0
+
+# Safety valve only -- deliberately far above observed volume. Raised with the
+# retention split: a 12-hour live window yields ~4,700 conflict rows after
+# (article, place) dedup, of which the trusted-domain minority now persists for
+# 24h. If the warning it logs ever fires, the volume assumption was wrong and
+# that needs to be visible rather than silently truncating the conflict layer.
+_ACCUMULATED_HARD_CAP = 40000
 
 # Column indices in the GDELT 2.0 Event export CSV (tab-separated, no header).
+# Verified empirically against live data by backend/scripts/probe_gdelt.py --
+# these are read by position out of a headerless file, so a wrong index does
+# not raise, it silently returns a neighbouring field.
 COL_GLOBAL_EVENT_ID = 0
+COL_SQLDATE = 1
 COL_ACTOR1_NAME = 6
+COL_ACTOR1_COUNTRY = 7
 COL_ACTOR1_KNOWN_GROUP = 8
 COL_ACTOR1_TYPE1 = 12
 COL_ACTOR2_NAME = 16
+COL_ACTOR2_COUNTRY = 17
 COL_ACTOR2_KNOWN_GROUP = 18
 COL_ACTOR2_TYPE1 = 22
+COL_IS_ROOT_EVENT = 25
 COL_EVENT_CODE = 26
+COL_EVENT_BASE_CODE = 27
 COL_EVENT_ROOT_CODE = 28
 COL_QUAD_CLASS = 29
 COL_GOLDSTEIN = 30
 COL_NUM_MENTIONS = 31
+COL_NUM_SOURCES = 32
+COL_NUM_ARTICLES = 33
 COL_AVG_TONE = 34
+COL_ACTION_GEO_TYPE = 51
 COL_ACTION_GEO_FULLNAME = 52
+COL_ACTION_GEO_COUNTRY = 53
 COL_ACTION_GEO_LAT = 56
 COL_ACTION_GEO_LONG = 57
+COL_ACTION_GEO_FEATURE_ID = 58
 COL_DATE_ADDED = 59
 COL_SOURCE_URL = 60
+
+# GDELT's ActionGeo_Type, translated once here into the precision vocabulary
+# the rest of the pipeline speaks. Nothing downstream should ever see the raw
+# integer.
+#
+# This distinction was previously not made at all, which meant a row geocoded
+# only to "Sudan" was drawn as a pin at Sudan's geometric centre and was
+# indistinguishable from a pin on a named street in Kherson. Roughly a fifth
+# of conflict rows are country-level (measured: 17.8%), so this was not a
+# corner case -- it was the map asserting a precision it never had.
+GEO_PRECISION = {
+    1: "country",    # COUNTRY  -- centroid, the true location is unknown
+    2: "region",     # USSTATE
+    5: "region",     # WORLDSTATE (ADM1)
+    3: "locality",   # USCITY
+    4: "locality",   # WORLDCITY -- a real place
+}
+GEO_PRECISION_UNKNOWN = "unknown"  # ActionGeo_Type 0 (no geocode match) or blank
+
+
+def _geo_precision(raw: str) -> str:
+    try:
+        return GEO_PRECISION.get(int(raw), GEO_PRECISION_UNKNOWN)
+    except (ValueError, TypeError):
+        return GEO_PRECISION_UNKNOWN
 
 _TS_RE = re.compile(r"(\d{14})\.export\.CSV\.zip")
 
@@ -149,15 +183,17 @@ def _parse_events(text: str) -> list[dict]:
             mentions = int(row[COL_NUM_MENTIONS])
         except (ValueError, IndexError):
             continue
-        # Verbal (3) *and* material (4) conflict are both kept here on
-        # purpose. This feed backs /api/news, which wants the broad political
-        # picture -- accusations and demands are news even when nobody was
-        # hurt. The conflict *map* needs the opposite, so the violence-only
-        # gate lives in event_fusion.py (VIOLENCE_ROOT_CODES) rather than
-        # here. Don't "simplify" by narrowing this: it would silently strip
-        # the news layer down to shootings.
-        if quad_class not in (3, 4):
-            continue
+        # Every quad class is parsed. This used to drop 1 and 2 (verbal and
+        # material *cooperation*) outright, which is why the app had no view of
+        # diplomacy at all: CAMEO root 04 -- a leader visiting, hosting or
+        # meeting another leader -- is quad class 1, so summits and state visits
+        # never entered the pipeline.
+        #
+        # Nothing downstream got wider as a result. _fetch routes each row by
+        # class: quad 3/4 to the conflict accumulator exactly as before, and the
+        # diplomatic subset to its own (see _is_officials_row). The narrowing
+        # each consumer needs happens at that split, not here, so the three
+        # layers can disagree about what is relevant to them.
         # Used to hard-require a verified-domain source_url here, which threw
         # away most raw CAMEO conflict events (anything only reported by a
         # regional/local outlet outside VERIFIED_NEWS_DOMAINS never made it
@@ -193,16 +229,61 @@ def _parse_events(text: str) -> list[dict]:
                 "actor2_group": row[COL_ACTOR2_KNOWN_GROUP] or None,
                 "event_code": row[COL_EVENT_CODE],
                 "event_root_code": event_root_code,
+                "event_base_code": row[COL_EVENT_BASE_CODE] or None,
                 "quad_class": quad_class,
+                "is_root_event": row[COL_IS_ROOT_EVENT] == "1",
                 "goldstein": float(row[COL_GOLDSTEIN]) if row[COL_GOLDSTEIN] else None,
                 "mentions": mentions,
+                # NumSources/NumArticles are carried for completeness, but do
+                # not mistake them for a corroboration signal: measured over a
+                # 12h live window, 99% of violent rows report NumSources == 1
+                # and NumMentions saturates at its per-file ceiling of 10.
+                # Real distinct-outlet counts come from the Mentions table
+                # (see _fetch_mentions), not from here.
+                "num_sources": int(row[COL_NUM_SOURCES]) if row[COL_NUM_SOURCES].isdigit() else None,
+                "num_articles": int(row[COL_NUM_ARTICLES]) if row[COL_NUM_ARTICLES].isdigit() else None,
                 "avg_tone": float(row[COL_AVG_TONE]) if row[COL_AVG_TONE] else None,
+                # How precisely this event is actually placed, and GDELT's own
+                # stable identifier for that place. The latter is a far better
+                # clustering key than a distance test: two rows sharing a
+                # FeatureID are the same place by construction. 90% of violent
+                # rows carry one.
+                "geo_precision": _geo_precision(row[COL_ACTION_GEO_TYPE]),
+                "geo_feature_id": row[COL_ACTION_GEO_FEATURE_ID] or None,
+                "geo_country_code": row[COL_ACTION_GEO_COUNTRY] or None,
+                "actor1_country": row[COL_ACTOR1_COUNTRY] or None,
+                "actor2_country": row[COL_ACTOR2_COUNTRY] or None,
+                # The date the event is reported to have happened, as distinct
+                # from date_added, which is when GDELT ingested the article.
+                # The pipeline used date_added as the event date for years,
+                # which made every event look like it happened when we heard
+                # about it.
+                "event_date": row[COL_SQLDATE] or None,
                 "date_added": row[COL_DATE_ADDED],
                 "source_url": row[COL_SOURCE_URL],
                 "source_name": agency,
             }
         )
     return candidates
+
+
+# Two things deliberately NOT implemented here, both of which look obviously
+# right until you check them against live data.
+#
+# 1. Upgrading a country-level ActionGeo using the Actor1Geo_*/Actor2Geo_*
+#    columns (35-50). For "Russia struck Kyiv", Actor1Geo is Moscow while
+#    ActionGeo is Kyiv -- the actor geocode is systematically the *wrong*
+#    place, so using it as a fallback would move pins to the aggressor's
+#    capital.
+#
+# 2. Rejecting rows where neither actor's geocoded country matches the action's
+#    country, as a filter for articles geocoded to the publication's location
+#    rather than the event's. Measured over a live window: 94% of violent rows
+#    match, and every one of the mismatches was a genuine cross-border event --
+#    Ukrainian forces striking Moscow, Russian servicemen in Kramatorsk,
+#    Jordanian forces in Baghdad. The filter would have removed exactly the
+#    cross-border strikes this map exists to show. Cross-border attack is the
+#    normal case in war, not an anomaly.
 
 
 # --- real article titles -----------------------------------------------
@@ -217,7 +298,7 @@ def _parse_events(text: str) -> list[dict]:
 #
 # This used to run synchronously inside the poll before state.data was set,
 # which meant the news layer (and first page load generally) waited on up to
-# ~MAX_ITEMS sequential-ish HTTP scrapes. It's now kicked off as a detached
+# ~NEWS_MAX_ITEMS sequential-ish HTTP scrapes. It's now kicked off as a detached
 # background task from start() so events appear immediately with the CAMEO
 # fallback sentence and get their real headline filled in moments later.
 
@@ -260,13 +341,38 @@ async def _fetch_title(client: httpx.AsyncClient, url: str) -> str | None:
     return title
 
 
+def _title_url_for(candidate: dict) -> str | None:
+    """Which URL to scrape a headline from.
+
+    The row's own source_url when it comes from a newsroom we vouch for --
+    otherwise any verified-domain URL from the Mentions table that reported the
+    same event. GDELT keeps only one article per event row, and which one is
+    essentially arbitrary, so an event covered by Reuters *and* a content farm
+    would previously get no headline at all whenever the content farm's URL
+    happened to be the one kept. That left most conflict events with no
+    description beyond a CAMEO code, which is also what starves the keyword
+    classifier and the casualty extractor in event_fusion.
+    """
+    if _matched_domain(candidate.get("source_url") or ""):
+        return candidate["source_url"]
+    for url in candidate.get("mention_urls") or ():
+        if _matched_domain(url):
+            return url
+    return None
+
+
 async def _attach_titles(candidates: list[dict]) -> None:
+    targets = [(c, _title_url_for(c)) for c in candidates]
+    targets = [(c, u) for c, u in targets if u]
     async with httpx.AsyncClient(timeout=10) as client:
-        titles = await asyncio.gather(
-            *(_fetch_title(client, c["source_url"]) for c in candidates)
-        )
-    for candidate, title in zip(candidates, titles):
+        titles = await asyncio.gather(*(_fetch_title(client, u) for _, u in targets))
+    for (candidate, url), title in zip(targets, titles):
         candidate["real_title"] = title
+        if title:
+            # Point the record at the article the headline actually came from,
+            # so "read the source" opens what is being quoted.
+            candidate["source_url"] = url
+            candidate["source_name"] = _agency_name(url)
 
 
 async def _backfill_titles(candidates: list[dict]) -> None:
@@ -274,6 +380,35 @@ async def _backfill_titles(candidates: list[dict]) -> None:
         await _attach_titles(candidates)
     except Exception as exc:  # noqa: BLE001 - keep the poller alive
         log.warning("GDELT title backfill failed: %s", exc)
+    finally:
+        _republish()
+
+
+# The three SourceStates start() owns, held here so the detached backfill task
+# can publish what it scraped. See _republish.
+_news_state = None
+_conflict_state = None
+_officials_state = None
+
+
+def _republish() -> None:
+    """Re-assign state.data so the freshly scraped titles actually reach clients.
+
+    _attach_titles mutates candidate dicts in place, and it runs *after* start()
+    has already assigned state.data. SourceState bumps its version only on
+    assignment (backend/cache.py), and app.py builds its ETag from that version
+    -- so without this the new headlines sat in memory while every client got a
+    304 and kept showing the old payload until the next poll 15 minutes later.
+
+    Cheap to be wrong about: re-slicing a few thousand dicts costs far less than
+    the scrape that just finished, and a no-op re-assign is harmless.
+    """
+    if _news_state is None or _conflict_state is None or _officials_state is None:
+        return  # backfill fired before start() finished registering
+    rows = list(_ACCUMULATED.values())
+    _news_state.data = _news_slice(rows)
+    _conflict_state.data = rows
+    _officials_state.data = list(_ACCUMULATED_OFFICIALS.values())
 
 
 # --- rolling multi-file window -------------------------------------------
@@ -340,6 +475,69 @@ def _fix_mojibake(text: str | None) -> str | None:
     return text  # not actually double-encoded, or not recoverable -- leave it alone
 
 
+# --- the Mentions table ----------------------------------------------------
+#
+# GDELT publishes a second file alongside each export, listing every article
+# that mentioned each event. It is the only place a real distinct-outlet count
+# exists.
+#
+# The export file's own NumSources column looks like it should serve: it does
+# not. Measured over a 12-hour live window, 99% of rows passing the violence
+# gate report NumSources == 1 (max 2), and NumMentions saturates at its
+# per-file ceiling of 10. Both are effectively constants on exactly the rows we
+# care about, so severity built on them was scoring a lone blog and a story
+# carried by forty newsrooms identically.
+#
+# Cost is small: ~98 KB per 15-minute file against the export's ~65 KB.
+MENTIONS_COL_EVENT_ID = 0
+MENTIONS_COL_SOURCE_NAME = 4     # the outlet's domain, e.g. "reuters.com"
+MENTIONS_COL_IDENTIFIER = 5      # the article URL
+MENTIONS_COL_CONFIDENCE = 11
+
+# Guard against one viral story pinning thousands of domains in memory. Well
+# above any real corroboration signal -- past a couple of dozen outlets the
+# distinction stops carrying information.
+_MAX_OUTLETS_TRACKED = 64
+
+
+def _parse_mentions(text: str) -> dict[str, tuple[set[str], list[str]]]:
+    """event id -> (distinct outlet domains, article URLs worth scraping).
+
+    The URL list keeps only verified-domain articles: it exists so an event
+    whose kept source_url is a content farm can still get a real headline from
+    a newsroom that covered the same event (see _title_url_for).
+    """
+    out: dict[str, tuple[set[str], list[str]]] = {}
+    for row in csv.reader(io.StringIO(text), delimiter="\t"):
+        if len(row) <= MENTIONS_COL_CONFIDENCE:
+            continue
+        event_id = row[MENTIONS_COL_EVENT_ID]
+        domain = (row[MENTIONS_COL_SOURCE_NAME] or "").strip().lower()
+        if not event_id or not domain:
+            continue
+        outlets, urls = out.setdefault(event_id, (set(), []))
+        if len(outlets) < _MAX_OUTLETS_TRACKED:
+            outlets.add(domain)
+        article = (row[MENTIONS_COL_IDENTIFIER] or "").strip()
+        if article and len(urls) < 4 and _matched_domain(article):
+            urls.append(article)
+    return out
+
+
+async def _fetch_one_mentions(client: httpx.AsyncClient, url: str) -> dict[str, tuple[set[str], list[str]]]:
+    try:
+        resp = await client.get(url)
+        if resp.status_code == 404:
+            return {}
+        resp.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            text = _decode_export(zf.read(zf.namelist()[0]))
+        return _parse_mentions(text)
+    except Exception as exc:  # noqa: BLE001 - supplementary; never sink the poll
+        log.debug("GDELT mentions fetch failed (%s): %s", url, exc)
+        return {}
+
+
 async def _fetch_one_export(client: httpx.AsyncClient, url: str) -> list[dict]:
     try:
         resp = await client.get(url)
@@ -362,18 +560,71 @@ def _dedup_key(ev: dict) -> str:
     return ev.get("source_url") or f"evt:{ev.get('event_id')}"
 
 
+def _conflict_key(ev: dict) -> str:
+    """Dedup key for the conflict feed: one row per (article, place).
+
+    _dedup_key keeps exactly one row per article, which is right for a news
+    list -- one headline, one pin. It is wrong for a conflict map: an article
+    reporting strikes on three cities is coded by GDELT as three rows, and
+    collapsing them to one discards two real events.
+
+    Measured over a 12-hour live window, keying on (article, place) instead
+    recovers 73% more rows that pass the violence gate -- 88 becomes 152.
+    """
+    return f"{_dedup_key(ev)}|{ev.get('geo_feature_id') or ''}"
+
+
 async def _fetch_window() -> list[dict]:
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         latest_url = await _latest_export_url(client)
         latest_dt = _parse_latest_ts(latest_url)
-        results = await asyncio.gather(*(_fetch_one_export(client, u) for u in _window_urls(latest_dt)))
+        export_urls = _window_urls(latest_dt)
+        mention_urls = [u.replace(".export.CSV.zip", ".mentions.CSV.zip") for u in export_urls]
+        results, mention_maps = await asyncio.gather(
+            asyncio.gather(*(_fetch_one_export(client, u) for u in export_urls)),
+            asyncio.gather(*(_fetch_one_mentions(client, u) for u in mention_urls)),
+        )
+
+    outlets_by_event: dict[str, set[str]] = {}
+    urls_by_event: dict[str, list[str]] = {}
+    for chunk in mention_maps:
+        for event_id, (domains, urls) in chunk.items():
+            merged_set = outlets_by_event.setdefault(event_id, set())
+            if len(merged_set) < _MAX_OUTLETS_TRACKED:
+                merged_set.update(domains)
+            bucket = urls_by_event.setdefault(event_id, [])
+            for url in urls:
+                if len(bucket) < 4 and url not in bucket:
+                    bucket.append(url)
+
     merged: dict[str, dict] = {}
     for file_events in results:
         for ev in file_events:
-            key = _dedup_key(ev)
+            key = _conflict_key(ev)
             existing = merged.get(key)
             if not existing or ev["mentions"] > existing["mentions"]:
                 merged[key] = ev
+
+    for ev in merged.values():
+        domains = outlets_by_event.get(ev["event_id"]) or set()
+        ev["outlet_count"] = len(domains)
+        ev["mention_urls"] = urls_by_event.get(ev["event_id"]) or []
+        # *Who* carried it, not just how many did. The domains were already
+        # being collected to produce outlet_count and then thrown away, which
+        # left a popup saying "carried by 7 independent outlets" and unable to
+        # name one of them. Capped and ranked by rank_outlets -- see outlets.py.
+        labels = [outlet_label(d) for d in domains]
+        # The row's own article leads the list -- it is the one the popup links
+        # to and the one the headline was scraped from, so a list that omitted
+        # it read as contradicting the link right below it.
+        ev["outlets"] = rank_outlets(labels, preferred=label_for_url(ev.get("source_url")))
+        # Which of them are editorially-staffed newsrooms we already vouch for.
+        # This is the same allowlist check the single source_url gets, applied
+        # across every outlet that carried the story instead -- so a
+        # wire-service pickup counts even when the row we happened to keep
+        # cites a content farm. Derived from the labels rather than from the
+        # raw domains so a subdomain (edition.cnn.com) counts too.
+        ev["verified_outlets"] = sorted(set(labels) & _VERIFIED_LABELS)
     return list(merged.values())
 
 
@@ -433,28 +684,193 @@ def _corroborated_by(ev: dict, acled_rows: list[dict]) -> list[str]:
 # very newsy window can't grow this unboundedly.
 _ACCUMULATED: dict[str, dict] = {}
 
+# The same, for the Officials & Diplomacy layer. A second store rather than a
+# flag on the first: the two overlap only partially (most diplomacy is quad
+# class 1, which is not conflict at all) and they are pruned and served
+# independently.
+_ACCUMULATED_OFFICIALS: dict[str, dict] = {}
 
-async def _fetch() -> list[dict]:
-    new_items = await _fetch_window()
-    for ev in new_items:
+
+def _is_officials_row(ev: dict) -> bool:
+    """Gate for rows entering the Officials & Diplomacy layer.
+
+    Four conditions, all required:
+
+      1. A diplomatic CAMEO root (cameo.DIPLOMATIC_ROOT_CODES -- everything
+         except the violence roots 18/19/20, which belong to the conflict
+         layer; an event should appear in exactly one of the two).
+      2. An official actor. CAMEO's own type codes carry this: GOV/ELI is a
+         head of state or minister, LEG/JUD/OPP/PTY the rest of a political
+         system, MIL a defence ministry, IGO the UN or NATO. A named known
+         group counts too, since CAMEO frequently leaves the type blank for
+         organisations it has a code for.
+      3. A country on at least one actor. This is what makes it *country*
+         officials rather than a mayor or a company: without it the layer fills
+         with domestic politics from whichever media market GDELT indexed most.
+      4. A verified-domain article, same rule the news feed applies. An
+         unattributable claim about what a president said is worth less than
+         nothing.
+    """
+    if ev.get("event_root_code") not in cameo.DIPLOMATIC_ROOT_CODES:
+        return False
+    official = (
+        ev.get("actor1_type") in cameo.OFFICIAL_ACTOR_TYPES
+        or ev.get("actor2_type") in cameo.OFFICIAL_ACTOR_TYPES
+        or bool(ev.get("actor1_group") or ev.get("actor2_group"))
+    )
+    if not official:
+        return False
+    if not (ev.get("actor1_country") or ev.get("actor2_country")):
+        return False
+    return bool(ev.get("real_title")) or _title_url_for(ev) is not None
+
+
+def _news_age_hours(ev: dict, now: datetime) -> float:
+    added = _parse_date_added(ev.get("date_added"))
+    if added is None:
+        return 0.0  # undated: treat as fresh rather than burying it at the bottom
+    return max((now - added).total_seconds() / 3600.0, 0.0)
+
+
+def _news_rank(ev: dict, now: datetime) -> float:
+    """Reach, decayed by age. See NEWS_HALF_LIFE_HOURS for why not raw reach.
+
+    The +1 keeps a zero-mention row rankable: over a 24h window a story that
+    has only just been ingested legitimately has no mention count yet, and
+    multiplying by a flat zero would send every one of them to the bottom of the
+    list regardless of how recent it is.
+    """
+    reach = (ev.get("mentions") or 0) + 1
+    return reach * 0.5 ** (_news_age_hours(ev, now) / NEWS_HALF_LIFE_HOURS)
+
+
+def _news_slice(rows: list[dict]) -> list[dict]:
+    """The top-NEWS_MAX_ITEMS list /api/news serves, ranked by decayed reach.
+
+    Collapsed back to one row per article first, because the accumulator is
+    keyed per (article, place) for the conflict layer's benefit and a news list
+    wants one entry per headline.
+
+    Restricted to trusted rows -- same rule the retention split applies. Only a
+    verified-domain row can ever be served (app.py requires a real_title, and
+    titles come only from the allowlist), so letting untrusted rows compete for
+    the cap would spend slots on items that can never be shown.
+    """
+    now = datetime.now(timezone.utc)
+    by_article: dict[str, dict] = {}
+    for ev in rows:
+        if not ev.get("real_title") and _title_url_for(ev) is None:
+            continue
         key = _dedup_key(ev)
-        prior = _ACCUMULATED.get(key)
-        if prior and prior.get("real_title") and not ev.get("real_title"):
-            ev["real_title"] = prior["real_title"]  # carry an already-backfilled title forward
-        _ACCUMULATED[key] = ev
+        existing = by_article.get(key)
+        if not existing or ev["mentions"] > existing["mentions"]:
+            by_article[key] = ev
+    return sorted(
+        by_article.values(),
+        # event_id breaks ties so two rows with identical reach and timestamp
+        # can't swap places between polls and churn the marker layer.
+        key=lambda d: (_news_rank(d, now), str(d.get("event_id") or "")),
+        reverse=True,
+    )[:NEWS_MAX_ITEMS]
 
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=WINDOW_MINUTES + FILE_STEP_MINUTES)
-    for key in list(_ACCUMULATED):
-        added = _parse_date_added(_ACCUMULATED[key].get("date_added"))
-        if added and added < cutoff:
-            del _ACCUMULATED[key]
 
-    if len(_ACCUMULATED) > _ACCUMULATED_HARD_CAP:
-        overflow = sorted(_ACCUMULATED.items(), key=lambda kv: kv[1]["mentions"])[: len(_ACCUMULATED) - _ACCUMULATED_HARD_CAP]
+def _accumulate(store: dict[str, dict], rows: list[dict]) -> None:
+    """Merge this poll's rows into a persistent accumulator.
+
+    The windows overlap by design (a 120-minute read every 15 minutes), so most
+    rows arriving here are already held. What survives from the prior copy is
+    everything that was *earned* over time rather than published in the file:
+    a scraped headline, and the running outlet tally.
+    """
+    for ev in rows:
+        key = _conflict_key(ev)
+        prior = store.get(key)
+        if prior:
+            if prior.get("real_title") and not ev.get("real_title"):
+                # Carry an already-backfilled title (and the URL it came from)
+                # forward rather than re-scraping it.
+                ev["real_title"] = prior["real_title"]
+                ev["source_url"] = prior.get("source_url") or ev.get("source_url")
+                ev["source_name"] = prior.get("source_name") or ev.get("source_name")
+            # Outlet counts accumulate rather than reset. Each mentions file
+            # covers one 15-minute slot, so a story picked up over six hours
+            # appears in six of them with a handful of outlets each -- taking
+            # only the latest window's count would permanently understate how
+            # widely an event was actually reported, which is the single input
+            # the severity score leans on hardest.
+            ev["outlet_count"] = max(ev.get("outlet_count") or 0, prior.get("outlet_count") or 0)
+            merged_verified = set(ev.get("verified_outlets") or []) | set(prior.get("verified_outlets") or [])
+            ev["verified_outlets"] = sorted(merged_verified)
+            # Same reasoning for the names: an outlet that carried the story two
+            # windows ago still carried it. Re-ranked rather than concatenated,
+            # so the union of two capped lists is itself capped and still leads
+            # with the mastheads a reader recognises.
+            ev["outlets"] = rank_outlets(
+                (ev.get("outlets") or []) + (prior.get("outlets") or []),
+                preferred=label_for_url(ev.get("source_url")),
+            )
+        store[key] = ev
+
+
+def _prune(store: dict[str, dict], label: str) -> None:
+    """Age rows out of an accumulator, then enforce the hard cap."""
+    now = datetime.now(timezone.utc)
+    news_cutoff = now - timedelta(minutes=NEWS_RETENTION_MINUTES)
+    fusion_cutoff = now - timedelta(minutes=FUSION_RETENTION_MINUTES)
+    for key in list(store):
+        row = store[key]
+        added = _parse_date_added(row.get("date_added"))
+        if not added:
+            continue  # undated rows are only ever evicted by the hard cap below
+        # A row earns the long window by being publishable: it already has a
+        # scraped headline, or _title_url_for can still find it one from a
+        # newsroom on the allowlist. Everything else is fusion input only.
+        trusted = bool(row.get("real_title")) or _title_url_for(row) is not None
+        if added < (news_cutoff if trusted else fusion_cutoff):
+            del store[key]
+
+    if len(store) > _ACCUMULATED_HARD_CAP:
+        # Oldest first, NOT lowest-mentions first. The old rule made sense when
+        # this list only backed /api/news, but event_fusion now reads the same
+        # accumulator, and evicting by mention count deletes precisely the
+        # low-profile local violence reports the conflict layer exists to
+        # surface.
+        overflow = sorted(
+            store.items(),
+            key=lambda kv: kv[1].get("date_added") or "",
+        )[: len(store) - _ACCUMULATED_HARD_CAP]
         for key, _ in overflow:
-            del _ACCUMULATED[key]
+            del store[key]
+        log.warning("GDELT %s accumulator hit its cap (%d); evicted %d oldest rows",
+                    label, _ACCUMULATED_HARD_CAP, len(overflow))
 
-    result = sorted(_ACCUMULATED.values(), key=lambda d: d["mentions"], reverse=True)[:MAX_ITEMS]
+
+async def _fetch() -> tuple[list[dict], list[dict], list[dict]]:
+    """Returns (news slice, full conflict window, officials window).
+
+    Three consumers with different needs, one fetch. /api/news wants the most
+    widely reported stories -- ranking is the whole point of a news feed. The
+    conflict layer wants the opposite: a village massacre carried by two local
+    outlets must not be deleted by a popularity cut before event_fusion's
+    violence gate has even looked at it. Measured over a 12-hour window, the
+    old top-400 cut was discarding 92% of the rows that pass that gate,
+    including strikes on Kyiv, Kherson and Jerusalem, each reported by a single
+    outlet. The officials window wants a third thing again -- statements and
+    meetings, most of which are not conflict rows at all.
+    """
+    new_items = await _fetch_window()
+    # Routed, not filtered: one row can legitimately belong to both windows (a
+    # threat is quad 3 *and* diplomacy), and the duplicate marker that would
+    # otherwise cause is resolved the same way merged news is -- the officials
+    # record names the news id it owns, and the map suppresses that marker.
+    _accumulate(_ACCUMULATED, [ev for ev in new_items if ev.get("quad_class") in (3, 4)])
+    _accumulate(_ACCUMULATED_OFFICIALS, [ev for ev in new_items if _is_officials_row(ev)])
+    _prune(_ACCUMULATED, "conflict")
+    _prune(_ACCUMULATED_OFFICIALS, "officials")
+
+    conflict_rows = list(_ACCUMULATED.values())
+    officials_rows = list(_ACCUMULATED_OFFICIALS.values())
+    result = _news_slice(conflict_rows)
 
     # Recomputed fresh every poll (never accumulated/stale) since ACLED/UCDP
     # data moves independently of GDELT's own window.
@@ -464,22 +880,63 @@ async def _fetch() -> list[dict]:
         ev["corroborated"] = bool(matches)
         ev["corroborated_by"] = matches
 
-    return result
+    return result, conflict_rows, officials_rows
 
 
 async def start():
+    global _news_state, _conflict_state, _officials_state
     state = registry.register("gdelt", key_configured=True)  # no key required
+    # The unranked, untruncated window, for event_fusion. A second registry
+    # entry rather than a module-level accessor: every cross-source read in
+    # this app already goes through the registry (this module reads acled that
+    # way, app.py reads event_fusion that way), and registry.has() is what lets
+    # event_fusion tolerate startup ordering.
+    conflict_state = registry.register("gdelt_conflict", key_configured=True)
+    # The diplomatic window, read by officials.py the same way. Registered here
+    # rather than there so it exists from the first poll and officials.py's own
+    # _wait_for_inputs has something to wait on.
+    officials_state = registry.register("gdelt_officials", key_configured=True)
+    # Shared with the detached title backfill so it can publish what it scraped
+    # instead of mutating already-served dicts -- see _republish.
+    _news_state, _conflict_state, _officials_state = state, conflict_state, officials_state
     while True:
         try:
-            candidates = await _fetch()
+            candidates, conflict_rows, officials_rows = await _fetch()
             state.data = candidates
-            state.last_success = time.time()
-            state.last_error = None
+            conflict_state.data = conflict_rows
+            officials_state.data = officials_rows
+            state.last_success = conflict_state.last_success = time.time()
+            officials_state.last_success = state.last_success
+            state.last_error = conflict_state.last_error = None
+            officials_state.last_error = None
             with_titles = sum(1 for d in candidates if d.get("real_title"))
-            log.info("GDELT: %d events (%d with a real title, rest backfilling)", len(candidates), with_titles)
+            log.info(
+                "GDELT: %d news events (%d with a real title, rest backfilling); "
+                "%d rows in the conflict window; %d in the diplomatic window",
+                len(candidates), with_titles, len(conflict_rows), len(officials_rows),
+            )
             await storage.record_snapshot("gdelt", candidates, "event_id")
+            # Persisted so event_fusion can rehydrate its 3-day violence
+            # accumulator after a restart instead of starting from the last
+            # two hours and taking three days to refill.
+            await storage.record_snapshot("gdelt_conflict", conflict_rows, "event_id")
+            await storage.record_snapshot("gdelt_officials", officials_rows, "event_id")
             await storage.record_source_health("gdelt", len(candidates), True)
-            to_fetch = [c for c in candidates if c.get("source_name") and "real_title" not in c]
+            # Backfill across both windows, not just the news slice: a conflict
+            # pin with no headline shows a bare CAMEO label and gives
+            # event_fusion's classifier and casualty extractor nothing to work
+            # with, and an officials pin with no headline cannot say what the
+            # official actually said. _title_url_for finds a verified-domain
+            # article for each, from the Mentions table when the row's own
+            # source_url isn't one.
+            #
+            # Keyed by identity through a dict so a row in both windows (a
+            # threat is conflict *and* diplomacy) is scraped once.
+            to_fetch = list({
+                id(c): c
+                for c in conflict_rows + officials_rows
+                if "real_title" not in c and _title_url_for(c)
+            }.values())
             # Skipped while a previous backfill is still running: title
             # scraping is network-bound and can outlast a poll interval, and
             # launching a second pass over an overlapping candidate set would

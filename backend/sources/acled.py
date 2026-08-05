@@ -9,6 +9,7 @@ import httpx
 
 from backend import config, storage
 from backend.cache import registry
+from backend.sources.outlets import split_outlet_names
 
 log = logging.getLogger("osint-globe.acled")
 
@@ -33,6 +34,9 @@ _token: dict = {"access_token": None, "expires_at": 0}
 # last URL that worked so most polls need just one request instead of
 # walking back through several 404s.
 _last_good_ucdp_url: str | None = None
+# (url, csv text) for the most recent successful candidate download, so the
+# live window and the full history parse share one fetch per poll.
+_ucdp_text_cache: tuple[str, str] | None = None
 # Research-tier myACLED accounts are embargoed from recent events (ACLED
 # returns the cutoff itself in data_query_restrictions.date_recency, e.g.
 # "12 Months old"). None means "not measured yet, try the live window
@@ -73,7 +77,12 @@ async def _query_acled_page(client: httpx.AsyncClient, token: str, since, until,
         "page": str(page),
         "event_date": f"{since.isoformat()}|{until.isoformat()}",
         "event_date_where": "BETWEEN",
-        "fields": "event_id_cnty|event_date|event_type|sub_event_type|actor1|actor2|fatalities|latitude|longitude|country|notes",
+        # `source` is the semicolon-separated list of outlets ACLED coded the
+        # event from. Requested so an ACLED-derived pin can name who reported
+        # it, the same question GDELT's Mentions table answers for its own rows
+        # -- without it, an ACLED-only event reaches the map with no reporting
+        # provenance at all.
+        "fields": "event_id_cnty|event_date|event_type|sub_event_type|actor1|actor2|fatalities|latitude|longitude|country|notes|source",
     }
     resp = await client.get(
         READ_URL, params=params, headers={"Authorization": f"Bearer {token}"}
@@ -127,7 +136,12 @@ def _parse_acled_rows(payload: dict) -> list[dict]:
                 "fatalities": int(row.get("fatalities") or 0),
                 "country": row.get("country"),
                 "notes": (row.get("notes") or "")[:400],
+                # Two different things that both want to be called "source":
+                # this key is the *dataset* marker every downstream module keys
+                # off, while `outlets` holds ACLED's own `source` column -- the
+                # newsrooms it coded the event from.
                 "source": "acled",
+                "outlets": split_outlet_names(row.get("source")),
             }
         )
     return items
@@ -186,7 +200,7 @@ def _ucdp_candidate_urls() -> list[str]:
 UCDP_LOOKBACK_DAYS = 3
 
 
-def _parse_ucdp_csv(text: str) -> list[dict]:
+def _parse_ucdp_csv(text: str, lookback_days: int | None = UCDP_LOOKBACK_DAYS) -> list[dict]:
     # The candidate file's own publication lags real time by a month or
     # more (it's only cut once UCDP has done enough review to call a month
     # "candidate"-quality) -- a cutoff measured from wall-clock *today* was
@@ -210,13 +224,20 @@ def _parse_ucdp_csv(text: str) -> list[dict]:
         return []
 
     latest_date = max(d for d, _, _, _ in rows)
-    cutoff_date = (
-        datetime.strptime(latest_date, "%Y-%m-%d").date() - timedelta(days=UCDP_LOOKBACK_DAYS)
-    ).isoformat()
+    # lookback_days=None keeps the whole file. The candidate file is a
+    # cumulative January-to-date cut, so the 3-day window is right for the live
+    # feed and throws away ~99% of a reviewed dataset for the history feed --
+    # which is the one place that history is exactly what's wanted.
+    cutoff_date = None
+    if lookback_days is not None:
+        cutoff_date = (
+            datetime.strptime(latest_date, "%Y-%m-%d").date() - timedelta(days=lookback_days)
+        ).isoformat()
+    lag_days = (datetime.now(timezone.utc).date() - datetime.strptime(latest_date, "%Y-%m-%d").date()).days
 
     items = []
     for date, lat, lon, row in rows:
-        if date < cutoff_date:
+        if cutoff_date is not None and date < cutoff_date:
             continue
         try:
             fatalities = int(row.get("best") or 0)
@@ -236,18 +257,31 @@ def _parse_ucdp_csv(text: str) -> list[dict]:
                 "country": row.get("country"),
                 "notes": (row.get("source_headline") or row.get("where_description") or "")[:400],
                 "source": "ucdp",
+                # Who UCDP read this off. source_article is a citation rather
+                # than a bare masthead, so split_outlet_names truncates each
+                # entry; source_office (the news agency) is the fallback when
+                # the article field is empty.
+                "outlets": split_outlet_names(
+                    row.get("source_article") or row.get("source_office")
+                ),
+                # How stale this dataset is, as data rather than as a footnote
+                # someone downstream might drop. Anything rendering these rows
+                # is expected to show it.
+                "as_of": latest_date,
+                "lag_days": lag_days,
             }
         )
     return items
 
 
-async def _fetch_ucdp() -> list[dict]:
-    global _last_good_ucdp_url
+async def _fetch_ucdp_text() -> str | None:
+    """The freshest available candidate CSV, cached by URL across polls."""
+    global _last_good_ucdp_url, _ucdp_text_cache
     candidates = _ucdp_candidate_urls()
     if _last_good_ucdp_url and _last_good_ucdp_url in candidates:
         candidates.remove(_last_good_ucdp_url)
         candidates.insert(0, _last_good_ucdp_url)
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         for url in candidates:
             try:
                 resp = await client.get(url)
@@ -255,14 +289,31 @@ async def _fetch_ucdp() -> list[dict]:
                     continue
                 resp.raise_for_status()
                 _last_good_ucdp_url = url
-                return _parse_ucdp_csv(resp.text)
+                # Held so the live and history parses share one download
+                # rather than pulling a multi-megabyte file twice per poll.
+                _ucdp_text_cache = (url, resp.text)
+                return resp.text
             except httpx.HTTPStatusError:
                 continue
             except Exception as exc:  # noqa: BLE001 - one bad file shouldn't sink the whole poll
                 log.debug("UCDP candidate fetch failed (%s): %s", url, exc)
                 continue
     log.warning("UCDP: no candidate dataset file found in the last 15 months")
-    return []
+    return None
+
+
+async def _fetch_ucdp() -> list[dict]:
+    text = await _fetch_ucdp_text()
+    return _parse_ucdp_csv(text) if text else []
+
+
+async def _fetch_ucdp_history() -> list[dict]:
+    """The whole reviewed record in the current candidate file, not a window."""
+    if _ucdp_text_cache is None:
+        text = await _fetch_ucdp_text()
+    else:
+        text = _ucdp_text_cache[1]
+    return _parse_ucdp_csv(text, lookback_days=None) if text else []
 
 
 def _within_real_lookback(items: list[dict]) -> list[dict]:
@@ -278,20 +329,36 @@ def _within_real_lookback(items: list[dict]) -> list[dict]:
     return [d for d in items if d.get("date") and d["date"] >= cutoff]
 
 
-async def _fetch() -> list[dict]:
+async def _fetch() -> tuple[list[dict], list[dict]]:
+    """Returns (live, history).
+
+    `live` is the existing _within_real_lookback-gated list: rows whose own
+    event date really does fall in the last few days. On an embargoed ACLED
+    account, and with a UCDP candidate file that lags a month or more, that
+    list is empty -- and empty is the honest answer, so the gate stays exactly
+    as it is.
+
+    `history` is the reviewed record, ungated, every row tagged with `as_of`
+    and `lag_days`. UCDP is the only rigorously reviewed conflict dataset
+    available without a paid key, and discarding it entirely (the previous
+    behaviour) threw that away rather than presenting it for what it is.
+    """
     acled_configured = bool(config.ACLED_EMAIL and config.ACLED_PASSWORD)
-    tasks = [_fetch_ucdp()]
+    tasks = [_fetch_ucdp(), _fetch_ucdp_history()]
     if acled_configured:
         tasks.append(_fetch_acled())
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    items = []
-    for result in results:
+    live_inputs, history = [], []
+    for index, result in enumerate(results):
         if isinstance(result, Exception):
             log.warning("Conflict source fetch failed: %s", result)
             continue
-        items.extend(result)
-    return _within_real_lookback(items)
+        if index == 1:
+            history = result
+        else:
+            live_inputs.extend(result)
+    return _within_real_lookback(live_inputs), history
 
 
 async def start():
@@ -299,25 +366,36 @@ async def start():
     # even without ACLED credentials -- key_configured reflects "the source
     # is usable", not "every possible sub-source is configured".
     state = registry.register("acled", key_configured=True)
+    # The reviewed record, deliberately separate from the live feed so nothing
+    # downstream can mistake a month-old verified dataset for current events.
+    history_state = registry.register("conflict_history", key_configured=True)
     while True:
         acled_configured = bool(config.ACLED_EMAIL and config.ACLED_PASSWORD)
         try:
-            state.data = await _fetch()
+            state.data, history = await _fetch()
+            history_state.data = history
+            history_state.last_success = time.time()
+            history_state.last_error = None
             state.last_success = time.time()
             state.last_error = (
                 None if acled_configured
                 else "ACLED_EMAIL / ACLED_PASSWORD not set -- showing UCDP only"
             )
             ucdp_count = sum(1 for d in state.data if d.get("source") == "ucdp")
+            as_of = next((h.get("as_of") for h in history if h.get("as_of")), None)
             log.info(
-                "Conflict events: %d total (%d ACLED, %d UCDP)",
+                "Conflict events: %d live (%d ACLED, %d UCDP); %d verified history rows"
+                " through %s",
                 len(state.data), len(state.data) - ucdp_count, ucdp_count,
+                len(history), as_of or "?",
             )
             # Raw ACLED+UCDP rows, pre-fusion -- event_fusion.py archives the
             # merged view separately, so both the inputs and the result stay
             # queryable rather than only the result.
             await storage.record_snapshot("acled", state.data, "id")
+            await storage.record_snapshot("conflict_history", history, "id")
             await storage.record_source_health("acled", len(state.data), True)
+            await storage.record_source_health("conflict_history", len(history), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("Conflict event fetch failed: %s", exc)

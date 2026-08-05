@@ -30,6 +30,18 @@ UCDP_POLL_INTERVAL = int(os.getenv("UCDP_POLL_INTERVAL", "21600"))  # UCDP's can
 # "personal daily archive", not a short replay buffer.
 CONFLICT_WATCH_RETENTION_DAYS = int(os.getenv("CONFLICT_WATCH_RETENTION_DAYS", "180"))
 
+# Bump whenever a change alters how many conflict events the pipeline produces,
+# or what severity means. escalation.py compares a 24h count against a 6-day
+# baseline drawn only from the *same* version, so a pipeline improvement that
+# multiplies event volume re-triggers escalation's own coverage guard and keeps
+# it silent until it has comparable history -- instead of reporting a world-wide
+# escalation because we got better at seeing.
+#
+# 2: violence pipeline rebuilt -- geographic precision, real event dates,
+#    outlet-count corroboration, and GDELT no longer filtered through the news
+#    popularity ranking (which was discarding 92% of violent events).
+CONFLICT_PIPELINE_VERSION = int(os.getenv("CONFLICT_PIPELINE_VERSION", "2"))
+
 # How long an entity can go without a fresh report before storage.py evicts
 # it from entity_latest (see backend/storage.py). Separate from ais.py's own
 # STALE_AFTER, which governs the in-memory live layer (/api/ships) -- these
@@ -48,6 +60,17 @@ ENTITY_STALE_AFTER = {
     "adsb": ADSB_STALE_AFTER,
     "satellites": 3600,
     "gdelt": 86400,
+    # Must outlive event_fusion's 3-day violence accumulator, since that
+    # accumulator is rehydrated from this table on restart. "gdelt"'s own one
+    # day is deliberately shorter -- the news layer has no reason to remember
+    # that far back.
+    "gdelt_conflict": 4 * 86400,
+    # The Officials & Diplomacy inputs and their fusion. Two days rather than
+    # one: all three carry a 24h live window, and a stale-after equal to the
+    # window would start expiring rows the layer is still showing.
+    "gdelt_officials": 2 * 86400,
+    "official_feeds": 2 * 86400,
+    "officials": 2 * 86400,
     "firms": 2 * 86400,
     "jamming": 2 * 86400,
     "acled": 7 * 86400,
