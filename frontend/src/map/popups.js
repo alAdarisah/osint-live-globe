@@ -93,7 +93,9 @@ function mergedNewsIdsIn(raw) {
   return ids;
 }
 
-function buildEventsSection(eventItems, gdeltItems) {
+// `heading` is dropped by the country card, which labels the fold itself, and
+// kept by the city popup, which has no folds and so still needs the line.
+function buildEventsSection(eventItems, gdeltItems, { heading = true } = {}) {
   const rows = [
     ...eventItems.map((i) => formatEventRow("events", i)),
     ...gdeltItems.map((i) => formatEventRow("gdelt", i)),
@@ -101,7 +103,7 @@ function buildEventsSection(eventItems, gdeltItems) {
   if (!rows.length) {
     return '<div class="popup-events"><div class="meta">No recent conflict/news events matched for this area.</div></div>';
   }
-  return `<div class="popup-events"><div class="meta">Recent events</div>${rows.join("")}</div>`;
+  return `<div class="popup-events">${heading ? '<div class="meta">Recent events</div>' : ""}${rows.join("")}</div>`;
 }
 
 // ---------- live situational snapshot ----------
@@ -152,8 +154,11 @@ function buildLivePicture(bounds, raw) {
     statRow("", "infrastructure sites", infra),
   ].join("");
 
+  // No heading of its own: the card's fold is labelled (see
+  // countryCardSections), and a section that restates its own title inside
+  // itself just costs a line in a 320px column.
   if (!cells) return "";
-  return `<div class="csection">Live picture &middot; in/near country</div><div class="cstats">${cells}</div>`;
+  return `<div class="cstats">${cells}</div>`;
 }
 
 // 72h rather than the full 3-day feed window so "recent" means recent --
@@ -192,7 +197,7 @@ function buildConflictSummary(bounds, raw, escalationZone) {
       }</div>`
     : "";
 
-  return `${badge}<div class="csection">Conflict &middot; last 72h</div>
+  return `${badge}
     <div class="cstats">
       ${statRow("", "events", count, "hot")}
       ${statRow("", "killed", fatalities, "hot")}
@@ -224,7 +229,7 @@ function buildSparkline(monthlySeries) {
     .join("");
   const last = recent[recent.length - 1];
   const label = last ? `${MONTH_ABBR[last.month]} ${last.year}: ${last.fatalities || 0} killed` : "";
-  return `<div class="csection">Conflict fatalities &middot; last ${recent.length} months (HDX/ACLED)</div>
+  return `<div class="meta">Fatalities, last ${recent.length} months (HDX/ACLED)</div>
     <svg class="cspark" viewBox="0 0 ${recent.length * (w + gap)} ${h}" preserveAspectRatio="none" role="img" aria-label="${esc(label)}">${bars}</svg>
     <div class="meta">${esc(label)} &middot; peak ${max}</div>`;
 }
@@ -262,8 +267,8 @@ function buildVerifiedRecord(wanted, raw) {
     .slice(0, 3);
 
   return `
-    <div class="csection">
-      <div class="csection-h">Verified record &middot; ${esc(latestMonth)}</div>
+    <div class="csection-body">
+      <div class="csection-h">${esc(latestMonth)}</div>
       <div class="cstats">
         <div class="cstat"><span class="cstat-v">${fmtNumber(events)}</span>events</div>
         <div class="cstat${killed > 0 ? " hot" : ""}"><span class="cstat-v">${fmtNumber(killed)}</span>killed</div>
@@ -276,7 +281,100 @@ function buildVerifiedRecord(wanted, raw) {
     </div>`;
 }
 
-export function countryPopupHtml(props, raw, bounds) {
+/**
+ * The country card, as a list of independently foldable sections.
+ *
+ * It used to be one HTML string, which made the card an all-or-nothing read:
+ * six subjects (identity, live conflict, live picture, the verified record, a
+ * year of fatalities, matched events) stacked into a 320px column that ran well
+ * past the bottom of the screen, with the one section a given reader wanted
+ * somewhere in the middle of it. As sections they collapse individually and the
+ * choice is remembered (see CountryInfoCard.jsx/useAccordion.js).
+ *
+ * Sections that have nothing to say are dropped here rather than rendered
+ * empty: a fold labelled "Verified record" that opens onto nothing is worse
+ * than no fold, because it costs a click to find that out.
+ *
+ * @param props   the GeoJSON feature's properties (name/population/density/hdi)
+ * @param raw     the map controller's live data buckets
+ * @param bounds  the country's own bounding box {south,west,north,east}, used
+ *                for every "inside this country" count. Optional -- the card
+ *                degrades to the name-matched sections without it.
+ * @returns {{title: string, sections: Array<{id, title, html, defaultOpen}>}}
+ */
+// Displacement and food security (backend/sources/humanitarian.py). Keyed on
+// ISO3, which is what both UNHCR and HAPI use -- and which the country features
+// already carry (see backend/sources/countries.py), so no name matching.
+//
+// Every figure is a country-level aggregate over a reference period of months,
+// so each one states its period. Nothing here is live and none of it is drawn
+// on the map.
+function buildHumanitarian(props, raw) {
+  const record = props.iso_a3 ? (raw.humanitarian || {})[props.iso_a3] : null;
+  if (!record) return "";
+  const d = record.displacement;
+  const food = record.food_security;
+  const idps = record.idps;
+  const presence = record.operational_presence;
+  const rows = [];
+  if (d) {
+    const parts = [
+      d.refugees != null ? `${fmtNumber(d.refugees)} refugees` : null,
+      d.asylum_seekers != null ? `${fmtNumber(d.asylum_seekers)} asylum seekers` : null,
+      d.idps != null ? `${fmtNumber(d.idps)} internally displaced` : null,
+      d.stateless ? `${fmtNumber(d.stateless)} stateless` : null,
+    ].filter(Boolean);
+    if (parts.length) {
+      rows.push(`<div>${parts.join(" &middot; ")}</div>
+        <div class="meta">UNHCR, ${esc(d.year)} &mdash; counted by country of <b>origin</b>: people this
+          country's situation has displaced, wherever they are now.</div>`);
+    }
+  }
+  if (food) {
+    rows.push(`<div><b>${fmtNumber(food.population_in_crisis)}</b> in IPC phase 3 or worse (crisis, emergency
+      or famine)</div>
+      <div class="meta">IPC via HDX HAPI, analysis period from ${esc((food.reference_period_start || "").slice(0, 10))}.</div>`);
+  }
+  if (idps) {
+    rows.push(`<div>${fmtNumber(idps.population)} internally displaced, in-country assessment</div>
+      <div class="meta">HDX HAPI, reporting round from ${esc((idps.reference_period_start || "").slice(0, 10))}.</div>`);
+  }
+  if (presence) {
+    rows.push(`<div>${fmtNumber(presence.organisations)} aid organisations reported active across
+      ${esc(presence.sector_count)} sectors</div>
+      <div class="meta">HDX HAPI 3W (who does what, where).</div>`);
+  }
+  if (!rows.length) return "";
+  return `${rows.join("")}
+    <p class="meta">All of the above are <b>aggregates over months</b>, not current counts, and are shown
+      here rather than on the map for exactly that reason.</p>`;
+}
+
+// A country losing the internet is one of the few things on this map that is
+// genuinely national in scope, so it belongs in the country card rather than as
+// a pin. IODA's `score` is a composite of three detection methods and is
+// unbounded -- it is emphatically not a percentage of the country offline, and
+// this says so rather than dressing it up as one.
+function buildConnectivity(props, raw) {
+  const code = props.iso_a2 && props.iso_a2 !== "-99" ? props.iso_a2 : null;
+  const outage = code ? (raw.outages || {})[code] : null;
+  if (!outage) return "";
+  const signals = Object.keys(outage.signals || {});
+  return `
+    <div class="outage-block">
+      <div class="outage-head">Connectivity disruption detected</div>
+      <div>IODA composite score: ${fmtNumber(Math.round(outage.score))}${
+        outage.event_count ? ` &middot; ${esc(outage.event_count)} event(s)` : ""
+      }</div>
+      ${signals.length ? `<div class="meta">Seen in: ${signals.map((k) => esc(k.split(".")[0])).join(", ")}</div>` : ""}
+    </div>
+    <p class="meta">Over the last 24 hours, from IODA (Georgia Tech), which watches BGP withdrawals, active
+      probing and darknet traffic. The score is a composite that is only meaningful <b>in comparison</b>
+      &mdash; against this country's own normal and against others in the same window. It is not a
+      percentage of the country offline, and it cannot distinguish a shutdown from a cable fault.</p>`;
+}
+
+export function countryCardSections(props, raw, bounds) {
   const name = props.name || "Unknown";
   const wanted = normalizeCountryName(name);
   const eventMatches = raw.events.filter((e) => normalizeCountryName(e.country) === wanted).slice(0, 3);
@@ -303,18 +401,38 @@ export function countryPopupHtml(props, raw, bounds) {
     return cLat >= zs && cLat <= zn && cLon >= zw && cLon <= ze;
   });
 
-  return `
-    <h3>${esc(name)}</h3>
-    <div class="meta">Pop ${fmtNumber(props.population)}${props.pop_year ? ` (${esc(props.pop_year)})` : ""} &middot; ${
-      props.density != null ? `${props.density}/km&sup2;` : "density n/a"
-    } &middot; HDI ${props.hdi != null ? props.hdi.toFixed(3) : "n/a"}</div>
-    ${buildConflictSummary(bounds, raw, escalationZone)}
-    ${buildLivePicture(bounds, raw)}
-    ${buildVerifiedRecord(wanted, raw)}
-    ${buildSparkline(trendSeries)}
-    ${buildEventsSection(eventMatches, gdeltMatches)}
-    <p class="meta">Live counts use the country's bounding box, so figures near borders are approximate.
-    Population/density: World Bank. HDI: UNDP. Listed events matched by country name.</p>`;
+  const sections = [
+    {
+      id: "profile",
+      title: "Country profile",
+      defaultOpen: true,
+      html: `<div class="meta">Pop ${fmtNumber(props.population)}${props.pop_year ? ` (${esc(props.pop_year)})` : ""} &middot; ${
+        props.density != null ? `${props.density}/km&sup2;` : "density n/a"
+      } &middot; HDI ${props.hdi != null ? props.hdi.toFixed(3) : "n/a"}</div>`,
+    },
+    // Open by default, and the only other one that is: on a map of armed
+    // conflict, "what has happened here in the last three days" is the question
+    // a country was clicked to answer.
+    { id: "conflict", title: "Conflict · last 72h", defaultOpen: true, html: buildConflictSummary(bounds, raw, escalationZone) },
+    { id: "live", title: "Live picture · in/near country", html: buildLivePicture(bounds, raw) },
+    // Joined on ISO2 rather than on the country name: IODA and Natural Earth
+    // disagree about several names ("Cote D Ivoire" vs "Côte d'Ivoire") and a
+    // name join silently drops exactly those.
+    { id: "connectivity", title: "Internet connectivity", defaultOpen: true,
+      html: buildConnectivity(props, raw) },
+    { id: "humanitarian", title: "Displacement & food security", html: buildHumanitarian(props, raw) },
+    { id: "verified", title: "Verified record", html: buildVerifiedRecord(wanted, raw) },
+    { id: "trend", title: "Fatality trend", html: buildSparkline(trendSeries) },
+    { id: "events", title: "Recent events", html: buildEventsSection(eventMatches, gdeltMatches, { heading: false }) },
+    {
+      id: "sources",
+      title: "Sources & caveats",
+      html: `<p class="meta">Live counts use the country's bounding box, so figures near borders are
+        approximate. Population/density: World Bank. HDI: UNDP. Listed events matched by country name.</p>`,
+    },
+  ];
+
+  return { title: name, sections: sections.filter((s) => s.html && s.html.trim()) };
 }
 
 export function cityPopupHtml(city, raw, countryNameByIso2) {

@@ -13,7 +13,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import config, escalation, history, infrastructure, regions, replay, storage
+from backend import admin_config, config, escalation, history, infrastructure, regions, replay, storage
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
 
@@ -39,8 +39,13 @@ _PROCESS_TOKEN = uuid.uuid4().hex[:8]
 
 
 _SOURCE_MODULES = (
-    "gdelt", "firms", "ais", "adsb", "acled", "countries", "cities", "jamming", "satellites",
-    "hdx_conflict_stats", "hapi_conflict", "event_fusion", "official_feeds", "officials",
+    # gazetteer sits with cities because it is the same GeoNames family, and
+    # early in the list because its download is the slowest here and everything
+    # in the placement path degrades to "no opinion" until it lands.
+    "gdelt", "firms", "ais", "adsb", "acled", "countries", "cities", "gazetteer",
+    "jamming", "satellites", "hazards", "airports", "sanctions", "dark_vessels",
+    "cables", "outages", "launches", "osm_infra",
+    "hdx_conflict_stats", "hapi_conflict", "humanitarian", "event_fusion", "official_feeds", "officials",
 )
 
 
@@ -96,6 +101,49 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 @app.get("/api/health")
 async def health():
     return registry.health()
+
+
+@app.get("/api/admin-config")
+async def admin_config_get():
+    """The saved Admin Mode configuration (see backend/admin_config.py).
+
+    Fetched once at startup by every client, before it paints anything from its
+    own localStorage copy, which is what makes a configuration saved on one
+    machine the configuration this deployment uses everywhere.
+
+    Never cached: it is small, it is read once per page load, and a stale copy
+    would silently un-apply a change someone just made.
+    """
+    return JSONResponse(
+        {"config": admin_config.load(), "saved_at": admin_config.saved_at()},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.put("/api/admin-config")
+async def admin_config_put(request: Request):
+    """Store the configuration the client just changed.
+
+    The whole object every time rather than a patch: it is a few kilobytes, the
+    client already holds the authoritative merged copy, and a patch protocol
+    would need conflict rules for a file that only ever has one editor.
+    """
+    try:
+        payload = await request.json()
+    except (ValueError, UnicodeDecodeError) as err:
+        raise HTTPException(status_code=400, detail=f"Body is not valid JSON: {err}") from err
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+    try:
+        stamp = await asyncio.to_thread(admin_config.save, payload)
+    except ValueError as err:
+        raise HTTPException(status_code=413, detail=str(err)) from err
+    except OSError as err:
+        # A read-only volume or a full disk. Worth surfacing rather than
+        # swallowing: the client shows "not saved" and keeps its own copy.
+        log.warning("Could not save the admin configuration: %s", err)
+        raise HTTPException(status_code=500, detail=f"Could not write the configuration: {err}") from err
+    return JSONResponse({"ok": True, "saved_at": stamp}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/regions")
@@ -272,6 +320,62 @@ async def jamming_endpoint(request: Request, region: str | None = None):
     return _cached_source_response(request, "jamming", region, regions.filter_points)
 
 
+@app.get("/api/osm-infrastructure")
+async def osm_infrastructure_endpoint(request: Request, region: str | None = None):
+    # Crowd-sourced, and served on its own endpoint rather than merged into
+    # /api/infrastructure for exactly that reason -- see the module docstring in
+    # backend/sources/osm_infra.py.
+    return _cached_source_response(request, "osm_infra", region, regions.filter_points, max_age=3600)
+
+
+@app.get("/api/humanitarian")
+async def humanitarian_endpoint(request: Request):
+    # Country-keyed aggregates over reference periods of months (see
+    # backend/sources/humanitarian.py) -- read by the country card, never drawn
+    # as points, so there is nothing for a region filter to narrow.
+    return _cached_source_response(request, "humanitarian", None, lambda data, _bounds: data)
+
+
+@app.get("/api/launches")
+async def launches_endpoint(request: Request, region: str | None = None):
+    # Placed at their pads (see backend/sources/launches.py), so this filters
+    # like any other point source.
+    return _cached_source_response(request, "launches", region, regions.filter_points)
+
+
+@app.get("/api/cables")
+async def cables_endpoint(request: Request):
+    # Routes are lines and landing points are points, so this is served as one
+    # payload the client splits -- same shape and the same hard cache as
+    # /api/infrastructure, since neither changes more than a few times a year.
+    # No region filter: a cable is a single object thousands of kilometres long
+    # and clipping it to a bounding box would cut it in half.
+    return _cached_source_response(request, "cables", None, lambda data, _bounds: data, max_age=86400)
+
+
+@app.get("/api/outages")
+async def outages_endpoint(request: Request):
+    # Country-keyed, not point data (see backend/sources/outages.py) -- no
+    # region filter, same as /api/conflict-stats.
+    return _cached_source_response(request, "outages", None, lambda data, _bounds: data)
+
+
+@app.get("/api/dark-vessels")
+async def dark_vessels_endpoint(request: Request, region: str | None = None):
+    # Derived from this backend's own AIS history, not fetched from anywhere
+    # (see backend/sources/dark_vessels.py). Every record is an inference and
+    # says so; the layer renders them accordingly.
+    return _cached_source_response(request, "dark_vessels", region, regions.filter_points)
+
+
+@app.get("/api/hazards")
+async def hazards_endpoint(request: Request, region: str | None = None):
+    # Earthquakes (USGS, ~5min) and volcanic activity (Smithsonian GVP, weekly)
+    # in one feed, each record carrying its own `kind` and publisher -- see
+    # backend/sources/hazards.py for why they share a layer but never a label.
+    return _cached_source_response(request, "hazards", region, regions.filter_points)
+
+
 @app.get("/api/satellites")
 async def satellites(region: str | None = None):
     # Position is propagated fresh every poll (see backend/sources/
@@ -332,6 +436,15 @@ async def countries(request: Request, region: str | None = None):
 @app.get("/api/cities")
 async def cities(request: Request, region: str | None = None):
     return _cached_source_response(request, "cities", region, regions.filter_points, max_age=3600)
+
+
+@app.get("/api/airports")
+async def airports_endpoint(request: Request, region: str | None = None):
+    # Reference data on the same footing as cities: it refreshes once a day, so
+    # a client may sit on a cached copy for an hour rather than revalidating on
+    # every poll. Only the served slice is here -- the wider index ADS-B popups
+    # query never leaves the backend (see backend/sources/airports.py).
+    return _cached_source_response(request, "airports", region, regions.filter_points, max_age=3600)
 
 
 # Aggregates a week of conflict_events across every region, so it's far too

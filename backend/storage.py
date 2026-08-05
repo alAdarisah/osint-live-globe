@@ -144,6 +144,29 @@ ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS corroboration TEXT;
 ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS event_code TEXT;
 ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
 ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS pipeline_version INTEGER;
+
+-- How the coordinate was arrived at, and how far it can be trusted. See
+-- backend/sources/geoverify.py: "confirmed" | "refined" | "contested" |
+-- "dateline_suspect" | "unverified" | "structured".
+--
+-- geo_confidence (0-100) is deliberately separate from severity. Severity says
+-- how big the event was; this says how sure we are it happened where the pin
+-- is, and one number cannot carry both -- collapsing them is what made a large
+-- unplaceable event and a small well-placed one score alike.
+--
+-- geo_radius_km is the real uncertainty of the coordinate, in kilometres, and
+-- is what the map draws as the ring around a pin. A country-centroid row is a
+-- 400 km circle whether or not anyone renders it as one.
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS geo_verdict TEXT;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS geo_confidence INTEGER;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS geo_radius_km DOUBLE PRECISION;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS geo_text_place TEXT;
+-- Where the pin was before a refinement moved it. Present only on refined rows,
+-- which makes them the auditable set: every placement this pipeline changed can
+-- be recovered and re-measured against its original.
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS original_lat DOUBLE PRECISION;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS original_lon DOUBLE PRECISION;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS original_geo_precision TEXT;
 -- escalation.py filters every window by (pipeline_version, first_seen); this
 -- is the index that keeps that from degrading into a full scan.
 CREATE INDEX IF NOT EXISTS idx_conflict_events_version_seen
@@ -383,9 +406,12 @@ INSERT INTO conflict_events (
   id, date, lat, lon, event_type, sub_event_type, actor1, actor2, fatalities,
   country, notes, source, corroborated, corroborated_by, mentions, goldstein,
   avg_tone, source_url, severity, geo_precision, geo_feature_id, outlet_count,
-  corroboration, event_code, ingested_at, pipeline_version, first_seen, last_seen
+  corroboration, event_code, ingested_at, pipeline_version,
+  geo_verdict, geo_confidence, geo_radius_km, geo_text_place,
+  original_lat, original_lon, original_geo_precision,
+  first_seen, last_seen
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-          $20,$21,$22,$23,$24,$25,$26,$27,$27)
+          $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$34)
 ON CONFLICT (id) DO UPDATE SET
   date = EXCLUDED.date, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
   event_type = EXCLUDED.event_type, sub_event_type = EXCLUDED.sub_event_type,
@@ -399,6 +425,10 @@ ON CONFLICT (id) DO UPDATE SET
   geo_precision = EXCLUDED.geo_precision, geo_feature_id = EXCLUDED.geo_feature_id,
   outlet_count = EXCLUDED.outlet_count, corroboration = EXCLUDED.corroboration,
   event_code = EXCLUDED.event_code, ingested_at = EXCLUDED.ingested_at,
+  geo_verdict = EXCLUDED.geo_verdict, geo_confidence = EXCLUDED.geo_confidence,
+  geo_radius_km = EXCLUDED.geo_radius_km, geo_text_place = EXCLUDED.geo_text_place,
+  original_lat = EXCLUDED.original_lat, original_lon = EXCLUDED.original_lon,
+  original_geo_precision = EXCLUDED.original_geo_precision,
   last_seen = EXCLUDED.last_seen
 """
 
@@ -455,27 +485,9 @@ async def record_conflict_events(items: list[dict]) -> None:
     now = datetime.now(timezone.utc)
     rows = []
     for item in items:
-        item_id = item.get("id")
-        lat, lon = item.get("lat"), item.get("lon")
-        if item_id is None or lat is None or lon is None:
-            continue
-        rows.append((
-            str(item_id), _parse_date(item.get("date")), lat, lon,
-            item.get("event_type"), item.get("sub_event_type"),
-            item.get("actor1"), item.get("actor2"),
-            int(item.get("fatalities") or 0), item.get("country"),
-            item.get("notes"), item.get("source"),
-            bool(item.get("corroborated")), list(item.get("corroborated_by") or []),
-            int(item.get("mentions") or 0) or None,
-            item.get("goldstein"), item.get("avg_tone"), item.get("source_url"),
-            int(item.get("severity") or 0) or None,
-            item.get("geo_precision"), item.get("geo_feature_id"),
-            int(item.get("outlet_count") or 0) or None, item.get("corroboration"),
-            item.get("event_code"),
-            _to_timestamp(item.get("ingested_at")),
-            config.CONFLICT_PIPELINE_VERSION,
-            now,
-        ))
+        row = _conflict_row(item, now)
+        if row is not None:
+            rows.append(row)
     if not rows:
         return
     try:
@@ -484,6 +496,47 @@ async def record_conflict_events(items: list[dict]) -> None:
                 await conn.executemany(_UPSERT_CONFLICT, rows)
     except Exception:  # noqa: BLE001
         log.exception("Failed to record %d conflict events", len(rows))
+
+
+def _conflict_row(item: dict, now: datetime) -> tuple | None:
+    """One fused event as the bind tuple _UPSERT_CONFLICT expects, or None.
+
+    Split out from record_conflict_events so its arity can be tested without a
+    database. The write path swallows exceptions by design, so a tuple that no
+    longer matches the statement would otherwise fail silently for as long as it
+    took someone to query the archive and find it empty.
+    """
+    item_id = item.get("id")
+    lat, lon = item.get("lat"), item.get("lon")
+    if item_id is None or lat is None or lon is None:
+        return None
+    return (
+        str(item_id), _parse_date(item.get("date")), lat, lon,
+        item.get("event_type"), item.get("sub_event_type"),
+        item.get("actor1"), item.get("actor2"),
+        int(item.get("fatalities") or 0), item.get("country"),
+        item.get("notes"), item.get("source"),
+        bool(item.get("corroborated")), list(item.get("corroborated_by") or []),
+        int(item.get("mentions") or 0) or None,
+        item.get("goldstein"), item.get("avg_tone"), item.get("source_url"),
+        int(item.get("severity") or 0) or None,
+        item.get("geo_precision"), item.get("geo_feature_id"),
+        int(item.get("outlet_count") or 0) or None, item.get("corroboration"),
+        item.get("event_code"),
+        _to_timestamp(item.get("ingested_at")),
+        config.CONFLICT_PIPELINE_VERSION,
+        # How the coordinate was arrived at and how far it can be trusted
+        # (see backend/sources/geoverify.py). original_* is only populated
+        # when a verdict actually moved the pin, so it doubles as the audit
+        # trail for every refinement the pipeline has ever made.
+        item.get("geo_verdict"),
+        int(item["geo_confidence"]) if item.get("geo_confidence") is not None else None,
+        item.get("geo_radius_km"),
+        item.get("geo_text_place"),
+        item.get("original_lat"), item.get("original_lon"),
+        item.get("original_geo_precision"),
+        now,
+    )
 
 
 async def record_reference(name: str, payload) -> None:
@@ -552,6 +605,105 @@ async def history_at(kind: str, at: float) -> list[dict]:
                 kind,
             )
     return [json.loads(r["payload"]) for r in rows]
+
+
+# Consecutive recorded positions for one kind, keeping only the pairs far apart
+# in time. Written as a window function rather than pulled into Python because
+# the input is every position ever recorded for the window -- millions of rows
+# for AIS -- while the answer is a few dozen. LAG over (entity_id ORDER BY ts)
+# is served directly by idx_history_entity.
+#
+# Note that entity_history only receives a row when an entity actually *moved*
+# (see record_snapshot), which is what makes this meaningful: a stationary ship
+# writes nothing, so a large ts difference means "we stopped hearing it", not
+# "it sat still".
+_POSITION_GAPS = """
+WITH steps AS (
+  SELECT entity_id, ts, lat, lon,
+         LAG(ts)  OVER w AS prev_ts,
+         LAG(lat) OVER w AS prev_lat,
+         LAG(lon) OVER w AS prev_lon
+    FROM entity_history
+   WHERE kind = $1 AND ts >= $2
+  WINDOW w AS (PARTITION BY entity_id ORDER BY ts)
+)
+SELECT entity_id, prev_ts, prev_lat, prev_lon, ts, lat, lon,
+       EXTRACT(EPOCH FROM (ts - prev_ts)) AS gap_seconds
+  FROM steps
+ WHERE prev_ts IS NOT NULL
+   AND EXTRACT(EPOCH FROM (ts - prev_ts)) >= $3
+ ORDER BY gap_seconds DESC
+ LIMIT $4
+"""
+
+
+async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: int = 500) -> list[dict]:
+    """Where an entity stopped reporting and later reappeared.
+
+    Each row is the pair of positions either side of the silence, so a caller
+    can say both where it went quiet and where it came back.
+    """
+    if _pool is None:
+        return []
+    when = datetime.fromtimestamp(since, tz=timezone.utc)
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(_POSITION_GAPS, kind, when, float(min_gap_seconds), int(limit))
+    return [
+        {
+            "entity_id": r["entity_id"],
+            "from_ts": r["prev_ts"].timestamp(),
+            "from_lat": r["prev_lat"],
+            "from_lon": r["prev_lon"],
+            "to_ts": r["ts"].timestamp(),
+            "to_lat": r["lat"],
+            "to_lon": r["lon"],
+            "gap_seconds": float(r["gap_seconds"]),
+        }
+        for r in rows
+    ]
+
+
+async def entity_latest_with_times(kind: str) -> list[dict]:
+    """entity_latest rows with their timestamps alongside the payload.
+
+    `last_moved_at` is the field this exists for: it is how long an entity has
+    been sitting still, which entity_latest maintains for free (see
+    _UPSERT_LATEST) and which no amount of reading the payload can recover.
+    """
+    if _pool is None:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT payload, updated_at, last_moved_at
+                 FROM entity_latest WHERE kind = $1""",
+            kind,
+        )
+    out = []
+    for r in rows:
+        payload = json.loads(r["payload"])
+        payload["_updated_at"] = r["updated_at"].timestamp()
+        payload["_last_moved_at"] = r["last_moved_at"].timestamp()
+        out.append(payload)
+    return out
+
+
+async def source_health_series(source: str, since: float) -> list[tuple[float, int | None, bool]]:
+    """(timestamp, item_count, ok) per poll since `since`, oldest first.
+
+    Read by the dark-vessel detector to tell "this ship switched its
+    transponder off" from "our AIS feed dropped out", which look identical from
+    a single ship's history.
+    """
+    if _pool is None:
+        return []
+    when = datetime.fromtimestamp(since, tz=timezone.utc)
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT ts, item_count, ok FROM source_health
+                WHERE source = $1 AND ts >= $2 ORDER BY ts ASC""",
+            source, when,
+        )
+    return [(r["ts"].timestamp(), r["item_count"], r["ok"]) for r in rows]
 
 
 async def entity_latest(kind: str, order_by_recency: bool = False) -> list[dict]:

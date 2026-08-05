@@ -49,6 +49,12 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    volumes:
+      # Read-write, unlike the migrate service's copy below: Admin Mode saves
+      # its configuration to data/admin_config.json (see backend/admin_config.py)
+      # and every client reads it back at startup, so without a bind mount here
+      # a configuration would live inside the container and disappear with it.
+      - ./data:/app/data
     restart: unless-stopped
 
   frontend:

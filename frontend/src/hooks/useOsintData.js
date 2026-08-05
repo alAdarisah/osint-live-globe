@@ -41,6 +41,33 @@ const POLL_CONFIG = [
   { key: "ais", url: "/api/ships", intervalMs: 10000 },
   { key: "adsb", url: "/api/aircraft", intervalMs: 20000 },
   { key: "jamming", url: "/api/jamming", intervalMs: 30 * 60000 }, // gpsjam.org itself only updates once/day
+  // Earthquakes and volcanic activity. Paced to the faster of its two inputs:
+  // USGS refreshes every ~5 minutes and a felt earthquake is the kind of thing
+  // a reader expects to appear while they are watching. The volcano half of the
+  // same payload only changes weekly (see backend/sources/hazards.py).
+  { key: "hazards", url: "/api/hazards", intervalMs: 5 * 60000 },
+  // Airfields. Reference data that only refreshes once a day server-side and is
+  // browser-cached for an hour (see /api/airports) -- polled at all only so a
+  // client left open overnight picks up the new file.
+  { key: "airports", url: "/api/airports", intervalMs: 60 * 60000 },
+  // AIS gaps and possible ship-to-ship transfers. The backend recomputes these
+  // from three days of its own recorded history every 15 minutes, so polling
+  // faster would only re-serve the same answer.
+  { key: "darkVessels", url: "/api/dark-vessels", intervalMs: 5 * 60000 },
+  // Country-level internet outage scores (IODA). Recomputed server-side every
+  // 15 minutes over a trailing 24h window -- see backend/sources/outages.py.
+  { key: "outages", url: "/api/outages", intervalMs: 5 * 60000 },
+  // Orbital launches. The backend refetches every 30 minutes and no faster --
+  // Launch Library rate-limits anonymous callers to roughly 15 requests an hour
+  // (see backend/sources/launches.py).
+  { key: "launches", url: "/api/launches", intervalMs: 10 * 60000 },
+  // Displacement and food security. Both publishers update on the order of
+  // months; this is polled at all only so a long-lived tab eventually notices.
+  { key: "humanitarian", url: "/api/humanitarian", intervalMs: 60 * 60000 },
+  // OpenStreetMap infrastructure. Swept server-side once a day over the conflict
+  // theatres and browser-cached for an hour, so this is only about picking up a
+  // new sweep, not about freshness.
+  { key: "osmInfra", url: "/api/osm-infrastructure", intervalMs: 30 * 60000 },
   { key: "satellites", url: "/api/satellites", intervalMs: 10000 }, // position, not elements -- see backend/sources/satellites.py
   { key: "conflictStats", url: "/api/conflict-stats", intervalMs: 60 * 60000 }, // HDX file itself only changes weekly -- see backend/sources/hdx_conflict_stats.py
   // Server-side aggregate over a week of history (backend/escalation.py),
@@ -56,12 +83,24 @@ const POLL_CONFIG = [
   { key: "conflictDistricts", url: "/api/conflict-districts", intervalMs: 6 * 60 * 60000 },
 ];
 
-export function useOsintData({ onData, flyToRegion }) {
+/**
+ * @param onData      called with every payload, after `transform`
+ * @param flyToRegion the map's own region fly-to
+ * @param transform   (key, data) => data. Admin Mode's record overrides are
+ *   applied here, between the fetch and everything downstream, so the map and
+ *   the panels can never be looking at differently-edited copies of one feed
+ *   (see settings/applyOverrides.js).
+ */
+export function useOsintData({ onData, flyToRegion, transform }) {
   const [regions, setRegions] = useState({});
   const [currentRegionKey, setCurrentRegionKey] = useState(null); // null == world/unscoped
   const [currentRegionLabel, setCurrentRegionLabel] = useState("World");
   const [gdeltRaw, setGdeltRaw] = useState([]);
   const [eventsRaw, setEventsRaw] = useState([]);
+  // Reactive like gdelt/events, and for the same two reasons: the country card
+  // reads it, and Admin Mode's data editor can only list a feed the app is
+  // actually holding. The payload is one bounded day of diplomatic items.
+  const [officialsRaw, setOfficialsRaw] = useState([]);
   // Regions running above their own baseline (backend/escalation.py).
   // Reactive like gdelt/events because a panel renders it directly.
   const [escalation, setEscalation] = useState([]);
@@ -91,6 +130,12 @@ export function useOsintData({ onData, flyToRegion }) {
   const onDataRef = useRef(onData);
   onDataRef.current = onData;
 
+  // Same ref treatment, same reason: `transform` closes over the current
+  // settings and changes identity whenever they do, and the pollers must not
+  // be torn down for that.
+  const transformRef = useRef(transform);
+  transformRef.current = transform;
+
   // Each entry is a zero-arg fn that re-runs that source's fetch immediately
   // (cancelling its own pending scheduled tick first) -- see registerPoller
   // below. refetchAllNow calls every one of them, which is what makes a
@@ -100,6 +145,17 @@ export function useOsintData({ onData, flyToRegion }) {
   const refetchAllNow = useCallback(() => {
     tickersRef.current.forEach((tick) => tick());
   }, []);
+
+  // The last payload each source delivered, exactly as the server sent it.
+  // Holding it costs nothing extra -- the map controller keeps the same objects
+  // alive in its own `raw` -- and it is what lets an Admin Mode edit show up
+  // immediately instead of at the next poll, without re-fetching feeds that
+  // have not changed. Re-running the transform from the *fetched* payload
+  // rather than the previous transformed one is what makes unhiding a record
+  // possible: an override is a view of the source, not an edit to it.
+  const fetchedRef = useRef({});
+  const reapplyTransformRef = useRef(() => {});
+  const reapplyTransform = useCallback((keys) => reapplyTransformRef.current(keys), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,8 +184,10 @@ export function useOsintData({ onData, flyToRegion }) {
           return;
         }
         try {
-          const data = await fetchJson(urlForRegion(url, currentRegionKeyRef.current));
+          const fetched = await fetchJson(urlForRegion(url, currentRegionKeyRef.current));
           if (cancelled) return;
+          fetchedRef.current[key] = fetched;
+          const data = transformRef.current ? transformRef.current(key, fetched) : fetched;
           onSuccess?.(data);
           onDataRef.current(key, data);
           if (!firstLoadReported) {
@@ -154,6 +212,7 @@ export function useOsintData({ onData, flyToRegion }) {
     const REACTIVE_SETTERS = {
       gdelt: setGdeltRaw,
       events: setEventsRaw,
+      officials: setOfficialsRaw,
       escalation: setEscalation,
       conflictHistory: (rows) =>
         setConflictHistoryAsOf((rows && rows.length && rows[0].as_of) || null),
@@ -161,6 +220,20 @@ export function useOsintData({ onData, flyToRegion }) {
     for (const src of POLL_CONFIG) {
       registerPoller(src.key, src.url, src.intervalMs, REACTIVE_SETTERS[src.key]);
     }
+
+    // Defined inside the effect so it can see REACTIVE_SETTERS, and reached
+    // from outside through a ref for the same reason the pollers are: this
+    // effect mounts once.
+    reapplyTransformRef.current = (keys) => {
+      const wanted = keys || Object.keys(fetchedRef.current);
+      for (const key of wanted) {
+        const fetched = fetchedRef.current[key];
+        if (fetched === undefined) continue;
+        const data = transformRef.current ? transformRef.current(key, fetched) : fetched;
+        REACTIVE_SETTERS[key]?.(data);
+        onDataRef.current(key, data);
+      }
+    };
 
     // Static for the process lifetime -- fetched once, not part of the
     // regular poll cycle.
@@ -181,6 +254,17 @@ export function useOsintData({ onData, flyToRegion }) {
     // a still-cached response from before pipelines existed would just be
     // the old bare sites array, so both shapes are handled rather than
     // assuming every cached copy already matches the current one.
+    // Submarine cables: routes and landing points arrive as one payload and are
+    // split into two raw slots, exactly as /api/infrastructure is below. Also
+    // fetched once rather than polled -- new cables land a few times a year.
+    fetchJson("/api/cables")
+      .then((data) => {
+        if (cancelled) return;
+        onDataRef.current("cables", data?.cables || []);
+        onDataRef.current("cableLandings", data?.landings || []);
+      })
+      .catch((err) => console.warn("Failed to load submarine cables:", err));
+
     fetchJson("/api/infrastructure")
       .then((data) => {
         if (cancelled) return;
@@ -245,6 +329,7 @@ export function useOsintData({ onData, flyToRegion }) {
     resetRegionToWorld,
     gdeltRaw,
     eventsRaw,
+    officialsRaw,
     escalation,
     conflictHistoryAsOf,
     bootSources,
@@ -253,5 +338,8 @@ export function useOsintData({ onData, flyToRegion }) {
     // interval, same reasoning selectRegion/resetRegionToWorld already rely
     // on above.
     refetchAllNow,
+    // Exposed for Admin Mode: re-runs the override transform over the payloads
+    // already in hand, so an edit lands on the map as it is typed.
+    reapplyTransform,
   };
 }

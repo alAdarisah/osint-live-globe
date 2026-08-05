@@ -3,9 +3,11 @@ import csv
 import html
 import io
 import logging
+import os
 import re
 import time
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -24,10 +26,12 @@ from backend.sources.outlets import (  # noqa: F401 - VERIFIED_NEWS_DOMAINS is r
     VERIFIED_LABELS as _VERIFIED_LABELS,
     VERIFIED_NEWS_DOMAINS,
     agency_name as _agency_name,
+    is_non_news_url,
     label_for_url,
     matched_domain as _matched_domain,
     outlet_label,
     rank_outlets,
+    url_age_months,
 )
 
 log = logging.getLogger("osint-globe.gdelt")
@@ -137,6 +141,27 @@ GEO_PRECISION = {
 }
 GEO_PRECISION_UNKNOWN = "unknown"  # ActionGeo_Type 0 (no geocode match) or blank
 
+# The values that mean "we do not actually know where in this country". Named
+# here because this module defines the vocabulary; officials.py imports it
+# rather than restating the literals. Backend twin of severity.js's
+# IMPRECISE_PRECISIONS, which asks the same question of the frontend.
+IMPRECISE_PRECISIONS = frozenset({"country", "region", GEO_PRECISION_UNKNOWN})
+
+# Snapping an imprecise diplomacy pin onto the capital is a strict improvement
+# for "country" and "unknown": both mean the geocoder placed the event nowhere
+# in particular, and a government's seat is where diplomacy happens.
+#
+# "region" is deliberately not in the default set. It means GDELT *did* match an
+# ADM1, and "Khersons'ka Oblast'" moved to Kyiv is worse than the oblast
+# centroid -- the centroid is at least inside the place the reporting named. The
+# counter-argument is real (many ADM1 matches are Laender or US states standing
+# in for a national act), so this is a flag to be flipped after measuring, not a
+# guess to be argued about. Same env-flag pattern as COUNTRY_CENTROID_POLICY.
+SNAPPABLE_PRECISIONS = frozenset(
+    {"country", GEO_PRECISION_UNKNOWN}
+    | ({"region"} if os.getenv("OFFICIALS_SNAP_REGION", "").lower() in ("1", "true", "on", "yes") else set())
+)
+
 
 def _geo_precision(raw: str) -> str:
     try:
@@ -163,8 +188,16 @@ def _parse_latest_ts(export_url: str) -> datetime:
     return datetime.strptime(match.group(1), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
 
 
-def _window_urls(latest_dt: datetime) -> list[str]:
-    n_files = WINDOW_MINUTES // FILE_STEP_MINUTES
+def _window_urls(latest_dt: datetime, window_minutes: int = WINDOW_MINUTES) -> list[str]:
+    """The export files covering `window_minutes` back from `latest_dt`.
+
+    `window_minutes` is a parameter rather than the constant so an offline
+    calibration run can read a wider slice than the live poller does --
+    backend/scripts/eval_placement.py needs hours of history per sampled day to
+    build a golden set, while the poller wants exactly the rolling window it
+    re-reads every 15 minutes.
+    """
+    n_files = max(1, window_minutes // FILE_STEP_MINUTES)
     return [
         f"{GDELT_BASE_URL}{(latest_dt - timedelta(minutes=FILE_STEP_MINUTES * k)).strftime('%Y%m%d%H%M%S')}.export.CSV.zip"
         for k in range(n_files)
@@ -302,11 +335,48 @@ def _parse_events(text: str) -> list[dict]:
 # background task from start() so events appear immediately with the CAMEO
 # fallback sentence and get their real headline filled in moments later.
 
-_TITLE_CACHE: dict[str, str | None] = {}
+# What the scrape now keeps. It used to keep only the headline, which was
+# enough to *label* a pin but not to check where the pin belongs -- and the
+# placement check is the thing that decides whether the pin is a claim about
+# Kherson or a claim about wherever the reporter was sitting.
+#
+# All four fields come out of the one response. A second fetch per article to
+# read the body would double an already network-bound backfill for text the
+# first fetch already had in hand.
+@dataclass(frozen=True, slots=True)
+class Article:
+    title: str | None
+    description: str | None   # og:description / <meta name="description">
+    excerpt: str | None       # the opening of the body text
+    dateline: str | None      # the place the piece was FILED from, not about
+
+
+_EMPTY_ARTICLE = Article(None, None, None, None)
+
+_ARTICLE_CACHE: dict[str, Article] = {}
+_article_cache_bytes = 0
 _backfill_task = None  # strong reference to the in-flight backfill -- see start()
 _TITLE_FETCH_SEM = asyncio.Semaphore(15)
 _OGTITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']*)["\']', re.IGNORECASE)
 _TITLE_TAG_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_OGDESC_RE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\'](?:og:)?description["\'][^>]+content=["\']([^"\']*)["\']',
+    re.IGNORECASE,
+)
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript|svg)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_PARAGRAPH_RE = re.compile(r"<p\b[^>]*>(.*?)</p>", re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+# How much body text to keep. Enough to carry the first few paragraphs -- which
+# is where a dispatch names where it happened -- and bounded because this is
+# held in memory for every cached article.
+MAX_EXCERPT_CHARS = 1200
+
+# The excerpt cache is bounded by bytes rather than entries: entries vary by
+# two orders of magnitude now that bodies are kept, so an entry cap that was
+# right for headlines would be a memory leak for articles.
+MAX_ARTICLE_CACHE_BYTES = 24 * 1024 * 1024
+
 _FETCH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -321,24 +391,144 @@ def _clean_title(raw: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(_fix_mojibake(raw) or "")).strip()
 
 
-async def _fetch_title(client: httpx.AsyncClient, url: str) -> str | None:
-    if url in _TITLE_CACHE:
-        return _TITLE_CACHE[url]
-    title = None
+def extract_excerpt(html_text: str, limit: int = MAX_EXCERPT_CHARS) -> str | None:
+    """The opening of the article body, as plain text.
+
+    Paragraph tags only. Taking all text on the page instead would fill the
+    excerpt with nav menus, cookie banners and related-story rails -- and those
+    carry place names, which is exactly the kind of noise that would make a
+    placement check confidently wrong.
+    """
+    if not html_text:
+        return None
+    body = _SCRIPT_STYLE_RE.sub(" ", html_text)
+    chunks: list[str] = []
+    total = 0
+    for match in _PARAGRAPH_RE.finditer(body):
+        text = _clean_title(_TAG_RE.sub(" ", match.group(1)))
+        # One- and two-word paragraphs are bylines, timestamps and share
+        # prompts, not prose.
+        if len(text) < 25:
+            continue
+        chunks.append(text)
+        total += len(text) + 1
+        if total >= limit:
+            break
+    if not chunks:
+        return None
+    return " ".join(chunks)[:limit].strip() or None
+
+
+# --- datelines -------------------------------------------------------------
+#
+# "KYIV, Aug 5 (Reuters) - Russian forces struck a market in Kherson."
+#
+# The dateline says where the piece was FILED, which is routinely not where the
+# event happened -- and GDELT's geocoder has no way to tell the two apart, so a
+# story filed from Kyiv about a strike in Kherson can land a pin on Kyiv. This
+# is the single largest identifiable source of mis-placement in the measured
+# baseline, and reading the dateline is what lets the placement check say "the
+# only place this article names is the one it was written in, so do not trust
+# that as the event location".
+#
+# Parsed in steps rather than with one regex: datelines are a typographic
+# convention with a dozen house variants, and a single pattern covering them all
+# is unreadable and impossible to reason about when it misfires.
+
+# The separator between the dateline and the story. An ASCII hyphen only counts
+# when it is spaced, or every hyphenated place name would split.
+_DATELINE_SEP_RE = re.compile(r"\s[—–]\s|\s[—–]|[—–]\s|\s-{1,2}\s")
+
+# A trailing "(Reuters)" / "(AP)" / "(Agence France-Presse)".
+_DATELINE_AGENCY_RE = re.compile(r"\s*\(([^)]{2,40})\)\s*$")
+
+# A trailing ", Aug 5" / ", August 5, 2026" / ", Aug. 5".
+_DATELINE_DATE_RE = re.compile(
+    r"\s*,?\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}"
+    r"(?:\s*,\s*\d{4})?\s*$",
+    re.IGNORECASE,
+)
+
+# How far into the text a dateline can start. Datelines open the body; anything
+# further in is a sentence that happens to contain a dash.
+_DATELINE_SEARCH_CHARS = 90
+
+# A dateline place is set in caps by convention. Requiring most of its letters
+# to be uppercase is what stops an ordinary sentence opening -- "Officials said
+# on Tuesday - according to..." -- from being read as one.
+_DATELINE_MIN_UPPER_RATIO = 0.6
+_DATELINE_MAX_WORDS = 4
+
+
+def extract_dateline(text: str) -> str | None:
+    """The place an article was filed from, or None when it carries no dateline.
+
+    Returns the place only -- the agency and date are used to *recognise* a
+    dateline and then discarded, because what a caller does with this is look
+    the place up in the gazetteer.
+    """
+    if not text:
+        return None
+    head = text[:_DATELINE_SEARCH_CHARS]
+    separator = _DATELINE_SEP_RE.search(head)
+    if not separator:
+        return None
+    candidate = head[: separator.start()].strip().lstrip("\"'“‘")
+
+    candidate = _DATELINE_AGENCY_RE.sub("", candidate)
+    candidate = _DATELINE_DATE_RE.sub("", candidate)
+    # "BEIRUT, Lebanon" and "CAIRO/BEIRUT" both mean the first one.
+    place = re.split(r"\s*[,/]\s*", candidate)[0].strip().rstrip(".")
+    if not (2 <= len(place) <= 40) or len(place.split()) > _DATELINE_MAX_WORDS:
+        return None
+
+    letters = [c for c in place if c.isalpha()]
+    if not letters:
+        return None
+    upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+    if upper_ratio < _DATELINE_MIN_UPPER_RATIO:
+        return None
+    return place
+
+
+def _parse_article(html_text: str) -> Article:
+    head = html_text[:30000]  # meta tags are always near the top of <head>
+    title_match = _OGTITLE_RE.search(head) or _TITLE_TAG_RE.search(head)
+    title = _clean_title(title_match.group(1)) if title_match and title_match.group(1).strip() else None
+
+    desc_match = _OGDESC_RE.search(head)
+    description = (
+        _clean_title(desc_match.group(1)) if desc_match and desc_match.group(1).strip() else None
+    )
+
+    excerpt = extract_excerpt(html_text)
+    # The dateline opens the body. The description is the fallback because many
+    # sites set og:description to the article's own first sentence.
+    dateline = extract_dateline(excerpt or "") or extract_dateline(description or "")
+    return Article(title=title, description=description, excerpt=excerpt, dateline=dateline)
+
+
+async def _fetch_article(client: httpx.AsyncClient, url: str) -> Article:
+    global _article_cache_bytes
+    cached = _ARTICLE_CACHE.get(url)
+    if cached is not None:
+        return cached
+    article = _EMPTY_ARTICLE
     async with _TITLE_FETCH_SEM:
         try:
             resp = await client.get(url, headers=_FETCH_HEADERS, timeout=6, follow_redirects=True)
             if resp.status_code == 200:
-                head = resp.text[:30000]  # title tags are always near the top of <head>
-                match = _OGTITLE_RE.search(head) or _TITLE_TAG_RE.search(head)
-                if match and match.group(1).strip():
-                    title = _clean_title(match.group(1))
-        except Exception:  # noqa: BLE001 - a slow/broken site just means no title
+                article = _parse_article(resp.text)
+        except Exception:  # noqa: BLE001 - a slow/broken site just means no article
             pass
-    _TITLE_CACHE[url] = title
-    if len(_TITLE_CACHE) > 20000:  # crude cap for a long-running session
-        _TITLE_CACHE.clear()
-    return title
+    _ARTICLE_CACHE[url] = article
+    _article_cache_bytes += len(url) + sum(
+        len(v) for v in (article.title, article.description, article.excerpt, article.dateline) if v
+    )
+    if _article_cache_bytes > MAX_ARTICLE_CACHE_BYTES:
+        _ARTICLE_CACHE.clear()
+        _article_cache_bytes = 0
+    return article
 
 
 def _title_url_for(candidate: dict) -> str | None:
@@ -361,6 +551,63 @@ def _title_url_for(candidate: dict) -> str | None:
     return None
 
 
+def _scrape_url_for(candidate: dict) -> str | None:
+    """Which URL to read for *placement evidence*, which is a different question.
+
+    _title_url_for above answers "whose reporting will we display and name" --
+    an editorial question, and the allowlist is the right answer to it. This
+    answers "may we read this page to check whether the pin is in the right
+    place", and the allowlist is the wrong answer to that: measured over a live
+    window, **zero** of the rows passing the violence gate had an allowlisted
+    article attached. Conflict reporting comes from the Jamaica Observer, the
+    Manila Times, Middle East Monitor -- regional outlets no masthead list will
+    ever hold. Gating the placement check on the allowlist left it reading
+    almost nothing, which is why 87% of rows came back unverified.
+
+    A place name in a regional paper is good evidence about *location* even
+    where we would not headline from it. What that evidence is allowed to do is
+    limited instead: geoverify only ever *moves* a pin on the strength of an
+    allowlisted article (`article_trusted` below), while lowering confidence --
+    the safe direction -- may come from any newsroom.
+
+    Section-path junk is still excluded: an opinion column or a listicle is not
+    a dispatch whatever domain it is on.
+    """
+    trusted = _title_url_for(candidate)
+    if trusted:
+        return trusted
+    url = candidate.get("source_url") or ""
+    if url and not is_non_news_url(url):
+        return url
+    return None
+
+
+# How many articles one poll may fetch. Widening the scrape past the allowlist
+# turned this from "every eligible row" into a queue: the accumulator holds up
+# to _ACCUMULATED_HARD_CAP rows and most of them are now eligible. Sized so a
+# poll's scraping finishes well inside the 15-minute interval at 15 concurrent
+# fetches, and so an unscraped row waits polls rather than hours -- it survives
+# in _ACCUMULATED and is offered again next time.
+MAX_SCRAPE_PER_POLL = 400
+
+
+def _scrape_priority(candidate: dict) -> tuple:
+    """Which articles to read first when there are more than the budget allows.
+
+    Imprecisely-placed rows come first. They are the ones a placement check can
+    actually improve -- a country-centroid pin has 400 km of uncertainty to
+    remove, while a row GDELT already placed on a named town has almost none.
+    Reach breaks ties after that: if two rows are equally unplaceable, read the
+    one more outlets are carrying.
+    """
+    imprecise = (candidate.get("geo_precision") or "unknown") in IMPRECISE_PRECISIONS
+    return (
+        0 if imprecise else 1,
+        -(candidate.get("outlet_count") or 0),
+        -(candidate.get("mentions") or 0),
+    )
+
+
 def _is_trusted_row(candidate: dict) -> bool:
     """Can this row ever be published as a News pin?
 
@@ -378,17 +625,36 @@ def _is_trusted_row(candidate: dict) -> bool:
 
 
 async def _attach_titles(candidates: list[dict]) -> None:
-    targets = [(c, _title_url_for(c)) for c in candidates]
+    targets = [(c, _scrape_url_for(c)) for c in candidates]
     targets = [(c, u) for c, u in targets if u]
     async with httpx.AsyncClient(timeout=10) as client:
-        titles = await asyncio.gather(*(_fetch_title(client, u) for _, u in targets))
-    for (candidate, url), title in zip(targets, titles):
-        candidate["real_title"] = title
-        if title:
-            # Point the record at the article the headline actually came from,
-            # so "read the source" opens what is being quoted.
-            candidate["source_url"] = url
-            candidate["source_name"] = _agency_name(url)
+        articles = await asyncio.gather(*(_fetch_article(client, u) for _, u in targets))
+    for (candidate, url), article in zip(targets, articles):
+        # Written unconditionally, including as None. "article_excerpt" being
+        # present is what tells the placement layer this article was *looked
+        # at* -- a row with no excerpt because the fetch failed and a row with
+        # no excerpt because nobody tried are different states, and only the
+        # first justifies concluding the text names no place.
+        candidate["article_excerpt"] = article.excerpt or article.description
+        candidate["dateline_place"] = article.dateline
+        # Whether the page we just read is one we vouch for. geoverify uses it
+        # to decide what this evidence may do: only a trusted article may move
+        # a pin, while any article may cast doubt on one.
+        trusted = _matched_domain(url) is not None
+        candidate["article_trusted"] = trusted
+        if trusted:
+            # Headline and attribution stay allowlist-only. Reading a regional
+            # outlet's page to check a coordinate is not the same as quoting it
+            # on the map, and conflating the two is how an unvouched-for
+            # newsroom would end up named as this record's source.
+            candidate["real_title"] = article.title
+            if article.title:
+                # Point the record at the article the headline actually came
+                # from, so "read the source" opens what is being quoted.
+                candidate["source_url"] = url
+                candidate["source_name"] = _agency_name(url)
+        else:
+            candidate.setdefault("real_title", None)
 
 
 async def _backfill_titles(candidates: list[dict]) -> None:
@@ -590,11 +856,31 @@ def _conflict_key(ev: dict) -> str:
     return f"{_dedup_key(ev)}|{ev.get('geo_feature_id') or ''}"
 
 
-async def _fetch_window() -> list[dict]:
+async def _fetch_window(
+    at: datetime | None = None, window_minutes: int = WINDOW_MINUTES
+) -> list[dict]:
+    """One rolling window of GDELT export files, rolled up and deduped.
+
+    `at=None` (the poller's case) reads GDELT's own lastupdate.txt and takes the
+    window ending at the newest published file. Passing an explicit `at` reads a
+    historical window instead: GDELT keeps v2 files indefinitely, and
+    backend/scripts/eval_placement.py needs windows aligned to the dates its
+    ground-truth dataset actually covers, which are months behind live.
+    """
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        latest_url = await _latest_export_url(client)
-        latest_dt = _parse_latest_ts(latest_url)
-        export_urls = _window_urls(latest_dt)
+        if at is None:
+            latest_url = await _latest_export_url(client)
+            latest_dt = _parse_latest_ts(latest_url)
+        else:
+            # GDELT publishes on exact 15-minute boundaries; an arbitrary
+            # timestamp would build URLs for files that do not exist and read
+            # back an empty window rather than an error.
+            latest_dt = at.replace(
+                minute=(at.minute // FILE_STEP_MINUTES) * FILE_STEP_MINUTES,
+                second=0,
+                microsecond=0,
+            )
+        export_urls = _window_urls(latest_dt, window_minutes)
         mention_urls = [u.replace(".export.CSV.zip", ".mentions.CSV.zip") for u in export_urls]
         results, mention_maps = await asyncio.gather(
             asyncio.gather(*(_fetch_one_export(client, u) for u in export_urls)),
@@ -649,6 +935,112 @@ def _parse_date_added(s: str | None) -> datetime | None:
         return datetime.strptime(s, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_event_date(s: str | None) -> datetime | None:
+    """SQLDATE -- when the event is reported to have *happened*."""
+    try:
+        return datetime.strptime(str(s)[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+# --- is this a report of something recent ----------------------------------
+#
+# Every retention rule above is keyed on DATEADDED, which is when GDELT
+# ingested the article -- not when anything happened. That is the right key for
+# "how long do we keep this", and completely the wrong one for "is this news".
+# An archival re-crawl and a magazine retrospective both arrive with DATEADDED
+# = now, so the windows above see them as breaking.
+#
+# Three independent signals, because no one of them catches everything:
+#
+#   lag        SQLDATE far behind DATEADDED. Catches a correctly-dated
+#              retrospective, and misses the ones GDELT dates today.
+#   section    the publisher filed it under /magazine/, /opinion/, /analysis/.
+#              Catches commentary the lag gate cannot see -- this is what the
+#              Atlantic 9/11 retrospective tripped, SQLDATE and all.
+#   URL date   the publication date in the URL path. The only signal that is
+#              independent of GDELT entirely, and the only one that catches an
+#              ordinary 2019 news report re-crawled today.
+#
+# Each keeps its own counter. A single fused counter would tell you the gate
+# dropped 40 rows and nothing about which heuristic started over-matching,
+# which is precisely the question worth asking when one of them drifts.
+
+# Shared with event_fusion, which imports it -- one definition of how much
+# reporting lag stops being lag and starts being history. Deliberately generous:
+# this is a sanity gate, not the map's recency window. Measured over a 12h live
+# window, 96.6% of violent rows are same-day and 2.3% exceed 30 days.
+MAX_REPORT_LAG_DAYS = 30
+
+# How stale a URL's own publication date may be before the row is treated as an
+# archival re-crawl. Months, not days: a URL carries year and month reliably and
+# the day only sometimes, and the cases this exists to catch are years old, not
+# weeks. Only consulted when NEWS_URL_DATE_GATE is on.
+MAX_URL_AGE_MONTHS = 3
+
+# The URL-date gate ships off. It is the only one of the three whose
+# false-positive rate has not been measured against live data, and the failure
+# mode is silent deletion of real breaking news from a publisher whose URL
+# scheme surprises us. backend/scripts/probe_gdelt.py prints every row it would
+# reject; read that list against a fresh window before turning this on.
+# Same env-flag pattern as event_fusion's COUNTRY_CENTROID_POLICY.
+URL_DATE_GATE = os.getenv("NEWS_URL_DATE_GATE", "").lower() in ("1", "true", "on", "yes")
+
+_dropped_retrospective = 0
+_dropped_non_news = 0
+_dropped_stale_url = 0
+
+
+def report_lag_days(event_date: str | None, date_added: str | None) -> int | None:
+    """Days between the event happening and GDELT ingesting the article."""
+    occurred = _parse_event_date(event_date)
+    added = _parse_date_added(date_added)
+    if occurred is None or added is None:
+        return None
+    return (added - occurred).days
+
+
+def _is_current_report(ev: dict) -> bool:
+    """Does this row describe something that just happened?
+
+    Applied to the News and Officials feeds. The Conflict layer runs its own
+    equivalent in event_fusion (it needs the parsed date as well as the verdict,
+    so it cannot simply call this), against the same MAX_REPORT_LAG_DAYS.
+    """
+    global _dropped_retrospective, _dropped_non_news, _dropped_stale_url
+
+    lag = report_lag_days(ev.get("event_date"), ev.get("date_added"))
+    if lag is not None and lag > MAX_REPORT_LAG_DAYS:
+        _dropped_retrospective += 1
+        return False
+
+    # source_url, not any of the mention URLs: it is the one the reader clicks,
+    # and _attach_titles may have repointed it since this row was stored --
+    # which is a reason to re-run this check per poll rather than once at
+    # accumulation. See where it is called from.
+    url = ev.get("source_url")
+    if is_non_news_url(url):
+        _dropped_non_news += 1
+        return False
+
+    if URL_DATE_GATE:
+        months = url_age_months(url)
+        if months is not None and months > MAX_URL_AGE_MONTHS:
+            _dropped_stale_url += 1
+            return False
+
+    return True
+
+
+def recency_drop_counts() -> dict[str, int]:
+    """Cumulative per-heuristic drop counts, for the poll log."""
+    return {
+        "retrospective": _dropped_retrospective,
+        "commentary": _dropped_non_news,
+        "stale_url": _dropped_stale_url,
+    }
 
 
 # --- cross-reference against ACLED/UCDP -----------------------------------
@@ -726,6 +1118,13 @@ def _is_officials_row(ev: dict) -> bool:
       5. A verified-domain article, same rule the news feed applies. An
          unattributable claim about what a president said is worth less than
          nothing.
+      6. A report of something recent rather than a retrospective or a
+         commentary piece -- see _is_current_report.
+
+    Unlike the news path, this gate runs at accumulation rather than at serve
+    time, and that is safe here: _ACCUMULATED_OFFICIALS has exactly one
+    consumer, so rejecting early keeps stale rows out of the cap and out of the
+    archive as well as off the map.
     """
     if ev.get("event_root_code") not in cameo.DIPLOMATIC_ROOT_CODES:
         return False
@@ -736,7 +1135,7 @@ def _is_officials_row(ev: dict) -> bool:
     )
     if not official:
         return False
-    return _is_cross_border(ev) and _is_trusted_row(ev)
+    return _is_cross_border(ev) and _is_trusted_row(ev) and _is_current_report(ev)
 
 
 def _is_cross_border(ev: dict) -> bool:
@@ -807,11 +1206,19 @@ def _news_slice(rows: list[dict]) -> list[dict]:
     verified-domain row can ever be served (app.py requires a real_title, and
     titles come only from the allowlist), so letting untrusted rows compete for
     the cap would spend slots on items that can never be shown.
+
+    The recency gate runs here rather than at accumulation, and the asymmetry
+    with the officials path below is deliberate. _ACCUMULATED is shared with
+    event_fusion, which applies its own already-correct gates; filtering rows
+    out of the store would change the conflict layer's input as a side effect of
+    a news fix. Running per-poll also re-tests source_url *after* _attach_titles
+    has had a chance to repoint it at a Mentions-table article -- the URL the
+    reader actually clicks is the one that has to pass.
     """
     now = datetime.now(timezone.utc)
     by_article: dict[str, dict] = {}
     for ev in rows:
-        if not _is_trusted_row(ev):
+        if not _is_trusted_row(ev) or not _is_current_report(ev):
             continue
         key = _dedup_key(ev)
         existing = by_article.get(key)
@@ -844,6 +1251,16 @@ def _accumulate(store: dict[str, dict], rows: list[dict]) -> None:
                 ev["real_title"] = prior["real_title"]
                 ev["source_url"] = prior.get("source_url") or ev.get("source_url")
                 ev["source_name"] = prior.get("source_name") or ev.get("source_name")
+            # The scraped text carries forward on the same terms as the title:
+            # it was earned by a network fetch, not published in the file, and
+            # losing it every 15 minutes would re-scrape the whole accumulator
+            # and leave the placement layer permanently working from nothing.
+            # Keyed on presence rather than truthiness -- "fetched, found no
+            # excerpt" must not be overwritten by "not fetched yet", since the
+            # first is what licenses a dateline-only verdict.
+            for field in ("article_excerpt", "dateline_place", "article_trusted"):
+                if field in prior and field not in ev:
+                    ev[field] = prior[field]
             # Outlet counts accumulate rather than reset. Each mentions file
             # covers one 15-minute slot, so a story picked up over six hours
             # appears in six of them with a handful of outlets each -- taking
@@ -962,6 +1379,15 @@ async def _rehydrate() -> None:
         return
     for store, rows in ((_ACCUMULATED, conflict_rows), (_ACCUMULATED_OFFICIALS, officials_rows)):
         for row in rows:
+            # Re-run the officials gate on restore. Rows were written to the
+            # archive under whatever rules were in force when they were
+            # accumulated, and this path writes straight into the store -- so
+            # without this, every deploy resurrects a full retention window of
+            # rows that the current gate would reject, and the fix looks
+            # intermittently broken for a day afterwards. The conflict store
+            # needs no equivalent: event_fusion re-gates everything it reads.
+            if store is _ACCUMULATED_OFFICIALS and not _is_officials_row(row):
+                continue
             key = _conflict_key(row)
             if key not in store:
                 store[key] = row
@@ -1000,10 +1426,13 @@ async def start():
             state.last_error = conflict_state.last_error = None
             officials_state.last_error = None
             with_titles = sum(1 for d in candidates if d.get("real_title"))
+            dropped = recency_drop_counts()
             log.info(
                 "GDELT: %d news events (%d with a real title, rest backfilling); "
-                "%d rows in the conflict window; %d in the diplomatic window",
+                "%d rows in the conflict window; %d in the diplomatic window. "
+                "Recency gate (cumulative): %d retrospective, %d commentary, %d stale-URL",
                 len(candidates), with_titles, len(conflict_rows), len(officials_rows),
+                dropped["retrospective"], dropped["commentary"], dropped["stale_url"],
             )
             await storage.record_snapshot("gdelt", candidates, "event_id")
             # Persisted so event_fusion can rehydrate its 3-day violence
@@ -1022,11 +1451,23 @@ async def start():
             #
             # Keyed by identity through a dict so a row in both windows (a
             # threat is conflict *and* diplomacy) is scraped once.
+            # Either field missing means this row has not been through the
+            # current scrape. Testing both rather than the title alone matters
+            # across an upgrade: rows rehydrated from before the scrape started
+            # keeping body text carry a title and no excerpt, and a title-only
+            # test would leave the placement layer blind to them forever.
             to_fetch = list({
                 id(c): c
                 for c in conflict_rows + officials_rows
-                if "real_title" not in c and _title_url_for(c)
+                if ("real_title" not in c or "article_excerpt" not in c) and _scrape_url_for(c)
             }.values())
+            # _scrape_url_for admits far more rows than the allowlist did (that
+            # is the point), and the accumulator can hold tens of thousands --
+            # so this is now a queue to be drained across polls rather than a
+            # list to be finished. Unscraped rows survive in _ACCUMULATED and
+            # come back next poll, so the only decision here is what to do first.
+            to_fetch.sort(key=_scrape_priority)
+            to_fetch = to_fetch[:MAX_SCRAPE_PER_POLL]
             # Skipped while a previous backfill is still running: title
             # scraping is network-bound and can outlast a poll interval, and
             # launching a second pass over an overlapping candidate set would

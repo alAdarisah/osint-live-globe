@@ -29,7 +29,8 @@ from datetime import datetime, timezone
 
 from backend import config, storage
 from backend.cache import registry
-from backend.sources import cameo
+from backend.sources import cameo, capitals
+from backend.sources.gdelt import SNAPPABLE_PRECISIONS
 from backend.sources.outlets import label_for_url
 
 log = logging.getLogger("osint-globe.officials")
@@ -54,6 +55,59 @@ def _gdelt_when(row: dict) -> float | None:
         ).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+# --- where to draw an imprecise diplomatic event ---------------------------
+#
+# Roughly a third of GDELT's diplomatic rows are geocoded only to a country
+# centroid. A pin in the geometric middle of Russia is not where a foreign
+# ministry said anything -- it is an artifact of the geocoder, and drawing it as
+# a location is the map asserting a precision it does not have.
+#
+# Diplomacy happens in capitals, so that is where those rows go. Three things
+# this is careful about:
+#
+#   * A locality-precise row is left alone. If GDELT matched Beijing, Beijing is
+#     a real place and strictly better than "the capital of China" -- a summit
+#     in Geneva must not be redrawn in Bern.
+#   * An official_feed row is never touched. Those already sit at the seat of
+#     the institution that published them, which is both correct and a
+#     different claim (see _normalize_feed's "institution" precision).
+#   * The record says it was moved. original_lat/lon and
+#     original_geo_precision travel with it and the popup prints the fact.
+_dropped_no_capital = 0
+
+
+def _snap_to_capital(row: dict) -> dict | None:
+    """Capital coordinates for an imprecisely-geocoded GDELT row, or None.
+
+    Returns the fields to override rather than applying them. This function
+    MUST NOT mutate `row`: gdelt._fetch routes the same dict objects into both
+    _ACCUMULATED and _ACCUMULATED_OFFICIALS, so a row here can be the very row
+    event_fusion is about to read. Writing to it would silently move conflict
+    pins as a side effect of a diplomacy fix.
+    """
+    global _dropped_no_capital
+    precision = row.get("geo_precision") or "unknown"
+    if precision not in SNAPPABLE_PRECISIONS:
+        return None
+    capital = capitals.capital_for_fips(row.get("geo_country_code"))
+    if not capital:
+        # No capital for this country: below GeoNames' own 15,000 floor, or a
+        # code that names no country. Degrade by leaving the record where it
+        # is -- never by dropping it.
+        _dropped_no_capital += 1
+        return None
+    return {
+        "lat": capital["lat"],
+        "lon": capital["lon"],
+        "geo_precision": "capital",
+        "snapped_to_capital": True,
+        "original_geo_precision": precision,
+        "original_lat": row.get("lat"),
+        "original_lon": row.get("lon"),
+        "anchor": capitals.anchor_for(capital),
+    }
 
 
 def _normalize_gdelt(row: dict) -> dict | None:
@@ -88,7 +142,8 @@ def _normalize_gdelt(row: dict) -> dict | None:
         summary = trimmed.rstrip() + "."
 
     headline = (row.get("real_title") or "").strip() or None
-    return {
+    snapped = _snap_to_capital(row)
+    record = {
         "id": f"gdelt:{row.get('event_id')}",
         "origin": "gdelt",
         "kind": kind,
@@ -120,6 +175,9 @@ def _normalize_gdelt(row: dict) -> dict | None:
         # event_fusion._coverage_for and the frontend's merged-id set.
         "coverage_event_ids": [row["event_id"]] if row.get("event_id") else [],
     }
+    if snapped:
+        record.update(snapped)
+    return record
 
 
 def _normalize_feed(row: dict) -> dict:
@@ -132,6 +190,18 @@ def _normalize_feed(row: dict) -> dict:
         # The seat of the institution, not the site of the act. Marked as such
         # so the map never implies this is where anything happened.
         "geo_precision": "institution",
+        # Press releases stack on one point by construction -- every White House
+        # statement shares a coordinate. Giving them the same anchor shape a
+        # capital-snapped record carries lets the frontend's hub group both
+        # without knowing or caring which kind it is looking at.
+        "anchor": {
+            "kind": "institution",
+            "id": f"institution:{row['feed_key']}",
+            "name": row.get("government"),
+            "country_code": None,
+            "lat": row.get("lat"),
+            "lon": row.get("lon"),
+        } if row.get("feed_key") else None,
         "location": row.get("government"),
         "country": row.get("country"),
         "headline": row.get("title"),

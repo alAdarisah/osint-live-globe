@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from backend import config, storage
 from backend.cache import registry
-from backend.sources import proximity
+from backend.sources import geoverify, proximity
 # The CAMEO vocabulary moved to its own module: officials.py renders the
 # diplomatic half of the same taxonomy (roots 01-17) and would otherwise have to
 # import this fusion pipeline for a lookup dict. Bound to the private names this
@@ -25,6 +25,11 @@ from backend.sources.cameo import (
     country_from_location as _country_from_location,
     pretty_actor as _pretty_actor,
 )
+# One definition of "how much reporting lag stops being lag and starts being
+# history", shared with the News and Officials feeds. gdelt.py owns it because
+# it owns GDELT's date semantics; this is a constant import, not a data
+# dependency -- event_fusion still reads gdelt's rows through the registry.
+from backend.sources.gdelt import MAX_REPORT_LAG_DAYS
 from backend.sources.outlets import is_non_news_url, label_for_url, rank_outlets
 
 log = logging.getLogger("osint-globe.event_fusion")
@@ -237,13 +242,11 @@ def _parse_gdelt_dt(s: str | None):
 # a live event with a 2014 date.
 #
 # So: take SQLDATE, but treat a large gap as retrospective reporting and drop
-# the row. Deliberately generous -- this is a sanity gate, not the map's
-# recency window, which lives in the frontend filter. Measured over a 12h live
-# window, 96.6% of violent rows are same-day and 2.3% exceed 30 days (the
-# worst being a full year), so this cuts the retrospectives without touching
-# ordinary reporting lag. The drop count is logged rather than silent: if this
-# assumption is ever wrong, it would empty the layer, and that must be visible.
-_MAX_REPORT_LAG_DAYS = 30
+# the row. The threshold itself lives in gdelt.py, which now applies the same
+# rule to the News and Officials feeds -- one definition of how much reporting
+# lag stops being lag and starts being history. This module keeps its own
+# function because it needs the parsed date as well as the verdict, and its own
+# counter because the two layers drop different rows for the same reason.
 _dropped_retrospective = 0
 
 
@@ -254,7 +257,7 @@ def _gdelt_event_dt(raw: dict):
     occurred = _parse_gdelt_dt(raw.get("event_date"))
     if occurred is None:
         return added  # no SQLDATE to work with; ingest time is the best available
-    if added is not None and (added - occurred).days > _MAX_REPORT_LAG_DAYS:
+    if added is not None and (added - occurred).days > MAX_REPORT_LAG_DAYS:
         _dropped_retrospective += 1
         return None
     return occurred
@@ -305,6 +308,7 @@ def _build_summary(record: dict) -> str | None:
 
 def _normalize_structured(source: str, raw: dict) -> dict:
     return {
+        **geoverify.for_structured(),
         "source": source,
         "id": raw.get("id"),
         "lat": raw.get("lat"),
@@ -364,7 +368,7 @@ def _normalize_gdelt(raw: dict) -> dict:
             raw.get("event_code"), raw.get("event_base_code"), raw.get("event_root_code")
         ) or "Conflict event"
         sub_event_type = None
-    return {
+    record = {
         "source": "gdelt",
         "id": raw.get("event_id"),
         "lat": raw.get("lat"),
@@ -433,6 +437,12 @@ def _normalize_gdelt(raw: dict) -> dict:
         "date_added": raw.get("date_added"),
         "mention_urls": raw.get("mention_urls") or [],
     }
+    # Read the article back against the coordinate GDELT chose. This is the one
+    # place a GDELT pin can move, and it moves only up the precision ladder --
+    # see backend/sources/geoverify.py. The overrides are merged last so a
+    # refinement's lat/lon/geo_precision win over the raw row's, and every
+    # record carries a verdict even when the answer is "no opinion".
+    return {**record, **geoverify.reconcile(raw)}
 
 
 # --- severity -------------------------------------------------------------
@@ -851,6 +861,17 @@ def _merge_cluster(cluster: list[dict]) -> dict:
         "lon": coord_member["lon"],
         "geo_precision": coord_member.get("geo_precision") or "unknown",
         "geo_feature_id": coord_member.get("geo_feature_id"),
+        # The placement verdict belongs to whichever member supplied the
+        # coordinate, not to `primary`. Those are routinely different members --
+        # ACLED writes the narrative while a refined GDELT row may hold the
+        # better location, or vice versa -- and taking the verdict from the
+        # narrative member would describe the confidence of a coordinate the
+        # record is not using.
+        **{
+            field: coord_member.get(field)
+            for field in geoverify.GEO_FIELDS
+            if coord_member.get(field) is not None
+        },
         "date": date_str,
         "event_type": event_type,
         "sub_event_type": primary["sub_event_type"],
@@ -923,7 +944,15 @@ COUNTRY_CENTROID_POLICY = os.getenv("COUNTRY_CENTROID_POLICY", "demote")
 # Severity multiplier applied under "demote". Not a punishment for being
 # imprecise -- a correction. An event we cannot place is less actionable than
 # an identical one we can, and the map should rank it that way.
-_IMPRECISION_PENALTY = {"country": 0.70, "region": 0.85, "unknown": 0.80, "locality": 1.0}
+# "capital" scores as "country" on purpose. A capital-snapped record is a
+# country-level geocode wearing a nicer hat -- we know which country, not where
+# in it -- and the readable coordinate must not be mistaken for a precise one.
+# Unreachable today (only officials.py snaps, and officials never enter fusion),
+# but a .get(x, 1.0) default would silently score it as fully precise the moment
+# that changed, which is exactly the kind of quiet mis-scoring worth pre-empting.
+_IMPRECISION_PENALTY = {
+    "country": 0.70, "capital": 0.70, "region": 0.85, "unknown": 0.80, "locality": 1.0,
+}
 
 
 def _apply_precision_policy(records: list[dict]) -> list[dict]:
@@ -1257,7 +1286,7 @@ async def start():
                 "precise geocode); %d retrospective rows dropped (report lag > %dd); "
                 "%d dropped as commentary/retrospective by URL section",
                 len(items), corroborated, imprecise, _dropped_retrospective,
-                _MAX_REPORT_LAG_DAYS, _dropped_non_news,
+                MAX_REPORT_LAG_DAYS, _dropped_non_news,
             )
             await storage.record_source_health("events", len(items), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive

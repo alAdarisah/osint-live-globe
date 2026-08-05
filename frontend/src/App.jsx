@@ -11,6 +11,8 @@ import { useReplay } from "./hooks/useReplay";
 import { useTheme } from "./hooks/useTheme";
 import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
+import { useAppSettings } from "./hooks/useAppSettings";
+import { applyOverrides } from "./settings/applyOverrides";
 import { boundsContainsPoint } from "./utils/geo";
 
 import LoadingScreen from "./components/LoadingScreen";
@@ -25,6 +27,8 @@ import ControlPanel from "./components/controlPanel/ControlPanel";
 import TimelineBar from "./components/TimelineBar";
 import Attribution from "./components/Attribution";
 import CountryInfoCard from "./components/CountryInfoCard";
+import CountrySelectionBar from "./components/CountrySelectionBar";
+import AdminPanel from "./components/admin/AdminPanel";
 
 // "Tickers" (the layer checkboxes) default off except critical
 // infrastructure, satellites, and the military-only halves of ADS-B/AIS --
@@ -35,12 +39,41 @@ const DEFAULT_LAYER_VISIBILITY = {
   countries: true, cities: true, infra: true, jamming: true, satellites: true, satellitesTrails: true,
   satellitesMilitary: true,
   precip: false, clouds: false, windArrows: false,
+  // Off by default: most days nothing in it bears on the conflict picture, and
+  // an M3.1 tremor competing with a strike for the eye is exactly the clutter
+  // the rest of these defaults avoid.
+  hazards: false,
+  // On by default and deliberately: this is the layer that shows an aircraft
+  // squawking 7500 or one whose operator asked not to be listed. Both are rare,
+  // both are the point, and neither should need to be switched on to be seen.
+  adsbFlagged: true,
+  // Off: 40k airfields is reference material you go looking for.
+  airports: false,
+  // Off, and this one on principle rather than for clutter: every pin in it is
+  // an inference drawn from an absence, and that should be something a reader
+  // chooses to look at rather than something the map asserts at them.
+  darkVessels: false,
+  // Off: 718 cable routes is a dense mesh over every ocean, and it is reference
+  // material for a specific question rather than something to watch.
+  cables: false,
+  // Off: a few dozen pads, and not what this map is primarily for.
+  launches: false,
+  // Off, and this is the one that most has to be: it is crowd-sourced geometry
+  // sitting next to a list whose coordinates a person checked, and it should
+  // never appear unless a reader asked for it.
+  osmInfra: false,
 };
 
 export default function App() {
   const mapContainerRef = useRef(null);
   const { theme, toggleTheme } = useTheme();
   const isMobileViewport = useIsMobileViewport();
+
+  // Admin Mode's configuration. Read here rather than in a context because
+  // three separate consumers need it in three different forms -- the map wants
+  // an icon theme, the fetch layer wants a record-override function, and the
+  // admin panel wants the object itself.
+  const { settings, adminMode, toggleAdminMode, actions, sync } = useAppSettings();
 
   // Panel starts open on desktop, but an 85vw-wide open drawer would cover
   // most of a small screen on first load, so it starts closed on phones
@@ -71,6 +104,7 @@ export default function App() {
       if (!replayActiveRef.current) mapApi.applyData(key, data);
     },
     flyToRegion: mapApi.flyToRegion,
+    transform: useCallback((key, data) => applyOverrides(key, data, settings.data), [settings.data]),
   });
   regionAutoResetRef.current = dataApi.resetRegionToWorld;
 
@@ -82,6 +116,52 @@ export default function App() {
   replayActiveRef.current = replayApi.isReplaying;
 
   const { health, owmConfigured } = useHealth();
+
+  // --- NASA GIBS satellite imagery ---------------------------------------
+  //
+  // Which imagery product is under the map, and for which day. The date is not
+  // a separate control: it follows the replay scrubber, so scrubbing back three
+  // days changes the imagery along with every other layer instead of leaving
+  // today's satellite pass sitting under a three-day-old conflict picture.
+  const [imageryKey, setImageryKey] = useState(null);
+  const imageryDate = useMemo(() => {
+    const at = replayApi.replayAt ?? Date.now();
+    // GIBS is keyed by UTC day, and its same-day coverage is partial (each
+    // product is built as the satellite's passes come down, a few hours behind).
+    return new Date(at).toISOString().slice(0, 10);
+  }, [replayApi.replayAt]);
+
+  useEffect(() => {
+    mapApi.setImagery(imageryKey, imageryDate);
+  }, [imageryKey, imageryDate, mapApi.setImagery]);
+
+  // --- Admin Mode, pushed into the map ---------------------------------
+  //
+  // useAppSettings already writes the palette into map/iconTheme.js, but a
+  // module-level palette change repaints nothing on its own -- these three
+  // effects are what make a settings change visible.
+  useEffect(() => {
+    mapApi.setIconTheme({
+      scale: settings.icons.scale,
+      colors: settings.icons.colors,
+      layers: settings.layers,
+    });
+  }, [settings.icons, settings.layers, mapApi.setIconTheme]);
+
+  useEffect(() => {
+    const overrides = {};
+    for (const [key, layer] of Object.entries(settings.layers)) {
+      if (Number.isFinite(layer.minZoom)) overrides[key] = layer.minZoom;
+    }
+    mapApi.setLayerZoomOverrides(overrides);
+  }, [settings.layers, mapApi.setLayerZoomOverrides]);
+
+  // Record edits apply to the payloads already in hand rather than waiting for
+  // the next poll, which for news is a minute away and for the officials feed
+  // two -- long enough that an edit would look like it had not worked.
+  useEffect(() => {
+    dataApi.reapplyTransform(["events", "gdelt", "officials"]);
+  }, [settings.data, dataApi.reapplyTransform]);
 
   // Ranks conflict zones by how much is currently happening in each, so the
   // "Choose Conflict Zone" menu (see RegionBar.jsx) lists the hottest first
@@ -209,7 +289,12 @@ export default function App() {
 
       <MapView containerRef={mapContainerRef} panelOpen={panelOpen} />
 
-      <TitleBar theme={theme} onToggleTheme={toggleTheme} />
+      <TitleBar
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        adminMode={adminMode}
+        onToggleAdminMode={toggleAdminMode}
+      />
 
       <RegionBar
         regions={dataApi.regions}
@@ -260,6 +345,9 @@ export default function App() {
         historyAsOf={historyAsOf}
         onEventFilterChange={onEventFilterChange}
         onInfraFilterChange={onInfraFilterChange}
+        imageryKey={imageryKey}
+        imageryDate={imageryDate}
+        onImageryChange={setImageryKey}
       />
 
       <TimelineBar
@@ -275,6 +363,30 @@ export default function App() {
       <Attribution />
 
       <CountryInfoCard country={mapApi.selectedCountry} onClose={mapApi.closeCountryCard} />
+
+      <CountrySelectionBar
+        selection={mapApi.countrySelection}
+        focusedKey={mapApi.selectedCountry?.key ?? null}
+        onFocus={mapApi.focusCountry}
+        onRemove={mapApi.deselectCountry}
+        onClear={mapApi.clearCountrySelection}
+      />
+
+      {/* The only place any of this is editable, and it exists only while Admin
+          Mode is on -- see AdminPanel.jsx on why that is the whole guard. */}
+      {adminMode && (
+        <AdminPanel
+          settings={settings}
+          actions={actions}
+          sync={sync}
+          sources={{
+            events: dataApi.eventsRaw,
+            gdelt: dataApi.gdeltRaw,
+            officials: dataApi.officialsRaw,
+          }}
+          onClose={toggleAdminMode}
+        />
+      )}
     </>
   );
 }

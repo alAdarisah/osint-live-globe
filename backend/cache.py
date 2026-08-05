@@ -29,6 +29,14 @@ class SourceState:
     def _item_count(self) -> int:
         if isinstance(self.data, dict) and "features" in self.data:
             return len(self.data["features"])
+        # A payload that is a dict *of* lists is one source serving several
+        # collections at once (cables.py's routes plus its landing points), and
+        # the useful count is how many things it holds, not how many keys. A
+        # plain dict -- outages.py's country -> record map -- keeps len().
+        if isinstance(self.data, dict) and self.data and all(
+            isinstance(v, list) for v in self.data.values()
+        ):
+            return sum(len(v) for v in self.data.values())
         try:
             return len(self.data)
         except TypeError:

@@ -19,6 +19,94 @@ export function basemapUrlFor(theme) {
   return `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`;
 }
 
+// NASA GIBS satellite imagery, as a basemap that sits *above* the vector
+// basemap and below everything else. Keyless WMTS-REST tiles, no backend of our
+// own involved.
+//
+// Four things about the URL are easy to get wrong and every one of them fails
+// silently as a 404 rather than as anything a reader would recognise:
+//
+//   * GIBS orders its REST path {z}/{y}/{x}, not the {z}/{x}/{y} every other
+//     tile server uses;
+//   * each layer has its own maximum native zoom, and asking past it returns an
+//     error tile rather than a 404, so Leaflet has to be told;
+//   * the file extension is per layer -- the true-colour products serve JPEG,
+//     the day/night band only PNG;
+//   * and each product has its own lag. True colour is available same day; the
+//     day/night band runs about three days behind, so asking it for "today"
+//     404s every tile. `lagDays` is what stops that, by clamping the request
+//     back to the newest date the product actually has.
+export const GIBS_LAYERS = {
+  modis: {
+    id: "MODIS_Terra_CorrectedReflectance_TrueColor",
+    matrix: "GoogleMapsCompatible_Level9",
+    maxNativeZoom: 9,
+    format: "jpg",
+    lagDays: 0,
+    label: "True colour (MODIS Terra)",
+    note: "Daily daylight pass, ~250 m. Cloud tops included -- most of the world is under cloud most days.",
+  },
+  viirs: {
+    id: "VIIRS_SNPP_CorrectedReflectance_TrueColor",
+    matrix: "GoogleMapsCompatible_Level9",
+    maxNativeZoom: 9,
+    format: "jpg",
+    lagDays: 0,
+    label: "True colour (VIIRS)",
+    note: "Same idea as MODIS, sharper and a few hours later in the day.",
+  },
+  night: {
+    id: "VIIRS_SNPP_DayNightBand_At_Sensor_Radiance",
+    matrix: "GoogleMapsCompatible_Level8",
+    maxNativeZoom: 8,
+    format: "png",
+    // Measured against the live service: three days back is the newest date
+    // that returns tiles.
+    lagDays: 3,
+    label: "Night lights (VIIRS day/night band)",
+    note: "What is lit after dark. A city that was bright last week and dark tonight is the point of this layer.",
+  },
+};
+
+/**
+ * The date a layer will actually be shown for: the requested day, or the
+ * newest one that product has if the request is inside its lag.
+ *
+ * Exported because the imagery panel prints this rather than what was asked
+ * for -- telling a reader they are looking at today's night lights when the
+ * newest available is three days old would be the wrong kind of tidy.
+ */
+export function gibsDateFor(layerKey, date) {
+  const layer = GIBS_LAYERS[layerKey];
+  if (!layer || !date) return date || "";
+  if (!layer.lagDays) return date;
+  const asked = Date.parse(`${date}T00:00:00Z`);
+  if (Number.isNaN(asked)) return date;
+  const newest = Date.now() - layer.lagDays * 86400000;
+  return new Date(Math.min(asked, newest)).toISOString().slice(0, 10);
+}
+
+export function gibsUrlFor(layerKey, date) {
+  const layer = GIBS_LAYERS[layerKey];
+  if (!layer || !date) return "";
+  const day = gibsDateFor(layerKey, date);
+  return `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layer.id}/default/${day}/${layer.matrix}/{z}/{y}/{x}.${layer.format}`;
+}
+
+export function createImageryLayer(map) {
+  // Starts with no URL and unattached: the layer only exists once a reader
+  // picks one, same "the real URL arrives later" shape the precip layer has.
+  return L.tileLayer("", {
+    opacity: 0.85,
+    // Above the vector basemap (which has no explicit zIndex, so 1) and below
+    // the weather rasters at 5, so imagery never covers precipitation or cloud.
+    zIndex: 3,
+    maxNativeZoom: 9,
+    attribution:
+      'Imagery: <a href="https://worldview.earthdata.nasa.gov" target="_blank" rel="noopener noreferrer">NASA EOSDIS GIBS</a>',
+  });
+}
+
 export function createWeatherLayers(map) {
   // URL starts empty -- RainViewer has no fixed tile path, it's a frame
   // timestamp that changes every ~10min, so the real URL is filled in by
@@ -152,6 +240,29 @@ export function createEntityClusterGroups(map) {
     // historical dataset sitting unlabelled among live pins would be the most
     // misleading thing on the map.
     conflictHistory: L.layerGroup(),
+    // Earthquakes and volcanic activity (backend/sources/hazards.py). Also not
+    // added here: off by default, since most days it has nothing to say about
+    // the conflict picture this map is primarily for.
+    hazards: L.layerGroup(),
+    // Airfields (backend/sources/airports.py) -- reference context for the
+    // aircraft layers, off by default and gated hard by zoom.
+    airports: L.layerGroup(),
+    // AIS gaps and possible ship-to-ship transfers, derived from our own
+    // recorded history (backend/sources/dark_vessels.py). Off by default: it is
+    // the one layer here whose every pin is an inference, and it should be
+    // something a reader chooses to look at.
+    darkVessels: L.layerGroup(),
+    // Submarine cable landing points. Not added to the map directly -- wrapped
+    // together with the cable routes into one combined "cables" layer in
+    // createMapController.js, same pattern as infraGroup + pipelinesGroup.
+    cableLandings: L.layerGroup(),
+    // Orbital launches at their pads (backend/sources/launches.py). Off by
+    // default -- there are only a few dozen and they are not what this map is
+    // primarily for.
+    launches: L.layerGroup(),
+    // OpenStreetMap-derived infrastructure, off by default and kept strictly
+    // apart from the curated infra layer (see backend/sources/osm_infra.py).
+    osmInfra: L.layerGroup(),
   };
   return { groups };
 }
@@ -246,6 +357,14 @@ export function createTrailLayers(map) {
 // directly -- combined with jammingLayer in createMapController.js so
 // toggling the "jamming" layer off also hides pings.
 export function createJammingPingGroup() {
+  return L.layerGroup();
+}
+
+// Submarine cable routes (backend/sources/cables.py) -- 718 polylines, same
+// "lines, not points, small curated set" treatment createPipelinesGroup gets.
+// Not added to the map directly: combined with the landing-point markers under
+// the single "cables" layer key in createMapController.js.
+export function createCablesGroup() {
   return L.layerGroup();
 }
 
