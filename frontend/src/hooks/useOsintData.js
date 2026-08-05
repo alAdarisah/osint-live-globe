@@ -15,10 +15,9 @@ import { fetchJson, urlForRegion } from "../api";
 const BOOT_SOURCES = [
   { key: "countries", label: "Country boundaries" },
   { key: "cities", label: "City index" },
-  { key: "acled", label: "Conflict & violence data (ACLED/UCDP)" },
+  { key: "events", label: "Conflict & violence events (ACLED + UCDP + GDELT, fused)" },
   { key: "firms", label: "Thermal anomaly feed (NASA FIRMS)" },
   { key: "gdelt", label: "Global news stream (GDELT)" },
-  { key: "conflictWatch", label: "Conflict Watch (independent, UCDP + GDELT NLP)" },
   { key: "ais", label: "Maritime traffic (AIS)" },
   { key: "adsb", label: "Aircraft tracking (ADS-B)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
@@ -30,10 +29,9 @@ const BOOT_SOURCES = [
 // nothing but redundant fetch/parse work, since the underlying data was
 // still the same one most of the time. 3 minutes still feels current.
 const POLL_CONFIG = [
-  { key: "acled", url: "/api/conflict", intervalMs: 180000 },
+  { key: "events", url: "/api/events", intervalMs: 60000 }, // GDELT-driven (event_fusion.py), same cadence as gdelt below
   { key: "firms", url: "/api/fires", intervalMs: 180000 },
   { key: "gdelt", url: "/api/news", intervalMs: 60000 },
-  { key: "conflictWatch", url: "/api/conflict-watch", intervalMs: 60000 }, // GDELT-driven, same cadence as gdelt above
   { key: "countries", url: "/api/countries", intervalMs: 5 * 60000 },
   { key: "cities", url: "/api/cities", intervalMs: 5 * 60000 },
   { key: "ais", url: "/api/ships", intervalMs: 10000 },
@@ -41,6 +39,10 @@ const POLL_CONFIG = [
   { key: "jamming", url: "/api/jamming", intervalMs: 30 * 60000 }, // gpsjam.org itself only updates once/day
   { key: "satellites", url: "/api/satellites", intervalMs: 10000 }, // position, not elements -- see backend/sources/satellites.py
   { key: "conflictStats", url: "/api/conflict-stats", intervalMs: 60 * 60000 }, // HDX file itself only changes weekly -- see backend/sources/hdx_conflict_stats.py
+  // Server-side aggregate over a week of history (backend/escalation.py),
+  // already cached for 120s there -- polling it faster would just re-serve
+  // the same object, and the underlying signal moves on the order of hours.
+  { key: "escalation", url: "/api/escalation", intervalMs: 3 * 60000 },
 ];
 
 export function useOsintData({ onData, flyToRegion }) {
@@ -48,7 +50,10 @@ export function useOsintData({ onData, flyToRegion }) {
   const [currentRegionKey, setCurrentRegionKey] = useState(null); // null == world/unscoped
   const [currentRegionLabel, setCurrentRegionLabel] = useState("World");
   const [gdeltRaw, setGdeltRaw] = useState([]);
-  const [acledRaw, setAcledRaw] = useState([]);
+  const [eventsRaw, setEventsRaw] = useState([]);
+  // Regions running above their own baseline (backend/escalation.py).
+  // Reactive like gdelt/events because a panel renders it directly.
+  const [escalation, setEscalation] = useState([]);
   const [bootSources, setBootSources] = useState(() => BOOT_SOURCES.map((s) => ({ ...s, status: "pending" })));
 
   // Read by poller ticks so a region switch is picked up on the very next
@@ -131,7 +136,7 @@ export function useOsintData({ onData, flyToRegion }) {
       tick();
     }
 
-    const REACTIVE_SETTERS = { gdelt: setGdeltRaw, acled: setAcledRaw };
+    const REACTIVE_SETTERS = { gdelt: setGdeltRaw, events: setEventsRaw, escalation: setEscalation };
     for (const src of POLL_CONFIG) {
       registerPoller(src.key, src.url, src.intervalMs, REACTIVE_SETTERS[src.key]);
     }
@@ -218,7 +223,8 @@ export function useOsintData({ onData, flyToRegion }) {
     selectRegion,
     resetRegionToWorld,
     gdeltRaw,
-    acledRaw,
+    eventsRaw,
+    escalation,
     bootSources,
     // Exposed for useReplay.js: leaving replay mode needs one immediate
     // refetch of every live source instead of waiting out each poller's own

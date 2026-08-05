@@ -34,7 +34,7 @@ export function useReplay({ applyData, currentRegionKey, onExitReplay }) {
     async (ts) => {
       try {
         const data = await fetchJson(urlForRegion(`/api/replay?at=${ts / 1000}`, regionRef.current));
-        applyData("acled", data.acled);
+        applyData("events", data.events);
         applyData("firms", data.firms);
         applyData("gdelt", data.gdelt);
         applyData("ais", data.ais);

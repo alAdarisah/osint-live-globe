@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from backend import config
+from backend import config, storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.firms")
@@ -142,7 +142,13 @@ async def start():
                     "FIRMS: %d hotspots after confidence+event-correlation filtering (%d fetched)",
                     len(state.data), len(fetched),
                 )
+                # No id field of its own -- storage.py synthesizes one from
+                # lat/lon/acq_date/acq_time so the same detection reappearing
+                # across polls updates its row instead of adding a new one.
+                await storage.record_snapshot("firms", state.data)
+                await storage.record_source_health("firms", len(state.data), True)
             except Exception as exc:  # noqa: BLE001 - keep the poller alive
                 state.last_error = str(exc)
                 log.warning("FIRMS fetch failed: %s", exc)
+                await storage.record_source_health("firms", None, False, str(exc))
         await asyncio.sleep(config.FIRMS_POLL_INTERVAL)

@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import logging
+import os
 import time
+import uuid
 import webbrowser
 from contextlib import asynccontextmanager
 
@@ -11,23 +13,42 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import config, history, infrastructure, regions, replay, storage
+from backend import config, escalation, history, infrastructure, regions, replay, storage
 from backend.cache import registry
+from backend.ratelimit import LruTtlCache, TokenBucket
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe")
 
 _background_tasks: list[asyncio.Task] = []
 
+# Every ETag below is derived from a source's `version` counter, which starts
+# at 0 in each new process. Without a per-process component, a restarted
+# backend re-issues ETags it already used -- so a browser holding a cached
+# copy from the *previous* process sends If-None-Match, matches, gets a 304,
+# and keeps showing data from before the restart. That's invisible in normal
+# operation and actively misleading after a deploy or a data-filtering
+# change. A token minted at import time makes every process's ETags distinct.
+_PROCESS_TOKEN = uuid.uuid4().hex[:8]
+
 
 _SOURCE_MODULES = (
     "gdelt", "firms", "ais", "adsb", "acled", "countries", "cities", "jamming", "satellites",
-    "hdx_conflict_stats", "conflict_watch",
+    "hdx_conflict_stats", "event_fusion",
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Storage connects in the background rather than blocking startup. Every
+    # write path already no-ops while the pool is None (see storage.py), so
+    # the cost of connecting late is a few skipped snapshots, whereas
+    # awaiting it here would hold the whole API hostage to the database:
+    # with Postgres absent the retry budget alone stalled first response by
+    # ~60s. Under compose the healthcheck means it connects on the first
+    # attempt anyway; this only changes the degraded cases.
+    _background_tasks.append(asyncio.create_task(storage.init_pool()))
+
     # Each source is imported and started independently -- one module with a
     # broken/missing dependency (e.g. jamming.py needing the `h3` package)
     # used to take the entire backend down at startup via a single shared
@@ -56,6 +77,7 @@ async def lifespan(app: FastAPI):
     for task in _background_tasks:
         task.cancel()
     await asyncio.gather(*_background_tasks, return_exceptions=True)
+    await storage.close_pool()
 
 
 app = FastAPI(title="OSINT Live Globe", lifespan=lifespan)
@@ -116,7 +138,7 @@ def _cached_source_response(request: Request, source_name: str, region: str | No
     # at all, so this costs nothing once version ticks past 0.
     if state.version == 0:
         return JSONResponse(filter_fn(state.data, regions.bounds_for(region)), headers={"Cache-Control": "no-store"})
-    etag = f'"{state.version}:{region or "world"}"'
+    etag = f'"{_PROCESS_TOKEN}:{state.version}:{region or "world"}"'
     cache_control = f"public, max-age={max_age}" if max_age else "no-cache"
     headers = {"Cache-Control": cache_control, "ETag": etag}
     if request.headers.get("if-none-match") == etag:
@@ -139,19 +161,21 @@ async def conflict_stats(request: Request):
     state = registry.get("hdx_conflict_stats")
     if state.version == 0:
         return JSONResponse(state.data, headers={"Cache-Control": "no-store"})
-    etag = f'"{state.version}"'
+    etag = f'"{_PROCESS_TOKEN}:{state.version}"'
     headers = {"Cache-Control": "no-cache", "ETag": etag}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
     return JSONResponse(state.data, headers=headers)
 
 
-@app.get("/api/conflict-watch")
-async def conflict_watch(request: Request, region: str | None = None):
-    # ACLED-independent layer -- UCDP GED Candidate rows + NLP-derived GDELT
-    # events, cross-referenced for corroboration. See
-    # backend/sources/conflict_watch.py.
-    return _cached_source_response(request, "conflict_watch", region, regions.filter_points)
+@app.get("/api/events")
+async def events(request: Request, region: str | None = None):
+    # The single canonical conflict/violence feed: ACLED + UCDP (via
+    # registry "acled") and GDELT's structured conflict events, cross-
+    # referenced and collapsed into one record per real-world incident. See
+    # backend/sources/event_fusion.py. This replaces rendering ACLED/UCDP
+    # and GDELT-derived conflict pins as separate, unmerged layers.
+    return _cached_source_response(request, "events", region, regions.filter_points)
 
 
 @app.get("/api/fires")
@@ -187,10 +211,18 @@ def _gdelt_filter(items: list[dict], bounds) -> list[dict]:
     # Only ever serve items with a real scraped article title -- a
     # CAMEO-coded fallback sentence isn't a headline and shouldn't be shown
     # as one. backend/sources/gdelt.py keeps title-less items in its own
-    # accumulator (for the backfill and for conflict_watch.py's direct read
+    # accumulator (for the backfill and for event_fusion.py's direct read
     # of registry state), so this filter only applies at this public
-    # serving boundary.
-    titled = [d for d in items if (d.get("real_title") or "").strip()]
+    # serving boundary. Also drops anything event_fusion.py already folded
+    # into a fused conflict event on its most recent poll -- otherwise the
+    # same headline shows twice: once as a News pin, once as a Conflict pin.
+    from backend.sources import event_fusion
+
+    consumed = event_fusion.consumed_gdelt_ids()
+    titled = [
+        d for d in items
+        if (d.get("real_title") or "").strip() and d.get("event_id") not in consumed
+    ]
     return regions.filter_points(titled, bounds)
 
 
@@ -217,6 +249,28 @@ async def cities(request: Request, region: str | None = None):
     return _cached_source_response(request, "cities", region, regions.filter_points, max_age=3600)
 
 
+# Aggregates a week of conflict_events across every region, so it's far too
+# expensive to recompute per request when the frontend polls it on a timer.
+# The underlying data only moves when event_fusion.py writes (minutes apart),
+# so a short TTL costs nothing in freshness.
+_ESCALATION_CACHE = LruTtlCache(maxsize=1, ttl=120)
+
+
+@app.get("/api/escalation")
+async def escalation_endpoint():
+    """Regions currently running above their own recent baseline.
+
+    Returns an empty list -- not an error -- when there's no database or not
+    enough history to compare against. "Nothing to report" and "we can't
+    tell yet" both correctly render as a hidden panel rather than a claim.
+    """
+    cached = _ESCALATION_CACHE.get("all")
+    if cached is None:
+        cached = await escalation.compute()
+        _ESCALATION_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/replay")
 async def replay_at(at: float, region: str | None = None):
     """Point-in-time snapshot for the timeline scrubber: conflict/fires/news
@@ -226,9 +280,23 @@ async def replay_at(at: float, region: str | None = None):
     would just be dead weight on every request.
     """
     bounds = regions.bounds_for(region)
+
+    # The conflict layer replays out of Postgres when there's history there,
+    # and falls back to time-filtering the in-memory feed otherwise (a fresh
+    # database, or the first minutes after a restart). Reading storage is
+    # what makes the scrubber show the *fused* records the live map draws --
+    # filtering registry data alone can only ever replay raw, pre-fusion
+    # ACLED/UCDP rows, so scrubbing back used to swap the map's merged
+    # events for un-deduplicated ones without saying so.
+    events = regions.filter_points(await storage.history_at("events", at), bounds)
+    if not events:
+        events = regions.filter_points(
+            replay.filter_up_to(registry.get("acled").data, replay.acled_ts, at), bounds
+        )
+
     payload = {
         "at": at,
-        "acled": regions.filter_points(replay.filter_up_to(registry.get("acled").data, replay.acled_ts, at), bounds),
+        "events": events,
         "firms": regions.filter_points(replay.filter_up_to(registry.get("firms").data, replay.firms_ts, at), bounds),
         "gdelt": regions.filter_points(replay.filter_up_to(registry.get("gdelt").data, replay.gdelt_ts, at), bounds),
         "ais": regions.filter_points(await history.SHIP_HISTORY.at(at), bounds),
@@ -244,10 +312,18 @@ async def replay_at(at: float, region: str | None = None):
 # grid (not 0.1deg) -- wind doesn't change meaningfully over a small pan, and
 # Open-Meteo's free tier has a hard *daily* request cap that a fine-grained
 # cache key burns through fast (every few-pixel pan was a fresh API call).
-_WIND_CACHE: dict[tuple[float, float, float, float], tuple[float, list[dict], int]] = {}
 _WIND_CACHE_TTL = 600
 _WIND_CACHE_GRID_DEG = 4
+_WIND_CACHE = LruTtlCache(maxsize=500, ttl=_WIND_CACHE_TTL)
 _wind_version = 0  # bumped only on an actual re-fetch, same idea as SourceState.version
+
+# Guards Open-Meteo's daily quota. Only cache *misses* draw a token, since a
+# hit costs the upstream nothing -- so this bounds the sustained outbound
+# rate while leaving normal browsing (which is nearly all cache hits, thanks
+# to the 4-degree snap above) completely unaffected. Burst of 30 covers a
+# first load panning across fresh grid squares; 1/s sustained is far more
+# than a human map session generates and far less than the daily cap.
+_WIND_UPSTREAM_LIMIT = TokenBucket(capacity=30, refill_per_second=1.0)
 
 # Open-Meteo's cap is a hard *daily* count, not a rate limit that recovers in
 # seconds -- once it's exhausted (or the upstream is otherwise down), retrying
@@ -273,19 +349,23 @@ async def wind(request: Request, south: float, west: float, north: float, east: 
         raise HTTPException(502, f"Wind data fetch failed: {cached_error[1]}")
 
     cached = _WIND_CACHE.get(cache_key)
-    if not cached or time.time() - cached[0] >= _WIND_CACHE_TTL:
-        if len(_WIND_CACHE) > 500:
-            _WIND_CACHE.clear()
+    if cached is None:
+        if not _WIND_UPSTREAM_LIMIT.take():
+            # Deliberately 503 + Retry-After rather than 502: nothing is
+            # broken, we're just declining to spend more of the daily quota
+            # this second. The frontend already treats a failed wind fetch as
+            # "unavailable right now" (see WeatherSection.jsx's notice).
+            raise HTTPException(503, "Wind fetch rate limit reached", headers={"Retry-After": "5"})
         try:
             data = await fetch_wind_velocity_grid(south, west, north, east)
         except Exception as exc:
             _WIND_ERROR_CACHE[cache_key] = (time.time(), str(exc))
             raise HTTPException(502, f"Wind data fetch failed: {exc}")
         _wind_version += 1
-        cached = (time.time(), data, _wind_version)
-        _WIND_CACHE[cache_key] = cached
+        cached = (data, _wind_version)
+        _WIND_CACHE.set(cache_key, cached)
 
-    _, data, version = cached
+    data, version = cached
     etag = '"{}:{}"'.format("-".join(str(v) for v in cache_key), version)
     headers = {"Cache-Control": f"public, max-age={_WIND_CACHE_TTL}", "ETag": etag}
     if request.headers.get("if-none-match") == etag:
@@ -309,32 +389,49 @@ async def wind(request: Request, south: float, west: float, north: float, east: 
 # max-age, and after that a revalidation costs a bare 304 instead of the
 # full image, since OWM frequently re-serves an unchanged tile between polls.
 _WEATHER_LAYERS = {"clouds_new", "wind_new", "precipitation_new", "temp_new", "pressure_new"}
-_TILE_CACHE: dict[tuple[str, int, int, int], tuple[float, bytes, str]] = {}  # (fetched_at, content, etag)
 _TILE_CACHE_TTL = 900
+_TILE_CACHE = LruTtlCache(maxsize=8000, ttl=_TILE_CACHE_TTL)
+
+# Same reasoning as the wind limiter above, sized for tiles: one screenful is
+# roughly 10-20 tiles, so a 200-token burst absorbs several pans over unseen
+# area, and 20/s sustained keeps a scripted crawl of the tile pyramid from
+# quietly draining the OWM quota. Only misses draw tokens.
+_TILE_UPSTREAM_LIMIT = TokenBucket(capacity=200, refill_per_second=20.0)
+
+# z/x/y arrive straight off the URL. Web Mercator only defines 0 <= x,y < 2^z,
+# and OWM serves nothing past z~20 -- without this, an out-of-range request
+# was forwarded upstream to earn a 4xx, spending quota to learn what simple
+# arithmetic already knows, and each distinct bad tuple got its own cache slot.
+_TILE_MAX_ZOOM = 20
 
 
 @app.get("/api/weather/tile/{layer}/{z}/{x}/{y}.png")
 async def weather_tile(layer: str, z: int, x: int, y: int, request: Request):
     if layer not in _WEATHER_LAYERS:
         raise HTTPException(404, "Unknown weather layer")
+    if not 0 <= z <= _TILE_MAX_ZOOM:
+        raise HTTPException(404, "Zoom out of range")
+    limit = 1 << z
+    if not (0 <= x < limit and 0 <= y < limit):
+        raise HTTPException(404, "Tile out of range")
     if not config.OWM_API_KEY:
         raise HTTPException(503, "OWM_API_KEY not set in .env")
 
     cache_key = (layer, z, x, y)
     cached = _TILE_CACHE.get(cache_key)
-    if not cached or time.time() - cached[0] >= _TILE_CACHE_TTL:
-        if len(_TILE_CACHE) > 8000:  # crude cap so a long-running session can't grow unbounded
-            _TILE_CACHE.clear()
+    if cached is None:
+        if not _TILE_UPSTREAM_LIMIT.take():
+            raise HTTPException(503, "Weather tile rate limit reached", headers={"Retry-After": "2"})
 
         url = f"https://tile.openweathermap.org/map/{layer}/{z}/{x}/{y}.png"
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url, params={"appid": config.OWM_API_KEY})
             resp.raise_for_status()
         etag = hashlib.sha256(resp.content).hexdigest()[:16]
-        cached = (time.time(), resp.content, etag)
-        _TILE_CACHE[cache_key] = cached
+        cached = (resp.content, etag)
+        _TILE_CACHE.set(cache_key, cached)
 
-    _, content, etag = cached
+    content, etag = cached
     etag_header = f'"{etag}"'
     headers = {"Cache-Control": f"public, max-age={_TILE_CACHE_TTL}", "ETag": etag_header}
     if request.headers.get("if-none-match") == etag_header:
@@ -342,38 +439,53 @@ async def weather_tile(layer: str, z: int, x: int, y: int, request: Request):
     return Response(content=content, media_type="image/png", headers=headers)
 
 
-if not (config.FRONTEND_DIST_DIR / "index.html").exists():
-    raise RuntimeError(
-        f"{config.FRONTEND_DIST_DIR} has no build output -- run `npm install && npm run build` "
-        "in frontend/ first (run.bat does this automatically)."
-    )
+# Serving the built frontend is optional. In the docker-compose split (see
+# docker-compose.yml) the React app is its own nginx container that proxies
+# /api here, so this image has no frontend/dist at all and must run as a
+# pure API -- what used to be a hard RuntimeError at import time. The
+# single-container path (root Dockerfile, render.yaml) still copies dist in,
+# so it keeps serving the UI from here exactly as before.
+_HAS_FRONTEND_BUILD = (config.FRONTEND_DIST_DIR / "index.html").exists()
 
-# Vite's default build layout: hashed JS/CSS under dist/assets/, everything
-# else (index.html, the favicon data-uri is inline so nothing else is needed)
-# served from dist/ directly.
-app.mount("/assets", StaticFiles(directory=str(config.FRONTEND_DIST_DIR / "assets")), name="assets")
+if _HAS_FRONTEND_BUILD:
+    # Vite's default build layout: hashed JS/CSS under dist/assets/, everything
+    # else (index.html, the favicon data-uri is inline so nothing else is needed)
+    # served from dist/ directly.
+    app.mount("/assets", StaticFiles(directory=str(config.FRONTEND_DIST_DIR / "assets")), name="assets")
 
+    @app.get("/")
+    async def index():
+        return FileResponse(str(config.FRONTEND_DIST_DIR / "index.html"))
+else:
+    log.info("No frontend build at %s -- serving API only", config.FRONTEND_DIST_DIR)
 
-@app.get("/")
-async def index():
-    return FileResponse(str(config.FRONTEND_DIST_DIR / "index.html"))
+    @app.get("/")
+    async def index():
+        return JSONResponse({"service": "osint-live-globe", "mode": "api-only"})
 
 
 def run():
     import uvicorn
 
-    threading_open_browser()
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    # Render (and most PaaS hosts) inject PORT and expect a bind on 0.0.0.0;
+    # local runs keep the old 127.0.0.1:8000 default with an auto-opened tab.
+    port = int(os.getenv("PORT", "8000"))
+    is_cloud = "PORT" in os.environ
+    host = "0.0.0.0" if is_cloud else "127.0.0.1"
+
+    if not is_cloud:
+        threading_open_browser(port)
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
-def threading_open_browser():
+def threading_open_browser(port: int):
     import threading
 
     def _open():
         import time
 
         time.sleep(1.5)
-        webbrowser.open("http://127.0.0.1:8000")
+        webbrowser.open(f"http://127.0.0.1:{port}")
 
     threading.Thread(target=_open, daemon=True).start()
 

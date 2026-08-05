@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from backend import config
+from backend import config, storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.acled")
@@ -313,7 +313,13 @@ async def start():
                 "Conflict events: %d total (%d ACLED, %d UCDP)",
                 len(state.data), len(state.data) - ucdp_count, ucdp_count,
             )
+            # Raw ACLED+UCDP rows, pre-fusion -- event_fusion.py archives the
+            # merged view separately, so both the inputs and the result stay
+            # queryable rather than only the result.
+            await storage.record_snapshot("acled", state.data, "id")
+            await storage.record_source_health("acled", len(state.data), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("Conflict event fetch failed: %s", exc)
+            await storage.record_source_health("acled", None, False, str(exc))
         await asyncio.sleep(config.ACLED_POLL_INTERVAL if acled_configured else config.UCDP_POLL_INTERVAL)

@@ -6,6 +6,7 @@ import zipfile
 
 import httpx
 
+from backend import storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.cities")
@@ -68,9 +69,14 @@ async def start():
             state.last_error = None
             ok = True
             log.info("Cities: %d with population >= %d", len(state.data), MIN_POPULATION)
+            # GeoNames rows have no stable id here -- synthesized from
+            # name/country_code/lat/lon (see storage.py's _synthetic_id).
+            await storage.record_snapshot("cities", state.data)
+            await storage.record_source_health("cities", len(state.data), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("Cities fetch failed: %s", exc)
+            await storage.record_source_health("cities", None, False, str(exc))
         # An empty exception message (e.g. a bare asyncio.TimeoutError) is
         # still a failure -- branch on whether the fetch itself succeeded,
         # not on the truthiness of the resulting error string.

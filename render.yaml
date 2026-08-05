@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: osint-live-globe
+    runtime: docker
+    plan: free
+    envVars:
+      # Durable storage is Postgres now (see backend/storage.py) -- point
+      # this at a managed instance. Without it the app still runs and the
+      # map still works, it just records nothing.
+      - key: DATABASE_URL
+        sync: false
+      - key: FIRMS_MAP_KEY
+        sync: false
+      - key: AISSTREAM_API_KEY
+        sync: false
+      - key: OPENSKY_CLIENT_ID
+        sync: false
+      - key: OPENSKY_CLIENT_SECRET
+        sync: false
+      - key: ACLED_EMAIL
+        sync: false
+      - key: ACLED_PASSWORD
+        sync: false
+      - key: OWM_API_KEY
+        sync: false

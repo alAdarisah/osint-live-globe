@@ -1,33 +1,41 @@
-"""Durable SQLite-backed position storage for ships (AIS) and aircraft
-(ADS-B), sitting behind history.py's replay buffers. The live layer
-(registry.get("ais"/"adsb").data, served by /api/ships and /api/aircraft)
-stays exactly as it was -- an in-memory "what's on the map right now" list.
-This module is the separate "where has it been" store: every live snapshot
-gets written here too, deduped against the last known position so a
-stationary ship reporting the same lat/lon every 5s doesn't bloat the
-movement log, with per-kind stale eviction and time-based retention so
-neither table grows without bound.
+"""Durable Postgres-backed storage for everything the app observes.
 
-Two tables, matching the "keep only latest valid position for inactive
-entities" vs "movement history separate from live layer" split:
-  entity_latest  -- one row per (kind, entity_id), always current.
-  entity_history -- append-only, one row per position *change*, pruned by
-                    retention_sweep_loop().
+The live layer (registry.get(...).data, served by /api/ships, /api/aircraft,
+/api/events, ...) stays exactly as it was: an in-memory "what's on the map
+right now" list. This module is the separate "what has been seen, and when"
+store that sits behind it. Every point source writes its snapshots here,
+deduped against the last known position so a stationary ship reporting the
+same lat/lon every 5s doesn't bloat the movement log.
 
-stdlib sqlite3 only, WAL mode (readers -- /api/replay -- don't block the
-writer, and vice versa). A single writer connection is reused for the
-process lifetime, serialized by _write_lock since sqlite3 connections
-aren't safe for concurrent use from multiple threads/tasks at once; every
-call into it runs off the event loop via asyncio.to_thread. Reads use a
-short-lived connection per call -- cheap at this data volume and avoids any
-contention on the writer connection.
+Five tables:
+  entity_latest      -- one row per (kind, entity_id), always current.
+  entity_history     -- append-only, one row per position *change*.
+  conflict_events    -- the fused ACLED/UCDP/GDELT archive, with the richer
+                        queryable columns entity_latest's generic shape
+                        can't express (see backend/sources/event_fusion.py).
+  reference_snapshots-- whole-document sources that aren't lat/lon rows at
+                        all (countries GeoJSON, HDX country->month series).
+  source_health      -- one row per poll outcome, per source.
+
+`kind` is what makes the first two generic: "ais", "adsb", "events",
+"acled", "gdelt", "satellites", "firms", "jamming", "cities". Adding a
+source is one record_snapshot() call in its poll loop, no schema change.
+
+asyncpg throughout (native async -- no thread pool), one pool for the
+process, created by init_pool() from app.py's lifespan before any source
+starts. Writes are deliberately failure-tolerant: the live layer is the
+source of truth for what's on screen, and a Postgres hiccup must never take
+a poller down with it, so write paths log and continue. Reads (/api/replay)
+surface their errors normally.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
-import sqlite3
-import time
+from datetime import datetime, timedelta, timezone
+
+import asyncpg
 
 from backend import config
 
@@ -38,35 +46,43 @@ log = logging.getLogger("osint-globe.storage")
 # that GPS/decoder jitter on a truly stationary entity doesn't.
 _COORD_EPSILON = 0.00001
 
-_write_lock = asyncio.Lock()
-_conn: sqlite3.Connection | None = None
+# Rows per round trip. Big enough that a 100k-point FIRMS snapshot is a
+# handful of statements, small enough that no single statement builds a
+# huge parameter array in memory.
+_BATCH = 5000
+
+_pool: asyncpg.Pool | None = None
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS entity_latest (
   kind TEXT NOT NULL,
   entity_id TEXT NOT NULL,
-  lat REAL NOT NULL,
-  lon REAL NOT NULL,
-  payload TEXT NOT NULL,
-  updated_at REAL NOT NULL,
-  last_moved_at REAL NOT NULL,
+  lat DOUBLE PRECISION NOT NULL,
+  lon DOUBLE PRECISION NOT NULL,
+  payload JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  last_moved_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (kind, entity_id)
 );
+CREATE INDEX IF NOT EXISTS idx_latest_kind_moved ON entity_latest (kind, last_moved_at DESC);
+
 CREATE TABLE IF NOT EXISTS entity_history (
+  id BIGSERIAL PRIMARY KEY,
   kind TEXT NOT NULL,
   entity_id TEXT NOT NULL,
-  ts REAL NOT NULL,
-  lat REAL NOT NULL,
-  lon REAL NOT NULL,
-  payload TEXT NOT NULL
+  ts TIMESTAMPTZ NOT NULL,
+  lat DOUBLE PRECISION NOT NULL,
+  lon DOUBLE PRECISION NOT NULL,
+  payload JSONB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_history_lookup ON entity_history(kind, ts);
-CREATE INDEX IF NOT EXISTS idx_history_entity ON entity_history(kind, entity_id, ts);
-CREATE TABLE IF NOT EXISTS conflict_watch_events (
+CREATE INDEX IF NOT EXISTS idx_history_lookup ON entity_history (kind, ts);
+CREATE INDEX IF NOT EXISTS idx_history_entity ON entity_history (kind, entity_id, ts DESC);
+
+CREATE TABLE IF NOT EXISTS conflict_events (
   id TEXT PRIMARY KEY,
-  date TEXT,
-  lat REAL NOT NULL,
-  lon REAL NOT NULL,
+  date DATE,
+  lat DOUBLE PRECISION,
+  lon DOUBLE PRECISION,
   event_type TEXT,
   sub_event_type TEXT,
   actor1 TEXT,
@@ -75,217 +91,404 @@ CREATE TABLE IF NOT EXISTS conflict_watch_events (
   country TEXT,
   notes TEXT,
   source TEXT,
-  corroborated INTEGER,
-  corroborated_by TEXT,
-  first_seen REAL NOT NULL,
-  last_seen REAL NOT NULL
+  corroborated BOOLEAN,
+  corroborated_by TEXT[],
+  mentions INTEGER,
+  -- DOUBLE PRECISION rather than REAL: these arrive as Python floats, which
+  -- asyncpg binds as float8, and matching the column type avoids relying on
+  -- an implicit float8 -> float4 narrowing on every insert.
+  goldstein DOUBLE PRECISION,
+  avg_tone DOUBLE PRECISION,
+  source_url TEXT,
+  -- 0-100, see event_fusion.py's _severity_for. Persisted (not just derived
+  -- at serve time) because escalation.py sums it over historical windows.
+  severity INTEGER,
+  first_seen TIMESTAMPTZ NOT NULL,
+  last_seen TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_conflict_watch_date ON conflict_watch_events(date);
+CREATE INDEX IF NOT EXISTS idx_conflict_events_date ON conflict_events (date);
+CREATE INDEX IF NOT EXISTS idx_conflict_events_last_seen ON conflict_events (last_seen);
+-- escalation.py's baseline query filters by first_seen and then by bounding
+-- box, so leading with first_seen is what keeps that window scan cheap.
+CREATE INDEX IF NOT EXISTS idx_conflict_events_first_seen ON conflict_events (first_seen);
+
+-- Added after the table shipped, so existing databases need it backfilled
+-- rather than only new ones getting it from the CREATE above.
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS severity INTEGER;
+
+CREATE TABLE IF NOT EXISTS reference_snapshots (
+  name TEXT PRIMARY KEY,
+  payload JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS source_health (
+  id BIGSERIAL PRIMARY KEY,
+  source TEXT NOT NULL,
+  ts TIMESTAMPTZ NOT NULL,
+  item_count INTEGER,
+  ok BOOLEAN NOT NULL,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_source_health_lookup ON source_health (source, ts DESC);
 """
 
 
-def _connect() -> sqlite3.Connection:
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(config.DATA_DIR / "positions.db", check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.executescript(_SCHEMA)
-    conn.commit()
-    return conn
+async def init_pool(retries: int = 30, delay: float = 2.0) -> None:
+    """Opens the pool and creates the schema, retrying while Postgres boots.
+
+    Scheduled as a background task by app.py's lifespan, deliberately not
+    awaited: writes no-op while `_pool` is None, so connecting late costs a
+    few skipped snapshots, whereas blocking on it would make the API's
+    availability depend on the database's. That matters because the retry
+    budget is generous on purpose -- docker-compose's healthcheck covers the
+    normal case, but a Postgres container restart can still race the backend,
+    and a backend that gave up permanently on that race would need manual
+    intervention to start recording again.
+    """
+    global _pool
+    if _pool is not None:
+        return
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            _pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=10)
+            async with _pool.acquire() as conn:
+                await conn.execute(_SCHEMA)
+            log.info("Postgres storage ready")
+            return
+        except Exception as exc:  # noqa: BLE001 - any connect failure is worth retrying
+            last_error = exc
+            if attempt < retries:
+                log.warning("Postgres not ready (attempt %d/%d): %s", attempt, retries, exc)
+                await asyncio.sleep(delay)
+    log.error("Giving up connecting to Postgres: %s -- running without durable storage", last_error)
 
 
-def _writer() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = _connect()
-    return _conn
+def get_pool() -> asyncpg.Pool | None:
+    """The live pool, or None while storage is unavailable.
+
+    Exposed for modules that run their own aggregate queries rather than
+    going through this module's record/read helpers (see escalation.py) --
+    they need to distinguish "no database" from "no results", and reaching
+    into _pool directly from outside would make that coupling invisible.
+    """
+    return _pool
+
+
+async def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
 
 
 def _stale_after(kind: str) -> int:
-    return config.AIS_STALE_AFTER if kind == "ais" else config.ADSB_STALE_AFTER
+    return config.ENTITY_STALE_AFTER.get(kind, config.ENTITY_STALE_AFTER_DEFAULT)
 
 
-def _record_snapshot_sync(kind: str, items: list[dict], id_field: str) -> None:
-    conn = _writer()
-    now = time.time()
-    cur = conn.cursor()
-    cur.execute("BEGIN")
-    try:
-        for item in items:
+def _synthetic_id(item: dict) -> str:
+    """Stable id for sources whose rows carry no identifier of their own.
+
+    FIRMS detections, GPSJam cells and GeoNames cities are all plain
+    observations -- there is no upstream key to dedup on, but the same
+    detection *does* reappear across consecutive polls, so hashing the
+    fields that identify it keeps that from creating a new row every time.
+    """
+    basis = "|".join(
+        str(item.get(k)) for k in ("lat", "lon", "acq_date", "acq_time", "name", "country_code")
+    )
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:20]
+
+
+def _rows_for(items: list[dict], id_field: str | None, id_fn) -> tuple[list, list, list, list]:
+    """Flattens items into the parallel arrays _UPSERT_LATEST unnests.
+
+    Deduplicated by id, last occurrence winning: Postgres rejects an
+    `ON CONFLICT DO UPDATE` whose source rows touch the same key twice
+    ("cannot affect row a second time"), which a snapshot can genuinely do
+    -- two FIRMS detections sharing a lat/lon/time collapse to one synthetic
+    id, and an upstream feed can repeat an entity within a single response.
+    A dict keyed by id is also what makes "last wins" the natural behaviour,
+    matching the live layer, where a later reading supersedes an earlier one.
+    """
+    rows: dict[str, tuple[float, float, str]] = {}
+    for item in items:
+        lat, lon = item.get("lat"), item.get("lon")
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            continue
+        if id_fn is not None:
+            raw_id = id_fn(item)
+        elif id_field is not None:
             raw_id = item.get(id_field)
-            if raw_id is None:
-                continue
-            entity_id = str(raw_id)
-            lat, lon = item.get("lat"), item.get("lon")
-            if lat is None or lon is None:
-                continue
-            payload = json.dumps(item)
+        else:
+            raw_id = _synthetic_id(item)
+        if raw_id is None:
+            continue
+        rows[str(raw_id)] = (float(lat), float(lon), json.dumps(item, default=str))
 
-            row = cur.execute(
-                "SELECT lat, lon, last_moved_at FROM entity_latest WHERE kind=? AND entity_id=?",
-                (kind, entity_id),
-            ).fetchone()
-
-            if row is not None:
-                prev_lat, prev_lon, prev_moved_at = row
-                moved = abs(prev_lat - lat) > _COORD_EPSILON or abs(prev_lon - lon) > _COORD_EPSILON
-                last_moved_at = now if moved else prev_moved_at
-            else:
-                moved = True
-                last_moved_at = now
-
-            cur.execute(
-                """INSERT INTO entity_latest (kind, entity_id, lat, lon, payload, updated_at, last_moved_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(kind, entity_id) DO UPDATE SET
-                     lat=excluded.lat, lon=excluded.lon, payload=excluded.payload,
-                     updated_at=excluded.updated_at, last_moved_at=excluded.last_moved_at""",
-                (kind, entity_id, lat, lon, payload, now, last_moved_at),
-            )
-
-            if moved:
-                cur.execute(
-                    "INSERT INTO entity_history (kind, entity_id, ts, lat, lon, payload) VALUES (?, ?, ?, ?, ?, ?)",
-                    (kind, entity_id, now, lat, lon, payload),
-                )
-
-        cutoff = now - _stale_after(kind)
-        cur.execute("DELETE FROM entity_latest WHERE kind=? AND updated_at < ?", (kind, cutoff))
-
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    ids = list(rows)
+    lats = [rows[i][0] for i in ids]
+    lons = [rows[i][1] for i in ids]
+    payloads = [rows[i][2] for i in ids]
+    return ids, lats, lons, payloads
 
 
-async def record_snapshot(kind: str, items: list[dict], id_field: str) -> None:
-    async with _write_lock:
-        await asyncio.to_thread(_record_snapshot_sync, kind, items, id_field)
+# One statement upserts a whole batch and reports back which rows actually
+# moved, via unnest() over parallel arrays. The SQLite version this replaces
+# did a SELECT-then-INSERT per row, which is what made large snapshots slow;
+# here the movement test lives in the ON CONFLICT clause itself, and
+# last_moved_at coming back equal to this poll's timestamp is precisely the
+# "it moved (or it's new)" signal used to decide which history rows to write.
+_UPSERT_LATEST = """
+INSERT INTO entity_latest (kind, entity_id, lat, lon, payload, updated_at, last_moved_at)
+SELECT $1, u.entity_id, u.lat, u.lon, u.payload::jsonb, $2, $2
+  FROM unnest($3::text[], $4::float8[], $5::float8[], $6::text[])
+       AS u(entity_id, lat, lon, payload)
+ON CONFLICT (kind, entity_id) DO UPDATE SET
+  lat = EXCLUDED.lat,
+  lon = EXCLUDED.lon,
+  payload = EXCLUDED.payload,
+  updated_at = EXCLUDED.updated_at,
+  last_moved_at = CASE
+    WHEN abs(entity_latest.lat - EXCLUDED.lat) > $7
+      OR abs(entity_latest.lon - EXCLUDED.lon) > $7
+    THEN EXCLUDED.updated_at
+    ELSE entity_latest.last_moved_at
+  END
+RETURNING entity_id, last_moved_at
+"""
+
+_INSERT_HISTORY = """
+INSERT INTO entity_history (kind, entity_id, ts, lat, lon, payload)
+SELECT $1, u.entity_id, $2, u.lat, u.lon, u.payload::jsonb
+  FROM unnest($3::text[], $4::float8[], $5::float8[], $6::text[])
+       AS u(entity_id, lat, lon, payload)
+"""
 
 
-def _history_at_sync(kind: str, at: float) -> list[dict]:
-    conn = sqlite3.connect(config.DATA_DIR / "positions.db", check_same_thread=False)
+async def record_snapshot(kind: str, items: list[dict], id_field: str | None = None, id_fn=None) -> None:
+    """Persists one poll's worth of points for `kind`.
+
+    `id_field` names the item key holding the entity's own id ("mmsi",
+    "icao24", ...). Sources whose rows have no such key (FIRMS, jamming,
+    cities) pass neither and get _synthetic_id; `id_fn` is the escape hatch
+    for anything needing a bespoke rule.
+    """
+    if _pool is None or not items:
+        return
+    ids, lats, lons, payloads = _rows_for(items, id_field, id_fn)
+    if not ids:
+        return
+    now = datetime.now(timezone.utc)
     try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        rows = conn.execute(
-            """
-            SELECT payload FROM (
-              SELECT payload, ts,
-                     ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY ts DESC) AS rn
-              FROM entity_history
-              WHERE kind = ? AND ts <= ?
-            ) WHERE rn = 1
-            """,
-            (kind, at),
-        ).fetchall()
+        async with _pool.acquire() as conn:
+            async with conn.transaction():
+                for start in range(0, len(ids), _BATCH):
+                    end = start + _BATCH
+                    chunk_ids = ids[start:end]
+                    chunk_lats = lats[start:end]
+                    chunk_lons = lons[start:end]
+                    chunk_payloads = payloads[start:end]
 
-        if not rows:
-            # `at` predates everything we've kept -- fall back to each
-            # entity's earliest known position, same as the old in-memory
-            # HistoryBuffer's "falls back to the oldest kept snapshot".
-            rows = conn.execute(
-                """
-                SELECT payload FROM (
-                  SELECT payload, ts,
-                         ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY ts ASC) AS rn
-                  FROM entity_history
-                  WHERE kind = ?
-                ) WHERE rn = 1
-                """,
-                (kind,),
-            ).fetchall()
+                    moved_rows = await conn.fetch(
+                        _UPSERT_LATEST, kind, now, chunk_ids, chunk_lats, chunk_lons,
+                        chunk_payloads, _COORD_EPSILON,
+                    )
+                    moved = {r["entity_id"] for r in moved_rows if r["last_moved_at"] == now}
+                    if not moved:
+                        continue
 
-        return [json.loads(r[0]) for r in rows]
-    finally:
-        conn.close()
+                    by_id = {i: n for n, i in enumerate(chunk_ids)}
+                    h_ids, h_lats, h_lons, h_payloads = [], [], [], []
+                    for entity_id in moved:
+                        idx = by_id.get(entity_id)
+                        if idx is None:
+                            continue
+                        h_ids.append(entity_id)
+                        h_lats.append(chunk_lats[idx])
+                        h_lons.append(chunk_lons[idx])
+                        h_payloads.append(chunk_payloads[idx])
+                    if h_ids:
+                        await conn.execute(_INSERT_HISTORY, kind, now, h_ids, h_lats, h_lons, h_payloads)
+
+                cutoff = now - timedelta(seconds=_stale_after(kind))
+                await conn.execute(
+                    "DELETE FROM entity_latest WHERE kind = $1 AND updated_at < $2", kind, cutoff
+                )
+    except Exception:  # noqa: BLE001 - storage must never take a poller down
+        log.exception("Failed to record %s snapshot (%d items)", kind, len(ids))
+
+
+_UPSERT_CONFLICT = """
+INSERT INTO conflict_events (
+  id, date, lat, lon, event_type, sub_event_type, actor1, actor2, fatalities,
+  country, notes, source, corroborated, corroborated_by, mentions, goldstein,
+  avg_tone, source_url, severity, first_seen, last_seen
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$20)
+ON CONFLICT (id) DO UPDATE SET
+  date = EXCLUDED.date, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+  event_type = EXCLUDED.event_type, sub_event_type = EXCLUDED.sub_event_type,
+  actor1 = EXCLUDED.actor1, actor2 = EXCLUDED.actor2,
+  fatalities = EXCLUDED.fatalities, country = EXCLUDED.country,
+  notes = EXCLUDED.notes, source = EXCLUDED.source,
+  corroborated = EXCLUDED.corroborated, corroborated_by = EXCLUDED.corroborated_by,
+  mentions = EXCLUDED.mentions, goldstein = EXCLUDED.goldstein,
+  avg_tone = EXCLUDED.avg_tone, source_url = EXCLUDED.source_url,
+  severity = EXCLUDED.severity,
+  last_seen = EXCLUDED.last_seen
+"""
+
+
+def _parse_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+async def record_conflict_events(items: list[dict]) -> None:
+    """Archives the fused conflict feed (see backend/sources/event_fusion.py).
+
+    Kept separate from entity_latest's generic shape because these rows are
+    the ones actually worth querying by actor/fatalities/corroboration, and
+    first_seen/last_seen answer "when did we first hear about this" -- which
+    a snapshot table structurally can't.
+    """
+    if _pool is None or not items:
+        return
+    now = datetime.now(timezone.utc)
+    rows = []
+    for item in items:
+        item_id = item.get("id")
+        lat, lon = item.get("lat"), item.get("lon")
+        if item_id is None or lat is None or lon is None:
+            continue
+        rows.append((
+            str(item_id), _parse_date(item.get("date")), lat, lon,
+            item.get("event_type"), item.get("sub_event_type"),
+            item.get("actor1"), item.get("actor2"),
+            int(item.get("fatalities") or 0), item.get("country"),
+            item.get("notes"), item.get("source"),
+            bool(item.get("corroborated")), list(item.get("corroborated_by") or []),
+            int(item.get("mentions") or 0) or None,
+            item.get("goldstein"), item.get("avg_tone"), item.get("source_url"),
+            int(item.get("severity") or 0) or None,
+            now,
+        ))
+    if not rows:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.executemany(_UPSERT_CONFLICT, rows)
+    except Exception:  # noqa: BLE001
+        log.exception("Failed to record %d conflict events", len(rows))
+
+
+async def record_reference(name: str, payload) -> None:
+    """Stores a whole-document source (countries GeoJSON, HDX series dict).
+
+    These have no per-row lat/lon to snapshot -- they're one big document
+    that's replaced wholesale on each refresh, so they get their own table
+    rather than being forced into entity_latest's point shape.
+    """
+    if _pool is None or payload is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO reference_snapshots (name, payload, updated_at)
+                   VALUES ($1, $2::jsonb, $3)
+                   ON CONFLICT (name) DO UPDATE SET
+                     payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at""",
+                name, json.dumps(payload, default=str), datetime.now(timezone.utc),
+            )
+    except Exception:  # noqa: BLE001
+        log.exception("Failed to record reference snapshot %r", name)
+
+
+async def record_source_health(source: str, item_count: int | None, ok: bool, error: str | None = None) -> None:
+    """One row per poll outcome -- the history behind /api/health's snapshot."""
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO source_health (source, ts, item_count, ok, error) VALUES ($1,$2,$3,$4,$5)",
+                source, datetime.now(timezone.utc), item_count, ok, (error or None),
+            )
+    except Exception:  # noqa: BLE001
+        log.exception("Failed to record source health for %r", source)
 
 
 async def history_at(kind: str, at: float) -> list[dict]:
-    return await asyncio.to_thread(_history_at_sync, kind, at)
-
-
-def _entity_latest_sync(kind: str, order_by_recency: bool) -> list[dict]:
-    conn = sqlite3.connect(config.DATA_DIR / "positions.db", check_same_thread=False)
-    try:
-        order = "last_moved_at DESC" if order_by_recency else "entity_id"
-        rows = conn.execute(
-            f"SELECT payload FROM entity_latest WHERE kind = ? ORDER BY {order}", (kind,)
-        ).fetchall()
-        return [json.loads(r[0]) for r in rows]
-    finally:
-        conn.close()
+    """Nearest recorded position at-or-before `at` (unix seconds), per entity."""
+    if _pool is None:
+        return []
+    when = datetime.fromtimestamp(at, tz=timezone.utc)
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT payload FROM (
+              SELECT payload, ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY ts DESC) AS rn
+                FROM entity_history
+               WHERE kind = $1 AND ts <= $2
+            ) ranked WHERE rn = 1
+            """,
+            kind, when,
+        )
+        if not rows:
+            # `at` predates everything kept -- fall back to each entity's
+            # earliest known position, same as the old in-memory buffer's
+            # "falls back to the oldest kept snapshot".
+            rows = await conn.fetch(
+                """
+                SELECT payload FROM (
+                  SELECT payload, ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY ts ASC) AS rn
+                    FROM entity_history WHERE kind = $1
+                ) ranked WHERE rn = 1
+                """,
+                kind,
+            )
+    return [json.loads(r["payload"]) for r in rows]
 
 
 async def entity_latest(kind: str, order_by_recency: bool = False) -> list[dict]:
-    return await asyncio.to_thread(_entity_latest_sync, kind, order_by_recency)
-
-
-def _record_conflict_watch_events_sync(items: list[dict]) -> None:
-    conn = _writer()
-    now = time.time()
-    cur = conn.cursor()
-    cur.execute("BEGIN")
-    try:
-        for item in items:
-            item_id = item.get("id")
-            lat, lon = item.get("lat"), item.get("lon")
-            if item_id is None or lat is None or lon is None:
-                continue
-            corroborated_by = ",".join(item.get("corroborated_by") or [])
-            cur.execute(
-                """INSERT INTO conflict_watch_events
-                     (id, date, lat, lon, event_type, sub_event_type, actor1, actor2,
-                      fatalities, country, notes, source, corroborated, corroborated_by,
-                      first_seen, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                     date=excluded.date, lat=excluded.lat, lon=excluded.lon,
-                     event_type=excluded.event_type, sub_event_type=excluded.sub_event_type,
-                     actor1=excluded.actor1, actor2=excluded.actor2, fatalities=excluded.fatalities,
-                     country=excluded.country, notes=excluded.notes, source=excluded.source,
-                     corroborated=excluded.corroborated, corroborated_by=excluded.corroborated_by,
-                     last_seen=excluded.last_seen""",
-                (
-                    str(item_id), item.get("date"), lat, lon, item.get("event_type"),
-                    item.get("sub_event_type"), item.get("actor1"), item.get("actor2"),
-                    int(item.get("fatalities") or 0), item.get("country"), item.get("notes"),
-                    item.get("source"), int(bool(item.get("corroborated"))), corroborated_by,
-                    now, now,
-                ),
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-
-async def record_conflict_watch_events(items: list[dict]) -> None:
-    async with _write_lock:
-        await asyncio.to_thread(_record_conflict_watch_events_sync, items)
-
-
-def _retention_sweep_sync(checkpoint: bool) -> None:
-    conn = _writer()
-    cutoff = time.time() - config.HISTORY_RETENTION_SECONDS
-    conn.execute("DELETE FROM entity_history WHERE ts < ?", (cutoff,))
-    conflict_watch_cutoff = time.time() - config.CONFLICT_WATCH_RETENTION_DAYS * 86400
-    conn.execute("DELETE FROM conflict_watch_events WHERE last_seen < ?", (conflict_watch_cutoff,))
-    conn.commit()
-    if checkpoint:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    if _pool is None:
+        return []
+    order = "last_moved_at DESC" if order_by_recency else "entity_id"
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT payload FROM entity_latest WHERE kind = $1 ORDER BY {order}", kind
+        )
+    return [json.loads(r["payload"]) for r in rows]
 
 
 async def retention_sweep_loop() -> None:
-    sweep_count = 0
+    """Prunes each table by its own window. Postgres reclaims space via
+    autovacuum, so unlike the SQLite version there's no WAL checkpoint to
+    schedule here."""
     while True:
         await asyncio.sleep(600)
-        async with _write_lock:
-            # WAL checkpointing is a bigger operation than a plain DELETE --
-            # only worth doing roughly once/hour, not on every 600s sweep.
-            sweep_count += 1
-            checkpoint = sweep_count % 6 == 0
-            try:
-                await asyncio.to_thread(_retention_sweep_sync, checkpoint)
-            except Exception:
-                log.exception("Retention sweep failed")
+        if _pool is None:
+            continue
+        now = datetime.now(timezone.utc)
+        try:
+            async with _pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM entity_history WHERE ts < $1",
+                    now - timedelta(seconds=config.HISTORY_RETENTION_SECONDS),
+                )
+                await conn.execute(
+                    "DELETE FROM conflict_events WHERE last_seen < $1",
+                    now - timedelta(days=config.CONFLICT_WATCH_RETENTION_DAYS),
+                )
+                await conn.execute(
+                    "DELETE FROM source_health WHERE ts < $1",
+                    now - timedelta(days=config.SOURCE_HEALTH_RETENTION_DAYS),
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("Retention sweep failed")

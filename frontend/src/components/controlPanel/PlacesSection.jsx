@@ -1,3 +1,6 @@
+import { SVG } from "../../map/svgIcons";
+import LayerIcon from "./LayerIcon";
+
 export default function PlacesSection({ counts, zoomNotes, layerVisibility, onToggleLayer }) {
   return (
     <>
@@ -8,7 +11,7 @@ export default function PlacesSection({ counts, zoomNotes, layerVisibility, onTo
           checked={layerVisibility.countries}
           onChange={(e) => onToggleLayer("countries", e.target.checked)}
         />
-        <span className="swatch swatch-countries" /> Countries
+        <LayerIcon svg={SVG.globe} color="#6fe3ff" /> Countries
         <span className="count">{counts.countries} ({counts.countriesTotal})</span>
       </label>
       <label className="layer-row" data-layer="cities">
@@ -17,7 +20,7 @@ export default function PlacesSection({ counts, zoomNotes, layerVisibility, onTo
           checked={layerVisibility.cities}
           onChange={(e) => onToggleLayer("cities", e.target.checked)}
         />
-        <span className="swatch swatch-cities" /> Cities (100k+)
+        <LayerIcon svg={SVG.city} color="#9be15d" /> Cities (100k+)
         <span className="count">{counts.cities} ({counts.citiesTotal})</span>
       </label>
       <div id="citiesZoomNote" className={`sublegend${zoomNotes.cities ? " visible" : ""}`}>

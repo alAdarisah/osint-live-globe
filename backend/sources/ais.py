@@ -15,6 +15,7 @@ STALE_AFTER = 60 * 30  # drop ships not updated in 30 minutes
 
 _ships: dict[int, dict] = {}
 _dirty = False  # set on every incoming position report, cleared once snapshotted
+_snapshot_task = None  # strong reference to the snapshot loop -- see start()
 
 # AIS "Type" (ship type code, from ShipStaticData) is a real classification
 # signal PositionReport alone never carries -- e.g. 35 = "Military ops", 80-89
@@ -130,8 +131,17 @@ async def start():
         while True:
             await asyncio.sleep(3600)
 
+    # Seed from the last known positions before the stream starts, so sparse
+    # boxes aren't blank while fresh PositionReports trickle in.
     await _preload_from_storage()
-    asyncio.create_task(_snapshot_loop(state))
+
+    # Held in a module-level global, not discarded: asyncio keeps only a weak
+    # reference to a running task, so a bare create_task() can be garbage
+    # collected mid-execution. That would silently stop the snapshot loop --
+    # taking /api/ships' updates and all AIS persistence with it, while the
+    # websocket kept happily filling _ships and nothing looked wrong.
+    global _snapshot_task
+    _snapshot_task = asyncio.create_task(_snapshot_loop(state))
 
     backoff = 5
     while True:

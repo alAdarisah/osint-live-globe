@@ -18,6 +18,7 @@ import MapView from "./components/MapView";
 import TitleBar from "./components/TitleBar";
 import RegionBar from "./components/RegionBar";
 import NewsBroadcastPanel from "./components/NewsBroadcastPanel";
+import NotableEventsPanel from "./components/NotableEventsPanel";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
@@ -29,9 +30,10 @@ import CountryInfoCard from "./components/CountryInfoCard";
 // infrastructure, satellites, and the military-only halves of ADS-B/AIS --
 // everything else is opt-in rather than cluttering the map on first load.
 const DEFAULT_LAYER_VISIBILITY = {
-  acled: true, conflictWatch: true, firms: false, aisCivilian: false, aisTanker: true, aisNavy: true, gdelt: true,
-  adsbCivilian: false, adsbMilitary: true,
-  countries: true, cities: false, infra: true, jamming: false, satellites: true,
+  events: true, firms: false, aisCivilian: false, aisTanker: true, aisTankerTrails: true, aisNavy: true, gdelt: true,
+  adsbCivilian: false, adsbMilitary: true, adsbMilitaryTrails: true,
+  countries: true, cities: true, infra: true, jamming: true, satellites: true, satellitesTrails: true,
+  satellitesMilitary: true,
   precip: false, clouds: false, windArrows: false,
 };
 
@@ -94,7 +96,7 @@ export default function App() {
       const [south, west, north, east] = entry.bounds;
       const bounds = { south, west, north, east };
       let score = 0;
-      for (const e of dataApi.acledRaw) {
+      for (const e of dataApi.eventsRaw) {
         if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
         if (!boundsContainsPoint(bounds, e.lat, e.lon)) continue;
         score += 1 + (e.fatalities || 0) * 2;
@@ -107,26 +109,13 @@ export default function App() {
       scores[key] = score;
     }
     return scores;
-  }, [dataApi.regions, dataApi.acledRaw, dataApi.gdeltRaw]);
+  }, [dataApi.regions, dataApi.eventsRaw, dataApi.gdeltRaw]);
 
   const [layerVisibility, setLayerVisibility] = useState(DEFAULT_LAYER_VISIBILITY);
   const onToggleLayer = useCallback(
     (key, visible) => {
       setLayerVisibility((prev) => ({ ...prev, [key]: visible }));
       mapApi.setLayerVisible(key, visible);
-    },
-    [mapApi.setLayerVisible]
-  );
-
-  // Single Layers-panel control for every conflict/violence source (ACLED,
-  // UCDP, Conflict Watch) -- see LayersSection.jsx's merged checkbox. Still
-  // two distinct layer keys under the hood since createMapController.js
-  // renders/counts/zoom-gates them separately.
-  const onToggleConflictLayers = useCallback(
-    (visible) => {
-      setLayerVisibility((prev) => ({ ...prev, acled: visible, conflictWatch: visible }));
-      mapApi.setLayerVisible("acled", visible);
-      mapApi.setLayerVisible("conflictWatch", visible);
     },
     [mapApi.setLayerVisible]
   );
@@ -217,12 +206,21 @@ export default function App() {
       {briefingZone && (
         <ConflictBriefingCard
           zone={briefingZone}
-          acledRaw={dataApi.acledRaw}
+          eventsRaw={dataApi.eventsRaw}
           gdeltRaw={dataApi.gdeltRaw}
           onClose={() => setBriefingZone(null)}
           onLocate={onLocateNewsItem}
         />
       )}
+
+      {/* Ranks the same /api/events data the map draws, so the two can't
+          disagree. Renders nothing when no event clears its severity floor. */}
+      <NotableEventsPanel
+        eventsRaw={dataApi.eventsRaw}
+        escalation={dataApi.escalation}
+        onLocate={onLocateNewsItem}
+        isMobile={isMobileViewport}
+      />
 
       <PanelToggle open={panelOpen} onToggle={togglePanel} />
 
@@ -232,7 +230,6 @@ export default function App() {
         zoomNotes={mapApi.zoomNotes}
         layerVisibility={layerVisibility}
         onToggleLayer={onToggleLayer}
-        onToggleConflictLayers={onToggleConflictLayers}
         health={health}
         owmConfigured={owmConfigured}
         windStatus={mapApi.windStatus}

@@ -411,6 +411,19 @@ html, body {
 
 #controlPanel h2:first-child { margin-top: 0; }
 
+/* Groups LayersSection.jsx's rows into scannable sections (Conflict & Events,
+   Air & Sea Traffic, Infrastructure & Environment, Space) instead of one
+   flat undifferentiated list -- one notch below h2 in weight/size. */
+.layer-group-heading {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--text-dim, var(--accent));
+  opacity: 0.75;
+  margin: 16px 0 6px;
+}
+.layer-group-heading:first-of-type { margin-top: 4px; }
+
 .layer-row {
   display: flex;
   align-items: center;
@@ -430,11 +443,21 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
-.swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+/* Indented, checkbox-only sub-tickers nested under a parent layer row (e.g.
+   "Show tanker trails" under Oil Tankers) -- same row shape, no icon/count,
+   smaller and dimmer since it's a secondary control, not its own layer. */
+.layer-row.sub-row {
+  padding-left: 20px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Replaces the old plain colored dot -- an actual glyph matching the
+   marker/tile that layer draws on the map, tinted via `color` (see
+   components/controlPanel/LayerIcon.jsx). */
+.layer-icon {
   flex: none;
+  color: var(--text-primary); /* overridden per-instance via inline style */
 }
 
 .sublegend {
@@ -446,7 +469,7 @@ html, body {
   color: var(--text-secondary);
 }
 .sublegend span { display: inline-flex; align-items: center; gap: 4px; }
-.sublegend .swatch { width: 8px; height: 8px; }
+.sublegend .layer-icon { width: 11px; height: 11px; }
 .sublegend.wind-unavailable { color: #ff8c3a; }
 
 .subticker-list {
@@ -463,7 +486,18 @@ html, body {
   color: var(--text-secondary);
   padding: 2px 0;
 }
-.subticker-row .swatch { width: 7px; height: 7px; }
+/* The base .swatch rule was dropped when the layer tickers moved from colour
+   dots to real glyphs (.layer-icon). The infra sub-tickers still use swatches
+   -- a 7px glyph would be unreadable, and a colour dot is the right weight
+   for a nested row -- so the base shape lives here now. Without it these
+   inherit no border-radius or flex behaviour and render as squares that
+   shrink under flex pressure. */
+.subticker-row .swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
 .subticker-row .count {
   margin-left: auto;
   color: var(--text-dim);
@@ -484,21 +518,75 @@ html, body {
 }
 .infra-filter-input:focus { outline: none; border-color: var(--accent); }
 
-.swatch-acled { background: #ff3b30; }
-.swatch-conflictWatch { background: #3ac1ff; }
-.swatch-firms { background: #ff9500; }
-.swatch-ais { background: #35c2ff; }
-.swatch-gdelt { background: #ffd60a; }
-.swatch-adsb { background: #b98cff; }
-.swatch-precip { background: #4ea8ff; }
-.swatch-clouds { background: #b8c4cc; }
-.swatch-wind { background: #7ee0c9; }
-.swatch-countries { background: #6fe3ff; }
-.swatch-cities { background: #ff6fb5; }
-.swatch-infra { background: #ff9500; }
-.swatch-jamming { background: #b833e0; }
-.swatch-satellites { background: #6fe3ff; }
-.swatch-wind-arrows { background: #7ee0c9; }
+/* ---------- country card: live situational snapshot ----------
+   Built by popups.js's countryPopupHtml and hosted in #countryInfoCard.
+   Compact by design: the card is 320px wide and pops out of the clicked
+   country, so these sections have to read at a glance rather than reward
+   study. */
+.csection {
+  margin: 8px 0 4px;
+  font-size: 8.5px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-top: 1px solid var(--panel-border);
+  padding-top: 6px;
+}
+
+.cstats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.cstat {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+.cstat-v {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+/* Counts that imply something is happening, rather than merely present. */
+.cstat.hot .cstat-v { color: #ff5c2a; }
+
+.cescalating {
+  margin: 7px 0 2px;
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: rgba(255, 92, 42, 0.16);
+  border: 1px solid rgba(255, 92, 42, 0.5);
+  color: #ff8c3a;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
+
+.cspark {
+  display: block;
+  width: 100%;
+  height: 26px;
+  margin: 3px 0 2px;
+}
+
+/* leaflet.heat paints into a full-viewport canvas in the overlay pane, and
+   unlike Leaflet's own renderers it never opts out of pointer events. That
+   canvas therefore sits on top of every country shape (countriesPane is
+   z-index 350, overlayPane 400) and swallows every click over the map --
+   countries became unclickable the moment any heat layer was switched on.
+   The heat layers are purely a visual density wash: FIRMS and jamming both
+   have separate, deliberately thin click-target layers (firmsPointsLayer /
+   jammingPointsLayer, see layers.js) that carry all their interactivity, so
+   making the heat canvas transparent to input costs nothing.
+   Scoped to leaflet.heat's own class -- L.Canvas renderers use different
+   classes and must keep their pointer events. */
+.leaflet-heatmap-layer {
+  pointer-events: none;
+}
 
 /* leaflet-velocity draws its own canvas particle field -- no custom marker
    CSS needed. Just keep it from intercepting clicks meant for the map. */
@@ -1077,6 +1165,161 @@ html, body {
   border-color: var(--accent);
 }
 
+/* ---------- notable activity board (NotableEventsPanel.jsx) ----------
+   Ranked "what matters right now", sitting bottom-right above the timeline
+   bar (46px) and clear of #attribution (bottom: 46px). Same panel language
+   as #newsBroadcast, but not draggable: it's a short, fixed-length board
+   rather than a scrolling feed, so there's nothing to get out of the way
+   of. Like #newsBroadcast it stays click-through except for its own
+   interactive parts, so map markers underneath remain reachable. */
+#notableEvents {
+  position: fixed;
+  right: 14px;
+  bottom: 78px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 38vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.notable-header, .notable-list { pointer-events: auto; }
+
+.notable-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-bottom: 1px solid var(--panel-border);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  flex: none;
+}
+.notable-header:hover { background: rgba(var(--accent-rgb), 0.08); }
+
+.notable-title {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  color: var(--accent);
+}
+
+.notable-count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.notable-caret {
+  font-size: 10px;
+  color: var(--accent);
+  transition: transform 0.18s ease;
+}
+#notableEvents.collapsed .notable-caret { transform: rotate(-90deg); }
+#notableEvents.collapsed .notable-header { border-bottom: none; }
+#notableEvents.collapsed .notable-list { display: none; }
+
+/* Distinct from .live-dot's steady pulse -- this one only exists when
+   something is actually on the board, so it reads as an alert rather than a
+   connection indicator. */
+.notable-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff5c2a;
+  flex: none;
+  animation: notable-pulse 1.8s ease-in-out infinite;
+}
+@keyframes notable-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 92, 42, 0.6); }
+  50% { opacity: 0.6; box-shadow: 0 0 0 5px rgba(255, 92, 42, 0); }
+}
+
+.notable-list { overflow-y: auto; }
+
+.notable-item {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.notable-item:last-child { border-bottom: none; }
+
+.notable-item-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notable-line {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notable-item-meta {
+  padding-left: 2px;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+/* Colours mirror decorators.js's severityBand so a row and its map pin are
+   recognisably the same event. */
+.notable-chip {
+  flex: none;
+  font-size: 8.5px;
+  letter-spacing: 0.8px;
+  padding: 2px 5px;
+  border-radius: 3px;
+  color: #0b0d10;
+  font-weight: 700;
+}
+/* Section dividers, present only when the panel is showing both an
+   escalation list and an event list. */
+.notable-section {
+  padding: 6px 10px 3px;
+  font-size: 8.5px;
+  letter-spacing: 1.2px;
+  color: var(--text-dim);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.escalation-item {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+/* The multiplier is the whole point of the row, so it leads and carries the
+   weight -- deliberately louder than the severity chips below it, since a
+   region trending up is a bigger claim than any single event. */
+.escalation-ratio {
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ff5c2a;
+  font-variant-numeric: tabular-nums;
+  min-width: 38px;
+}
+
+.notable-chip.critical { background: #ff1a1a; }
+.notable-chip.high { background: #ff5c2a; }
+.notable-chip.moderate { background: #ff9500; }
+.notable-chip.low { background: #ffd11a; }
+
 .news-empty {
   padding: 10px 0;
   font-size: 11.5px;
@@ -1151,6 +1394,18 @@ html, body {
   .timeline-label { min-width: 0; font-size: 10px; }
   .timeline-live-btn { padding: 5px 8px; }
   #attribution { bottom: 50px; }
+
+  /* Full width and clear of the taller mobile timeline. Starts collapsed
+     (see NotableEventsPanel.jsx), so this is a single header bar until
+     tapped. */
+  #notableEvents {
+    left: 10px;
+    right: 10px;
+    bottom: 84px;
+    width: auto;
+    max-width: none;
+    max-height: 34vh;
+  }
 }
 
 /* ---------- boot-sequence loading screen ----------
@@ -1245,6 +1500,7 @@ html, body {
 }
 .loading-log-line.ok { color: #cfe8f2; opacity: 1; }
 .loading-log-line.warn { opacity: 0.7; }
+.loading-log-line.timeout { opacity: 0.85; color: #ff8c3a; }
 
 .loading-log-status {
   width: 14px;
@@ -1256,6 +1512,7 @@ html, body {
 .loading-log-line.pending .loading-log-status { animation: loading-ellipsis-pulse 1.2s ease-in-out infinite; }
 .loading-log-line.ok .loading-log-status { color: #34c759; }
 .loading-log-line.warn .loading-log-status { color: #ff9500; }
+.loading-log-line.timeout .loading-log-status { color: #ff8c3a; }
 
 @keyframes loading-ellipsis-pulse {
   0%, 100% { opacity: 0.25; }

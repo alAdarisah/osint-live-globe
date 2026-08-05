@@ -22,10 +22,10 @@ function acledColor(d) {
 }
 
 // ACLED's own 6 top-level event_type categories, plus the UCDP violence-type
-// labels (see acled.py's UCDP_VIOLENCE_TYPE) and conflict_watch.py's local
+// labels (see acled.py's UCDP_VIOLENCE_TYPE) and event_fusion.py's local
 // classifier -- all three sources land in this one shared taxonomy, so one
 // lookup covers every item this glyph function will ever see. Matched by
-// substring (lowercased) rather than exact string since UCDP/conflict_watch
+// substring (lowercased) rather than exact string since UCDP/event_fusion
 // labels ("State-based armed conflict") don't spell ACLED's own wording.
 const ACLED_EVENT_ICON = [
   [/battle/i, SVG.battle],
@@ -45,38 +45,70 @@ function acledIcon(d) {
   return SVG.burst;
 }
 
-export function decorateAcled(d) {
-  const tooltip = `<b>${esc(d.event_type || "Event")}</b><br/>${esc(d.country || "")} &middot; ${esc(d.date || "")}<br/>Fatalities: ${d.fatalities ?? 0}`;
-  const detail = `
-    <h3>${esc(d.event_type || "Conflict event")}${d.sub_event_type ? " &mdash; " + esc(d.sub_event_type) : ""}</h3>
-    <div class="meta">${esc(d.country || "")} &middot; ${esc(d.date || "")} &middot; Fatalities: ${d.fatalities ?? 0}</div>
-    ${d.actor1 ? `<div>Actor 1: ${esc(d.actor1)}</div>` : ""}
-    ${d.actor2 ? `<div>Actor 2: ${esc(d.actor2)}</div>` : ""}
-    ${d.notes ? `<p>${esc(d.notes)}</p>` : ""}
-    <div class="meta">Source: ${d.source === "ucdp" ? "UCDP (GED Candidate)" : "ACLED"}</div>`;
-  const size = 14 + Math.min(Math.sqrt(d.fatalities || 0), 8) * 1.6;
-  return { icon: icon(acledIcon(d), acledColor(d), size), tooltip, detail };
+// ---------- fused conflict/violence events (ACLED + UCDP + GDELT) ----------
+//
+// backend/sources/event_fusion.py collapses same real-world incidents
+// reported by more than one of ACLED, UCDP, and GDELT's structured conflict
+// events into ONE canonical record before this ever reaches the map --
+// `corroborated_by` lists every source that independently reported it. This
+// replaces the old decorateAcled/decorateConflictWatch pair, which used to
+// render the same UCDP row (and the same GDELT headline) as two separate pins.
+
+const SOURCE_LABEL = {
+  acled: "ACLED", ucdp: "UCDP (GED Candidate)", gdelt: "GDELT (structured conflict event)",
+};
+
+// Goldstein is CAMEO's own -10 (max conflictual) .. +10 (max cooperative)
+// intensity scale for the underlying action -- only ever present on a
+// GDELT-sourced record (see event_fusion.py's _normalize_gdelt). A rough
+// plain-language read is more useful in a popup than the bare number.
+function goldsteinLabel(score) {
+  if (score == null) return null;
+  if (score <= -7) return "severe conflict intensity";
+  if (score <= -3) return "significant conflict intensity";
+  if (score < 0) return "mild conflict intensity";
+  return "low conflict intensity"; // 0..+10 still reached this classifier (quad_class 3/4), so never reads as "cooperative"
 }
 
-// ---------- Conflict Watch (ACLED-independent: UCDP + GDELT NLP) ----------
-
-function conflictWatchSourceLabel(d) {
-  if (d.source === "ucdp") return "UCDP (GED Candidate)";
-  if (d.source === "gdelt-nlp") return "GDELT (NLP-extracted)";
-  return d.source || "Conflict Watch";
+// Severity (0-100, computed server-side in event_fusion.py's _severity_for)
+// drives both size and colour, so a corroborated mass-casualty event is
+// unmistakably louder than a single-source skirmish. It supersedes the old
+// fatalities-only sizing, which rendered every GDELT event identically --
+// GDELT never reports casualties, so that was most of the layer.
+function severityBand(severity) {
+  if (severity >= 75) return { label: "Critical", color: "#ff1a1a" };
+  if (severity >= 55) return { label: "High", color: "#ff5c2a" };
+  if (severity >= 40) return { label: "Moderate", color: "#ff9500" };
+  return { label: "Low", color: "#ffd11a" };
 }
 
-export function decorateConflictWatch(d) {
-  const tooltip = `<b>${esc(d.event_type || "Event")}</b><br/>${esc(d.country || d.notes || "")}${d.date ? " &middot; " + esc(d.date) : ""}<br/>Fatalities: ${d.fatalities ?? 0}`;
+export function decorateEvent(d) {
+  const sources = (d.corroborated_by && d.corroborated_by.length ? d.corroborated_by : [d.source]).filter(Boolean);
+  const sourceLine = sources.map((s) => SOURCE_LABEL[s] || s).join(", ");
+  const severity = Number.isFinite(d.severity) ? d.severity : 0;
+  const band = severityBand(severity);
+  const tooltip = `<b>${esc(d.event_type || "Event")}</b> &middot; ${esc(band.label)}<br/>${esc(d.country || d.notes || "")}${d.date ? " &middot; " + esc(d.date) : ""}<br/>Fatalities: ${d.fatalities ?? 0}`;
+  const intensity = goldsteinLabel(d.goldstein);
+  // event_fusion's classifier assigns the same label to both fields for
+  // GDELT-derived events, so only show the subtype when it adds something.
+  const subtype = d.sub_event_type && d.sub_event_type !== d.event_type ? d.sub_event_type : null;
   const detail = `
-    <h3>${esc(d.event_type || "Conflict event")}${d.sub_event_type ? " &mdash; " + esc(d.sub_event_type) : ""}</h3>
+    <h3>${esc(d.event_type || "Conflict event")}${subtype ? " &mdash; " + esc(subtype) : ""}</h3>
     <div class="meta">${esc(d.country || "")} &middot; ${esc(d.date || "")} &middot; Fatalities: ${d.fatalities ?? 0}</div>
+    <div class="meta">Severity: ${severity}/100 (${esc(band.label)})</div>
     ${d.actor1 ? `<div>Actor 1: ${esc(d.actor1)}</div>` : ""}
     ${d.actor2 ? `<div>Actor 2: ${esc(d.actor2)}</div>` : ""}
-    ${d.notes ? `<p>${esc(d.notes)}</p>` : ""}
-    <div class="meta">Source: ${esc(conflictWatchSourceLabel(d))}${d.corroborated ? ` &middot; corroborated by ${esc((d.corroborated_by || []).join(", "))}` : ""}</div>`;
-  const size = 14 + Math.min(Math.sqrt(d.fatalities || 0), 8) * 1.6;
-  const color = d.corroborated ? "#3ac1ff" : acledColor(d);
+    ${d.notes ? `<p>${esc(d.notes)}</p>` : `<p class="meta">No scraped headline for this incident yet -- shown from CAMEO actor/location data only.</p>`}
+    ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
+    ${d.mentions ? `<div class="meta">Reported by ${d.mentions} GDELT mention${d.mentions === 1 ? "" : "s"}</div>` : ""}
+    ${intensity ? `<div class="meta">Goldstein intensity: ${esc(intensity)} (${d.goldstein})</div>` : ""}
+    <div class="meta">Source: ${esc(sourceLine)}${d.corroborated ? ` &middot; corroborated by ${sources.length} independent sources` : ""}</div>`;
+  // 13px at severity 0 up to ~31px at 100 -- a visible hierarchy at a glance
+  // without the largest pins swallowing their neighbours.
+  const size = 13 + (severity / 100) * 18;
+  // Corroboration keeps its distinct blue: "confirmed by a second source" is
+  // a different axis from "how bad", and both are worth seeing at once.
+  const color = d.corroborated ? "#3ac1ff" : band.color;
   return { icon: icon(acledIcon(d), color, size), tooltip, detail };
 }
 
@@ -213,9 +245,26 @@ const MILITARY_ROLE_LABEL = {
   helicopter: "Military helicopter",
 };
 
+// Per-role military glyphs -- military_role (see MILITARY_ROLE_LABEL above,
+// backend/sources/adsb.py's own role heuristic) picks a distinct silhouette
+// instead of every military aircraft sharing one generic plane icon.
+// AIRCRAFT_STYLE.military (SVG.planeMilitary) stays the fallback for
+// d.military===true/heuristic hits with no role guessed.
+export const MILITARY_ROLE_STYLE = {
+  fighter: { svg: SVG.planeMilitary, color: "#ff4d4d", size: 28, name: "plane-military-fighter" },
+  bomber: { svg: SVG.planeBomber, color: "#ff4d4d", size: 30, name: "plane-military-bomber" },
+  tanker: { svg: SVG.planeTanker, color: "#ff8c3a", size: 26, name: "plane-military-tanker" },
+  awacs: { svg: SVG.planeAwacs, color: "#ffd60a", size: 28, name: "plane-military-awacs" },
+  recon: { svg: SVG.planeRecon, color: "#d8b9ff", size: 24, name: "plane-military-recon" },
+  patrol: { svg: SVG.planePatrol, color: "#6fe3ff", size: 26, name: "plane-military-patrol" },
+  drone: { svg: SVG.planeDrone, color: "#9be15d", size: 18, name: "plane-military-drone" },
+  transport: { svg: SVG.planeTransport, color: "#8aa0ad", size: 26, name: "plane-military-transport" },
+  helicopter: { svg: SVG.helicopter, color: "#ff4d4d", size: 20, name: "plane-military-helicopter" },
+};
+
 export function decorateAdsb(d, { selectedIcao } = {}) {
   const type = classifyAircraft(d);
-  const style = AIRCRAFT_STYLE[type];
+  const style = (type === "military" && d.military_role && MILITARY_ROLE_STYLE[d.military_role]) || AIRCRAFT_STYLE[type];
   const label = type === "military" ? (d.military === true ? "Military (confirmed)" : "Military (heuristic)") : style.label;
   // airplanes.live supplies a real type/description for aircraft it has
   // reference data for -- OpenSky has no such field at all, so this is
@@ -259,7 +308,7 @@ const INFRA_STYLE = {
 // from `subtype` (air/naval/army/missile/joint/logistics/radar) instead of
 // `type` -- see backend/infrastructure.py's MILITARY_BASES.
 const MILITARY_SUBTYPE_STYLE = {
-  air: { svg: SVG.planeMilitary, color: "#ff4d4d", label: "Air base" },
+  air: { svg: SVG.airBase, color: "#ff4d4d", label: "Air base" },
   naval: { svg: SVG.ship, color: "#ffd60a", label: "Naval base" },
   army: { svg: SVG.armyBase, color: "#9be15d", label: "Army base" },
   missile: { svg: SVG.missileBase, color: "#ff8c3a", label: "Missile / space base" },
@@ -291,19 +340,32 @@ export function decorateInfra(d, { hot, nearbyEvents } = {}) {
 
 // ---------- satellites ----------
 
-const SATELLITE_GROUP_LABEL = {
-  stations: "Space station",
-  military: "Military satellite",
+// Keyed by CelesTrak's own group name (see backend/sources/satellites.py's
+// GROUPS) -- military objects get their own glyph and colour instead of the
+// whole layer sharing one cyan satellite pin, so "which of these is a
+// reconnaissance bird" is answerable at a glance. Exported so
+// LayersSection.jsx's legend and the map draw from the same values.
+export const SATELLITE_STYLE = {
+  stations: { svg: SVG.satellite, color: "#6fe3ff", size: 24, label: "Space station" },
+  military: { svg: SVG.satelliteMilitary, color: "#ff4d4d", size: 26, label: "Military satellite" },
 };
+const SATELLITE_FALLBACK = { svg: SVG.satellite, color: "#6fe3ff", size: 24, label: "Satellite" };
+
+export function isMilitarySatellite(d) {
+  return d.group === "military";
+}
 
 export function decorateSatellite(d) {
-  const groupLabel = SATELLITE_GROUP_LABEL[d.group] || "Satellite";
-  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(groupLabel)} &middot; ${Math.round(d.alt_km || 0)} km`;
+  const style = SATELLITE_STYLE[d.group] || SATELLITE_FALLBACK;
+  const military = isMilitarySatellite(d);
+  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${Math.round(d.alt_km || 0)} km`;
   const detail = `
     <h3>${esc(d.name || `NORAD ${d.norad_id}`)}</h3>
-    <div class="meta">${esc(groupLabel)} &middot; NORAD catalog ID ${esc(d.norad_id)}</div>
+    <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(d.norad_id)}</div>
     <div>Altitude: ${Math.round(d.alt_km || 0)} km</div>
+    ${military ? '<p class="meta">Listed in CelesTrak\'s public "Miscellaneous Military" group (e.g. SAR-Lupe reconnaissance satellites) -- a catalogue classification, not a claim about what it is doing right now.</p>' : ""}
     <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- a real orbit, not a live telemetry confirmation.</p>
     <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
-  return { icon: icon(SVG.satellite, "#6fe3ff", 24, 0, "satellite-marker"), tooltip, detail };
+  const cls = `satellite-marker${military ? " satellite-military-marker" : ""}`;
+  return { icon: icon(style.svg, style.color, style.size, 0, cls), tooltip, detail };
 }

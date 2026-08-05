@@ -5,6 +5,7 @@ import time
 import httpx
 from skyfield.api import EarthSatellite, load
 
+from backend import storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.satellites")
@@ -82,7 +83,10 @@ async def start():
             state.last_success = time.time()
             state.last_error = None
             log.info("Satellites: %d tracked (%d element sets)", len(state.data), len(elements))
+            await storage.record_snapshot("satellites", state.data, "norad_id")
+            await storage.record_source_health("satellites", len(state.data), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("Satellite propagation failed: %s", exc)
+            await storage.record_source_health("satellites", None, False, str(exc))
         await asyncio.sleep(10)

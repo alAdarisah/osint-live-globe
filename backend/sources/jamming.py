@@ -7,6 +7,7 @@ import time
 import h3
 import httpx
 
+from backend import storage
 from backend.cache import registry
 
 log = logging.getLogger("osint-globe.jamming")
@@ -99,9 +100,13 @@ async def start():
             state.last_error = None
             ok = True
             log.info("GPS jamming: %d hot cells for %s", len(points), date)
+            # H3 cells carry no id of their own -- synthesized from lat/lon.
+            await storage.record_snapshot("jamming", points)
+            await storage.record_source_health("jamming", len(points), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("GPS jamming fetch failed: %s", exc)
+            await storage.record_source_health("jamming", None, False, str(exc))
         # An empty exception message (e.g. a bare asyncio.TimeoutError) is
         # still a failure -- branch on whether the fetch itself succeeded,
         # not on the truthiness of the resulting error string.

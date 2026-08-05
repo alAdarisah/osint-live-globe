@@ -12,7 +12,7 @@ import { boundsContainsPoint } from "../utils/geo";
 const NEWS_MAX_ITEMS = 5;
 const TOP_EVENTS_MAX = 4;
 
-export default function ConflictBriefingCard({ zone, acledRaw, gdeltRaw, onClose, onLocate }) {
+export default function ConflictBriefingCard({ zone, eventsRaw, gdeltRaw, onClose, onLocate }) {
   // Same widget-style dragging as NewsBroadcastPanel: header is the drag
   // handle, `pos` null means "use default fixed CSS position".
   const [pos, setPos] = useState(null);
@@ -58,12 +58,12 @@ export default function ConflictBriefingCard({ zone, acledRaw, gdeltRaw, onClose
     return { south, west, north, east };
   }, [zone]);
 
-  const acledInZone = useMemo(() => {
+  const eventsInZone = useMemo(() => {
     if (!bounds) return [];
-    return acledRaw.filter(
+    return eventsRaw.filter(
       (e) => typeof e.lat === "number" && typeof e.lon === "number" && boundsContainsPoint(bounds, e.lat, e.lon)
     );
-  }, [acledRaw, bounds]);
+  }, [eventsRaw, bounds]);
 
   const newsInZone = useMemo(() => {
     if (!bounds) return [];
@@ -86,18 +86,18 @@ export default function ConflictBriefingCard({ zone, acledRaw, gdeltRaw, onClose
   }, [gdeltRaw, bounds]);
 
   const briefing = useMemo(() => {
-    const fatalities = acledInZone.reduce((sum, e) => sum + (e.fatalities || 0), 0);
+    const fatalities = eventsInZone.reduce((sum, e) => sum + (e.fatalities || 0), 0);
     const typeCounts = {};
-    for (const e of acledInZone) {
+    for (const e of eventsInZone) {
       if (!e.event_type) continue;
       typeCounts[e.event_type] = (typeCounts[e.event_type] || 0) + 1;
     }
     const topType = Object.entries(typeCounts).sort(([, a], [, b]) => b - a)[0]?.[0] || null;
-    const topEvents = [...acledInZone]
+    const topEvents = [...eventsInZone]
       .sort((a, b) => (b.fatalities || 0) - (a.fatalities || 0) || (b.date || "").localeCompare(a.date || ""))
       .slice(0, TOP_EVENTS_MAX);
-    return { count: acledInZone.length, fatalities, topType, topEvents };
-  }, [acledInZone]);
+    return { count: eventsInZone.length, fatalities, topType, topEvents };
+  }, [eventsInZone]);
 
   if (!zone) return null;
 
