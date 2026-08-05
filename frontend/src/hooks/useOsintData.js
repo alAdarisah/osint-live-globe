@@ -32,6 +32,10 @@ const POLL_CONFIG = [
   { key: "events", url: "/api/events", intervalMs: 60000 }, // GDELT-driven (event_fusion.py), same cadence as gdelt below
   { key: "firms", url: "/api/fires", intervalMs: 180000 },
   { key: "gdelt", url: "/api/news", intervalMs: 60000 },
+  // Officials & Diplomacy. Slower than news on purpose: its GDELT half moves on
+  // the same 15-minute poll as everything else GDELT, and its other half is
+  // government press feeds that publish a handful of times a day.
+  { key: "officials", url: "/api/officials", intervalMs: 2 * 60000 },
   { key: "countries", url: "/api/countries", intervalMs: 5 * 60000 },
   { key: "cities", url: "/api/cities", intervalMs: 5 * 60000 },
   { key: "ais", url: "/api/ships", intervalMs: 10000 },
@@ -43,6 +47,13 @@ const POLL_CONFIG = [
   // already cached for 120s there -- polling it faster would just re-serve
   // the same object, and the underlying signal moves on the order of hours.
   { key: "escalation", url: "/api/escalation", intervalMs: 3 * 60000 },
+  // UCDP's reviewed record and ACLED's district-level monthly counts. Both are
+  // historical by nature -- UCDP's candidate file lags a month or more and the
+  // ACLED aggregates run to the end of last month -- so they change on the
+  // order of weeks and are polled accordingly. Neither is a live feed and
+  // neither is rendered as one.
+  { key: "conflictHistory", url: "/api/conflict-history", intervalMs: 6 * 60 * 60000 },
+  { key: "conflictDistricts", url: "/api/conflict-districts", intervalMs: 6 * 60 * 60000 },
 ];
 
 export function useOsintData({ onData, flyToRegion }) {
@@ -54,6 +65,10 @@ export function useOsintData({ onData, flyToRegion }) {
   // Regions running above their own baseline (backend/escalation.py).
   // Reactive like gdelt/events because a panel renders it directly.
   const [escalation, setEscalation] = useState([]);
+  // Only the cut-off date, not the rows: the UCDP payload is thousands of
+  // records that only the map needs, but the date has to reach the control
+  // panel so the layer can state its own staleness.
+  const [conflictHistoryAsOf, setConflictHistoryAsOf] = useState(null);
   const [bootSources, setBootSources] = useState(() => BOOT_SOURCES.map((s) => ({ ...s, status: "pending" })));
 
   // Read by poller ticks so a region switch is picked up on the very next
@@ -136,7 +151,13 @@ export function useOsintData({ onData, flyToRegion }) {
       tick();
     }
 
-    const REACTIVE_SETTERS = { gdelt: setGdeltRaw, events: setEventsRaw, escalation: setEscalation };
+    const REACTIVE_SETTERS = {
+      gdelt: setGdeltRaw,
+      events: setEventsRaw,
+      escalation: setEscalation,
+      conflictHistory: (rows) =>
+        setConflictHistoryAsOf((rows && rows.length && rows[0].as_of) || null),
+    };
     for (const src of POLL_CONFIG) {
       registerPoller(src.key, src.url, src.intervalMs, REACTIVE_SETTERS[src.key]);
     }
@@ -225,6 +246,7 @@ export function useOsintData({ onData, flyToRegion }) {
     gdeltRaw,
     eventsRaw,
     escalation,
+    conflictHistoryAsOf,
     bootSources,
     // Exposed for useReplay.js: leaving replay mode needs one immediate
     // refetch of every live source instead of waiting out each poller's own

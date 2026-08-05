@@ -36,7 +36,15 @@ async def fetch_wind_velocity_grid(south: float, west: float, north: float, east
         # leaflet-velocity examples are built around.
         "models": "ncep_gfs025",
     }
-    async with httpx.AsyncClient(timeout=15) as client:
+    # Open-Meteo connects fine most of the time and then intermittently refuses
+    # to complete the TCP handshake at all -- observed from the backend
+    # container as httpx.ConnectTimeout with an empty message, while the same
+    # request from the host succeeded seconds earlier. httpx's transport-level
+    # `retries` covers exactly that case (connection establishment, not a
+    # request that already reached the server), so a blip costs a retry instead
+    # of blanking the wind layer for the whole error-cache TTL.
+    transport = httpx.AsyncHTTPTransport(retries=2)
+    async with httpx.AsyncClient(timeout=15, transport=transport) as client:
         resp = await client.get(FORECAST_URL, params=params)
         resp.raise_for_status()
         payload = resp.json()

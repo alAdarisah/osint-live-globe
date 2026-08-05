@@ -12,6 +12,7 @@
 // layers -> selection/trails -> per-source renderers -> event wiring.
 
 import { L } from "./leafletGlobal";
+import { isImprecise, ageHours, ageHoursFromDateAdded, NEWS_WINDOW_HOURS } from "./severity";
 import {
   createBaseLayer,
   basemapUrlFor,
@@ -30,6 +31,7 @@ import {
 } from "./layers";
 import {
   decorateEvent,
+  decorateHistoricalEvent,
   decorateGdelt,
   decorateAis,
   decorateAdsb,
@@ -41,8 +43,21 @@ import {
   SHIP_STYLE,
   AIRCRAFT_STYLE,
   MILITARY_ROLE_STYLE,
+  SATELLITE_STYLE,
+  decorateOfficials,
+  eventIconSize,
+  gdeltIconSize,
+  officialsIconSize,
+  historicalIconSize,
+  INFRA_ICON_SIZE,
+  decorateCity,
+  cityTier,
+  cityTierRank,
+  PIPELINE_ROUTE_COLOR,
 } from "./decorators";
-import { declutterPoints } from "./declutter";
+import { placeAll } from "./declutter";
+import { collapseByProximity, COLLAPSE_MAX_ZOOM } from "./collapse";
+import { buildCountryIndex, findCountryAt } from "./countryHitTest";
 import { countryPopupHtml, cityPopupHtml, normalizeCountryName } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
@@ -76,7 +91,11 @@ const GDELT_MIN_ZOOM = 3;
 const AIS_MIN_ZOOM = 3;
 // AIS has its own dedicated renderAisLayer (civilian/Navy split, like ADS-B's
 // civilian/military split) so it isn't part of this generic lookup.
-const MARKER_LAYER_MIN_ZOOM = { events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM };
+const OFFICIALS_MIN_ZOOM = 3;
+const MARKER_LAYER_MIN_ZOOM = {
+  events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictHistory: 4,
+  officials: OFFICIALS_MIN_ZOOM,
+};
 // Gates only the interactive per-point FIRMS layer -- the heat layer itself
 // always stays on regardless of zoom.
 const FIRMS_DETAIL_MIN_ZOOM = 5;
@@ -91,9 +110,20 @@ const SATELLITE_TRAIL_MAX_POINTS = 36;
 // polls back" length as ship trails, not satellites' longer arc.
 const TANKER_TRAIL_MAX_POINTS = 60;
 
-const ID_FIELD = { events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24" };
+const ID_FIELD = {
+  events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24", conflictHistory: "id",
+  officials: "id",
+};
 const DECORATORS = {
   events: decorateEvent, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
+  conflictHistory: decorateHistoricalEvent, officials: decorateOfficials,
+};
+// The placement pass has to know how much room each icon needs before any of
+// them are drawn, so the size formulas live in decorators.js and are read from
+// both places rather than restated here.
+const ICON_SIZE_FOR = {
+  events: eventIconSize, gdelt: gdeltIconSize, conflictHistory: historicalIconSize,
+  officials: officialsIconSize,
 };
 
 const REGION_FLY_DURATION = 1.2;
@@ -160,15 +190,20 @@ export function createMapController(container, initial, callbacks) {
   // All internal to the controller: nothing outside the map needs to know
   // which aircraft is selected, so it never needs to be React state.
   const raw = {
-    events: [], firms: [], ais: [], gdelt: [], adsb: [],
+    events: [], firms: [], ais: [], gdelt: [], adsb: [], officials: [],
     countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
     conflictStats: {},
+    // Not live: UCDP's reviewed record (a month or more behind) and ACLED's
+    // district-level monthly counts. Held here so country cards can show the
+    // verified numbers next to the live picture, each labelled for what it is.
+    conflictHistory: [], conflictDistricts: [], escalation: [],
   };
   // ais/aisNavy/aisTanker/adsb/adsbMilitary are no longer here -- their
   // markers live inside entityWebglLayer's own per-bucket entry maps now
   // (see webglLayer.js's updateEntities), not as L.marker instances.
   const markersByKey = {
     events: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
+    conflictHistory: new Map(), officials: new Map(),
   };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
@@ -212,6 +247,10 @@ export function createMapController(container, initial, callbacks) {
   // renderSatellites can skip work (not just hide the result) while
   // switched off.
   let satellitesVisible = true;
+  // Same mirror for "countries": the shapes no longer carry their own click
+  // handlers (see countryHitTest.js), so the map-level hit-test has to know
+  // whether the layer is actually on before it selects anything.
+  let countriesVisible = true;
   // These three mirror their own dedicated "*Trails" sub-ticker toggle (see
   // LayersSection.jsx's "Show ... trails" rows and the matching keys in
   // setLayerVisible below) -- entityWebglLayer/renderSatellites keep
@@ -235,47 +274,126 @@ export function createMapController(container, initial, callbacks) {
   // cross-layer search.
   let infraNameFilter = "";
 
+  // ---------- conflict-event filters ----------
+  //
+  // What the user asked to see. Applied per item in renderMarkerLayer through
+  // LAYER_ITEM_FILTER rather than by special-casing "events" inside the generic
+  // loop, so adding a filter to another layer later is a table entry.
+  let eventFilter = { maxAgeHours: 72, minSeverity: 0, showImprecise: true };
+
+  function passesEventFilter(item) {
+    if (!eventFilter.showImprecise && isImprecise(item)) return false;
+    if ((item.severity || 0) < eventFilter.minSeverity) return false;
+    if (eventFilter.maxAgeHours != null) {
+      const age = ageHours(item);
+      // An event we can't date is kept: hiding it would silently drop data on
+      // the basis of a missing field rather than of anything the user chose.
+      if (Number.isFinite(age) && age > eventFilter.maxAgeHours) return false;
+    }
+    return true;
+  }
+
+  // ---------- news filter ----------
+  //
+  // News ids that already have a pin of their own -- because a fused conflict
+  // record absorbed the headline (event_fusion._coverage_for) or an Officials &
+  // Diplomacy record did (officials.py). Drawing them again would put a second
+  // marker on top of the first for the same story.
+  //
+  // The backend used to solve this by deleting those items from /api/news
+  // outright, which removed the duplicate marker by removing the article: it
+  // then appeared nowhere, not even on the pin that had absorbed it. Now the
+  // absorbing record carries the headline *and* names the id, so the feed stays
+  // complete (the news panel and the country card both read it unfiltered) and
+  // only the redundant marker is suppressed.
+  //
+  // Built from the full raw arrays rather than from what is currently visible:
+  // a conflict pin cut by capBySeverity at world zoom must not cause its news
+  // counterpart to blink back into existence.
+  let mergedNewsIds = new Set();
+
+  function rebuildMergedNewsIds() {
+    const ids = new Set();
+    for (const source of [raw.events, raw.officials]) {
+      for (const record of source || []) {
+        for (const id of record.coverage_event_ids || []) ids.add(id);
+      }
+    }
+    mergedNewsIds = ids;
+  }
+
+  function passesNewsFilter(item) {
+    if (mergedNewsIds.has(item.event_id)) return false;
+    const age = ageHoursFromDateAdded(item.date_added);
+    // Undated items are kept, matching passesEventFilter: hiding one would be
+    // dropping data on a missing field rather than on anything the user chose.
+    return !(Number.isFinite(age) && age > NEWS_WINDOW_HOURS);
+  }
+
+  const LAYER_ITEM_FILTER = { events: passesEventFilter, gdelt: passesNewsFilter };
+
+  // At world zoom the map should read as "where is the significant activity",
+  // not as an undifferentiated smear. A rank-based cap rather than an absolute
+  // severity floor, deliberately: severity is calibrated against real data
+  // where a single-outlet report scores in the 20s, so a fixed threshold like
+  // "hide anything under 55" would empty the map entirely on a quiet day. A cap
+  // adapts -- it only ever removes the least significant events, and only once
+  // there are more than can be read at once.
+  const ZOOM_MARKER_CAP = [
+    { maxZoom: 3, cap: 150 },
+    { maxZoom: 5, cap: 400 },
+    { maxZoom: 7, cap: 900 },
+  ];
+
+  function capBySeverity(items, zoom) {
+    const rule = ZOOM_MARKER_CAP.find((r) => zoom <= r.maxZoom);
+    if (!rule || items.length <= rule.cap) return items;
+    return [...items].sort((a, b) => (b.severity || 0) - (a.severity || 0)).slice(0, rule.cap);
+  }
+
+  // News is the one layer that groups rather than merely spreading out -- see
+  // collapse.js for why it earns the exception. Reach decides which story
+  // becomes the visible head, decayed by age so a busy city shows what broke
+  // most recently rather than whatever was biggest yesterday.
+  function newsRank(item) {
+    const hours = ageHoursFromDateAdded(item.date_added);
+    const reach = (item.mentions || 0) + 1;
+    return Number.isFinite(hours) ? reach * 0.5 ** (hours / 6) : reach;
+  }
+
+  function collapseNews(items, zoom) {
+    if (zoom > COLLAPSE_MAX_ZOOM) return items;
+    return collapseByProximity(
+      items,
+      // The same projection registerPlacement uses, so what collapse considers
+      // "on top of each other" is what the reader actually sees.
+      (item) => map.latLngToLayerPoint([item.lat, item.lon]),
+      newsRank
+    );
+  }
+
   // ---------- country/city popups ----------
 
-  // Country click no longer opens a Leaflet popup (which auto-panned the
-  // map and closed the moment you clicked elsewhere) -- instead it drives a
-  // persistent React info card (see CountryInfoCard.jsx/onCountrySelect)
-  // that stays open across pan/zoom, and toggles closed on a second click of
-  // the same country. Every country gets these handlers, not just the
-  // auto-flagged war-hot ones -- hover/click work on any country shape.
-  // fillOpacity alone (0.03 -> 0.18) was too subtle against the near-
-  // transparent base fill to read as a highlight, so hover also brightens
-  // the stroke -- same technique .country-selected already uses, just
-  // lighter so the two states stay visually distinct.
-  const countriesLayer = createCountriesLayer(map, (feature, layer) => {
-    layer.on("mouseover", () => layer.setStyle({ fillOpacity: 0.25, color: "#aef0ff", weight: 2 }));
-    layer.on("mouseout", () => layer.setStyle({ fillOpacity: 0, color: "rgba(111, 227, 255, 0)", weight: 1 }));
-    layer.on("click", (e) => {
-      if (e.originalEvent) e.originalEvent.stopPropagation(); // don't let the map's own click handler immediately deselect
-      const iso = feature.properties?.iso_a2 || null;
-      if (selectedCountryIso && selectedCountryIso === iso) {
-        selectedCountryIso = null;
-        selectedCountryLayer = null;
-        if (!activeConflictZoneBounds) citiesEnabled = false; // no other active scope -- fully closing means fully closing
-        callbacks.onCountrySelect?.(null);
-      } else {
-        citiesEnabled = true;
-        selectedCountryIso = iso;
-        selectedCountryLayer = layer;
-        callbacks.onCountrySelect?.({
-          iso,
-          name: feature.properties?.name,
-          // The country's own bbox drives every "inside this country" count
-          // in the card (see popups.js) -- taken from the rendered layer
-          // rather than recomputed from the geometry.
-          html: countryPopupHtml(feature.properties, raw, boundsToPlainObject(layer.getBounds())),
-          point: countryAnchorPoint(layer),
-        });
-      }
-      renderCities();
-      updateCountryHighlights();
-    });
-  });
+  // Country click drives a persistent React info card (see CountryInfoCard.jsx/
+  // onCountrySelect) that stays open across pan/zoom and toggles closed on a
+  // second click of the same country, rather than a Leaflet popup (which
+  // auto-panned the map and closed the moment you clicked elsewhere).
+  //
+  // The shapes themselves are pure paint now (pointer-events: none in
+  // style.css) and carry no click/hover handlers -- hit-testing runs off the
+  // map's own click/mousemove against the geometry instead. See
+  // countryHitTest.js for why: an interactive full-viewport L.Canvas renderer
+  // sitting above the countries pane made every country unclickable from the
+  // first zoom-in onwards, and no pane ordering fixes that without breaking
+  // marker clicks instead.
+  const countriesLayer = createCountriesLayer(map);
+  let countryIndex = [];          // see buildCountryIndex -- smallest-area-first
+  let layerByCountryKey = new Map();
+  let hoveredCountryKey = null;
+
+  function countryLayerFor(key) {
+    return key == null ? null : layerByCountryKey.get(key) || null;
+  }
 
   // Same shape as updateCountryWarFlare below: iterate the already-rendered
   // countriesLayer and toggle a CSS class per feature, rather than rebuilding
@@ -292,6 +410,43 @@ export function createMapController(container, initial, callbacks) {
       const el = layer.getElement?.();
       if (el) el.classList.toggle("country-selected", !!selected);
     });
+  }
+
+  function selectCountryEntry(entry) {
+    const key = entry?.key ?? null;
+    if (key != null && key === selectedCountryIso) {
+      selectedCountryIso = null;
+      selectedCountryLayer = null;
+      if (!activeConflictZoneBounds) citiesEnabled = false; // no other active scope -- fully closing means fully closing
+      callbacks.onCountrySelect?.(null);
+    } else if (entry) {
+      const layer = countryLayerFor(key);
+      citiesEnabled = true;
+      selectedCountryIso = key;
+      selectedCountryLayer = layer;
+      callbacks.onCountrySelect?.({
+        iso: entry.iso,
+        name: entry.name,
+        // The country's own bbox drives every "inside this country" count in
+        // the card (see popups.js).
+        html: countryPopupHtml(entry.props, raw, layer ? boundsToPlainObject(layer.getBounds()) : null),
+        point: layer ? countryAnchorPoint(layer) : null,
+      });
+    } else {
+      return false;
+    }
+    renderCities();
+    updateCountryHighlights();
+    return true;
+  }
+
+  function setHoveredCountry(key) {
+    if (key === hoveredCountryKey) return;
+    const previous = countryLayerFor(hoveredCountryKey)?.getElement?.();
+    if (previous) previous.classList.remove("hovered");
+    hoveredCountryKey = key;
+    const next = countryLayerFor(key)?.getElement?.();
+    if (next) next.classList.add("hovered");
   }
 
   function layerForKey(key) {
@@ -322,7 +477,14 @@ export function createMapController(container, initial, callbacks) {
     satellitesTrails: { setFlag: (v) => (satellitesTrailsVisible = v), layer: () => satelliteTrailsLayer, trails: () => satelliteTrails, catchUp: renderSatellites },
   };
 
+  // Which layer keys are currently on the map. Read by settlePlacement so a
+  // hidden layer's icons don't shove visible ones around: renderMarkerLayer
+  // keeps building markers into a layerGroup that has been removed from the
+  // map, and those markers are real but invisible.
+  const layerOnMap = {};
+
   function setLayerVisible(key, visible) {
+    layerOnMap[key] = visible;
     // Not a layer of its own -- a filter on the satellites layer's pool, so
     // it re-renders in place instead of going through layerForKey (which has
     // nothing to add/remove for this key).
@@ -337,11 +499,18 @@ export function createMapController(container, initial, callbacks) {
       trailToggle.setFlag(visible);
       if (visible) {
         map.addLayer(trailToggle.layer());
-        trailToggle.catchUp(); // build/show trails that were skipped while off
+        trailToggle.catchUp(); // draw the history accumulated while it was hidden
       } else {
         map.removeLayer(trailToggle.layer());
         trailToggle.layer().clearLayers(); // don't leave a stale trail sitting under the (now-hidden) markers
-        trailToggle.trails().clear();
+        // Deliberately NOT trailToggle.trails().clear(): the position history
+        // is the expensive thing here (it can only be built up one poll at a
+        // time -- neither AIS nor ADS-B nor CelesTrak serves past positions),
+        // and throwing it away meant switching the ticker off and back on
+        // restarted every trail from a single point. Only the drawn polylines
+        // are transient; the history keeps accumulating while hidden (see the
+        // updateTrails calls in renderAisLayer/renderAdsbLayer/renderSatellites,
+        // which run unconditionally now) so the layer comes back at full length.
       }
       return;
     }
@@ -355,6 +524,11 @@ export function createMapController(container, initial, callbacks) {
     if (!layer) return;
     if (visible) map.addLayer(layer);
     else map.removeLayer(layer);
+
+    if (key === "countries") {
+      countriesVisible = visible;
+      if (!visible) setHoveredCountry(null);
+    }
 
     if (key === "satellites") {
       satellitesVisible = visible;
@@ -417,11 +591,21 @@ export function createMapController(container, initial, callbacks) {
   // the marker outlives any single render (see syncLayerMarkers' diffing) --
   // updateMarker refreshes _item in place, so an open popup always reflects
   // the entity's current data rather than whatever it held when created.
-  function buildMarker(key, item, decorate) {
-    const d = decorate(item, {});
+  // A smaller icon is drawn in front of a bigger one, so a 13px pin can never
+  // end up completely buried under a 31px neighbour with no way to click it.
+  // Leaflet's own default orders markers by latitude, which says nothing about
+  // which of two overlapping icons the user can actually reach.
+  function applyStacking(marker, size) {
+    marker.setZIndexOffset(-Math.round(size));
+  }
+
+  function buildMarker(key, item, decorate, sizeOf) {
+    const id = item[ID_FIELD[key]];
+    const d = decorate(item, { offset: offsetFor(key, id) });
     const marker = L.marker([item.lat, item.lon], { icon: d.icon });
     marker._item = item;
     marker._iconHtml = d.icon.options.html;
+    applyStacking(marker, sizeOf(item));
     marker.bindPopup(() => decorate(marker._item, { selectedIcao, selectedMmsi }).detail, { maxWidth: 320 });
     marker.bindTooltip(() => decorate(marker._item, { selectedIcao, selectedMmsi }).tooltip, {
       className: "map-tooltip",
@@ -430,15 +614,18 @@ export function createMapController(container, initial, callbacks) {
     return marker;
   }
 
-  function updateMarker(marker, item, decorate) {
-    const d = decorate(item, { selectedIcao, selectedMmsi });
+  function updateMarker(marker, item, decorate, key, sizeOf) {
+    const id = item[ID_FIELD[key]];
+    const d = decorate(item, { selectedIcao, selectedMmsi, offset: offsetFor(key, id) });
     marker._item = item;
     marker.setLatLng([item.lat, item.lon]);
+    applyStacking(marker, sizeOf(item));
     // setIcon tears down and recreates the marker's DOM element, so doing it
     // unconditionally meant every pan re-created hundreds of icons that were
     // pixel-identical. The generated html string is a complete description
-    // of the icon (glyph, colour, size, rotation -- see svgIcons.js's
-    // buildDivIcon), so comparing it is an exact, cheap change test.
+    // of the icon (glyph, colour, size, rotation, declutter offset -- see
+    // svgIcons.js's buildDivIcon), so comparing it is an exact, cheap change
+    // test.
     if (marker._iconHtml !== d.icon.options.html) {
       marker.setIcon(d.icon);
       marker._iconHtml = d.icon.options.html;
@@ -452,8 +639,8 @@ export function createMapController(container, initial, callbacks) {
   // literally "only show what you're looking at."
 
   const counts = {
-    events: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
-    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
+    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
   };
@@ -461,8 +648,8 @@ export function createMapController(container, initial, callbacks) {
   // current viewport/zoom filtering that `counts` reflects -- shown in the
   // UI as the "(total)" figure next to the live on-screen tick.
   const totals = {
-    events: 0, firms: 0, gdelt: 0, countries: 0, cities: 0, infra: 0, jamming: 0, satellites: 0,
-    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
+    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
   };
@@ -476,6 +663,7 @@ export function createMapController(container, initial, callbacks) {
   };
   const zoomNotes = {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
+    officials: false,
   };
   function reportCounts() {
     const totalsSuffixed = {};
@@ -484,22 +672,136 @@ export function createMapController(container, initial, callbacks) {
   }
   function reportZoomNotes() { callbacks.onZoomNotesChange?.({ ...zoomNotes }); }
 
-  // Nudges same-layer items that project to the exact same screen pixel
-  // apart (see declutter.js) -- only affects where the icon is drawn, not
-  // the item itself, so popups/tooltips still show the item's real data.
-  // Cloning (not mutating raw[key]'s own objects) matters: raw[key] is
-  // reused across polls, and repeatedly nudging the same object each render
-  // would compound into permanent drift from its true position.
-  function declutterVisible(items) {
-    if (items.length < 2) return items;
-    const points = items.map((item) => map.latLngToLayerPoint([item.lat, item.lon]));
-    const adjusted = declutterPoints(points);
-    return items.map((item, i) => {
-      const p = points[i], a = adjusted[i];
-      if (a.x === p.x && a.y === p.y) return item;
-      const latlng = map.layerPointToLatLng(L.point(a.x, a.y));
-      return { ...item, lat: latlng.lat, lon: latlng.lng };
-    });
+  // ---------- cross-layer icon placement ----------
+  //
+  // One pass over every visible icon of every layer, so that two things a few
+  // pixels apart both stay clickable. See declutter.js for the algorithm and
+  // for what the previous per-layer version got wrong.
+  //
+  // Only applied once zoomed in. A screen-space nudge necessarily changes as
+  // the projection scales, so applying it at every zoom made pins appear to
+  // slide whenever the user zoomed; the trade taken here is that crowding is
+  // accepted at world zoom (where individual pins are not readable anyway) and
+  // everything is separated -- and therefore reachable -- once zoomed in.
+  const DECLUTTER_MIN_ZOOM = 6;
+
+  // Who keeps its true position when two icons want the same pixel. Higher
+  // wins. Conflict events outrank everything because their position *is* the
+  // claim being made; cities are lowest because a city dot is context, and its
+  // real position is already labelled by the basemap underneath it.
+  const LAYER_PLACEMENT_PRIORITY = {
+    events: 100, infra: 80, satellites: 70, aisNavy: 65, adsbMilitary: 65,
+    // Above news: several officials pins sit on a capital's coordinate by
+    // construction (a press release has no location of its own), so they are
+    // the ones that most need to keep their true point rather than being
+    // pushed off it by whatever news happens to share the pixel.
+    aisTanker: 50, officials: 45, gdelt: 40, conflictHistory: 30, aisCivilian: 20,
+    adsbCivilian: 20, cities: 10,
+  };
+
+  // Buckets that share one render function, so a settle pass triggered by any
+  // of them redraws the group once rather than once per bucket.
+  const REDRAW_GROUP = {
+    aisCivilian: "ais", aisTanker: "ais", aisNavy: "ais",
+    adsbCivilian: "adsb", adsbMilitary: "adsb",
+  };
+
+  // Layer keys are plain identifiers, so splitting a uid on its FIRST "::"
+  // always recovers the layer even when the item id contains one itself.
+  const SEP = "::";
+  const placementInput = new Map(); // layerKey -> [{id, lat, lon, size}]
+  let placementOffsets = new Map(); // `${layerKey}\0${id}` -> {dx, dy}
+  let settleSuspended = 0;
+
+  function offsetFor(layerKey, id) {
+    return placementOffsets.get(`${layerKey}${SEP}${id}`);
+  }
+
+  function registerPlacement(layerKey, entries) {
+    placementInput.set(layerKey, entries);
+  }
+
+  // The WebGL buckets take their offsets as one Map per bucket rather than a
+  // per-item lookup, since updateEntities already walks the whole bucket.
+  function registerVehiclePlacement(bucketKey, items, idOf, sizeOf) {
+    registerPlacement(
+      bucketKey,
+      items.map((item) => ({ id: idOf(item), lat: item.lat, lon: item.lon, size: sizeOf(item) }))
+    );
+  }
+
+  // Built from the registered entries rather than by parsing uids back apart,
+  // so an id keeps its original type -- MMSIs and NORAD ids arrive as numbers,
+  // and the sprite lookup on the other side keys on the raw value.
+  function offsetsForBucket(bucketKey) {
+    const out = new Map();
+    for (const entry of placementInput.get(bucketKey) || []) {
+      const off = placementOffsets.get(`${bucketKey}${SEP}${entry.id}`);
+      if (off) out.set(entry.id, off);
+    }
+    return out;
+  }
+
+  function redrawLayerGroup(group) {
+    if (group === "events" || group === "gdelt" || group === "conflictHistory") renderMarkerLayer(group);
+    else if (group === "infra") renderInfra();
+    else if (group === "satellites") renderSatellites();
+    else if (group === "cities") renderCities();
+    else if (group === "ais") renderAisLayer();
+    else if (group === "adsb") renderAdsbLayer();
+  }
+
+  // Recomputes every offset, then redraws only the layers whose offsets
+  // actually changed. Suppressed while a redraw is in flight (a renderer
+  // re-registers its own input, which would otherwise recurse) and while
+  // renderAll is mid-pass, so a full render settles exactly once at the end
+  // instead of once per layer against half-stale input.
+  function settlePlacement() {
+    if (settleSuspended) return;
+    const spread = map.getZoom() >= DECLUTTER_MIN_ZOOM;
+    let next = new Map();
+    if (spread) {
+      const items = [];
+      for (const [layerKey, entries] of placementInput) {
+        if (layerOnMap[layerKey] === false) continue; // hidden layers take up no room
+        const priority = LAYER_PLACEMENT_PRIORITY[layerKey] ?? 0;
+        for (const entry of entries) {
+          const p = map.latLngToLayerPoint([entry.lat, entry.lon]);
+          // A layer may rank its own items (cities do, by population tier) --
+          // otherwise everything in it ties and the winner falls to the uid
+          // tie-break, which would let a 100k town hold its ground and push a
+          // megacity off its real position.
+          items.push({
+            uid: `${layerKey}${SEP}${entry.id}`,
+            x: p.x,
+            y: p.y,
+            r: entry.size / 2,
+            priority: entry.priority ?? priority,
+          });
+        }
+      }
+      next = placeAll(items);
+    }
+
+    const dirty = new Set();
+    const markDirty = (uid) => {
+      const layerKey = uid.slice(0, uid.indexOf(SEP));
+      dirty.add(REDRAW_GROUP[layerKey] || layerKey);
+    };
+    for (const [uid, off] of next) {
+      const prev = placementOffsets.get(uid);
+      if (!prev || prev.dx !== off.dx || prev.dy !== off.dy) markDirty(uid);
+    }
+    for (const uid of placementOffsets.keys()) if (!next.has(uid)) markDirty(uid);
+    placementOffsets = next;
+    if (!dirty.size) return;
+
+    settleSuspended += 1;
+    try {
+      for (const group of dirty) redrawLayerGroup(group);
+    } finally {
+      settleSuspended -= 1;
+    }
   }
 
   function renderMarkerLayer(key) {
@@ -513,6 +815,7 @@ export function createMapController(container, initial, callbacks) {
     }
     const group = groups[key];
     const decorate = DECORATORS[key];
+    const sizeOf = ICON_SIZE_FOR[key];
     const bounds = map.getBounds().pad(0.25);
     const idField = ID_FIELD[key];
     const minZoom = MARKER_LAYER_MIN_ZOOM[key];
@@ -521,25 +824,34 @@ export function createMapController(container, initial, callbacks) {
       zoomNotes[key] = belowMinZoom;
       reportZoomNotes();
     }
-    const visible = [];
+    const itemFilter = LAYER_ITEM_FILTER[key];
+    let visible = [];
     if (!belowMinZoom) {
       for (const item of raw[key]) {
         if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
         if (!bounds.contains([item.lat, item.lon])) continue;
+        if (itemFilter && !itemFilter(item)) continue;
         visible.push(item);
       }
     }
+    if (key === "events") visible = capBySeverity(visible, map.getZoom());
+    if (key === "gdelt") visible = collapseNews(visible, map.getZoom());
+    registerPlacement(
+      key,
+      visible.map((item) => ({ id: item[idField], lat: item.lat, lon: item.lon, size: sizeOf(item) }))
+    );
     syncLayerMarkers(
       markersByKey[key],
       group,
-      declutterVisible(visible),
+      visible,
       (item) => item[idField],
-      (item) => buildMarker(key, item, decorate),
-      (marker, item) => updateMarker(marker, item, decorate)
+      (item) => buildMarker(key, item, decorate, sizeOf),
+      (marker, item) => updateMarker(marker, item, decorate, key, sizeOf)
     );
     counts[key] = visible.length;
     totals[key] = raw[key].length;
     reportCounts();
+    settlePlacement();
   }
 
   // Navy/MSC ships (USS/USNS) always render, ignoring the AIS zoom gate,
@@ -582,17 +894,23 @@ export function createMapController(container, initial, callbacks) {
     const headingFn = (item) => (Number.isFinite(item.heading) && item.heading !== 511 ? item.heading : item.course);
     const tooltipFn = (item) => decorate(item, { selectedMmsi }).tooltip;
     const isSelectedFn = (item) => item.mmsi === selectedMmsi;
+    registerVehiclePlacement("aisCivilian", civilianVisible, idFn, () => SHIP_STYLE.other.size);
+    registerVehiclePlacement("aisTanker", tankerVisible, idFn, () => SHIP_STYLE.tanker.size);
+    registerVehiclePlacement("aisNavy", navyVisible, idFn, () => SHIP_STYLE.navy.size);
     entityWebglLayer.updateEntities("aisCivilian", civilianVisible, {
       idField: idFn, heading: headingFn, style: () => SHIP_STYLE.other,
       isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+      offsets: offsetsForBucket("aisCivilian"),
     });
     entityWebglLayer.updateEntities("aisTanker", tankerVisible, {
       idField: idFn, heading: headingFn, style: () => SHIP_STYLE.tanker,
       isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+      offsets: offsetsForBucket("aisTanker"),
     });
     entityWebglLayer.updateEntities("aisNavy", navyVisible, {
       idField: idFn, heading: headingFn, style: () => SHIP_STYLE.navy,
       isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+      offsets: offsetsForBucket("aisNavy"),
     });
 
     counts.aisCivilian = civilianVisible.length;
@@ -608,6 +926,7 @@ export function createMapController(container, initial, callbacks) {
       else totals.aisCivilian += 1;
     }
     reportCounts();
+    settlePlacement();
     // Extend the selected ship's trail on every render, not just at the
     // moment it was clicked. updateTrails appends at most one point per
     // call, so seeding it once in selectShip() left the trail permanently
@@ -620,9 +939,14 @@ export function createMapController(container, initial, callbacks) {
     // "the path itself is the point" reasoning as renderSatellites, just
     // scoped to the current viewport (tankerVisible) since the global tanker
     // fleet is far bigger than the ~46 curated satellites and isn't worth
-    // tracking off-screen. Skipped entirely while the layer's toggled off.
+    // tracking off-screen.
+    //
+    // Accumulation runs even while the sub-ticker is off, and only the drawing
+    // is gated: a position history can only ever be built one poll at a time,
+    // so pausing it would punch a hole in the track that switching the ticker
+    // back on could never fill (see setLayerVisible's trail branch).
+    updateTrails(tankerTrails, tankerVisible, "mmsi", TANKER_TRAIL_MAX_POINTS, undefined);
     if (tankerTrailsVisible) {
-      updateTrails(tankerTrails, tankerVisible, "mmsi", TANKER_TRAIL_MAX_POINTS, undefined);
       renderTrailLayer(tankerTrailsLayer, tankerTrails, "#ffb347", new Set(tankerTrails.keys()), {
         maxOpacity: 0.35,
         dashArray: "2 5",
@@ -663,15 +987,20 @@ export function createMapController(container, initial, callbacks) {
     const idFn = (item) => item.icao24;
     const tooltipFn = (item) => decorate(item, { selectedIcao }).tooltip;
     const isSelectedFn = (item) => item.icao24 === selectedIcao;
+    const civilianStyle = (item) => AIRCRAFT_STYLE[classifyAircraft(item)];
+    const militaryStyle = (item) =>
+      (item.military_role && MILITARY_ROLE_STYLE[item.military_role]) || AIRCRAFT_STYLE.military;
+    registerVehiclePlacement("adsbCivilian", civilianVisible, idFn, (item) => civilianStyle(item).size);
+    registerVehiclePlacement("adsbMilitary", militaryVisible, idFn, (item) => militaryStyle(item).size);
     entityWebglLayer.updateEntities("adsbCivilian", civilianVisible, {
-      idField: idFn, heading: (item) => item.heading,
-      style: (item) => AIRCRAFT_STYLE[classifyAircraft(item)],
+      idField: idFn, heading: (item) => item.heading, style: civilianStyle,
       isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
+      offsets: offsetsForBucket("adsbCivilian"),
     });
     entityWebglLayer.updateEntities("adsbMilitary", militaryVisible, {
-      idField: idFn, heading: (item) => item.heading,
-      style: (item) => (item.military_role && MILITARY_ROLE_STYLE[item.military_role]) || AIRCRAFT_STYLE.military,
+      idField: idFn, heading: (item) => item.heading, style: militaryStyle,
       isSelected: isSelectedFn, onSelect: selectAircraft, getTooltip: tooltipFn,
+      offsets: offsetsForBucket("adsbMilitary"),
     });
 
     counts.adsbCivilian = civilianVisible.length;
@@ -683,6 +1012,7 @@ export function createMapController(container, initial, callbacks) {
       else totals.adsbCivilian += 1;
     }
     reportCounts();
+    settlePlacement();
     // Same per-render accumulation the selected ship needs -- see the note
     // in renderAisLayer.
     if (selectedIcao) updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
@@ -690,9 +1020,10 @@ export function createMapController(container, initial, callbacks) {
 
     // Every on-screen military aircraft gets a trail, not just a selected
     // one -- same "the path itself is the point" reasoning as tanker/
-    // satellite trails above. Skipped entirely while its sub-ticker is off.
+    // satellite trails above. Accumulates regardless of the sub-ticker; only
+    // the drawing is gated (see renderAisLayer's note).
+    updateTrails(militaryTrails, militaryVisible, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, undefined);
     if (militaryTrailsVisible) {
-      updateTrails(militaryTrails, militaryVisible, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, undefined);
       renderTrailLayer(militaryTrailsLayer, militaryTrails, "#ff4d4d", new Set(militaryTrails.keys()), {
         maxOpacity: 0.35,
         dashArray: "2 5",
@@ -752,11 +1083,16 @@ export function createMapController(container, initial, callbacks) {
     reportCounts();
   }
 
+  function satelliteIconSize(sat) {
+    return (SATELLITE_STYLE[sat.group] || SATELLITE_STYLE.stations).size;
+  }
+
   function buildSatelliteMarker(sat) {
-    const d = decorateSatellite(sat);
+    const d = decorateSatellite(sat, { offset: offsetFor("satellites", sat.norad_id) });
     const marker = L.marker([sat.lat, sat.lon], { icon: d.icon });
     marker._item = sat;
     marker._iconHtml = d.icon.options.html;
+    applyStacking(marker, satelliteIconSize(sat));
     marker.bindPopup(() => decorateSatellite(marker._item).detail, { maxWidth: 320 });
     marker.bindTooltip(() => decorateSatellite(marker._item).tooltip, {
       className: "map-tooltip",
@@ -765,12 +1101,18 @@ export function createMapController(container, initial, callbacks) {
     return marker;
   }
 
-  // Satellites re-poll every 10s and their icon never varies -- only the
-  // position does, so this is the layer where the unconditional setIcon was
-  // pure waste (see updateMarker's note on why it's skipped).
+  // Satellites re-poll every 10s and their glyph never varies -- only the
+  // position and (since the declutter pass) the offset do, so the icon is only
+  // rebuilt when the generated HTML actually differs, same test updateMarker
+  // uses.
   function updateSatelliteMarker(marker, sat) {
     marker._item = sat;
     marker.setLatLng([sat.lat, sat.lon]);
+    const d = decorateSatellite(sat, { offset: offsetFor("satellites", sat.norad_id) });
+    if (marker._iconHtml !== d.icon.options.html) {
+      marker.setIcon(d.icon);
+      marker._iconHtml = d.icon.options.html;
+    }
   }
 
   // Always on, any zoom -- only ~46 curated objects (stations + military),
@@ -795,10 +1137,15 @@ export function createMapController(container, initial, callbacks) {
     const visible = pool.filter(
       (s) => typeof s.lat === "number" && typeof s.lon === "number" && bounds.contains([s.lat, s.lon])
     );
+    registerPlacement(
+      "satellites",
+      visible.map((s) => ({ id: s.norad_id, lat: s.lat, lon: s.lon, size: satelliteIconSize(s) }))
+    );
     syncLayerMarkers(markersByKey.satellites, satelliteGroup, visible, (s) => s.norad_id, buildSatelliteMarker, updateSatelliteMarker);
     counts.satellites = visible.length;
     totals.satellites = pool.length;
     reportCounts();
+    settlePlacement();
 
     // Satellites have no click-to-select model like ships/aircraft, so every
     // satellite's trail is tracked all the time (restrictTo === undefined,
@@ -806,15 +1153,24 @@ export function createMapController(container, initial, callbacks) {
     // one -- their orbital path is the point, not a detail you opt into.
     // Semi-transparent + dashed (vs. ship/aircraft trails' solid look) so it
     // reads as a background orbital track, not an active-selection cue.
-    // Gated on its own sub-ticker (satellitesTrailsVisible), independent of
-    // the Satellites layer itself being on -- see the "satellitesTrails" key
-    // in setLayerVisible.
+    // Drawing is gated on its own sub-ticker (satellitesTrailsVisible),
+    // independent of the Satellites layer itself being on -- see the
+    // "satellitesTrails" key in setLayerVisible. Accumulation is not gated:
+    // an orbital track can only be built one 10s poll at a time.
+    updateTrails(satelliteTrails, pool, "norad_id", SATELLITE_TRAIL_MAX_POINTS, undefined);
     if (satellitesTrailsVisible) {
-      updateTrails(satelliteTrails, pool, "norad_id", SATELLITE_TRAIL_MAX_POINTS, undefined);
-      renderTrailLayer(satelliteTrailsLayer, satelliteTrails, "#6fe3ff", new Set(satelliteTrails.keys()), {
-        maxOpacity: 0.22,
-        dashArray: "2 5",
-      });
+      // Military objects' tracks take the same red as their marker glyph, so a
+      // reconnaissance satellite's orbit reads as one at a glance instead of
+      // disappearing into a field of identical cyan arcs. The colour comes
+      // straight from SATELLITE_STYLE rather than being restated here.
+      const militaryIds = new Set(pool.filter(isMilitarySatellite).map((s) => s.norad_id));
+      renderTrailLayer(
+        satelliteTrailsLayer,
+        satelliteTrails,
+        (id) => (militaryIds.has(id) ? SATELLITE_STYLE.military.color : SATELLITE_STYLE.stations.color),
+        new Set(satelliteTrails.keys()),
+        { maxOpacity: 0.22, dashArray: "2 5" }
+      );
     }
   }
 
@@ -892,19 +1248,42 @@ export function createMapController(container, initial, callbacks) {
   // payload -- rebuilding the whole GeoJSON layer (and killing any open
   // popup) on every one of those ticks is the same anti-pattern
   // syncLayerMarkers exists to avoid. Skip the rebuild when nothing changed.
+  //
+  // Fingerprinted on the feature count plus the ISO/name list rather than
+  // JSON.stringify of the whole payload: the boundaries are several megabytes
+  // and serialising them every five minutes to detect a change that happens
+  // once a day is real main-thread time for nothing. A boundary edit that
+  // touched only vertex coordinates would be missed until the next reload,
+  // which is an acceptable trade for a dataset whose own updates are country
+  // additions and renames.
   let lastCountriesSignature = null;
 
   function renderCountries() {
-    const signature = JSON.stringify(raw.countries);
+    const features = raw.countries.features || [];
+    const signature = `${features.length}|${features
+      .map((f) => f.properties?.iso_a2 || f.properties?.name || "?")
+      .join(",")}`;
     if (signature !== lastCountriesSignature) {
       lastCountriesSignature = signature;
       countriesLayer.clearLayers();
-      const features = raw.countries.features || [];
       if (features.length) countriesLayer.addData(raw.countries);
       countryNameByIso2 = {};
       for (const f of features) {
         if (f.properties.iso_a2) countryNameByIso2[f.properties.iso_a2] = f.properties.name;
       }
+      // Rebuilt together with the layer so the two can never disagree about
+      // which shapes exist. Selection is keyed by ISO/name rather than by a
+      // captured layer reference, so a boundary refresh can't strand the
+      // selected country on a detached layer.
+      countryIndex = buildCountryIndex(raw.countries);
+      layerByCountryKey = new Map();
+      countriesLayer.eachLayer((layer) => {
+        const props = layer.feature?.properties || {};
+        const key = props.iso_a2 && props.iso_a2 !== "-99" ? props.iso_a2 : props.name || null;
+        if (key != null) layerByCountryKey.set(key, layer);
+      });
+      hoveredCountryKey = null;
+      selectedCountryLayer = countryLayerFor(selectedCountryIso);
       counts.countries = features.length;
       totals.countries = features.length;
       reportCounts();
@@ -953,13 +1332,28 @@ export function createMapController(container, initial, callbacks) {
     return `${city.name}|${city.country_code}|${city.lat}|${city.lon}`;
   }
 
+  // Glyph and size both come from the city's population tier (see
+  // decorators.js's CITY_TIERS) -- what used to be one identical dot for
+  // everything from a 100k town to Shanghai.
   function buildCityMarker(city) {
-    const marker = L.marker([city.lat, city.lon], {
-      icon: L.divIcon({ html: '<div class="city-dot"></div>', className: "", iconSize: [8, 8], iconAnchor: [4, 4] }),
-    });
+    const { icon, size, tier } = decorateCity(city, { offset: offsetFor("cities", cityKey(city)) });
+    const marker = L.marker([city.lat, city.lon], { icon });
+    marker._iconHtml = icon.options.html;
+    applyStacking(marker, size);
     marker.bindPopup(() => cityPopupHtml(city, raw, countryNameByIso2), { maxWidth: 320 });
-    marker.bindTooltip(`${esc(city.name)} (${fmtNumber(city.population)})`, { className: "map-tooltip", direction: "top" });
+    marker.bindTooltip(`${esc(city.name)} &middot; ${esc(tier.label)}<br/>Population: ${fmtNumber(city.population)}`, {
+      className: "map-tooltip",
+      direction: "top",
+    });
     return marker;
+  }
+
+  function updateCityMarker(marker, city) {
+    const { icon } = decorateCity(city, { offset: offsetFor("cities", cityKey(city)) });
+    if (marker._iconHtml !== icon.options.html) {
+      marker.setIcon(icon);
+      marker._iconHtml = icon.options.html;
+    }
   }
 
   function renderCities() {
@@ -988,15 +1382,25 @@ export function createMapController(container, initial, callbacks) {
             if (activeConflictZoneBounds) return boundsContainsPoint(activeConflictZoneBounds, c.lat, c.lon);
             return false;
           });
+    registerPlacement(
+      "cities",
+      visible.map((c) => {
+        const tier = cityTier(c.population);
+        // Bigger city wins the contested pixel: rank rides on top of the
+        // layer's own priority, and stays well under the next layer up.
+        return { id: cityKey(c), lat: c.lat, lon: c.lon, size: tier.size, priority: 10 + cityTierRank(tier) };
+      })
+    );
     // Diff-based sync (not clearLayers()+rebuild) -- a full teardown on
     // every moveend used to destroy the marker (and its just-opened popup)
     // that a click's own auto-pan had just triggered, making city dots feel
     // unclickable. See renderMarkerLayer/syncLayerMarkers for the same fix
     // applied to every other point layer.
-    syncLayerMarkers(markersByKey.cities, citiesGroup, visible, cityKey, buildCityMarker, () => {});
+    syncLayerMarkers(markersByKey.cities, citiesGroup, visible, cityKey, buildCityMarker, updateCityMarker);
     counts.cities = visible.length;
     totals.cities = raw.cities.length;
     reportCounts();
+    settlePlacement();
   }
 
   // ---------- critical infrastructure + hot-zone flare ----------
@@ -1040,16 +1444,17 @@ export function createMapController(container, initial, callbacks) {
   // above, and for the same reason: the "recent activity within 75km" list
   // rendered into each popup is the most expensive markup in the app, and
   // it was being built for all 79 sites on every pan.
-  function infraDecoration(site) {
+  function infraDecoration(site, offset) {
     const nearbyEvents = nearbyEventsFor(site);
-    return decorateInfra(site, { hot: nearbyEvents.length > 0, nearbyEvents });
+    return decorateInfra(site, { hot: nearbyEvents.length > 0, nearbyEvents, offset });
   }
 
   function buildInfraMarker(site) {
-    const d = infraDecoration(site);
+    const d = infraDecoration(site, offsetFor("infra", site.id));
     const marker = L.marker([site.lat, site.lon], { icon: d.icon });
     marker._item = site;
     marker._iconHtml = d.icon.options.html;
+    applyStacking(marker, INFRA_ICON_SIZE);
     marker.bindPopup(() => infraDecoration(marker._item).detail, { maxWidth: 320 });
     marker.bindTooltip(() => infraDecoration(marker._item).tooltip, {
       className: "map-tooltip",
@@ -1059,7 +1464,7 @@ export function createMapController(container, initial, callbacks) {
   }
 
   function updateInfraMarker(marker, site) {
-    const d = infraDecoration(site);
+    const d = infraDecoration(site, offsetFor("infra", site.id));
     marker._item = site;
     if (marker._iconHtml !== d.icon.options.html) {
       marker.setIcon(d.icon);
@@ -1072,6 +1477,10 @@ export function createMapController(container, initial, callbacks) {
     const needle = infraNameFilter.trim().toLowerCase();
     const visible = raw.infra.filter(
       (s) => bounds.contains([s.lat, s.lon]) && (!needle || s.name.toLowerCase().includes(needle))
+    );
+    registerPlacement(
+      "infra",
+      visible.map((s) => ({ id: s.id, lat: s.lat, lon: s.lon, size: INFRA_ICON_SIZE }))
     );
     // Diff-sync like every other point layer -- re-runs on every ACLED/GDELT
     // update too (see renderAll) so a flare turns on/off promptly, without
@@ -1093,6 +1502,7 @@ export function createMapController(container, initial, callbacks) {
       if (key) totals[key] += 1;
     }
     reportCounts();
+    settlePlacement();
   }
 
   // Pipeline routes (backend/infrastructure.py's PIPELINE_ROUTES) -- a small
@@ -1102,7 +1512,7 @@ export function createMapController(container, initial, callbacks) {
     pipelinesGroup.clearLayers();
     for (const route of raw.pipelines) {
       const line = L.polyline(route.coords, {
-        color: "#ffb347",
+        color: PIPELINE_ROUTE_COLOR,
         weight: 2,
         opacity: 0.65,
         dashArray: "6 6",
@@ -1117,8 +1527,27 @@ export function createMapController(container, initial, callbacks) {
   }
 
   function renderAll() {
+    // One placement pass for the whole map, at the end. Without the
+    // suspension each of the eight renderers below would settle on its own,
+    // against input where the other seven layers still held the *previous*
+    // viewport's positions -- eight passes per pan, most of them wrong.
+    settleSuspended += 1;
+    try {
+      renderAllLayers();
+    } finally {
+      settleSuspended -= 1;
+    }
+    settlePlacement();
+  }
+
+  function renderAllLayers() {
     renderMarkerLayer("events");
+    // Bounds-filtered like every other marker layer, so it has to re-render on
+    // pan/zoom -- its own data only arrives every six hours, and without this
+    // it would render once and then be empty everywhere the map moved to.
+    renderMarkerLayer("conflictHistory");
     renderMarkerLayer("gdelt");
+    renderMarkerLayer("officials");
     renderMarkerLayer("ais");
     renderMarkerLayer("adsb");
     renderFirms();
@@ -1205,6 +1634,7 @@ export function createMapController(container, initial, callbacks) {
       : null;
     if (key === "world" && selectedCountryIso) {
       selectedCountryIso = null;
+      selectedCountryLayer = null;
       callbacks.onCountrySelect?.(null);
     }
     renderCities();
@@ -1256,8 +1686,25 @@ export function createMapController(container, initial, callbacks) {
   // don't share that DOM propagation chain (they run through Pixi's own
   // internal event queue on the same canvas), so entityWebglLayer sets a
   // one-shot flag on tap that's checked and cleared here instead.
-  map.on("click", () => {
+  map.on("click", (e) => {
     if (entityWebglLayer.consumeSuppressedClick()) return;
+    // A click that landed on a vector layer (the FIRMS/jamming canvas click
+    // targets are L.Path, which bubbles to the map by default, unlike
+    // L.Marker) belongs to that layer's own popup, not to the country under
+    // it. Leaflet sets sourceTarget to whichever layer originated the event.
+    if (e.sourceTarget && e.sourceTarget !== map) return;
+
+    // Country selection is a *fallback* hit-test rather than a handler on the
+    // shapes themselves -- see countryHitTest.js. Everything above this point
+    // has already had its chance to claim the click.
+    if (countriesVisible) {
+      const entry = findCountryAt(countryIndex, e.latlng.lat, e.latlng.lng);
+      if (entry) {
+        selectCountryEntry(entry);
+        return;
+      }
+    }
+
     if (selectedIcao) {
       selectedIcao = null;
       aircraftTrails.clear();
@@ -1269,6 +1716,30 @@ export function createMapController(container, initial, callbacks) {
       renderMarkerLayer("ais");
     }
   });
+
+  // Hover highlight, same fallback path as the click above. Throttled to one
+  // hit-test per animation frame: mousemove fires far faster than the map can
+  // repaint, and each test is a bbox scan plus one or two ray-casts.
+  let hoverFrame = null;
+  let pendingHoverLatLng = null;
+  map.on("mousemove", (e) => {
+    if (e.sourceTarget && e.sourceTarget !== map) return;
+    pendingHoverLatLng = e.latlng;
+    if (hoverFrame != null) return;
+    hoverFrame = requestAnimationFrame(() => {
+      hoverFrame = null;
+      const latlng = pendingHoverLatLng;
+      if (!latlng || !countriesVisible) {
+        setHoveredCountry(null);
+        return;
+      }
+      setHoveredCountry(findCountryAt(countryIndex, latlng.lat, latlng.lng)?.key ?? null);
+    });
+  });
+  // Leaving the map entirely never fires a mousemove that misses every
+  // country, so the highlight would otherwise stay stuck on whatever was last
+  // under the pointer.
+  map.on("mouseout", () => setHoveredCountry(null));
 
   // Sync every layer's actual add/remove state to the caller's initial
   // defaults (see DEFAULT_LAYER_VISIBILITY in App.jsx) right after
@@ -1305,6 +1776,13 @@ export function createMapController(container, initial, callbacks) {
       // Invalidates nearbyEventsFor's cache -- these are the only two
       // sources it reads, so nothing else needs to bust it.
       if (key === "events" || key === "gdelt") eventsDataVersion += 1;
+      // Both feeds name the news ids they have absorbed, so the set has to be
+      // rebuilt whenever either lands -- and the news layer redrawn with it,
+      // or a suppressed pin lingers until the next pan. See passesNewsFilter.
+      if (key === "events" || key === "officials") {
+        rebuildMergedNewsIds();
+        renderMarkerLayer("gdelt");
+      }
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();
       else if (key === "cities") renderCities();
@@ -1318,7 +1796,10 @@ export function createMapController(container, initial, callbacks) {
       // dict (hdx_conflict_stats.py) and escalation is a ranked region list
       // (escalation.py); both are read straight out of `raw` by popups.js
       // when a country card is built.
-      else if (key === "conflictStats" || key === "escalation") { /* no marker layer */ }
+      else if (key === "conflictStats" || key === "escalation" || key === "conflictDistricts") {
+        /* reference data read on demand by popups.js -- no marker layer */
+      }
+      else if (key === "conflictHistory") renderMarkerLayer("conflictHistory");
       else renderMarkerLayer(key);
       if (key === "events") updateCountryWarFlare();
     },
@@ -1331,6 +1812,11 @@ export function createMapController(container, initial, callbacks) {
     setInfraFilter(text) {
       infraNameFilter = text || "";
       renderInfra();
+    },
+
+    setEventFilter(next) {
+      eventFilter = { ...eventFilter, ...(next || {}) };
+      renderMarkerLayer("events");
     },
 
     // Mirrors the country layer's own toggle-off branch -- called from the
@@ -1358,7 +1844,13 @@ export function createMapController(container, initial, callbacks) {
       clearInterval(precipRefreshTimer);
       clearTimeout(moveEndWindTimer);
       clearTimeout(regionFlightTimer);
+      if (hoverFrame != null) cancelAnimationFrame(hoverFrame);
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      // Aborts any pan/zoom animation still in flight. Leaflet's own animation
+      // frame keeps running after remove() otherwise, and then reads panes that
+      // remove() has already deleted -- the "Cannot read properties of null
+      // (reading 'containerPointToLayerPoint')" that shows up on teardown.
+      map.stop();
       map.remove();
     },
   };

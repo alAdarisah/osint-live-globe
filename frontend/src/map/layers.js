@@ -143,31 +143,47 @@ export function createEntityClusterGroups(map) {
   const groups = {
     events: L.layerGroup().addTo(map), // fused ACLED+UCDP+GDELT conflict layer, see event_fusion.py
     gdelt: L.layerGroup().addTo(map),
+    // Statements, meetings and state visits by heads of state and foreign
+    // ministries -- CAMEO-coded from trusted newsrooms plus the governments'
+    // own press feeds. See backend/sources/officials.py.
+    officials: L.layerGroup().addTo(map),
+    // UCDP's reviewed record. NOT added to the map here: it is off by default
+    // precisely because it is a month or more out of date, and a verified
+    // historical dataset sitting unlabelled among live pins would be the most
+    // misleading thing on the map.
+    conflictHistory: L.layerGroup(),
   };
   return { groups };
 }
 
-export function createCountriesLayer(map, onEachFeature) {
-  // Stroke starts fully transparent -- boundaries only appear on hover (see
-  // mouseover/mouseout in createMapController.js) or via the .country-hot/
-  // .country-selected CSS classes, which set their own stroke color and win
-  // over this base regardless. Without that, every untouched country's
-  // outline sat faintly visible at world zoom, which read as visual noise.
+export function createCountriesLayer(map) {
+  // Stroke starts fully transparent -- boundaries only appear via the
+  // .hovered/.country-hot/.country-selected CSS classes, which set their own
+  // stroke color and win over this base regardless. Without that, every
+  // untouched country's outline sat faintly visible at world zoom, which read
+  // as visual noise.
   function countryStyle() {
-    return { className: "country-shape", color: "rgba(111, 227, 255, 0)", weight: 1, fillColor: "#6fe3ff", fillOpacity: 0 };
+    return {
+      className: "country-shape",
+      color: "rgba(111, 227, 255, 0)",
+      weight: 1,
+      fillColor: "#6fe3ff",
+      fillOpacity: 0,
+      // The shapes are paint only. Hover and selection are hit-tested from the
+      // map's own mousemove/click against the geometry (see
+      // countryHitTest.js), which is the only arrangement that survives an
+      // interactive full-viewport L.Canvas renderer being added above this
+      // pane -- and it also means a country's fill can never swallow a click
+      // meant for a marker sitting on top of it.
+      interactive: false,
+    };
   }
-  // Own pane, z-indexed below the default overlayPane (400) that every
-  // point layer's canvas/SVG renders into -- an SVG path's interior still
-  // hit-tests pointer events even at fillOpacity 0 (SVG "visiblePainted"
-  // ignores fill-opacity, only fill:none), so without this the country
-  // shapes -- created after jamming/FIRMS/etc, so stacked on top of them --
-  // swallowed every click landing over land before it reached those layers'
-  // markers. Below overlayPane still receives clicks fine wherever nothing
-  // else covers that pixel, which is nearly everywhere on land.
+  // Own pane, z-indexed below the default overlayPane (400) so the shapes
+  // paint under every point layer rather than over them.
   if (!map.getPane("countriesPane")) {
     map.createPane("countriesPane").style.zIndex = 350;
   }
-  return L.geoJSON(null, { style: countryStyle, onEachFeature, pane: "countriesPane" }).addTo(map);
+  return L.geoJSON(null, { style: countryStyle, pane: "countriesPane" }).addTo(map);
 }
 
 export function createCitiesGroup(map) {

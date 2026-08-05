@@ -30,7 +30,7 @@ import CountryInfoCard from "./components/CountryInfoCard";
 // infrastructure, satellites, and the military-only halves of ADS-B/AIS --
 // everything else is opt-in rather than cluttering the map on first load.
 const DEFAULT_LAYER_VISIBILITY = {
-  events: true, firms: false, aisCivilian: false, aisTanker: true, aisTankerTrails: true, aisNavy: true, gdelt: true,
+  events: true, conflictHistory: false, firms: false, aisCivilian: false, aisTanker: true, aisTankerTrails: true, aisNavy: true, gdelt: true, officials: true,
   adsbCivilian: false, adsbMilitary: true, adsbMilitaryTrails: true,
   countries: true, cities: true, infra: true, jamming: true, satellites: true, satellitesTrails: true,
   satellitesMilitary: true,
@@ -160,6 +160,28 @@ export default function App() {
   }, [dataApi.currentRegionKey]);
 
   const [infraFilterText, setInfraFilterText] = useState("");
+
+  // What the user has asked the conflict layer to show. Held in React (rather
+  // than only inside the map controller) because the notable-events panel and
+  // the zone briefing read the same feed and should agree with the map about
+  // what is currently in scope.
+  // The cut-off date of the UCDP record, surfaced in the layer's own label so
+  // the lag is stated where the layer is switched on, not buried in a popup.
+  const historyAsOf = dataApi.conflictHistoryAsOf;
+
+  const [eventFilter, setEventFilter] = useState({
+    maxAgeHours: 72, minSeverity: 0, showImprecise: true,
+  });
+  const onEventFilterChange = useCallback(
+    (patch) => {
+      setEventFilter((prev) => {
+        const next = { ...prev, ...patch };
+        mapApi.setEventFilter(next);
+        return next;
+      });
+    },
+    [mapApi.setEventFilter]
+  );
   const onInfraFilterChange = useCallback(
     (text) => {
       setInfraFilterText(text);
@@ -234,6 +256,9 @@ export default function App() {
         owmConfigured={owmConfigured}
         windStatus={mapApi.windStatus}
         infraFilterText={infraFilterText}
+        eventFilter={eventFilter}
+        historyAsOf={historyAsOf}
+        onEventFilterChange={onEventFilterChange}
         onInfraFilterChange={onInfraFilterChange}
       />
 

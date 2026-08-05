@@ -17,7 +17,7 @@ database should produce silence, not a fabricated spike.
 import logging
 from datetime import datetime, timedelta, timezone
 
-from backend import regions, storage
+from backend import config, regions, storage
 
 log = logging.getLogger("osint-globe.escalation")
 
@@ -49,6 +49,12 @@ MIN_RATIO = 1.5
 MIN_BASELINE_COVERAGE_HOURS = 36
 
 
+# Every window is scoped to one pipeline version. A change that makes the
+# pipeline see more events -- which is a change in us, not in the world --
+# would otherwise land as a simultaneous multi-fold "escalation" in every
+# region at once. Scoping means a version bump resets the observed history, so
+# MIN_BASELINE_COVERAGE_HOURS below takes over and this stays quiet until it
+# has a comparable baseline again. Silence is the correct output there.
 _SQL = """
 WITH windows AS (
   SELECT
@@ -56,7 +62,7 @@ WITH windows AS (
     (first_seen >= $1) AS is_current,
     (first_seen >= $2 AND first_seen < $1) AS is_baseline
   FROM conflict_events
-  WHERE first_seen >= $2
+  WHERE first_seen >= $2 AND pipeline_version = $7
 )
 SELECT
   count(*) FILTER (WHERE is_current)  AS current_count,
@@ -72,8 +78,21 @@ SELECT event_type, country, notes, severity, lat, lon
   FROM conflict_events
  WHERE first_seen >= $1
    AND lat BETWEEN $2 AND $3 AND lon BETWEEN $4 AND $5
+   AND pipeline_version = $6
  ORDER BY severity DESC NULLS LAST, first_seen DESC
  LIMIT 3
+"""
+
+# Minimum successful `events` polls inside the current window for its counts to
+# mean anything. At GDELT_POLL_INTERVAL=900s a healthy 24 hours is ~96 polls;
+# below a quarter of that, a low current count says more about our own downtime
+# than about the world, and reporting either the quiet or the catch-up spike
+# would be a claim about the world made from a fact about our uptime.
+MIN_POLLS_IN_WINDOW = 24
+
+_POLL_COUNT_SQL = """
+SELECT count(*) FROM source_health
+ WHERE source = 'events' AND ok AND ts >= $1
 """
 
 
@@ -89,15 +108,28 @@ async def compute() -> list[dict]:
     baseline_from = now - timedelta(days=BASELINE_DAYS)
 
     results = []
+    version = config.CONFLICT_PIPELINE_VERSION
     try:
         async with pool.acquire() as conn:
+            # Were we actually watching? A gap in our own polling looks
+            # identical to a quiet 24 hours in the data, and the two must not
+            # be reported the same way.
+            polls = await conn.fetchval(_POLL_COUNT_SQL, current_from)
+            if (polls or 0) < MIN_POLLS_IN_WINDOW:
+                log.info(
+                    "Escalation suppressed: only %s successful event polls in the last %dh "
+                    "(need %d) -- our own coverage is too thin to call this",
+                    polls, CURRENT_WINDOW_HOURS, MIN_POLLS_IN_WINDOW,
+                )
+                return []
+
             for key, entry in regions.REGIONS.items():
                 bounds = entry.get("bounds")
                 if not bounds:
                     continue  # "world" has no bounds -- not a rankable zone
                 south, west, north, east = bounds
 
-                row = await conn.fetchrow(_SQL, current_from, baseline_from, south, north, west, east)
+                row = await conn.fetchrow(_SQL, current_from, baseline_from, south, north, west, east, version)
                 if row is None:
                     continue
 
@@ -125,7 +157,7 @@ async def compute() -> list[dict]:
                 if ratio < MIN_RATIO:
                     continue
 
-                top = await conn.fetch(_TOP_EVENTS_SQL, current_from, south, north, west, east)
+                top = await conn.fetch(_TOP_EVENTS_SQL, current_from, south, north, west, east, version)
                 results.append({
                     "region": key,
                     "label": entry["label"],

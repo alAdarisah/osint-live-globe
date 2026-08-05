@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -103,6 +104,27 @@ CREATE TABLE IF NOT EXISTS conflict_events (
   -- 0-100, see event_fusion.py's _severity_for. Persisted (not just derived
   -- at serve time) because escalation.py sums it over historical windows.
   severity INTEGER,
+  -- "locality" | "region" | "country" | "unknown". How precisely this event is
+  -- actually placed; a "country" row sits on a national centroid and its true
+  -- location is unknown. geo_feature_id is GDELT's own stable place id.
+  geo_precision TEXT,
+  geo_feature_id TEXT,
+  -- Distinct news outlets reporting this event (GDELT Mentions table), as
+  -- opposed to corroborated_by, which counts distinct *datasets*. Two
+  -- different axes of confidence; see event_fusion._merge_cluster.
+  outlet_count INTEGER,
+  corroboration TEXT,
+  -- Full CAMEO event code (e.g. "195" aerial bombardment) rather than only the
+  -- 20-bucket root, so the archive keeps the specific act.
+  event_code TEXT,
+  -- When we first observed it, at full timestamp resolution. `date` is the
+  -- day the event happened; this is what age-based rendering needs.
+  ingested_at TIMESTAMPTZ,
+  -- config.CONFLICT_PIPELINE_VERSION at insert time. Insert-only on purpose:
+  -- escalation.py compares counts only within one version, so a change that
+  -- alters event volume can't read as a world-wide escalation. Updating it on
+  -- conflict would relabel old rows as current and defeat that.
+  pipeline_version INTEGER,
   first_seen TIMESTAMPTZ NOT NULL,
   last_seen TIMESTAMPTZ NOT NULL
 );
@@ -115,6 +137,17 @@ CREATE INDEX IF NOT EXISTS idx_conflict_events_first_seen ON conflict_events (fi
 -- Added after the table shipped, so existing databases need it backfilled
 -- rather than only new ones getting it from the CREATE above.
 ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS severity INTEGER;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS geo_precision TEXT;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS geo_feature_id TEXT;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS outlet_count INTEGER;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS corroboration TEXT;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS event_code TEXT;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
+ALTER TABLE conflict_events ADD COLUMN IF NOT EXISTS pipeline_version INTEGER;
+-- escalation.py filters every window by (pipeline_version, first_seen); this
+-- is the index that keeps that from degrading into a full scan.
+CREATE INDEX IF NOT EXISTS idx_conflict_events_version_seen
+  ON conflict_events (pipeline_version, first_seen);
 
 CREATE TABLE IF NOT EXISTS reference_snapshots (
   name TEXT PRIMARY KEY,
@@ -163,6 +196,26 @@ async def init_pool(retries: int = 30, delay: float = 2.0) -> None:
                 log.warning("Postgres not ready (attempt %d/%d): %s", attempt, retries, exc)
                 await asyncio.sleep(delay)
     log.error("Giving up connecting to Postgres: %s -- running without durable storage", last_error)
+
+
+async def wait_for_pool(timeout: float = 30.0) -> bool:
+    """Block until the pool is up, for the few readers that actually need it.
+
+    init_pool is deliberately not awaited by app.py's lifespan (see above), and
+    every *write* path no-ops harmlessly while `_pool` is None. Reads at
+    startup are the exception: a source rehydrating its window gets an empty
+    list instead of an error, so the race is silent -- the layer simply comes
+    back cold and nothing says why. Both rehydrate paths (gdelt.py's news
+    window and event_fusion.py's violence window) hit this.
+
+    Bounded, and returns a bool rather than raising: a run with no database at
+    all must still start promptly rather than stalling every source for the
+    full connect budget.
+    """
+    deadline = time.monotonic() + timeout
+    while _pool is None and time.monotonic() < deadline:
+        await asyncio.sleep(0.25)
+    return _pool is not None
 
 
 def get_pool() -> asyncpg.Pool | None:
@@ -320,12 +373,19 @@ async def record_snapshot(kind: str, items: list[dict], id_field: str | None = N
         log.exception("Failed to record %s snapshot (%d items)", kind, len(ids))
 
 
+# Hand-numbered placeholders. New columns go immediately before first_seen,
+# never in the middle, so existing positions never shift. first_seen and
+# last_seen deliberately share the last placeholder: first_seen is written once
+# at insert and never updated, which is what makes it mean "when we first heard
+# about this incident" -- the quantity escalation.py counts.
 _UPSERT_CONFLICT = """
 INSERT INTO conflict_events (
   id, date, lat, lon, event_type, sub_event_type, actor1, actor2, fatalities,
   country, notes, source, corroborated, corroborated_by, mentions, goldstein,
-  avg_tone, source_url, severity, first_seen, last_seen
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$20)
+  avg_tone, source_url, severity, geo_precision, geo_feature_id, outlet_count,
+  corroboration, event_code, ingested_at, pipeline_version, first_seen, last_seen
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+          $20,$21,$22,$23,$24,$25,$26,$27,$27)
 ON CONFLICT (id) DO UPDATE SET
   date = EXCLUDED.date, lat = EXCLUDED.lat, lon = EXCLUDED.lon,
   event_type = EXCLUDED.event_type, sub_event_type = EXCLUDED.sub_event_type,
@@ -336,8 +396,31 @@ ON CONFLICT (id) DO UPDATE SET
   mentions = EXCLUDED.mentions, goldstein = EXCLUDED.goldstein,
   avg_tone = EXCLUDED.avg_tone, source_url = EXCLUDED.source_url,
   severity = EXCLUDED.severity,
+  geo_precision = EXCLUDED.geo_precision, geo_feature_id = EXCLUDED.geo_feature_id,
+  outlet_count = EXCLUDED.outlet_count, corroboration = EXCLUDED.corroboration,
+  event_code = EXCLUDED.event_code, ingested_at = EXCLUDED.ingested_at,
   last_seen = EXCLUDED.last_seen
 """
+
+
+_DELETE_CONFLICT = "DELETE FROM conflict_events WHERE id = ANY($1::text[])"
+
+
+async def delete_conflict_events(ids: list[str]) -> None:
+    """Remove rows whose cluster was absorbed into another one.
+
+    Called when a new report bridges two previously separate clusters (see
+    event_fusion._stable_cluster_id): the surviving cluster keeps the older id,
+    and leaving the loser behind would let escalation.py count one incident
+    twice.
+    """
+    if _pool is None or not ids:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(_DELETE_CONFLICT, list(ids))
+    except Exception:  # noqa: BLE001 - archive hygiene, never worth failing a poll
+        log.exception("Failed to delete %d superseded conflict events", len(ids))
 
 
 def _parse_date(value):
@@ -346,6 +429,16 @@ def _parse_date(value):
     try:
         return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
     except ValueError:
+        return None
+
+
+def _to_timestamp(value):
+    """Unix seconds -> aware datetime, for asyncpg's TIMESTAMPTZ binding."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
         return None
 
 
@@ -376,6 +469,11 @@ async def record_conflict_events(items: list[dict]) -> None:
             int(item.get("mentions") or 0) or None,
             item.get("goldstein"), item.get("avg_tone"), item.get("source_url"),
             int(item.get("severity") or 0) or None,
+            item.get("geo_precision"), item.get("geo_feature_id"),
+            int(item.get("outlet_count") or 0) or None, item.get("corroboration"),
+            item.get("event_code"),
+            _to_timestamp(item.get("ingested_at")),
+            config.CONFLICT_PIPELINE_VERSION,
             now,
         ))
     if not rows:

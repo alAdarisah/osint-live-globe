@@ -45,6 +45,13 @@ export function updateTrails(trailMap, items, idField, maxPoints, restrictTo) {
   }
 }
 
+// `color` is either one colour for the whole layer or a `(id) => colour`
+// function, so a single trail layer can hold two visually distinct
+// categories -- satellites use it to draw military objects' tracks in the same
+// red their marker glyph uses (see SATELLITE_STYLE) while stations stay cyan,
+// without splitting the layer in two and without the colour being restated
+// somewhere it could drift from the icon.
+//
 // `style` optionally overrides the opacity ceiling and adds a dashArray --
 // used by satellite trails (semi-transparent, dashed, reads as a background
 // orbital track) while ship/aircraft trails keep their default solid,
@@ -52,13 +59,15 @@ export function updateTrails(trailMap, items, idField, maxPoints, restrictTo) {
 export function renderTrailLayer(trailLayer, trailMap, color, visibleIds, style) {
   const maxOpacity = style?.maxOpacity ?? 0.5;
   const dashArray = style?.dashArray;
+  const colorFor = typeof color === "function" ? color : () => color;
   trailLayer.clearLayers();
   for (const [id, points] of trailMap) {
     if (!visibleIds.has(id) || points.length < 2) continue;
+    const stroke = colorFor(id);
     for (let i = 0; i < points.length - 1; i++) {
       const t = (i + 1) / (points.length - 1); // 0 (oldest) .. 1 (newest)
       L.polyline([points[i], points[i + 1]], {
-        color,
+        color: stroke,
         weight: 2,
         opacity: (0.08 + t * 0.42) * (maxOpacity / 0.5),
         dashArray,

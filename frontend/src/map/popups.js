@@ -75,6 +75,24 @@ function buildTrendSection(monthlySeries) {
   return `<div class="popup-trend"><div class="meta">Conflict trend (HDX/ACLED, monthly)</div>${rows}</div>`;
 }
 
+// News ids already represented by a conflict or officials record in the same
+// card. Without this the country card lists one story twice -- once as the
+// incident and once as the headline underneath it -- which is the duplication
+// the map itself now avoids, reappearing in a different panel.
+//
+// Recomputed per card rather than shared with the controller's own set: this
+// module is called with `raw` and nothing else, and a card is built on click,
+// not on every render.
+function mergedNewsIdsIn(raw) {
+  const ids = new Set();
+  for (const source of [raw.events, raw.officials]) {
+    for (const record of source || []) {
+      for (const id of record.coverage_event_ids || []) ids.add(id);
+    }
+  }
+  return ids;
+}
+
 function buildEventsSection(eventItems, gdeltItems) {
   const rows = [
     ...eventItems.map((i) => formatEventRow("events", i)),
@@ -218,12 +236,54 @@ function buildSparkline(monthlySeries) {
  *                for every "inside this country" count below. Optional -- the
  *                card degrades to the name-matched sections without it.
  */
+// The reviewed counterpart to the live picture above it: ACLED's own monthly
+// totals at district level (via HDX HAPI -- keyless and, unlike the ACLED API
+// on a research account, not embargoed) plus UCDP's peer-reviewed death count.
+//
+// Deliberately labelled with the month it covers rather than presented as
+// current. The live layer answers "what is being reported right now"; this
+// answers "what was actually verified", and the two disagreeing is
+// information, not a bug to hide.
+function buildVerifiedRecord(wanted, raw) {
+  const districts = (raw.conflictDistricts || []).filter(
+    (r) => normalizeCountryName(r.country) === wanted
+  );
+  if (!districts.length) return "";
+
+  const latestMonth = districts.reduce((m, r) => (r.month > m ? r.month : m), "");
+  const current = districts.filter((r) => r.month === latestMonth);
+  const events = current.reduce((n, r) => n + (r.events || 0), 0);
+  const killed = current.reduce((n, r) => n + (r.fatalities || 0), 0);
+  if (!events && !killed) return "";
+
+  const worst = current
+    .filter((r) => r.fatalities > 0)
+    .sort((a, b) => b.fatalities - a.fatalities)
+    .slice(0, 3);
+
+  return `
+    <div class="csection">
+      <div class="csection-h">Verified record &middot; ${esc(latestMonth)}</div>
+      <div class="cstats">
+        <div class="cstat"><span class="cstat-v">${fmtNumber(events)}</span>events</div>
+        <div class="cstat${killed > 0 ? " hot" : ""}"><span class="cstat-v">${fmtNumber(killed)}</span>killed</div>
+        <div class="cstat"><span class="cstat-v">${fmtNumber(current.length)}</span>districts</div>
+      </div>
+      ${worst.length ? `<div class="meta">Worst-hit: ${worst
+        .map((r) => `${esc(r.admin2 || r.admin1 || "?")} (${r.fatalities})`)
+        .join(", ")}</div>` : ""}
+      <div class="meta">ACLED via HDX HAPI, complete to end of ${esc(latestMonth)} &mdash; reviewed monthly totals, not live.</div>
+    </div>`;
+}
+
 export function countryPopupHtml(props, raw, bounds) {
   const name = props.name || "Unknown";
   const wanted = normalizeCountryName(name);
   const eventMatches = raw.events.filter((e) => normalizeCountryName(e.country) === wanted).slice(0, 3);
+  const merged = mergedNewsIdsIn(raw);
   const gdeltMatches = raw.gdelt
     .filter((e) => {
+      if (merged.has(e.event_id)) return false;
       if (!e.location) return false;
       const parts = e.location.split(",");
       return normalizeCountryName(parts[parts.length - 1]) === wanted;
@@ -250,6 +310,7 @@ export function countryPopupHtml(props, raw, bounds) {
     } &middot; HDI ${props.hdi != null ? props.hdi.toFixed(3) : "n/a"}</div>
     ${buildConflictSummary(bounds, raw, escalationZone)}
     ${buildLivePicture(bounds, raw)}
+    ${buildVerifiedRecord(wanted, raw)}
     ${buildSparkline(trendSeries)}
     ${buildEventsSection(eventMatches, gdeltMatches)}
     <p class="meta">Live counts use the country's bounding box, so figures near borders are approximate.
@@ -261,8 +322,10 @@ export function cityPopupHtml(city, raw, countryNameByIso2) {
   const eventMatches = raw.events
     .filter((e) => typeof e.lat === "number" && haversineKm(city.lat, city.lon, e.lat, e.lon) <= 50)
     .slice(0, 3);
+  const merged = mergedNewsIdsIn(raw);
   const gdeltMatches = raw.gdelt
-    .filter((e) => typeof e.lat === "number" && haversineKm(city.lat, city.lon, e.lat, e.lon) <= 50)
+    .filter((e) => !merged.has(e.event_id)
+      && typeof e.lat === "number" && haversineKm(city.lat, city.lon, e.lat, e.lon) <= 50)
     .slice(0, 3);
   return `
     <h3>${esc(city.name)}</h3>

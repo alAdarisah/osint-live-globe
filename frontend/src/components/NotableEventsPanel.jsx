@@ -7,6 +7,7 @@
 // is drawing, because it's the same array.
 import { useMemo, useState } from "react";
 import LocateIcon from "./icons/LocateIcon";
+import { severityBand, isImprecise } from "../map/severity";
 
 const MAX_ITEMS = 6;
 
@@ -16,15 +17,6 @@ const MAX_ITEMS = 6;
 const MIN_SEVERITY = 40;
 
 const SOURCE_BADGE = { acled: "ACLED", ucdp: "UCDP", gdelt: "GDELT" };
-
-// Severity bands, matching decorators.js's severityBand so a pin and its row
-// in this list always read as the same colour.
-function band(severity) {
-  if (severity >= 75) return { label: "CRITICAL", cls: "critical" };
-  if (severity >= 55) return { label: "HIGH", cls: "high" };
-  if (severity >= 40) return { label: "MODERATE", cls: "moderate" };
-  return { label: "LOW", cls: "low" };
-}
 
 function daysOld(dateStr) {
   if (!dateStr) return 0;
@@ -137,11 +129,11 @@ export default function NotableEventsPanel({ eventsRaw, escalation, onLocate, is
 
 function NotableItem({ event, onLocate }) {
   const severity = Number.isFinite(event.severity) ? event.severity : 0;
-  const { label, cls } = band(severity);
+  const band = severityBand(severity);
   const sources = (event.corroborated_by && event.corroborated_by.length ? event.corroborated_by : [event.source])
     .filter(Boolean)
     .map((s) => SOURCE_BADGE[s] || s.toUpperCase());
-  const where = event.country || "Location unknown";
+  const where = event.location || event.country || "Location unknown";
   const actors = [event.actor1, event.actor2].filter(Boolean).join(" vs ");
   // The scraped headline when there is one, otherwise the CAMEO actor pair --
   // never a bare event type, which tells the reader nothing they can't see
@@ -151,8 +143,12 @@ function NotableItem({ event, onLocate }) {
   return (
     <div className="notable-item">
       <div className="notable-item-row">
-        <span className={`notable-chip ${cls}`} title={`Severity ${severity}/100`}>
-          {label}
+        <span
+          className="notable-chip"
+          style={{ background: band.color }}
+          title={`Severity ${severity}/100`}
+        >
+          {band.label.toUpperCase()}
         </span>
         <span className="notable-line">{line}</span>
         <button

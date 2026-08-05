@@ -18,7 +18,6 @@
 // from, and gets full control over hit-testing as a side benefit (needed
 // for click-to-select/hover anyway).
 import { L } from "./leafletGlobal";
-import { declutterPoints } from "./declutter";
 
 // Pixi is loaded on demand rather than bundled into the main chunk: it is by
 // far the heaviest dependency here (~13 MB installed, and the dominant share
@@ -141,7 +140,16 @@ const EntityWebglLayer = L.Layer.extend({
     this._map = map;
     const size = map.getSize();
 
-    this._canvas = L.DomUtil.create("canvas", "leaflet-webgl-entity-layer");
+    // `leaflet-zoom-animated` is not decoration: that class carries
+    // `transform-origin: 0 0` (leaflet.css) and the `transform` transition that
+    // makes an overlay glide with the basemap during a zoom gesture. Without
+    // it the canvas falls back to the browser default origin of `50% 50%`,
+    // while _onAnimZoom below computes its offset with maths that assumes
+    // 0 0 -- so every sprite was displaced by (1 - scale) * (width/2, height/2),
+    // i.e. 640x360 px on a single zoom-in of a 1280x720 map, and snapped
+    // instantly instead of animating. That was the "planes and ships move
+    // when zooming" bug.
+    this._canvas = L.DomUtil.create("canvas", "leaflet-webgl-entity-layer leaflet-zoom-animated");
     this._canvas.style.position = "absolute";
     // Permanently click-through. The canvas is always sized to the FULL map
     // viewport (see _reset below), so any other value puts it in front of
@@ -178,6 +186,11 @@ const EntityWebglLayer = L.Layer.extend({
       autoDensity: true,
     });
 
+    // Draw order is by container.zIndex (set per sprite in updateEntities from
+    // its icon size) rather than by insertion order, so a small sprite is never
+    // stuck permanently behind a large one it happens to overlap.
+    this._app.stage.sortableChildren = true;
+
     this._textureCache = new TextureCache();
     this._buckets = new Map(); // bucketKey -> Map(entityId -> entry)
     this._visibleBuckets = new Set();
@@ -208,6 +221,13 @@ const EntityWebglLayer = L.Layer.extend({
   },
 
   _applyStyle(entry, style) {
+    // An entity can leave the viewport (and have its sprite destroyed, see
+    // updateEntities' sweep) while it is still queued in _pendingSprites
+    // waiting for its texture to rasterize. Setting .width on a destroyed
+    // Pixi sprite reads through a nulled .scale and throws inside the
+    // texture-ready promise -- an unhandled rejection in the console, and the
+    // rest of that batch's sprites never get their texture.
+    if (!entry.sprite || entry.sprite.destroyed) return;
     const key = `${style.name}|${style.color}|${style.size}`;
     const texture = this._textureCache.get(style);
     if (texture) {
@@ -255,6 +275,13 @@ const EntityWebglLayer = L.Layer.extend({
 
   _reset() {
     const map = this._map;
+    // Pixi loads asynchronously (see createEntityWebglLayer's dynamic import),
+    // so onAdd -- and therefore this -- can run after the controller has
+    // already torn the map down: Leaflet deletes layer._map on removal, and
+    // this used to throw "Cannot read properties of null (reading
+    // 'containerPointToLayerPoint')" into the console on every such teardown.
+    // Nothing to reposition when there is no map; the next onAdd does it.
+    if (!map || !this._app) return;
     const size = map.getSize();
     if (this._canvas.width !== size.x || this._canvas.height !== size.y) {
       this._app.renderer.resize(size.x, size.y);
@@ -342,6 +369,7 @@ const EntityWebglLayer = L.Layer.extend({
   // untransformed reprojection once the gesture settles.
   _onAnimZoom(e) {
     const map = this._map;
+    if (!map || !this._canvas) return; // same teardown race as _reset above
     const scale = map.getZoomScale(e.zoom, this._animZoom);
     const position = L.DomUtil.getPosition(this._canvas);
     const viewHalf = map.getSize().multiplyBy(0.5);
@@ -357,17 +385,27 @@ const EntityWebglLayer = L.Layer.extend({
     return { x: p.x - this._topLeft.x, y: p.y - this._topLeft.y };
   },
 
+  // Declutter offsets come from createMapController's single cross-layer
+  // placement pass (see declutter.js) rather than being computed per bucket
+  // here -- the previous per-bucket version could not see that a tanker and a
+  // navy ship, or a ship and a conflict pin, were landing on the same pixel.
+  _offsetFor(bucketKey, item) {
+    return this._offsetsByBucket?.get(bucketKey)?.get(this._idOf(bucketKey, item));
+  },
+
+  _placeEntry(entry, bucketKey, item) {
+    const p = this._project(item.lat, item.lon);
+    const off = this._offsetFor(bucketKey, item);
+    entry.container.position.set(p.x + (off?.dx || 0), p.y + (off?.dy || 0));
+  },
+
   _repositionAll() {
     for (const [bucketKey, entries] of this._buckets) {
       const items = this._lastItems?.get(bucketKey);
       if (!items) continue;
-      const projected = items.map((item) => this._project(item.lat, item.lon));
-      const placed = declutterPoints(projected);
-      for (let idx = 0; idx < items.length; idx++) {
-        const entry = entries.get(this._idOf(bucketKey, items[idx]));
-        if (!entry) continue;
-        const { x, y } = placed[idx];
-        entry.container.position.set(x, y);
+      for (const item of items) {
+        const entry = entries.get(this._idOf(bucketKey, item));
+        if (entry) this._placeEntry(entry, bucketKey, item);
       }
     }
   },
@@ -403,9 +441,14 @@ const EntityWebglLayer = L.Layer.extend({
    *   isSelected: (item) => boolean
    *   onSelect: (item) => void -- caller owns the popup; this only reports the tap
    *   getTooltip: (item) => string (HTML), shown on hover
+   *   offsets: Map(id -> {dx, dy}) | undefined -- declutter nudges from the
+   *     shared cross-layer placement pass; drawn position only, entry.item
+   *     (used for clicks/popups/tooltips) keeps the real lat/lon.
    */
   updateEntities(bucketKey, items, opts) {
     if (!this._app) return;
+    this._offsetsByBucket = this._offsetsByBucket || new Map();
+    this._offsetsByBucket.set(bucketKey, opts.offsets || new Map());
     this._idFieldByBucket = this._idFieldByBucket || new Map();
     this._idFieldByBucket.set(bucketKey, opts.idField);
     this._lastItems = this._lastItems || new Map();
@@ -421,15 +464,6 @@ const EntityWebglLayer = L.Layer.extend({
       this._buckets.set(bucketKey, entries);
     }
     const visible = this._visibleBuckets.has(bucketKey);
-
-    // Same declutter pass createMapController.js's renderMarkerLayer applies
-    // to plain Leaflet markers -- ships/aircraft cluster at ports/airports
-    // just as easily as conflict events cluster in a city, and this is the
-    // one bucket-scoped place per-bucket item positions are all known at
-    // once. Only affects the sprite's drawn position; entry.item (used for
-    // clicks/popups/tooltips) keeps the item's real lat/lon.
-    const projected = items.map((item) => this._project(item.lat, item.lon));
-    const placed = declutterPoints(projected);
 
     const seen = new Set();
     for (let idx = 0; idx < items.length; idx++) {
@@ -452,8 +486,11 @@ const EntityWebglLayer = L.Layer.extend({
       entry.highlight.visible = selected;
       if (selected) drawHighlight(entry, style.size, 0xffffff);
 
-      const { x, y } = placed[idx];
-      entry.container.position.set(x, y);
+      this._placeEntry(entry, bucketKey, item);
+      // A smaller sprite draws in front of a bigger one, so a 13px "other"
+      // aircraft can't end up completely buried under a 30px bomber with no
+      // way to tap it. Mirrors applyStacking on the Leaflet-marker side.
+      entry.container.zIndex = -Math.round(style.size || 16);
 
       entry.item = item;
     }
@@ -461,6 +498,10 @@ const EntityWebglLayer = L.Layer.extend({
     for (const [id, entry] of entries) {
       if (!seen.has(id)) {
         this._app.stage.removeChild(entry.container);
+        // Drop it from any texture-ready queue before destroying it, so the
+        // callback isn't left holding a dead sprite (see _applyStyle's guard,
+        // which is the belt to this braces).
+        for (const waiting of this._pendingSprites.values()) waiting.delete(entry);
         entry.container.destroy({ children: true });
         entries.delete(id);
       }
@@ -514,6 +555,17 @@ export function createEntityWebglLayer(map) {
 
   loadPixi()
     .then(() => {
+      // The map can already be gone by the time the Pixi chunk lands (a fast
+      // unmount, or React's dev-mode double mount). Attaching to a removed map
+      // leaves a layer wired to torn-down panes, which is where the
+      // teardown-race guards in _reset/_onAnimZoom were firing from.
+      //
+      // Tested on the panes rather than on _loaded/_container: L.Map.remove()
+      // leaves both of those exactly as they were and instead empties _panes
+      // and deletes _mapPane, so the earlier check passed on a dead map and
+      // onAdd then threw "Cannot read properties of undefined (reading
+      // 'appendChild')" -- getPane() had nothing to return.
+      if (!map._container || !map._mapPane || !map.getPane("overlayPane")) return;
       layer = new EntityWebglLayer();
       layer.addTo(map);
       for (const [bucketKey, visible] of pendingVisibility) layer.setVisible(bucketKey, visible);

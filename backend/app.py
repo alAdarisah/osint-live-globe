@@ -20,6 +20,12 @@ from backend.ratelimit import LruTtlCache, TokenBucket
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe")
 
+# httpx logs every request's full URL at INFO, and FIRMS takes its API key as a
+# path segment -- so FIRMS_MAP_KEY was being written to the container logs in
+# plaintext on every poll. Its own failures still surface: each source module
+# catches and logs them itself.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 _background_tasks: list[asyncio.Task] = []
 
 # Every ETag below is derived from a source's `version` counter, which starts
@@ -34,7 +40,7 @@ _PROCESS_TOKEN = uuid.uuid4().hex[:8]
 
 _SOURCE_MODULES = (
     "gdelt", "firms", "ais", "adsb", "acled", "countries", "cities", "jamming", "satellites",
-    "hdx_conflict_stats", "event_fusion",
+    "hdx_conflict_stats", "hapi_conflict", "event_fusion", "official_feeds", "officials",
 )
 
 
@@ -168,6 +174,57 @@ async def conflict_stats(request: Request):
     return JSONResponse(state.data, headers=headers)
 
 
+@app.get("/api/conflict-history")
+async def conflict_history(request: Request, region: str | None = None):
+    # UCDP's reviewed record, ungated by recency (see backend/sources/acled.py).
+    # Every row carries as_of/lag_days; anything rendering this is expected to
+    # show that it is not live.
+    return _cached_source_response(request, "conflict_history", region, regions.filter_points)
+
+
+@app.get("/api/conflict-districts")
+async def conflict_districts(request: Request, country: str | None = None, months: int = 1):
+    # ACLED at admin-2 resolution, monthly, keyless and un-embargoed (see
+    # backend/sources/hapi_conflict.py). District-keyed rather than point data,
+    # so the same no-region-filter treatment as /api/conflict-stats.
+    #
+    # `months` defaults to 1 deliberately. The full 24-month archive is ~23 MB
+    # of JSON across 100k district-months; the frontend only reads the latest
+    # month (for country cards), and shipping the archive to a browser that
+    # discards 23/24ths of it would cost a multi-second parse on every load.
+    # Pass months=0 for everything.
+    state = registry.get("hapi_conflict")
+    items = state.data or []
+    if country:
+        wanted = country.strip().upper()
+        items = [r for r in items if (r.get("country_code") or "").upper() == wanted]
+    if months and items:
+        keep = sorted({r["month"] for r in items}, reverse=True)[:months]
+        cutoff = keep[-1]
+        items = [r for r in items if r["month"] >= cutoff]
+    if state.version == 0:
+        return JSONResponse(items, headers={"Cache-Control": "no-store"})
+    etag = f'"{_PROCESS_TOKEN}:{state.version}:{country or ""}:{months}"'
+    headers = {"Cache-Control": "no-cache", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(items, headers=headers)
+
+
+# Ceiling on the *world* view only. A selected region is never capped -- if you
+# have asked to look at Sudan you should see all of Sudan. Applied here at the
+# serving boundary rather than in fusion, because the archive and escalation.py
+# must go on seeing everything.
+EVENTS_MAX_ITEMS = 2500
+
+
+def _events_filter(items: list[dict], bounds) -> list[dict]:
+    scoped = regions.filter_points(items, bounds)
+    if bounds is None and len(scoped) > EVENTS_MAX_ITEMS:
+        return sorted(scoped, key=lambda d: d.get("severity") or 0, reverse=True)[:EVENTS_MAX_ITEMS]
+    return scoped
+
+
 @app.get("/api/events")
 async def events(request: Request, region: str | None = None):
     # The single canonical conflict/violence feed: ACLED + UCDP (via
@@ -175,7 +232,34 @@ async def events(request: Request, region: str | None = None):
     # referenced and collapsed into one record per real-world incident. See
     # backend/sources/event_fusion.py. This replaces rendering ACLED/UCDP
     # and GDELT-derived conflict pins as separate, unmerged layers.
-    return _cached_source_response(request, "events", region, regions.filter_points)
+    return _cached_source_response(request, "events", region, _events_filter)
+
+
+# Same world-view-only reasoning as EVENTS_MAX_ITEMS above. Lower because this
+# layer is bounded by how much diplomacy actually happens in a day, not by how
+# much of the world is on fire.
+OFFICIALS_MAX_ITEMS = 1200
+
+
+def _officials_filter(items: list[dict], bounds) -> list[dict]:
+    scoped = regions.filter_points(items, bounds)
+    if bounds is None and len(scoped) > OFFICIALS_MAX_ITEMS:
+        # officials.py already sorted by its own recency-weighted rank, so the
+        # cut here is a prefix rather than a re-sort -- which also means a
+        # government's own release is never dropped in favour of a wire story
+        # about it (see officials._rank).
+        return scoped[:OFFICIALS_MAX_ITEMS]
+    return scoped
+
+
+@app.get("/api/officials")
+async def officials(request: Request, region: str | None = None):
+    # Statements, meetings, state visits, demands and threats by heads of
+    # state, foreign ministries and international bodies -- CAMEO-coded from
+    # trusted newsrooms and, separately, straight from the governments' own
+    # press feeds. See backend/sources/officials.py; the per-record `origin`
+    # field is what tells those two apart, and the popup says which it is.
+    return _cached_source_response(request, "officials", region, _officials_filter)
 
 
 @app.get("/api/fires")
@@ -213,16 +297,17 @@ def _gdelt_filter(items: list[dict], bounds) -> list[dict]:
     # as one. backend/sources/gdelt.py keeps title-less items in its own
     # accumulator (for the backfill and for event_fusion.py's direct read
     # of registry state), so this filter only applies at this public
-    # serving boundary. Also drops anything event_fusion.py already folded
-    # into a fused conflict event on its most recent poll -- otherwise the
-    # same headline shows twice: once as a News pin, once as a Conflict pin.
-    from backend.sources import event_fusion
-
-    consumed = event_fusion.consumed_gdelt_ids()
-    titled = [
-        d for d in items
-        if (d.get("real_title") or "").strip() and d.get("event_id") not in consumed
-    ]
+    # serving boundary.
+    #
+    # This used to also drop anything event_fusion.py had folded into a fused
+    # conflict event, to stop one story rendering as both a News pin and a
+    # Conflict pin. That removed the duplicate marker by removing the article:
+    # the headline then appeared nowhere at all, including on the conflict pin
+    # that had absorbed it. The fused record now carries the headlines itself
+    # (event_fusion._coverage_for) along with the news ids behind them, and the
+    # map suppresses the duplicate marker from that -- so this endpoint serves
+    # the full feed and the news panel stays complete.
+    titled = [d for d in items if (d.get("real_title") or "").strip()]
     return regions.filter_points(titled, bounds)
 
 
@@ -359,8 +444,14 @@ async def wind(request: Request, south: float, west: float, north: float, east: 
         try:
             data = await fetch_wind_velocity_grid(south, west, north, east)
         except Exception as exc:
-            _WIND_ERROR_CACHE[cache_key] = (time.time(), str(exc))
-            raise HTTPException(502, f"Wind data fetch failed: {exc}")
+            # Type name included deliberately: httpx's timeout exceptions carry
+            # an empty message, so the detail read "Wind data fetch failed: "
+            # and the server logged nothing at all -- an outage that told you
+            # neither what failed nor why. Now it says ConnectTimeout.
+            reason = f"{type(exc).__name__}: {exc}".rstrip(": ")
+            log.warning("Wind fetch failed for %s: %s", cache_key, reason, exc_info=True)
+            _WIND_ERROR_CACHE[cache_key] = (time.time(), reason)
+            raise HTTPException(502, f"Wind data fetch failed: {reason}")
         _wind_version += 1
         cached = (data, _wind_version)
         _WIND_CACHE.set(cache_key, cached)
