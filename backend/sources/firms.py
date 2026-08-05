@@ -2,7 +2,6 @@ import asyncio
 import csv
 import io
 import logging
-import math
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -23,49 +22,18 @@ WORLD_BBOX = "-180,-90,180,90"
 # filtering policy below.
 VIIRS_CONFIDENCE_ALLOW = {"n", "h", "nominal", "high"}
 
-# A thermal anomaly only ships if it's also within this radius of a recent
-# ACLED/GDELT event -- "supporting metadata explaining likely cause" rather
-# than a bare, uncorrelated hotspot. Widened from 50km: with ACLED creds
-# unset (UCDP-only fallback) and GDELT's sparse per-poll event coverage, 50km
-# left the layer showing ~0 hotspots almost always, which defeated live
-# wildfire tracking -- the actual use case. 300km trades some false-positive
-# correlation for the layer actually showing fires.
-EVENT_CORRELATION_RADIUS_KM = 300.0
-
-
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    r = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
-
-
-def _has_nearby_event(lat: float, lon: float, events: list[dict]) -> bool:
-    for e in events:
-        elat, elon = e.get("lat"), e.get("lon")
-        if not isinstance(elat, (int, float)) or not isinstance(elon, (int, float)):
-            continue
-        if _haversine_km(lat, lon, elat, elon) <= EVENT_CORRELATION_RADIUS_KM:
-            return True
-    return False
-
-
 def _filter_supported(items: list[dict]) -> list[dict]:
-    """Drop anomalies with unknown/missing/low confidence, then drop
-    whatever's left that isn't near a recent ACLED/GDELT event -- see the
-    module-level comments for why both cuts exist."""
-    confident = [
+    """Drop anomalies with unknown/missing/low confidence -- see
+    VIIRS_CONFIDENCE_ALLOW above for what counts as supported.
+
+    Previously also required proximity to a recent ACLED/GDELT event, but
+    wildfires (the actual use case for this layer) mostly have no conflict
+    or news correlation at all, so that gate left the layer showing ~0
+    hotspots almost always. Dropped in favor of live wildfire tracking."""
+    return [
         d for d in items
         if d.get("confidence") is not None and str(d["confidence"]).strip().lower() in VIIRS_CONFIDENCE_ALLOW
     ]
-    acled_events = registry.get("acled").data if registry.has("acled") else []
-    gdelt_events = registry.get("gdelt").data if registry.has("gdelt") else []
-    events = list(acled_events) + list(gdelt_events)
-    if not events:
-        return []  # no event context available yet -- nothing to correlate against, so nothing qualifies
-    return [d for d in confident if _has_nearby_event(d["lat"], d["lon"], events)]
 
 # NOAA HMS Fire product: pre-processed, analyst-QC'd fire detections fusing
 # GOES-16/18 (5-15 min geostationary cadence -- much faster than VIIRS's

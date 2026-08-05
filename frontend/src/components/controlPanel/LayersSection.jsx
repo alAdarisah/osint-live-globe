@@ -182,7 +182,6 @@ export default function LayersSection({
       </label>
       <div className="sublegend">
         Publicly documented sites relevant to the selected conflict zone; flares when a nearby event is reported.
-        Includes military bases (air/naval/army/missile/joint/logistics/radar).
       </div>
       <input
         type="text"
@@ -191,6 +190,44 @@ export default function LayersSection({
         value={infraFilterText}
         onChange={(e) => onInfraFilterChange(e.target.value)}
       />
+      <div className="subticker-list">
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#ff4d4d" }} /> Military Bases
+          <span className="count">{counts.infraMilitary} ({counts.infraMilitaryTotal})</span>
+        </div>
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#ff9500" }} /> Oil Refineries
+          <span className="count">{counts.infraRefinery} ({counts.infraRefineryTotal})</span>
+        </div>
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#ffb347" }} /> LNG Terminals
+          <span className="count">{counts.infraLng} ({counts.infraLngTotal})</span>
+        </div>
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#35c2ff" }} /> Ports &amp; Naval Terminals
+          <span className="count">{counts.infraPort} ({counts.infraPortTotal})</span>
+        </div>
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#6fe3ff" }} /> Desalination Plants
+          <span className="count">{counts.infraDesalination} ({counts.infraDesalinationTotal})</span>
+        </div>
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#9be15d" }} /> Nuclear Facilities
+          <span className="count">{counts.infraNuclear} ({counts.infraNuclearTotal})</span>
+        </div>
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#d8b9ff" }} /> Semiconductor Fabs
+          <span className="count">{counts.infraFab} ({counts.infraFabTotal})</span>
+        </div>
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#8aa0ad" }} /> Pipeline Nodes
+          <span className="count">{counts.infraPipelineNode} ({counts.infraPipelineNodeTotal})</span>
+        </div>
+        <div className="subticker-row">
+          <span className="swatch" style={{ background: "#8aa0ad" }} /> Pipeline Routes
+          <span className="count">{counts.pipelineRoutes} ({counts.pipelineRoutesTotal})</span>
+        </div>
+      </div>
 
       <label className="layer-row" data-layer="firms">
         <input

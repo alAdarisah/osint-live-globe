@@ -104,6 +104,25 @@ async def _snapshot_loop(state):
             state.last_success = time.time()
 
 
+async def _preload_from_storage():
+    """Seed _ships/_ship_types from the last known position per MMSI so a
+    backend restart doesn't blank out sparse-traffic boxes (Red Sea, Hormuz)
+    for however long it takes fresh PositionReports to trickle back in --
+    busy boxes (South China Sea) refill fast on their own, these don't."""
+    global _dirty
+    cutoff = time.time() - STALE_AFTER
+    for ship in await storage.entity_latest("ais"):
+        mmsi, updated = ship.get("mmsi"), ship.get("updated")
+        if mmsi is None or updated is None or updated < cutoff:
+            continue
+        _ships[mmsi] = ship
+        ship_type = ship.get("ship_type")
+        if ship_type is not None:
+            _ship_types[mmsi] = ship_type
+    if _ships:
+        _dirty = True
+
+
 async def start():
     key_configured = bool(config.AISSTREAM_API_KEY)
     state = registry.register("ais", key_configured=key_configured)
@@ -111,6 +130,10 @@ async def start():
         state.last_error = "AISSTREAM_API_KEY not set in .env"
         while True:
             await asyncio.sleep(3600)
+
+    # Seed from the last known positions before the stream starts, so sparse
+    # boxes aren't blank while fresh PositionReports trickle in.
+    await _preload_from_storage()
 
     # Held in a module-level global, not discarded: asyncio keeps only a weak
     # reference to a running task, so a bare create_task() can be garbage

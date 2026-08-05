@@ -9,6 +9,8 @@ import { createMapController } from "./createMapController";
 const COUNT_KEYS = [
   "events", "firms", "gdelt", "countries", "cities", "infra", "jamming", "satellites",
   "aisCivilian", "aisNavy", "aisTanker", "adsbCivilian", "adsbMilitary",
+  "infraMilitary", "infraRefinery", "infraLng", "infraPort", "infraDesalination",
+  "infraNuclear", "infraFab", "infraPipelineNode", "pipelineRoutes",
 ];
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
