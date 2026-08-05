@@ -486,7 +486,18 @@ html, body {
   color: var(--text-secondary);
   padding: 2px 0;
 }
-.subticker-row .swatch { width: 7px; height: 7px; }
+/* The base .swatch rule was dropped when the layer tickers moved from colour
+   dots to real glyphs (.layer-icon). The infra sub-tickers still use swatches
+   -- a 7px glyph would be unreadable, and a colour dot is the right weight
+   for a nested row -- so the base shape lives here now. Without it these
+   inherit no border-radius or flex behaviour and render as squares that
+   shrink under flex pressure. */
+.subticker-row .swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
 .subticker-row .count {
   margin-left: auto;
   color: var(--text-dim);
