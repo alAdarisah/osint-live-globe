@@ -14,8 +14,13 @@ Five tables:
                         queryable columns entity_latest's generic shape
                         can't express (see backend/sources/event_fusion.py).
   reference_snapshots-- whole-document sources that aren't lat/lon rows at
-                        all (countries GeoJSON, HDX country->month series).
+                        all (countries GeoJSON, HDX country->month series,
+                        cable routes, the OFAC SDN list).
   source_health      -- one row per poll outcome, per source.
+
+Everything a source collects lands in one of these, and every source reads its
+own back at startup through warm_points/warm_reference below, so a restart
+serves the last known state immediately instead of an empty map.
 
 `kind` is what makes the first two generic: "ais", "adsb", "events",
 "acled", "gdelt", "satellites", "firms", "jamming", "cities". Adding a
@@ -54,6 +59,17 @@ _BATCH = 5000
 
 _pool: asyncpg.Pool | None = None
 
+# The channel every writer announces on and the backend listens to (see
+# backend/mirror.py). One channel for all kinds, with the kind as the payload,
+# rather than a channel each: asyncpg registers listeners per channel name, and
+# a channel per kind would mean re-registering whenever the set of mirrored
+# kinds changed, for no gain -- the payload already says which one moved.
+#
+# Every NOTIFY below is issued *inside* the writing transaction. Postgres holds
+# notifications until commit, so a listener can never be woken for a change it
+# would not yet be able to read.
+NOTIFY_CHANNEL = "osint_ingest"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS entity_latest (
   kind TEXT NOT NULL,
@@ -66,6 +82,12 @@ CREATE TABLE IF NOT EXISTS entity_latest (
   PRIMARY KEY (kind, entity_id)
 );
 CREATE INDEX IF NOT EXISTS idx_latest_kind_moved ON entity_latest (kind, last_moved_at DESC);
+-- Serves kind_watermark()'s max(updated_at), which the backend runs on every
+-- mirror tick to decide whether a kind is worth re-reading at all. Without it
+-- that "has anything changed?" question is a full scan of the kind -- 100k+
+-- rows for FIRMS -- several times a minute, which costs more than the read it
+-- is trying to avoid.
+CREATE INDEX IF NOT EXISTS idx_latest_kind_updated ON entity_latest (kind, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS entity_history (
   id BIGSERIAL PRIMARY KEY,
@@ -187,6 +209,28 @@ CREATE TABLE IF NOT EXISTS source_health (
   error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_source_health_lookup ON source_health (source, ts DESC);
+
+-- What the cache worker has found wrong (see backend/cacheworker). One row per
+-- (subject, condition) rather than one per observation: a cache that has been
+-- missing for six hours is one fact, and appending it every 60 seconds would
+-- turn the useful question -- "what is wrong right now" -- into an aggregate
+-- over 360 identical rows. occurrences and first_seen keep the duration; the
+-- primary key keeps the count at one.
+--
+-- resolved_at is set rather than the row deleted, so "this broke overnight and
+-- fixed itself" stays answerable in the morning.
+CREATE TABLE IF NOT EXISTS alerts (
+  subject TEXT NOT NULL,
+  condition TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  detail TEXT,
+  first_seen TIMESTAMPTZ NOT NULL,
+  last_seen TIMESTAMPTZ NOT NULL,
+  occurrences INTEGER NOT NULL DEFAULT 1,
+  resolved_at TIMESTAMPTZ,
+  PRIMARY KEY (subject, condition)
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (resolved_at, last_seen DESC);
 """
 
 
@@ -261,6 +305,13 @@ async def close_pool() -> None:
 
 def _stale_after(kind: str) -> int:
     return config.ENTITY_STALE_AFTER.get(kind, config.ENTITY_STALE_AFTER_DEFAULT)
+
+
+def _replay_window(kind: str) -> int:
+    """How old a recorded fix may be and still answer "where was it then".
+    Falls back to the eviction window for kinds that don't need their own --
+    reference layers refresh so slowly that the two are the same question."""
+    return config.REPLAY_WINDOW_SECONDS.get(kind, _stale_after(kind))
 
 
 def _synthetic_id(item: dict) -> str:
@@ -392,6 +443,7 @@ async def record_snapshot(kind: str, items: list[dict], id_field: str | None = N
                 await conn.execute(
                     "DELETE FROM entity_latest WHERE kind = $1 AND updated_at < $2", kind, cutoff
                 )
+                await conn.execute("SELECT pg_notify($1, $2)", NOTIFY_CHANNEL, kind)
     except Exception:  # noqa: BLE001 - storage must never take a poller down
         log.exception("Failed to record %s snapshot (%d items)", kind, len(ids))
 
@@ -494,6 +546,7 @@ async def record_conflict_events(items: list[dict]) -> None:
         async with _pool.acquire() as conn:
             async with conn.transaction():
                 await conn.executemany(_UPSERT_CONFLICT, rows)
+                await conn.execute("SELECT pg_notify($1, $2)", NOTIFY_CHANNEL, "conflict_events")
     except Exception:  # noqa: BLE001
         log.exception("Failed to record %d conflict events", len(rows))
 
@@ -561,6 +614,103 @@ async def record_reference(name: str, payload) -> None:
         log.exception("Failed to record reference snapshot %r", name)
 
 
+async def reference(name: str):
+    """The last stored document for `name`, or None if there isn't one.
+
+    The read counterpart to record_reference. Without it those sources were
+    write-only: the document was saved on every poll and never looked at, so a
+    restart still showed an empty layer until the next successful fetch --
+    which for a 24-hour refresh that fails is the rest of the day.
+    """
+    if _pool is None:
+        return None
+    try:
+        async with _pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT payload FROM reference_snapshots WHERE name = $1", name
+            )
+    except Exception:  # noqa: BLE001 - a cold read is not worth failing a boot over
+        log.exception("Failed to read reference snapshot %r", name)
+        return None
+    return json.loads(row["payload"]) if row else None
+
+
+# --- boot warming ---------------------------------------------------------
+#
+# Every source's poll loop runs its first fetch immediately, so in the happy
+# case a layer is blank only for as long as that fetch takes. Two things make
+# that a bad assumption in practice:
+#
+#   - Some first fetches are genuinely slow. osm_infra runs an Overpass query
+#     that takes minutes and frequently times out; gazetteer and cities pull
+#     multi-megabyte GeoNames archives; countries pulls a world GeoJSON.
+#   - When a fetch fails the retry backs off to the source's full refresh
+#     interval, which for airports, cables, osm_infra, sanctions and gazetteer
+#     is 24 hours. A single failed boot fetch means a blank layer all day.
+#
+# In both cases Postgres already holds a perfectly good copy of what the layer
+# last looked like. Serving that immediately and letting the live fetch
+# overwrite it is strictly better than showing nothing: the data is real, it is
+# attributed exactly as it was when collected, and /api/health still reports
+# last_success as null until a fetch actually succeeds, so a warmed layer is
+# never mistaken for a fresh one.
+#
+# Both helpers take the SourceState duck-typed rather than importing the
+# registry, which would point this module at backend.cache and invert the
+# dependency the rest of the file is careful to keep one-way.
+
+
+# Much shorter than wait_for_pool's own default, and deliberately so. Warming
+# runs before a source's first fetch, so every second spent waiting here is a
+# second the live poll has not started -- and on a run with no database at all
+# (a bare `python -m backend.app` with no DATABASE_URL reachable) that cost is
+# paid by every source for nothing.
+# init_pool connects on its first attempt whenever Postgres is actually
+# reachable, and under compose the backend does not even start until the
+# database reports healthy, so five seconds is generous for the case this can
+# help and cheap for the case it cannot.
+_WARM_POOL_WAIT = 5.0
+
+
+async def wait_for_warm_pool() -> bool:
+    """wait_for_pool on the warming budget, for sources that warm by hand.
+
+    Most sources go through warm_points/warm_reference below. The three that
+    rebuild something more structured than a state payload -- gazetteer's name
+    index, osm_infra's per-theatre map, satellites' orbital elements -- call
+    this directly so they wait exactly as long as everything else does.
+    """
+    return await wait_for_pool(timeout=_WARM_POOL_WAIT)
+
+
+async def _warm(state, load, label: str) -> bool:
+    if state.data:
+        return False  # a live fetch already won the race; never overwrite it
+    if not await wait_for_warm_pool():
+        return False
+    stored = await load()
+    if not stored:
+        return False
+    # Re-checked after the await: waiting for the pool can take seconds, and a
+    # fast first fetch landing in that window must not be clobbered by an older
+    # snapshot.
+    if state.data:
+        return False
+    state.data = stored
+    log.info("%s: warmed from storage while the first fetch runs", label)
+    return True
+
+
+async def warm_reference(state, name: str, label: str | None = None) -> bool:
+    """Fill a still-empty whole-document source from its last stored copy."""
+    return await _warm(state, lambda: reference(name), label or name)
+
+
+async def warm_points(state, kind: str, label: str | None = None) -> bool:
+    """Fill a still-empty point source from entity_latest."""
+    return await _warm(state, lambda: entity_latest(kind), label or kind)
+
+
 async def record_source_health(source: str, item_count: int | None, ok: bool, error: str | None = None) -> None:
     """One row per poll outcome -- the history behind /api/health's snapshot."""
     if _pool is None:
@@ -575,35 +725,212 @@ async def record_source_health(source: str, item_count: int | None, ok: bool, er
         log.exception("Failed to record source health for %r", source)
 
 
-async def history_at(kind: str, at: float) -> list[dict]:
-    """Nearest recorded position at-or-before `at` (unix seconds), per entity."""
+async def kind_watermark(kind: str) -> datetime | None:
+    """The newest updated_at in entity_latest for `kind`, or None if empty.
+
+    The cheap half of the mirror's read (see backend/mirror.py): one row out of
+    idx_latest_kind_updated answers "did anything change since last time", so
+    the expensive half -- pulling every row of the kind and reassigning
+    state.data -- runs only when the answer is yes. That gate is what keeps
+    HTTP ETags stable: state.data's setter bumps state.version (see
+    backend/cache.py), version is the ETag, and re-reading an unchanged kind on
+    every tick would invalidate every client's cached copy of a 100k-point
+    payload several times a minute for no new data.
+
+    Raises rather than swallowing: unlike the write paths, a mirror that cannot
+    tell whether data moved must keep what it has, not silently republish.
+    """
+    if _pool is None:
+        return None
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT max(updated_at) FROM entity_latest WHERE kind = $1", kind
+        )
+
+
+async def source_health_latest(source: str) -> tuple[dict | None, dict | None]:
+    """`(newest row, newest successful row)` for `source`; either may be None.
+
+    Both come from idx_source_health_lookup (source, ts DESC), one row each.
+    Two queries rather than one because they answer different questions and the
+    newest row is usually the successful one anyway: the newest says whether the
+    producing process is currently working, the newest successful says when data
+    last actually arrived. A source failing for an hour needs both -- "erroring
+    since 10:04" and "last real data 09:58" -- and either alone reads as a
+    healthier or deader source than it is.
+    """
+    if _pool is None:
+        return None, None
+    async with _pool.acquire() as conn:
+        newest = await conn.fetchrow(
+            "SELECT ts, item_count, ok, error FROM source_health"
+            " WHERE source = $1 ORDER BY ts DESC LIMIT 1",
+            source,
+        )
+        newest_ok = await conn.fetchrow(
+            "SELECT ts, item_count FROM source_health"
+            " WHERE source = $1 AND ok ORDER BY ts DESC LIMIT 1",
+            source,
+        )
+    return (dict(newest) if newest else None), (dict(newest_ok) if newest_ok else None)
+
+
+async def record_alert(subject: str, condition: str, severity: str, detail: str) -> bool:
+    """Upsert one alert. Returns True only the first time it starts firing.
+
+    That return value is what keeps the webhook quiet: a condition that stays
+    true for hours is one notification, not one per probe. A condition that
+    clears and returns is a new notification, because it is genuinely new
+    information -- which is why resolve_alerts below clears first_seen's row
+    rather than leaving it to be re-upserted.
+    """
+    if _pool is None:
+        return False
+    now = datetime.now(timezone.utc)
+    try:
+        async with _pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO alerts (subject, condition, severity, detail, first_seen, last_seen)
+                   VALUES ($1,$2,$3,$4,$5,$5)
+                   ON CONFLICT (subject, condition) DO UPDATE SET
+                     severity = EXCLUDED.severity,
+                     detail = EXCLUDED.detail,
+                     last_seen = EXCLUDED.last_seen,
+                     occurrences = alerts.occurrences + 1,
+                     -- A row that had been resolved starts a fresh episode, so
+                     -- first_seen moves and resolved_at clears. Without this a
+                     -- recurring problem would report a first_seen from days
+                     -- ago and read as one continuous outage.
+                     first_seen = CASE WHEN alerts.resolved_at IS NOT NULL
+                                       THEN EXCLUDED.first_seen ELSE alerts.first_seen END,
+                     resolved_at = NULL
+                   RETURNING occurrences, (xmax = 0) AS inserted, first_seen""",
+                subject, condition, severity, detail, now,
+            )
+            # Newly firing means either a brand new row or one that had been
+            # resolved and just came back.
+            return bool(row["inserted"] or row["first_seen"] == now)
+    except Exception:  # noqa: BLE001 - alerting must never take the worker down
+        log.exception("Failed to record alert %s/%s", subject, condition)
+        return False
+
+
+async def resolve_alerts(active: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Close every firing alert not in `active`. Returns what was closed."""
+    if _pool is None:
+        return []
+    now = datetime.now(timezone.utc)
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT subject, condition FROM alerts WHERE resolved_at IS NULL"
+            )
+            stale = [
+                (r["subject"], r["condition"]) for r in rows
+                if (r["subject"], r["condition"]) not in active
+            ]
+            for subject, condition in stale:
+                await conn.execute(
+                    "UPDATE alerts SET resolved_at = $1 WHERE subject = $2 AND condition = $3",
+                    now, subject, condition,
+                )
+            return stale
+    except Exception:  # noqa: BLE001
+        log.exception("Failed to resolve alerts")
+        return []
+
+
+async def active_alerts() -> list[dict]:
+    """Everything currently firing, worst first. Served on /api/health."""
+    if _pool is None:
+        return []
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT subject, condition, severity, detail, first_seen, last_seen, occurrences
+                     FROM alerts WHERE resolved_at IS NULL
+                    ORDER BY severity = 'critical' DESC, last_seen DESC"""
+            )
+        return [
+            {
+                "subject": r["subject"],
+                "condition": r["condition"],
+                "severity": r["severity"],
+                "detail": r["detail"],
+                "first_seen": r["first_seen"].timestamp(),
+                "last_seen": r["last_seen"].timestamp(),
+                "occurrences": r["occurrences"],
+            }
+            for r in rows
+        ]
+    except Exception:  # noqa: BLE001 - health must answer even when this table cannot
+        log.exception("Failed to read active alerts")
+        return []
+
+
+# Positions as of one moment, measured from the last time we actually looked
+# rather than from the moment asked for. `anchor` is that look: the newest
+# recorded timestamp at or before `at`. Everything then hangs off it, which is
+# what keeps the answer stable as the scrubber moves *between* polls -- read
+# straight from `at`, a moment landing 25 minutes after the last poll returned
+# only whatever happened to move in the 5 minutes before it, so the fleet
+# thinned and refilled with every drag. The anchor is still required to be
+# recent (see the HAVING), or a scrub into a stretch we never recorded would
+# answer with an old snapshot dressed up as the present.
+#
+# Two stages on purpose as well: the inner DISTINCT ON runs entirely inside
+# idx_history_entity (kind, entity_id, ts DESC) and touches no payload, so
+# only the few thousand winning rows are read off the heap. Ranking payloads
+# directly -- SELECT payload, ROW_NUMBER() OVER (PARTITION BY entity_id ...)
+# over the whole kind -- made the planner sort every JSONB row in the window,
+# which on a warm database (millions of ADSB rows over 3 days) took
+# /api/replay past 30 seconds per scrub.
+_HISTORY_AT = """
+WITH anchor AS (
+  SELECT max(ts) AS ts
+    FROM entity_history
+   WHERE kind = $1 AND ts <= $2 AND ts >= $2::timestamptz - $3::interval
+)
+SELECT h.payload
+  FROM (
+    SELECT DISTINCT ON (e.entity_id) e.id
+      FROM entity_history e, anchor a
+     WHERE e.kind = $1 AND a.ts IS NOT NULL
+       AND e.ts <= a.ts AND e.ts >= a.ts - $3::interval
+     ORDER BY e.entity_id, e.ts DESC
+  ) latest
+  JOIN entity_history h ON h.id = latest.id
+"""
+
+
+async def history_at(kind: str, at: float, window_seconds: int | None = None) -> list[dict]:
+    """Where each entity was at `at` (unix seconds): its most recent recorded
+    position at or before that moment, ignoring anything whose last fix is
+    older than `window_seconds` -- by default config.REPLAY_WINDOW_SECONDS for
+    that kind, falling back to its eviction window. Callers override it when
+    the live layer draws a narrower window than the rows are kept for.
+
+    That window is what makes this a *moment* rather than an accumulation.
+    Without it the query answered "every entity ever recorded up to `at`", so
+    scrubbing to yesterday drew 18k aircraft -- every plane seen in the
+    preceding days, all at once, at whatever position it was last seen. It
+    also does the disappearing act the scrubber is for: drag back past when a
+    vessel was first heard and it goes, drag into a window it was live in and
+    it returns, wherever it happens to be gone from now.
+
+    Empty when nothing was recorded within the window before `at` -- either
+    the timestamp predates the log or a poller was down across it. It used to
+    fall back to each entity's earliest kept position, which meant every
+    timestamp older than the log returned one identical payload: dragging
+    across the whole left-hand side of the scrubber changed nothing on the
+    map, because the answer really was the same bytes each time.
+    """
     if _pool is None:
         return []
     when = datetime.fromtimestamp(at, tz=timezone.utc)
+    window = timedelta(seconds=window_seconds or _replay_window(kind))
     async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT payload FROM (
-              SELECT payload, ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY ts DESC) AS rn
-                FROM entity_history
-               WHERE kind = $1 AND ts <= $2
-            ) ranked WHERE rn = 1
-            """,
-            kind, when,
-        )
-        if not rows:
-            # `at` predates everything kept -- fall back to each entity's
-            # earliest known position, same as the old in-memory buffer's
-            # "falls back to the oldest kept snapshot".
-            rows = await conn.fetch(
-                """
-                SELECT payload FROM (
-                  SELECT payload, ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY ts ASC) AS rn
-                    FROM entity_history WHERE kind = $1
-                ) ranked WHERE rn = 1
-                """,
-                kind,
-            )
+        rows = await conn.fetch(_HISTORY_AT, kind, when, window)
     return [json.loads(r["payload"]) for r in rows]
 
 

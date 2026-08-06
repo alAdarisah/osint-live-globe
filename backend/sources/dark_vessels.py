@@ -119,14 +119,21 @@ def feed_was_healthy(
     to report anything would be the wrong failure mode for a signal whose whole
     value is that it is rare -- but a measured collapse suppresses the gap.
     """
+    window = [(ts, count, ok) for ts, count, ok in series if start <= ts <= end]
+    if any(not ok for _ts, _count, ok in window):
+        # Checked before the baseline, not after. A recorded failure across the
+        # gap is direct evidence about our own feed and needs no comparison to
+        # interpret -- and requiring a baseline first is what made this guard
+        # inert exactly when it mattered most: through a total outage the feed
+        # recorded nothing but failures, so there was no successful count to
+        # take a median of, so every vessel in every watched box read as having
+        # gone dark at the same moment.
+        return False
     if baseline is None:
         return True
-    window = [(ts, count, ok) for ts, count, ok in series if start <= ts <= end]
     if not window:
         # No polls recorded across the gap at all: the snapshot loop itself was
         # not running, which is exactly the case this guard exists for.
-        return False
-    if any(not ok for _ts, _count, ok in window):
         return False
     counts = [count for _ts, count, _ok in window if isinstance(count, int)]
     if not counts:
@@ -260,8 +267,22 @@ async def _compute() -> list[dict]:
     return build_gap_records(gaps, ships_by_mmsi, health) + build_sts_records(ships, _port_index())
 
 
-async def start():
-    state = registry.register("dark_vessels", key_configured=True)  # derives from our own history
+async def derive_forever():
+    """The gap/STS derivation, for the life of the refine process.
+
+    Self-paced rather than scheduled: the loop below retries after 60s and backs
+    off from there when a pass fails, rather than waiting out the full 15
+    minutes. A fixed schedule would throw that away, and this derivation runs
+    three aggregate queries over the AIS movement log -- the case where retrying
+    sooner matters is exactly the case where the database was busy.
+    """
+    state = registry.ensure("dark_vessels", key_configured=True)  # derives from our own history
+    # Derived rather than fetched, but still worth storing and restoring: the
+    # derivation reads AIS history that the pool has to be up to serve, so at
+    # boot this source produces nothing until Postgres is connected *and* a
+    # 15-minute cycle has run. Storing it also puts gaps and STS pairs on the
+    # replay timeline alongside the positions they were derived from.
+    await storage.warm_points(state, "dark_vessels", "Dark vessels")
     consecutive_failures = 0
     while True:
         ok = False
@@ -278,6 +299,7 @@ async def start():
                 len(records) - gaps,
                 sum(1 for r in records if r.get("sanctions")),
             )
+            await storage.record_snapshot("dark_vessels", records, id_field="id")
             await storage.record_source_health("dark_vessels", len(records), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)

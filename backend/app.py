@@ -13,7 +13,10 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import admin_config, config, escalation, history, infrastructure, regions, replay, storage
+from backend import (
+    admin_config, cachestore, config, escalation, history, infrastructure, ingest, mirror, refine,
+    regions, replay, storage,
+)
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
 
@@ -38,15 +41,37 @@ _background_tasks: list[asyncio.Task] = []
 _PROCESS_TOKEN = uuid.uuid4().hex[:8]
 
 
+# The sources this process still fetches for itself: every one of them is
+# keyless and unmetered, so the cost of a restart re-polling them is bandwidth
+# and nothing else. Everything credentialed or metered -- ACLED, FIRMS, ADS-B,
+# AIS -- moved to the ingest process (see backend/ingest), because those were
+# being re-paid for on every restart, redeploy and local dev run by whoever
+# happened to be running the backend. osm_infra went with them: it is keyless,
+# but Overpass is a volunteer service and a 20-minute sweep restarting from the
+# top on every deploy is the same discourtesy in a different currency.
+#
+# Those five are read back from Postgres instead (see backend/mirror.py), which
+# is what keeps /api/ships, /api/aircraft, /api/fires and the conflict layer
+# serving exactly as before.
 _SOURCE_MODULES = (
     # gazetteer sits with cities because it is the same GeoNames family, and
     # early in the list because its download is the slowest here and everything
     # in the placement path degrades to "no opinion" until it lands.
-    "gdelt", "firms", "ais", "adsb", "acled", "countries", "cities", "gazetteer",
-    "jamming", "satellites", "hazards", "airports", "sanctions", "dark_vessels",
-    "cables", "outages", "launches", "osm_infra",
-    "hdx_conflict_stats", "hapi_conflict", "humanitarian", "event_fusion", "official_feeds", "officials",
+    "gdelt", "countries", "cities", "gazetteer",
+    "jamming", "satellites", "hazards", "airports", "sanctions",
+    "cables", "outages", "launches",
+    "hdx_conflict_stats", "hapi_conflict", "humanitarian", "official_feeds", "officials",
 )
+
+# Everything this process serves but does not produce: the ingest process's
+# collected layers and the refine process's derived ones. Composed here rather
+# than inside backend/mirror.py so that module stays a dependency of both
+# pipelines without either becoming a dependency of it.
+def _mirrored_specs():
+    return (
+        mirror.from_jobs(ingest.all_jobs(), producer="the ingest service")
+        + mirror.from_jobs(refine.all_jobs(), producer="the refine service")
+    )
 
 
 @asynccontextmanager
@@ -59,6 +84,12 @@ async def lifespan(app: FastAPI):
     # ~60s. Under compose the healthcheck means it connects on the first
     # attempt anyway; this only changes the degraded cases.
     _background_tasks.append(asyncio.create_task(storage.init_pool()))
+
+    # Before the mirror starts, so its first read can already hit a warm cache
+    # after a restart instead of pulling every kind out of Postgres in full.
+    # Never blocks: with no Redis configured or reachable, every call is a miss
+    # and the mirror reads the database exactly as it did before.
+    await cachestore.connect()
 
     # Each source is imported and started independently -- one module with a
     # broken/missing dependency (e.g. jamming.py needing the `h3` package)
@@ -75,6 +106,14 @@ async def lifespan(app: FastAPI):
         except Exception:
             log.exception("Failed to start source %r -- it will stay unavailable", name)
 
+    # Follows what the ingest and refine processes write, for everything this one
+    # no longer produces. Registered synchronously first so /api/ships and
+    # friends can never be served before their state exists; the task then
+    # fills it.
+    specs = _mirrored_specs()
+    mirror.register(specs)
+    _background_tasks.append(asyncio.create_task(mirror.follow(specs)))
+
     _background_tasks.append(asyncio.create_task(storage.retention_sweep_loop()))
 
     # Weather has no polling loop of its own -- it's proxied tile-by-tile on
@@ -88,6 +127,7 @@ async def lifespan(app: FastAPI):
     for task in _background_tasks:
         task.cancel()
     await asyncio.gather(*_background_tasks, return_exceptions=True)
+    await cachestore.close()
     await storage.close_pool()
 
 
@@ -100,7 +140,15 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 @app.get("/api/health")
 async def health():
-    return registry.health()
+    """Per-source status, plus whatever the cache worker is currently reporting.
+
+    The `alerts` block is the part no registry state can carry: conditions about
+    the infrastructure between the processes rather than about a source -- Redis
+    evicting, a cached kind the backend has stopped following, a producer that
+    stopped producing. Read from the alerts table rather than recomputed here,
+    so the API and the worker cannot disagree about what is wrong.
+    """
+    return {**registry.health(), "alerts": await storage.active_alerts()}
 
 
 @app.get("/api/admin-config")
@@ -447,10 +495,11 @@ async def airports_endpoint(request: Request, region: str | None = None):
     return _cached_source_response(request, "airports", region, regions.filter_points, max_age=3600)
 
 
-# Aggregates a week of conflict_events across every region, so it's far too
-# expensive to recompute per request when the frontend polls it on a timer.
-# The underlying data only moves when event_fusion.py writes (minutes apart),
-# so a short TTL costs nothing in freshness.
+# The ranking is computed by the refine process now, so this is a read of one
+# stored document rather than a week of conflict_events aggregated across every
+# region. The TTL stays anyway: the document only changes when the refine
+# process writes it (minutes apart), and a cache here keeps a frontend polling
+# on a timer from hitting the database for an answer it already has.
 _ESCALATION_CACHE = LruTtlCache(maxsize=1, ttl=120)
 
 
@@ -458,15 +507,54 @@ _ESCALATION_CACHE = LruTtlCache(maxsize=1, ttl=120)
 async def escalation_endpoint():
     """Regions currently running above their own recent baseline.
 
-    Returns an empty list -- not an error -- when there's no database or not
-    enough history to compare against. "Nothing to report" and "we can't
-    tell yet" both correctly render as a hidden panel rather than a claim.
+    Returns an empty list -- not an error -- when there's no database or the
+    refine process has not written a ranking yet. "Nothing to report" and "we
+    can't tell yet" both correctly render as a hidden panel rather than a claim.
     """
     cached = _ESCALATION_CACHE.get("all")
     if cached is None:
-        cached = await escalation.compute()
+        cached = await storage.reference(escalation.REFERENCE_NAME) or []
         _ESCALATION_CACHE.set("all", cached)
     return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+async def _replay_source(kind, registry_key, ts_fn, at, bounds, window_seconds=None):
+    """One replayed layer: the live payload time-filtered to `at`, falling back
+    to what the database recorded by then once `at` predates the live window.
+
+    That order matters. The live payload is exactly what the map draws now, so
+    filtering it keeps recent replay identical to live. But FIRMS fetches one
+    day and GDELT one day, so past that the filter can only ever return
+    nothing -- which is why the fire and news layers used to sit empty across
+    the whole older half of the scrubber however much history was stored.
+    Storage answers a slightly different question (what we had *recorded* by
+    then, not what one upstream fetch held), so it is the fallback rather than
+    the primary, and it gets time-filtered too.
+    """
+    items = replay.filter_up_to(registry.get(registry_key).data, ts_fn, at)
+    if not items:
+        stored = await storage.history_at(kind, at, window_seconds=window_seconds)
+        items = replay.filter_up_to(stored, ts_fn, at)
+    return regions.filter_points(items, bounds)
+
+
+async def _replay_positions(kind, buffer, at, bounds):
+    """Ships/aircraft for one moment: what was recorded around it, falling back
+    to the live payload only when `at` is inside the window a fix stays good
+    for and nothing was recorded across it.
+
+    That fallback is what keeps the live edge of the scrubber agreeing with the
+    live map. Both feeds keep serving their last successful fetch while the
+    upstream is failing -- OpenSky answering 429 for an hour doesn't clear the
+    aircraft layer -- so without it, scrubbing to *now* during an outage
+    emptied a map that was drawing several thousand aircraft a second earlier.
+    Bounded by the same window, so it can only ever stand in for a gap we
+    would still call current, never paper over a stretch of missing history.
+    """
+    items = await buffer.at(at)
+    if not items and time.time() - at <= config.REPLAY_WINDOW_SECONDS.get(kind, 0):
+        items = registry.get(kind).data
+    return regions.filter_points(items, bounds)
 
 
 @app.get("/api/replay")
@@ -492,13 +580,24 @@ async def replay_at(at: float, region: str | None = None):
             replay.filter_up_to(registry.get("acled").data, replay.acled_ts, at), bounds
         )
 
+    # Fires and news reach back past their own live windows via storage --
+    # see _replay_source. FIRMS is read over a narrower window than its rows
+    # are kept for: NASA's NRT file is nominally a day (day_range=1) but is
+    # continuously pruned, so what it actually holds at any moment is about
+    # six hours of detections -- measured against this database, a 6h read
+    # returns ~7.5k points where the live layer holds ~7.6k, and a 24h read
+    # returns ~99k. Matching the window is what keeps replayed fire density
+    # the same as live instead of an order of magnitude heavier.
+    firms = await _replay_source("firms", "firms", replay.firms_ts, at, bounds, window_seconds=6 * 3600)
+    gdelt = await _replay_source("gdelt", "gdelt", replay.gdelt_ts, at, bounds)
+
     payload = {
         "at": at,
         "events": events,
-        "firms": regions.filter_points(replay.filter_up_to(registry.get("firms").data, replay.firms_ts, at), bounds),
-        "gdelt": regions.filter_points(replay.filter_up_to(registry.get("gdelt").data, replay.gdelt_ts, at), bounds),
-        "ais": regions.filter_points(await history.SHIP_HISTORY.at(at), bounds),
-        "adsb": regions.filter_points(await history.AIRCRAFT_HISTORY.at(at), bounds),
+        "firms": firms,
+        "gdelt": gdelt,
+        "ais": await _replay_positions("ais", history.SHIP_HISTORY, at, bounds),
+        "adsb": await _replay_positions("adsb", history.AIRCRAFT_HISTORY, at, bounds),
     }
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
@@ -643,12 +742,12 @@ async def weather_tile(layer: str, z: int, x: int, y: int, request: Request):
     return Response(content=content, media_type="image/png", headers=headers)
 
 
-# Serving the built frontend is optional. In the docker-compose split (see
+# Serving the built frontend is optional. Under compose (see
 # docker-compose.yml) the React app is its own nginx container that proxies
 # /api here, so this image has no frontend/dist at all and must run as a
-# pure API -- what used to be a hard RuntimeError at import time. The
-# single-container path (root Dockerfile, render.yaml) still copies dist in,
-# so it keeps serving the UI from here exactly as before.
+# pure API -- what used to be a hard RuntimeError at import time. Kept for the
+# case where someone has run `npm run build` and wants one process to serve
+# both, which is how a local `python -m backend.app` behaves.
 _HAS_FRONTEND_BUILD = (config.FRONTEND_DIST_DIR / "index.html").exists()
 
 if _HAS_FRONTEND_BUILD:

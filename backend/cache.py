@@ -65,6 +65,24 @@ class SourceRegistry:
         self._sources[name] = state
         return state
 
+    def ensure(self, name: str, key_configured: bool) -> SourceState:
+        """register(), but keeps an existing state instead of replacing it.
+
+        register() is right for a poller that owns its own `while True` loop: it
+        runs once, at the top, and everything after it holds the same object for
+        the life of the process. A scheduled job has no such top -- the ingest
+        scheduler re-enters a source's step from a fresh call every interval (see
+        backend/ingest), so register() there would hand out a new state each time
+        and throw away the version counter, last_success and last_error the
+        previous run recorded. `key_configured` is refreshed on every call, since
+        credentials can appear in the environment between runs.
+        """
+        state = self._sources.get(name)
+        if state is None:
+            return self.register(name, key_configured)
+        state.key_configured = key_configured
+        return state
+
     def health(self) -> dict[str, Any]:
         return {name: state.to_health() for name, state in self._sources.items()}
 

@@ -361,43 +361,55 @@ async def _fetch() -> tuple[list[dict], list[dict]]:
     return _within_real_lookback(live_inputs), history
 
 
-async def start():
+async def ingest_once():
+    """One poll of both halves. Runs in the ingest process (see backend/ingest).
+
+    Nothing is warmed from storage here: this process publishes to Postgres and
+    serves no one, so filling its registry state from the previous run's rows
+    would achieve nothing. The warm that used to happen here mattered because
+    event_fusion._wait_for_inputs blocks on acled.version > 0 for up to 60
+    seconds; that consumer runs in the backend, and the backend now fills the
+    same state from Postgres on boot instead (see backend/mirror.py).
+    """
     # UCDP's candidate dataset needs no key, so this layer is always usable
     # even without ACLED credentials -- key_configured reflects "the source
     # is usable", not "every possible sub-source is configured".
-    state = registry.register("acled", key_configured=True)
+    state = registry.ensure("acled", key_configured=True)
     # The reviewed record, deliberately separate from the live feed so nothing
     # downstream can mistake a month-old verified dataset for current events.
-    history_state = registry.register("conflict_history", key_configured=True)
-    while True:
-        acled_configured = bool(config.ACLED_EMAIL and config.ACLED_PASSWORD)
-        try:
-            state.data, history = await _fetch()
-            history_state.data = history
-            history_state.last_success = time.time()
-            history_state.last_error = None
-            state.last_success = time.time()
-            state.last_error = (
-                None if acled_configured
-                else "ACLED_EMAIL / ACLED_PASSWORD not set -- showing UCDP only"
-            )
-            ucdp_count = sum(1 for d in state.data if d.get("source") == "ucdp")
-            as_of = next((h.get("as_of") for h in history if h.get("as_of")), None)
-            log.info(
-                "Conflict events: %d live (%d ACLED, %d UCDP); %d verified history rows"
-                " through %s",
-                len(state.data), len(state.data) - ucdp_count, ucdp_count,
-                len(history), as_of or "?",
-            )
-            # Raw ACLED+UCDP rows, pre-fusion -- event_fusion.py archives the
-            # merged view separately, so both the inputs and the result stay
-            # queryable rather than only the result.
-            await storage.record_snapshot("acled", state.data, "id")
-            await storage.record_snapshot("conflict_history", history, "id")
-            await storage.record_source_health("acled", len(state.data), True)
-            await storage.record_source_health("conflict_history", len(history), True)
-        except Exception as exc:  # noqa: BLE001 - keep the poller alive
-            state.last_error = str(exc)
-            log.warning("Conflict event fetch failed: %s", exc)
-            await storage.record_source_health("acled", None, False, str(exc))
-        await asyncio.sleep(config.ACLED_POLL_INTERVAL if acled_configured else config.UCDP_POLL_INTERVAL)
+    history_state = registry.ensure("conflict_history", key_configured=True)
+    acled_configured = bool(config.ACLED_EMAIL and config.ACLED_PASSWORD)
+    try:
+        state.data, history = await _fetch()
+        history_state.data = history
+        history_state.last_success = time.time()
+        history_state.last_error = None
+        state.last_success = time.time()
+        state.last_error = (
+            None if acled_configured
+            else "ACLED_EMAIL / ACLED_PASSWORD not set -- showing UCDP only"
+        )
+        ucdp_count = sum(1 for d in state.data if d.get("source") == "ucdp")
+        as_of = next((h.get("as_of") for h in history if h.get("as_of")), None)
+        log.info(
+            "Conflict events: %d live (%d ACLED, %d UCDP); %d verified history rows"
+            " through %s",
+            len(state.data), len(state.data) - ucdp_count, ucdp_count,
+            len(history), as_of or "?",
+        )
+        # Raw ACLED+UCDP rows, pre-fusion -- event_fusion.py archives the
+        # merged view separately, so both the inputs and the result stay
+        # queryable rather than only the result.
+        await storage.record_snapshot("acled", state.data, "id")
+        await storage.record_snapshot("conflict_history", history, "id")
+        await storage.record_source_health("acled", len(state.data), True)
+        await storage.record_source_health("conflict_history", len(history), True)
+    except Exception as exc:  # noqa: BLE001 - one failed poll is not a dead source
+        state.last_error = str(exc)
+        log.warning("Conflict event fetch failed: %s", exc)
+        await storage.record_source_health("acled", None, False, str(exc))
+        # Recorded for both halves, not just the live feed. They are fetched
+        # together and fail together, and leaving conflict_history's last row
+        # successful would keep the verified-history layer green while the job
+        # producing it was erroring.
+        await storage.record_source_health("conflict_history", None, False, str(exc))

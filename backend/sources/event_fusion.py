@@ -31,6 +31,10 @@ from backend.sources.cameo import (
 # dependency -- event_fusion still reads gdelt's rows through the registry.
 from backend.sources.gdelt import MAX_REPORT_LAG_DAYS
 from backend.sources.outlets import is_non_news_url, label_for_url, rank_outlets
+# Who is behind a record and how much that is worth, kept out of this module
+# because it is a different question from the one _severity_for answers -- see
+# the header of reliability.py.
+from backend.sources import reliability
 
 log = logging.getLogger("osint-globe.event_fusion")
 
@@ -58,6 +62,104 @@ _ONESIDED_WORDS = (
     "civilians", "massacre", "executed", "ethnic cleansing", "genocide",
     "targeted civilians", "protesters killed", "unarmed",
 )
+
+# --- does the headline describe a violent act? -----------------------------
+#
+# Everything above answers "who is mentioned". Nothing in this pipeline used to
+# ask "what happened", and that is the whole reason a road accident, an
+# aviation incident and two opinion pieces reached a layer labelled Violence
+# only. Measured on a live window, of 16 rows carrying a real headline, six
+# were not armed violence at all:
+#
+#   "Army personnel among 2 killed, 2 injured after SUV crashes into tree"
+#       -> CAMEO coded ARMY/MIL, root 19. It read the word "Army".
+#   "FAA investigates air safety incident involving Trump's Marine One"
+#       -> ARMY/MIL. It read "Marine".
+#   "Polish swimmer becomes the first person to swim ... across the Baltic Sea"
+#       -> FIGHTER/UAF. It read "fighter" somewhere in the text.
+#   "Abdul El-Sayed offers a template for Democrats to defeat Trumpism"
+#       -> INSURGENT/REB on a Guardian opinion column.
+#
+# The armed-actor test cannot separate those from real strikes, because the
+# actor codes are identical -- an air strike on Kyiv is also AIR FORCE/MIL. The
+# separable signal is the act: a human wrote a headline, and a headline about
+# an armed attack says so. So when a headline exists it gets a vote, and a
+# headline naming no violent act at all is treated as evidence against CAMEO's
+# coding rather than as an absence of evidence.
+#
+# Deliberately only a veto where a headline exists. Most rows have none (title
+# backfill runs for verified-domain URLs only), and for those CAMEO remains the
+# only thing to go on -- rejecting them for failing a test they cannot sit
+# would empty the layer.
+_VIOLENT_ACT_WORDS = (
+    "strike", "struck", "shell", "bombard", "bomb", "blast", "explosion", "explode",
+    "attack", "assault", "raid", "offensive", "incursion", "invasion", "siege",
+    "clash", "fighting", "battle", "combat", "firefight", "shootout", "gunfire",
+    "shoot", "shot", "gunmen", "ambush", "airstrike", "drone", "missile", "rocket",
+    "artillery", "mortar", "sniper", "killed", "kills", "slain", "massacre",
+    "execution", "executed", "abduct", "kidnap", "hostage", "torture", "stabbing",
+    "beheading", "casualties", "wounded", "injured in", "war", "insurgent",
+    "militant", "terror", "violence", "unrest", "riot", "crackdown",
+)
+
+# Contexts where the act words above appear but describe something that is not
+# armed conflict. Kept very short and evidence-led rather than speculative: each
+# entry is here because a specific row reached the map through it. A traffic
+# collision is the one that recurs -- "killed" and "injured" are exactly the
+# vocabulary of a road-accident report.
+_NON_VIOLENT_CONTEXT_WORDS = (
+    "crashes into", "car crash", "road accident", "road crash", "traffic accident",
+    "collided with", "collision with",
+)
+
+
+def _headline_describes_violence(text: str) -> bool:
+    lowered = text.lower()
+    if any(w in lowered for w in _NON_VIOLENT_CONTEXT_WORDS):
+        return False
+    return any(w in lowered for w in _VIOLENT_ACT_WORDS)
+
+
+# --- is the headline about something that happened long ago? ---------------
+#
+# _gdelt_event_dt already drops a row whose SQLDATE is far behind its
+# DATEADDED, which catches an old article being re-crawled. It cannot catch an
+# anniversary piece, because GDELT stamps those with *today's* SQLDATE -- the
+# article really was published today, and it really is about 1965. Measured
+# live, that put this on the map as a current event in Australia:
+#
+#   "When thousands crossed ceasefire line: 61 years since Operation
+#    Gibraltar sparked 1965 Indo-Pak war"
+#
+# Two independent signals, because either alone misses cases the other catches:
+# the phrasing a retrospective uses, and a year named in the text that is far
+# behind the date the row claims.
+_RETROSPECTIVE_PHRASES = (
+    "anniversary", "years since", "year since", "years ago", "years after",
+    "decades ago", "decades since", "on this day", "looking back", "look back",
+    "remembering", "in memory of", "commemorat", "throwback", "retrospective",
+    "history of", "the story of how",
+)
+
+# How far behind the row's own date a year has to be named before the headline
+# reads as history rather than as context. Deliberately generous: a live
+# conflict is routinely framed against its own start ("the war Russia began in
+# 2022"), and flagging that would drop current reporting on the longest-running
+# stories -- which are exactly the ones this map exists for.
+_RETROSPECTIVE_YEARS = 5
+
+_YEAR_RE = re.compile(r"(?<!\d)((?:1[89]|20)\d{2})(?!\d)")
+
+
+def _headline_is_retrospective(text: str, event_year: int | None) -> bool:
+    lowered = text.lower()
+    if any(p in lowered for p in _RETROSPECTIVE_PHRASES):
+        return True
+    if event_year is None:
+        return False
+    return any(
+        event_year - int(match) >= _RETROSPECTIVE_YEARS for match in _YEAR_RE.findall(text)
+    )
 
 _CASUALTY_RE = re.compile(
     r"(\d+)\s*(?:people\s+)?(?:were\s+)?(?:reportedly\s+)?(killed|kills?|dead|died|wounded|injured)",
@@ -422,6 +524,13 @@ def _normalize_gdelt(raw: dict) -> dict:
         "goldstein": raw.get("goldstein"),
         "avg_tone": raw.get("avg_tone"),
         "source_url": raw.get("source_url") if headline else None,
+        # The same URL, kept unconditionally. source_url above is for *display*
+        # and is withheld without a headline, because a link with no title to
+        # put on it is not something a popup can show. Clustering asks a
+        # different question -- "were these rows coded from the same words" --
+        # and the answer does not depend on whether anyone scraped the title.
+        # See _same_article_and_family.
+        "article_url": raw.get("source_url"),
         # The three fields a merged headline needs in order to survive as
         # *coverage* on the fused record rather than being deleted from the
         # news feed. source_name is the masthead, date_added is when GDELT
@@ -622,6 +731,36 @@ def _same_event(a: dict, b: dict) -> bool:
     return proximity.haversine_km(a["lat"], a["lon"], b["lat"], b["lon"]) <= _MATCH_KM
 
 
+def _same_article_and_family(a: dict, b: dict) -> bool:
+    """Two rows coded out of the same article, describing the same kind of act.
+
+    GDELT emits one row per actor geography -- Actor1's country, Actor2's
+    country, the action's country -- so a single dispatch becomes several rows
+    at coordinates thousands of kilometres apart. Measured live: one DW article
+    about Russian strikes on Kyiv produced three pins, in the United States,
+    Ukraine and Russia, at full severity each, and two of them named a country
+    the incident did not happen in.
+
+    Distance clustering cannot merge those by construction: _MATCH_KM is 50 and
+    the rows are continents apart. But a shared article URL is not a proximity
+    heuristic at all -- it is proof the rows were coded from the same words -- so
+    it earns the same treatment geo_feature_id gets: an exact match that skips
+    the distance test entirely.
+
+    Guarded on the CAMEO root for the same reason _same_place_and_family is: an
+    article covering both a strike and the reprisal for it is describing two
+    acts, and collapsing them would lose one.
+    """
+    url = a.get("article_url")
+    if not url or url != b.get("article_url"):
+        return False
+    if a.get("event_root_code") != b.get("event_root_code"):
+        return False
+    if a["dt"] is None or b["dt"] is None:
+        return False
+    return abs((a["dt"] - b["dt"]).days) <= _MATCH_DAYS
+
+
 def _same_place_and_family(a: dict, b: dict) -> bool:
     """Cheap pre-match on GDELT's own geographic identity.
 
@@ -676,17 +815,26 @@ class _Union:
 def _cluster(items: list[dict]) -> list[list[dict]]:
     """Group rows describing the same incident. Roughly O(n * neighbours).
 
-    Two passes feed one union-find: an exact FeatureID match, then a spatial
-    hash so each row is distance-tested only against rows in nearby cells
-    rather than against all n. The previous implementation was O(n^2) and
-    non-transitive; this is neither.
+    Three passes feed one union-find: an exact article match, an exact
+    FeatureID match, then a spatial hash so each row is distance-tested only
+    against rows in nearby cells rather than against all n. The previous
+    implementation was O(n^2) and non-transitive; this is neither.
+
+    The two exact passes come first and are deliberately not distance-gated --
+    both answer "these are the same thing" from identity rather than from
+    nearness, and the article pass exists precisely because the rows it merges
+    are too far apart for the spatial pass to ever see each other.
     """
     union = _Union(len(items))
     span = int(round(360.0 / _CELL_DEG))
 
+    by_article: dict[tuple, list[int]] = {}
     by_feature: dict[tuple, list[int]] = {}
     cells: dict[tuple[int, int], list[int]] = {}
     for index, item in enumerate(items):
+        article = item.get("article_url")
+        if article:
+            by_article.setdefault((article, item.get("event_root_code")), []).append(index)
         feature = item.get("geo_feature_id")
         if feature:
             by_feature.setdefault((feature, item.get("event_root_code")), []).append(index)
@@ -695,6 +843,12 @@ def _cluster(items: list[dict]) -> list[list[dict]]:
         key = (int(math.floor(item["lat"] / _CELL_DEG)),
                int(math.floor(item["lon"] / _CELL_DEG)) % span)
         cells.setdefault(key, []).append(index)
+
+    for group in by_article.values():
+        first = group[0]
+        for other in group[1:]:
+            if _same_article_and_family(items[first], items[other]):
+                union.union(first, other)
 
     for group in by_feature.values():
         first = group[0]
@@ -788,10 +942,20 @@ def _merge_cluster(cluster: list[dict]) -> dict:
     primary = cluster[0]
     # primary still supplies the narrative fields (actors, notes, fatalities);
     # the coordinate comes from whichever member actually knows where it was.
+    # Placement confidence sits between precision and source priority, and it is
+    # what decides the case _same_article_and_family creates. Merging one
+    # article's rows leaves a cluster whose members are all locality-precision
+    # and all from GDELT -- Kyiv, Washington and Moscow tie on both of the other
+    # two keys, and `min` would then return whichever happened to come first.
+    # geo_confidence is the only field that distinguishes them: geoverify reads
+    # the headline, finds Kyiv in it, and confirms the Ukrainian row while
+    # contesting the other two. Negated because higher confidence must sort
+    # first while the other keys sort ascending.
     coord_member = min(
         cluster,
         key=lambda c: (
             _PRECISION_RANK.get(c.get("geo_precision"), 3),
+            -(c.get("geo_confidence") or 0),
             _SOURCE_PRIORITY.get(c["source"], 9),
         ),
     )
@@ -799,7 +963,18 @@ def _merge_cluster(cluster: list[dict]) -> dict:
     fatalities = max((c["fatalities"] or 0) for c in cluster)
     notes = primary["notes"] or next((c["notes"] for c in cluster if c["notes"]), None)
     date_str = primary["dt"].date().isoformat() if primary["dt"] else None
-    country = primary["country"] or next((c["country"] for c in cluster if c.get("country")), None)
+    # Place fields follow the coordinate, not the narrative. `primary` is
+    # chosen for prose quality (source priority); coord_member is chosen for
+    # knowing where the thing happened, and the country label has to agree with
+    # the dot on the map or the record contradicts itself. Merging one
+    # article's actor-geography rows is what made this visible: the pin lands on
+    # Kyiv because the headline names Kyiv, while `primary` was the Washington
+    # row and the popup said United States under a pin in Ukraine.
+    country = (
+        coord_member.get("country")
+        or primary["country"]
+        or next((c["country"] for c in cluster if c.get("country")), None)
+    )
     # GDELT-only signals (see _normalize_gdelt) -- None/0 for an
     # ACLED/UCDP-only cluster, since neither source carries them. mentions
     # takes the max across every GDELT member of the cluster (more outlets
@@ -811,6 +986,13 @@ def _merge_cluster(cluster: list[dict]) -> dict:
     goldstein = next((c.get("goldstein") for c in gdelt_members if c.get("goldstein") is not None), None)
     avg_tone = next((c.get("avg_tone") for c in gdelt_members if c.get("avg_tone") is not None), None)
     source_url = next((c.get("source_url") for c in gdelt_members if c.get("source_url")), None)
+    # The same URL without the "only if we scraped a title" condition
+    # _normalize_gdelt puts on source_url. That condition is right for display
+    # -- a link with no title on it is not something a popup can show -- and
+    # wrong for everything else, and dropping the field at the merge left
+    # reliability.py unable to tell "no article behind this at all" from "we
+    # never scraped this article's title", which are opposite claims.
+    article_url = next((c.get("article_url") for c in gdelt_members if c.get("article_url")), None)
     event_type = primary["event_type"] or "Conflict event"
     # Distinct newsrooms that carried this, from the GDELT Mentions table.
     # A different axis from corroborated_by, which counts distinct *datasets*:
@@ -878,8 +1060,14 @@ def _merge_cluster(cluster: list[dict]) -> dict:
         "event_code": next((c.get("event_code") for c in cluster if c.get("event_code")), None),
         # The full place string ("Kherson, Khersons'ka Oblast', Ukraine")
         # alongside the bare country, so a popup can show where without the
-        # country matcher having to parse it back out.
-        "location": next((c.get("location") for c in cluster if c.get("location")), None),
+        # country matcher having to parse it back out. Read off coord_member
+        # first for the same reason `country` is: this names the dot, so it has
+        # to be the dot's own place rather than whichever member happened to
+        # come first in the cluster.
+        "location": (
+            coord_member.get("location")
+            or next((c.get("location") for c in cluster if c.get("location")), None)
+        ),
         "actor1": primary["actor1"],
         "actor2": primary["actor2"],
         "actor1_type": primary.get("actor1_type"),
@@ -907,6 +1095,7 @@ def _merge_cluster(cluster: list[dict]) -> dict:
         "goldstein": goldstein,
         "avg_tone": avg_tone,
         "source_url": source_url,
+        "article_url": article_url,
         # The headlines this incident was reported under, and the news ids that
         # therefore already have a pin. See _coverage_for.
         "coverage": coverage,
@@ -915,6 +1104,10 @@ def _merge_cluster(cluster: list[dict]) -> dict:
     reasons: list[str] = []
     record["severity"] = _severity_for(record, reasons)
     record["severity_reasons"] = reasons
+    # How consequential (above) and how believable (here) are two different
+    # claims, and one number was being asked to carry both -- the map's "How
+    # much to trust this" panel was reading out severity. See reliability.py.
+    record.update(reliability.assess(record))
     # A rendering of the coded fields, not an extra claim -- see _build_summary.
     # Only worth generating when there is no real article text to show instead.
     record["summary"] = None if notes else _build_summary(record)
@@ -995,6 +1188,32 @@ def _aggregate_country_records(records: list[dict]) -> list[dict]:
 # thinning the layer.
 _dropped_non_news = 0
 
+# Rows whose headline described no violent act. Counted separately from the
+# section heuristic above because they fail for a different reason and the two
+# rates say different things: this one going up means CAMEO is mis-coding, that
+# one going up means publishers are re-sectioning their sites.
+_dropped_not_violent = 0
+
+# Rows whose headline was about something that happened years ago. Distinct
+# from _dropped_retrospective, which counts rows GDELT itself dated far back:
+# an anniversary piece is dated *today* by GDELT and is invisible to that gate.
+_dropped_anniversary = 0
+
+# Merged records that scored as unreliable and then failed a concrete check --
+# see _screen_unreliable. Counted separately from the three gates above because
+# it runs at a different stage on a different unit: those reject GDELT *rows*
+# before clustering, this rejects a finished *cluster* after everything known
+# about it has been assembled.
+_dropped_unreliable = 0
+
+# The cluster ids _screen_unreliable removed on the most recent pass. Deleted
+# from the archive alongside _superseded_ids for the same reason those are: a
+# record that has stopped being served but is still in conflict_events would
+# keep showing up on the replay timeline and would keep being counted by
+# escalation.py, so removing it from the map and leaving it in the archive is
+# only half a removal.
+_screened_ids: list[str] = []
+
 
 def _is_violent_gdelt_row(row: dict) -> bool:
     """Gate for GDELT rows entering the conflict layer.
@@ -1014,7 +1233,7 @@ def _is_violent_gdelt_row(row: dict) -> bool:
     ACLED/UCDP rows never reach this -- they're curated conflict data and
     pass through untouched.
     """
-    global _dropped_non_news
+    global _dropped_non_news, _dropped_not_violent, _dropped_anniversary
     if row.get("event_root_code") not in VIOLENCE_ROOT_CODES:
         return False
     armed = (
@@ -1033,7 +1252,76 @@ def _is_violent_gdelt_row(row: dict) -> bool:
     if is_non_news_url(row.get("source_url")):
         _dropped_non_news += 1
         return False
+    # The headline's own vote, where there is one. See
+    # _headline_describes_violence for why an armed actor is not enough.
+    headline = (row.get("real_title") or "").strip()
+    if headline and not _headline_describes_violence(headline):
+        _dropped_not_violent += 1
+        return False
+    if headline:
+        dt = _parse_gdelt_dt(row.get("event_date")) or _parse_gdelt_dt(row.get("date_added"))
+        if _headline_is_retrospective(headline, dt.year if dt else None):
+            _dropped_anniversary += 1
+            return False
     return True
+
+
+def _screen_unreliable(records: list[dict]) -> list[dict]:
+    """Drop the records that scored badly *and* then failed a specific check.
+
+    The order is the whole design. Scoring comes first and applies to
+    everything; the screen runs only on what already landed in the bottom two
+    bands (reliability.SCREEN_BELOW), and it removes a record only for a fact
+    about the page -- an opinion-section URL, a publication date months behind
+    today, an event date beyond any report lag, no traceable newsroom at all.
+
+    A low score alone never removes anything. That is the point: "we can barely
+    source this" is information the reader should get, and deleting it would
+    quietly narrow the map to whatever the wire services happened to cover,
+    which is the opposite of what an OSINT layer is for. Only a stated,
+    checkable failure earns a deletion.
+
+    The retrospective-headline test lives here rather than in reliability.py
+    because it needs this module's phrasing table and its notion of the event
+    year. _is_violent_gdelt_row already applies it to individual rows; a merged
+    cluster can still inherit an anniversary piece through a member that had no
+    headline of its own at gate time and picked one up later.
+
+    Rejections are logged individually. A record vanishing from the map with no
+    trace is exactly the failure mode this pipeline's other filters were built
+    to avoid, and the counter alone cannot tell you which one went.
+    """
+    global _dropped_unreliable, _screened_ids
+
+    kept: list[dict] = []
+    screened: list[str] = []
+    for record in records:
+        failures = reliability.screen(record)
+        headline = (record.get("notes") or "").strip()
+        if headline:
+            year = None
+            if record.get("date"):
+                try:
+                    year = int(str(record["date"])[:4])
+                except ValueError:
+                    year = None
+            if (
+                record.get("reliability", 100) < reliability.SCREEN_BELOW
+                and _headline_is_retrospective(headline, year)
+            ):
+                failures = [*failures, "the headline reads as a retrospective"]
+        if not failures:
+            kept.append(record)
+            continue
+        _dropped_unreliable += 1
+        if record.get("id"):
+            screened.append(record["id"])
+        log.info(
+            "Dropped unreliable event %s (%s/100): %s -- %r",
+            record.get("id"), record.get("reliability"), "; ".join(failures), headline or None,
+        )
+    _screened_ids = screened
+    return kept
 
 
 def _fuse(acled_state_rows: list[dict], gdelt_rows: list[dict]) -> list[dict]:
@@ -1073,7 +1361,7 @@ def _fuse(acled_state_rows: list[dict], gdelt_rows: list[dict]) -> list[dict]:
     _cluster_minted_at = next_minted_at
     # An id that survived as a winner elsewhere this poll is not superseded.
     _superseded_ids = sorted(superseded - set(next_minted_at))
-    return _apply_precision_policy(merged)
+    return _apply_precision_policy(_screen_unreliable(merged))
 
 
 # gdelt.py's own accumulator holds a ~2 hour rolling window, which is right
@@ -1101,7 +1389,13 @@ def _accumulate_violent_gdelt(rows: list[dict]) -> list[dict]:
             continue
         stored = dict(row)
         prior = _violent_gdelt.get(event_id)
-        stored["_seen_at"] = prior["_seen_at"] if prior else now
+        # Prefer, in order: what this accumulator already remembers, then the
+        # stamp gdelt.py's own accumulator put on the row, then now. The middle
+        # term is what makes a first-seen time survive a restart -- it is the
+        # copy that gets persisted in the gdelt_conflict snapshot, so without
+        # preferring it every rehydrated row would be re-dated to boot time.
+        candidates = (prior.get("_seen_at") if prior else None, row.get("_seen_at"), now)
+        stored["_seen_at"] = next(c for c in candidates if c is not None)
         _violent_gdelt[event_id] = stored
 
     cutoff = now - _VIOLENT_RETENTION_SECONDS
@@ -1233,9 +1527,11 @@ async def _rehydrate_violent_gdelt() -> None:
         event_id = row.get("event_id")
         if not event_id or event_id in _violent_gdelt or not _is_violent_gdelt_row(row):
             continue
-        # Rows persisted before _seen_at existed, or from an older run, are
-        # aged from now rather than being treated as brand new -- but anything
-        # already past the retention window is simply not restored.
+        # gdelt.py stamps _seen_at into the accumulator it persists, so a row
+        # written by a current build carries its real first-seen time through a
+        # restart. The `now` fallback is the legacy path only: rows persisted
+        # before that stamp existed. Anything already past the retention window
+        # is simply not restored.
         seen_at = row.get("_seen_at")
         if seen_at is not None and seen_at < cutoff:
             continue
@@ -1260,9 +1556,30 @@ async def _wait_for_inputs() -> None:
         await asyncio.sleep(1)
 
 
-async def start():
-    state = registry.register("events", key_configured=True)
+async def fuse_forever():
+    """Fusion, for the life of the refine process (see backend/refine).
+
+    Self-paced rather than scheduled, because the two things before the loop are
+    not startup ceremony: _rehydrate_violent_gdelt refills a 3-day accumulator
+    that would otherwise take 3 days of running to rebuild, and _wait_for_inputs
+    is what stops the first pass from fusing against still-empty inputs. A
+    scheduler would re-enter the loop, not the setup, so both would have to be
+    hoisted somewhere else for no gain.
+
+    The inputs it reads from the registry -- acled, gdelt_conflict, firms,
+    jamming -- are filled in this process by mirroring them from Postgres (see
+    backend/refine's INPUTS), not by pollers. Two are collected by the ingest
+    process and two by the backend; from here they look identical, which is the
+    point.
+    """
+    state = registry.ensure("events", key_configured=True)
     await _rehydrate_violent_gdelt()
+    # The fused output itself, alongside the accumulator above. Fusion runs
+    # only after _wait_for_inputs and then takes a full pass, so without this
+    # the conflict layer stays empty for the first minute or so of every
+    # restart even though the previous run's result is sitting in Postgres.
+    # Overwritten by the first fuse below.
+    await storage.warm_points(state, "events", "Fused conflict events")
     await _wait_for_inputs()
     while True:
         try:
@@ -1276,7 +1593,7 @@ async def start():
             # timeline the same way ships and aircraft are.
             # Order matters: drop the absorbed clusters before writing, so the
             # archive never briefly holds both halves of a merge.
-            await storage.delete_conflict_events(_superseded_ids)
+            await storage.delete_conflict_events([*_superseded_ids, *_screened_ids])
             await storage.record_conflict_events(items)
             await storage.record_snapshot("events", items, "id")
             corroborated = sum(1 for d in items if d.get("corroborated"))
@@ -1284,9 +1601,13 @@ async def start():
             log.info(
                 "Fused events: %d canonical (%d corroborated by 2+ sources, %d without a "
                 "precise geocode); %d retrospective rows dropped (report lag > %dd); "
-                "%d dropped as commentary/retrospective by URL section",
+                "%d dropped as commentary/retrospective by URL section; "
+                "%d dropped for a headline describing no violent act; "
+                "%d dropped as anniversary/history pieces; "
+                "%d dropped as unreliable and failing a fake/stale check",
                 len(items), corroborated, imprecise, _dropped_retrospective,
-                MAX_REPORT_LAG_DAYS, _dropped_non_news,
+                MAX_REPORT_LAG_DAYS, _dropped_non_news, _dropped_not_violent,
+                _dropped_anniversary, _dropped_unreliable,
             )
             await storage.record_source_health("events", len(items), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive

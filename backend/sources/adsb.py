@@ -215,6 +215,24 @@ def _infer_military_role(desc: str | None, category: int | None = None) -> str |
 
 _token: dict = {"access_token": None, "expires_at": 0}
 
+# OpenSky bills per request out of a daily credit budget, and a global
+# states/all is its most expensive call (4 credits). Running out is not an
+# error to retry through: every further request is refused *and* charged
+# against the same exhausted budget, so hammering it each poll is what keeps
+# it exhausted. Skipping OpenSky for a while costs nothing here -- see
+# _fetch(), where airplanes.live carries the layer meanwhile.
+OPENSKY_RATE_LIMIT_PAUSE = 3600
+_opensky_pause_until = 0.0
+
+
+def _retry_after_seconds(resp: httpx.Response) -> int | None:
+    raw = resp.headers.get("Retry-After", "").strip()
+    if not raw.isdigit():
+        return None
+    # An hour either way is fine; a header claiming days is not worth honouring
+    # when the budget resets daily anyway.
+    return min(int(raw), 6 * 3600)
+
 
 async def _get_token(client: httpx.AsyncClient) -> str | None:
     if not (config.OPENSKY_CLIENT_ID and config.OPENSKY_CLIENT_SECRET):
@@ -237,10 +255,22 @@ async def _get_token(client: httpx.AsyncClient) -> str | None:
 
 
 async def _fetch_opensky() -> dict[str, dict]:
+    global _opensky_pause_until
+    if time.time() < _opensky_pause_until:
+        return {}
     async with httpx.AsyncClient(timeout=20) as client:
         token = await _get_token(client)
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         resp = await client.get(STATES_URL, headers=headers)
+        if resp.status_code == 429:
+            pause = _retry_after_seconds(resp) or OPENSKY_RATE_LIMIT_PAUSE
+            _opensky_pause_until = time.time() + pause
+            log.warning(
+                "OpenSky is out of credits (429) -- pausing it for %dmin. "
+                "Aircraft keep coming from airplanes.live meanwhile.",
+                pause // 60,
+            )
+            return {}
         resp.raise_for_status()
         payload = resp.json()
 
@@ -262,6 +292,12 @@ async def _fetch_opensky() -> dict[str, dict]:
             "on_ground": s[8],
             "category": s[17] if len(s) > 17 else 0,
             "military": False,  # OpenSky has no such field -- refined below if airplanes.live agrees
+            # s[3] time_position, s[4] last_contact: when this position was last
+            # updated, and when *any* message was last received. Position time is
+            # the honest answer to "when was this aircraft last heard where the
+            # icon is", and it is null for aircraft heard only on non-positional
+            # messages -- hence the fallback rather than one or the other.
+            "updated": s[3] or s[4],
         }
     return items
 
@@ -295,6 +331,16 @@ def normalize_airplanes_live(ac: dict) -> dict | None:
     category = _READSB_CATEGORY_TO_OPENSKY.get(ac.get("category"), 0)
     squawk = (ac.get("squawk") or "").strip() or None
     emergency = (ac.get("emergency") or "").strip().lower()
+    # readsb reports age, not time: seen_pos is seconds since the last position
+    # message, seen is seconds since any message at all. Turned into an absolute
+    # timestamp here so an aircraft record carries the same "when was this last
+    # true" field a ship does, whichever feed it came from. Measured against our
+    # own clock rather than the response's `now` because this normalises one
+    # aircraft, not the envelope it arrived in -- the difference is the
+    # request's own latency, well under the second this is rounded to.
+    seen = ac.get("seen_pos")
+    if not isinstance(seen, (int, float)):
+        seen = ac.get("seen")
     return {
         "icao24": hex_id,
         "callsign": (ac.get("flight") or "").strip() or None,
@@ -320,6 +366,7 @@ def normalize_airplanes_live(ac: dict) -> dict | None:
         # lights up on either and the popup says which one fired.
         "emergency": _EMERGENCY_LABEL.get(emergency) if emergency and emergency != "none" else None,
         "emergency_squawk": _SQUAWK_PATHS.get(squawk),
+        "updated": round(time.time() - seen, 1) if isinstance(seen, (int, float)) else None,
     }
 
 
@@ -386,10 +433,42 @@ def _attach_nearest_airfield(item: dict) -> None:
     }
 
 
+_last_counts = {"OpenSky": 0, "airplanes.live": 0}
+
+
+def _contribution_summary() -> str:
+    parts = []
+    for name, count in _last_counts.items():
+        if name == "OpenSky" and time.time() < _opensky_pause_until:
+            parts.append(f"{name} paused until credits reset")
+        else:
+            parts.append(f"{name} {count}")
+    return ", ".join(parts)
+
+
 async def _fetch() -> list[dict]:
-    opensky_items, airplanes_live_items = await asyncio.gather(
-        _fetch_opensky(), _fetch_airplanes_live()
+    # Independently fallible on purpose. These are two unrelated networks with
+    # unrelated failure modes -- one keyed and metered, one keyless and
+    # community-run -- and a plain gather() propagated the first exception,
+    # so an OpenSky 429 threw away a complete airplanes.live result that had
+    # already arrived. The aircraft layer went empty for hours at a time while
+    # a working source sat there unused. Only a poll where *both* failed is a
+    # failed poll.
+    results = await asyncio.gather(
+        _fetch_opensky(), _fetch_airplanes_live(), return_exceptions=True
     )
+    opensky_items, airplanes_live_items = results
+    failures = [(name, r) for name, r in zip(("OpenSky", "airplanes.live"), results) if isinstance(r, Exception)]
+    if len(failures) == len(results):
+        raise failures[0][1]
+    for name, exc in failures:
+        log.warning("%s unavailable this poll, continuing without it: %s", name, exc)
+    if isinstance(opensky_items, Exception):
+        opensky_items = {}
+    if isinstance(airplanes_live_items, Exception):
+        airplanes_live_items = {}
+    _last_counts["OpenSky"] = len(opensky_items)
+    _last_counts["airplanes.live"] = len(airplanes_live_items)
     # airplanes.live wins on conflict: unfiltered coverage and a real military
     # flag beat OpenSky's fields for the same aircraft. Fall back to OpenSky
     # fields (e.g. origin_country, which airplanes.live doesn't provide) via
@@ -397,7 +476,16 @@ async def _fetch() -> list[dict]:
     merged = dict(opensky_items)
     for icao24, item in airplanes_live_items.items():
         base = merged.get(icao24, {})
-        merged[icao24] = {**base, **item, "origin_country": item.get("origin_country") or base.get("origin_country")}
+        merged[icao24] = {
+            **base,
+            **item,
+            "origin_country": item.get("origin_country") or base.get("origin_country"),
+            # Same treatment, same reason: airplanes.live only carries an age
+            # for aircraft it has actually heard from recently, and letting its
+            # None overwrite OpenSky's timestamp would make the popup say the
+            # last ping is unknown for an aircraft we have a time for.
+            "updated": item.get("updated") or base.get("updated"),
+        }
     for item in merged.values():
         # Both no-op until their own source's first download lands, which is the
         # point of them being lookups rather than dependencies: ADS-B never
@@ -410,30 +498,44 @@ async def _fetch() -> list[dict]:
     return list(merged.values())
 
 
-async def start():
+async def ingest_once():
+    """One poll. Runs in the ingest process, on the schedule in backend/ingest.
+
+    Nothing is warmed from storage here, and not for the reason the other
+    sources have: this process serves no one, so there is nothing to fill. The
+    backend does read these positions back (see backend/mirror.py), which is a
+    real change -- aircraft used to be the one layer deliberately left blank
+    after a restart, on the grounds that drawing an aircraft where it was ten
+    minutes ago is a confident lie. That is no longer avoidable once the
+    backend's aircraft layer *is* the stored one, so it is bounded instead:
+    config.ENTITY_STALE_AFTER["adsb"] evicts after 30 minutes, every record
+    carries its own `updated` timestamp for the age the popup shows, and
+    /api/health reports how long ago this job actually last succeeded.
+    """
     authenticated = bool(config.OPENSKY_CLIENT_ID and config.OPENSKY_CLIENT_SECRET)
-    state = registry.register("adsb", key_configured=authenticated)
-    interval = config.ADSB_POLL_INTERVAL_AUTH if authenticated else config.ADSB_POLL_INTERVAL_ANON
-    while True:
-        try:
-            state.data = await _fetch()
-            state.last_success = time.time()
-            state.last_error = None
-            await storage.record_snapshot("adsb", state.data, "icao24")
-            await storage.record_source_health("adsb", len(state.data), True)
-            military_count = sum(1 for a in state.data if a.get("military"))
-            emergencies = sum(1 for a in state.data if a.get("emergency") or a.get("emergency_squawk"))
-            hidden = sum(1 for a in state.data if a.get("display_limited"))
-            log.info(
-                "ADS-B: %d aircraft (%s, %d flagged military, %d emergency, %d display-limited)",
-                len(state.data),
-                "OpenSky authenticated" if authenticated else "OpenSky anonymous, rate-limited to 100 calls/day",
-                military_count,
-                emergencies,
-                hidden,
-            )
-        except Exception as exc:  # noqa: BLE001 - keep the poller alive
-            state.last_error = str(exc)
-            log.warning("ADS-B fetch failed: %s", exc)
-            await storage.record_source_health("adsb", None, False, str(exc))
-        await asyncio.sleep(interval)
+    state = registry.ensure("adsb", key_configured=authenticated)
+    try:
+        state.data = await _fetch()
+        state.last_success = time.time()
+        state.last_error = None
+        await storage.record_snapshot("adsb", state.data, "icao24")
+        await storage.record_source_health("adsb", len(state.data), True)
+        military_count = sum(1 for a in state.data if a.get("military"))
+        emergencies = sum(1 for a in state.data if a.get("emergency") or a.get("emergency_squawk"))
+        hidden = sum(1 for a in state.data if a.get("display_limited"))
+        # Names what each upstream actually contributed rather than how
+        # this process is configured to talk to them: with either one able
+        # to drop out on its own now, "OpenSky authenticated" on a poll
+        # OpenSky sat out of would be the most misleading line in the log.
+        log.info(
+            "ADS-B: %d aircraft (%s, %d flagged military, %d emergency, %d display-limited)",
+            len(state.data),
+            _contribution_summary(),
+            military_count,
+            emergencies,
+            hidden,
+        )
+    except Exception as exc:  # noqa: BLE001 - one failed poll is not a dead source
+        state.last_error = str(exc)
+        log.warning("ADS-B fetch failed: %s", exc)
+        await storage.record_source_health("adsb", None, False, str(exc))

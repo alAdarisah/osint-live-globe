@@ -1,12 +1,15 @@
-# Three-container split: Postgres for durable storage, the FastAPI backend
-# as a pure API, and the React app behind nginx (which proxies /api to the
-# backend, so the browser only ever talks to one origin).
+# The whole stack: Postgres for durable storage, an ingest process that owns
+# every credentialed or metered outbound call, the FastAPI backend as a pure
+# API, and the React app behind nginx (which proxies /api to the backend, so
+# the browser only ever talks to one origin).
 #
 #   docker compose up --build      -> app at http://localhost:8080
 #
-# The root Dockerfile + render.yaml single-container path still exists and
-# still works -- it bakes the frontend into the backend image and serves
-# both from one process. This file is the local/self-hosted alternative.
+# This is the only supported way to run the app. The single-container path
+# (root Dockerfile + render.yaml) and the plain run.bat process were both
+# removed when ingest split out: neither has anywhere to put the ingest
+# process, and run.bat has no Postgres at all, so under the split both would
+# have shown five permanently empty layers.
 
 services:
   postgres:
@@ -38,14 +41,19 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres:5432/${POSTGRES_DB:-osint}
+      REDIS_URL: redis://redis:6379/0
     env_file:
-      # API keys (FIRMS/AIS/OpenSky/ACLED/OWM). Optional: every source
-      # degrades to "unavailable" rather than crashing when its key is
-      # missing, so the stack still comes up without this file.
+      # Only OWM_API_KEY is still read here -- the weather tile proxy is the one
+      # credentialed thing the backend does itself, because it is served
+      # on-demand per tile rather than polled. Every other key belongs to the
+      # ingest container now. Optional, as before: a missing key degrades that
+      # one feature rather than stopping the stack.
       - path: .env
         required: false
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       - "8000:8000"
@@ -54,14 +62,131 @@ services:
       # its configuration to data/admin_config.json (see backend/admin_config.py)
       # and every client reads it back at startup, so without a bind mount here
       # a configuration would live inside the container and disappear with it.
+      #
+      # This is the *only* state outside Postgres. Everything the app collects
+      # goes to the database (see backend/storage.py) and is read back on the
+      # next start, so the pgdata volume below is what has to survive, not this.
       - ./data:/app/data
+    healthcheck:
+      # No curl in python:3.12-slim, and adding one would mean a package layer
+      # for a single request. /api/health is served from in-memory registry
+      # state and never touches Postgres, so it answers as soon as the app is
+      # actually accepting requests -- which is precisely what the frontend
+      # needs to know before it starts proxying.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # Read-through cache in front of Postgres for the payloads the backend serves
+  # (see backend/cachestore.py). Holds only what was derived from the database,
+  # so it is safe to lose entirely: `docker compose stop redis` degrades to
+  # reading Postgres directly and nothing else changes.
+  redis:
+    image: redis:7-alpine
+    # allkeys-lru rather than the default noeviction: every key here is a
+    # rebuildable copy of something in Postgres, so dropping the least useful
+    # one under pressure is exactly right, whereas noeviction would start
+    # refusing writes and turn a full cache into a permanent one.
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Owns ACLED, FIRMS, ADS-B, AIS and the Overpass sweep -- everything that
+  # costs credentials, credits or a volunteer service's patience. Nothing else
+  # in the stack holds those keys, which is the point: with the pollers inside
+  # the backend, every restart and redeploy re-spent the quota.
+  #
+  # Deliberately one instance. A second copy doubles the spend on every metered
+  # source, so if this ever moves somewhere that scales services by default,
+  # pin it to one replica there too.
+  ingest:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres:5432/${POSTGRES_DB:-osint}
+    env_file:
+      # The same keys the backend used to read. It no longer needs them --
+      # nothing in that process makes a credentialed call any more -- but they
+      # stay in one shared .env rather than being split in two, because a key
+      # that silently reaches only one container is far harder to diagnose than
+      # one that reaches both and is used by one.
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # No ports: it serves nothing. No volumes: everything it produces goes to
+    # Postgres, and it reads no local state.
+    command: ["python", "-m", "backend.ingest"]
+    restart: unless-stopped
+
+  # Derives new facts from stored ones: fuses ACLED/UCDP/GDELT into one record
+  # per incident, finds AIS gaps and ship-to-ship pairs in the movement log, and
+  # ranks escalating regions. Reads Postgres, writes Postgres, calls nothing --
+  # it holds no credentials at all, which is why it can be restarted or killed
+  # freely where the ingest container cannot.
+  #
+  # Separated from the backend because fusion is ~1600 lines of clustering and
+  # geo-reconciliation that was sharing an event loop with every map request.
+  refine:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres:5432/${POSTGRES_DB:-osint}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # No env_file: nothing here reads an API key, and not passing them is the
+    # cheapest way to keep that true.
+    command: ["python", "-m", "backend.refine"]
+    restart: unless-stopped
+
+  # Watches the cache and the two producing processes, and reports what is wrong
+  # to the log, the alerts table and (if ALERT_WEBHOOK_URL is set) a webhook.
+  #
+  # It repairs nothing -- see backend/cacheworker. Repopulating a missing key
+  # from here would hide the only symptom of a backend that has lost Redis, and
+  # would make this a second writer of keys the backend owns.
+  cache-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres:5432/${POSTGRES_DB:-osint}
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      # For ALERT_WEBHOOK_URL only. Unset means the log and the alerts table,
+      # which is a complete configuration -- the webhook is the one sink that
+      # reaches someone not looking at the map.
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "backend.cacheworker"]
     restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
     depends_on:
-      - backend
+      backend:
+        # Waiting on the container merely *existing* meant nginx started
+        # proxying before uvicorn was listening, and every request in that
+        # window came back 502 -- which looks exactly like a broken API rather
+        # than one that has not finished starting.
+        condition: service_healthy
     ports:
       - "8080:80"
     restart: unless-stopped
@@ -90,4 +215,8 @@ services:
     command: ["python", "-m", "backend.migrate_sqlite_to_postgres"]
 
 volumes:
+  # Named, so it survives `docker compose down`, an image rebuild and a host
+  # reboot. This is where everything the app has ever collected lives -- every
+  # source writes here and reads its own data back at startup -- so `down -v`
+  # is the one command that throws the collected history away.
   pgdata:
