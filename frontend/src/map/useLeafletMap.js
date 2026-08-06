@@ -15,13 +15,20 @@ const COUNT_KEYS = [
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
 );
-const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false, ais: false, jamming: false, officials: false };
+// eventsCapped is a count rather than a flag -- how many events capBySeverity
+// kept at the current zoom, 0 when it kept everything. See createMapController.
+const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false, ais: false, jamming: false, officials: false, eventsCapped: 0 };
 
-export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialLayerVisibility }) {
+const NO_BORDER_EDIT = { active: false, countryKey: null, linkMode: true, canUndo: false };
+
+export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorderRingCommit, initialLayerVisibility }) {
   const controllerRef = useRef(null);
   const [counts, setCounts] = useState(EMPTY_COUNTS);
   const [zoomNotes, setZoomNotes] = useState(EMPTY_ZOOM_NOTES);
   const [mapBounds, setMapBounds] = useState(null);
+  // Mirrored purely so the fetch layer can gate a source on it (see
+  // useOsintData.js) -- the map itself never reads its zoom back out of React.
+  const [zoom, setZoom] = useState(null);
   const [ready, setReady] = useState(false);
   const [windStatus, setWindStatus] = useState({ ok: true });
   // The country whose card is open (null when none is), and the full selection
@@ -30,6 +37,14 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
   // other. See createMapController's selectCountryEntry.
   const [selectedCountry, setSelectedCountry] = useState(null);
   const [countrySelection, setCountrySelection] = useState([]);
+  // What the boundary editor is doing, for the controls that drive it: whether
+  // a session is open, on which country, how many handles are drawn and whether
+  // there is anything to undo. See map/borderEdit.js.
+  const [borderEdit, setBorderEdit] = useState(NO_BORDER_EDIT);
+  // { [countryKey]: fingerprint } for the boundaries currently loaded. Mirrored
+  // so the admin panel can tell a stored edit that still fits from one made
+  // against a geometry the source has since changed.
+  const [countryFingerprints, setCountryFingerprints] = useState({});
 
   // onRegionAutoReset changes identity across renders (it closes over
   // region state) -- keep the latest one in a ref so the controller (created
@@ -37,6 +52,10 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
   // recreated every time it changes.
   const onRegionAutoResetRef = useRef(onRegionAutoReset);
   onRegionAutoResetRef.current = onRegionAutoReset;
+  // Same indirection, same reason: this one closes over the settings writer,
+  // which is a new function on every render.
+  const onBorderRingCommitRef = useRef(onBorderRingCommit);
+  onBorderRingCommitRef.current = onBorderRingCommit;
 
   useEffect(() => {
     if (!containerRef.current) return undefined;
@@ -47,11 +66,15 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
         onCountsChange: setCounts,
         onZoomNotesChange: setZoomNotes,
         onBoundsChange: setMapBounds,
+        onZoomChange: setZoom,
         onRegionAutoReset: () => onRegionAutoResetRef.current?.(),
         onWindStatusChange: setWindStatus,
         onCountrySelect: setSelectedCountry,
         onCountrySelectionChange: setCountrySelection,
         onCountryPointChange: (point) => setSelectedCountry((prev) => (prev ? { ...prev, point } : prev)),
+        onBorderEditChange: (state) => setBorderEdit(state?.active ? state : NO_BORDER_EDIT),
+        onCountryFingerprints: setCountryFingerprints,
+        onBorderRingCommit: (commits) => onBorderRingCommitRef.current?.(commits),
       }
     );
     controllerRef.current = controller;
@@ -95,6 +118,10 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
     controllerRef.current?.setEventFilter(next);
   }, []);
 
+  const setAgeReference = useCallback((ts) => {
+    controllerRef.current?.setAgeReference(ts);
+  }, []);
+
   // Closing the card leaves the country highlighted -- the selection is cleared
   // by its own controls (the chips in CountrySelectionBar), never as a side
   // effect of shutting a panel.
@@ -127,14 +154,35 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, initialL
     controllerRef.current?.setImagery(key, date);
   }, []);
 
+  const refreshCountriesNow = useCallback(() => {
+    controllerRef.current?.refreshCountriesNow();
+  }, []);
+
+  const beginBorderEdit = useCallback(
+    (key, options) => !!controllerRef.current?.beginBorderEdit(key, options),
+    []
+  );
+
+  const endBorderEdit = useCallback(() => {
+    controllerRef.current?.endBorderEdit();
+  }, []);
+
+  const setBorderLinkMode = useCallback((on) => {
+    controllerRef.current?.setBorderLinkMode(on);
+  }, []);
+
+  const undoBorderEdit = useCallback(() => controllerRef.current?.undoBorderEdit() ?? false, []);
+
   useEffect(() => {
     controllerRef.current?.setTheme(theme);
   }, [theme]);
 
   return {
-    ready, counts, zoomNotes, mapBounds, windStatus, selectedCountry, countrySelection,
-    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter,
+    ready, counts, zoomNotes, mapBounds, zoom, windStatus, selectedCountry, countrySelection,
+    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, setAgeReference,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
     setIconTheme, setLayerZoomOverrides, setImagery,
+    borderEdit, countryFingerprints,
+    refreshCountriesNow, beginBorderEdit, endBorderEdit, setBorderLinkMode, undoBorderEdit,
   };
 }

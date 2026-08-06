@@ -58,6 +58,63 @@ export function ColorField({ label, value, defaultValue, onChange }) {
   );
 }
 
+/**
+ * One kind of pin, on one line: its colour, its name, and how big it is drawn.
+ *
+ * The two controls share a row rather than stacking because there are forty of
+ * these -- a separate size row per token would make the section twice as long
+ * to scroll and put a pin's two properties a screen apart. `size` is null for
+ * the few tokens that name a colour with no pin of their own (see
+ * COLOUR_ONLY_TOKENS in map/iconTheme.js), and the slider is simply absent
+ * there rather than present and inert.
+ */
+export function IconField({ label, color, defaultColor, onColorChange, size, onSizeChange }) {
+  const colorModified = color !== defaultColor;
+  const sizeModified = size != null && size !== 1;
+  return (
+    <div className="admin-icon-field">
+      <input
+        type="color"
+        value={color}
+        onChange={(e) => onColorChange(e.target.value)}
+        aria-label={`${label} colour`}
+      />
+      <span className="admin-icon-label">{label}</span>
+      {size != null && (
+        <>
+          <input
+            className="admin-icon-size"
+            type="range"
+            min={0.3}
+            max={3}
+            step={0.05}
+            value={size}
+            onChange={(e) => onSizeChange(Number(e.target.value))}
+            aria-label={`${label} size`}
+            title="Size, on top of the global and per-layer multipliers"
+          />
+          <span className={`admin-icon-size-value${sizeModified ? " modified" : ""}`}>
+            {Math.round(size * 100)}%
+          </span>
+        </>
+      )}
+      {(colorModified || sizeModified) && (
+        <button
+          type="button"
+          className="admin-reset-btn"
+          title="Back to the shipped colour and size"
+          onClick={() => {
+            if (colorModified) onColorChange(defaultColor);
+            if (sizeModified) onSizeChange(1);
+          }}
+        >
+          ↺
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function CheckField({ label, checked, onChange, note }) {
   return (
     <label className="admin-check-field">

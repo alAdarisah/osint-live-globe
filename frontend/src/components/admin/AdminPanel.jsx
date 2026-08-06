@@ -18,19 +18,20 @@
 // work when it is closed.
 
 import { useRef, useState } from "react";
-import { PALETTE_GROUPS, DEFAULT_COLORS } from "../../map/iconTheme";
+import { PALETTE_GROUPS, DEFAULT_COLORS, tokenHasSize } from "../../map/iconTheme";
 import { SETTINGS_LAYERS, defaultSettings } from "../../settings/defaults";
+import { borderStats } from "../../settings/borderOverrides";
 import { useAccordion } from "../../hooks/useAccordion";
 import { useDraggablePanel, clearAllPanelPositions } from "../../hooks/useDraggablePanel";
 import { PanelGroup } from "../controlPanel/Collapsible";
-import { SliderField, ColorField, CheckField } from "./fields";
+import { SliderField, ColorField, IconField, CheckField } from "./fields";
 import DataEditor from "./DataEditor";
 
 const DEFAULT_OPEN = { "adm-icons": true };
 const STORAGE_KEY = "osint-admin-accordion";
 const DEFAULTS = defaultSettings();
 
-export default function AdminPanel({ settings, actions, sources, sync, onClose }) {
+export default function AdminPanel({ settings, actions, sources, sync, staleBorders, onClose }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN, STORAGE_KEY);
   const { panelRef, style, handleProps } = useDraggablePanel("adminPanel");
 
@@ -62,24 +63,33 @@ export default function AdminPanel({ settings, actions, sources, sync, onClose }
             separated at any size.
           </div>
 
+          <div className="admin-note">
+            Below, each kind of pin has its own colour and its own size. The size is a multiplier on
+            top of this global one and the per-layer one in the next section &mdash; so a layer can be
+            turned down as a whole while one kind of pin inside it stays large.
+          </div>
+
           {PALETTE_GROUPS.map((group) => (
             <div className="admin-color-group" key={group.id}>
               <div className="admin-subhead">{group.label}</div>
               {group.note && <div className="admin-note">{group.note}</div>}
               {group.tokens.map((token) => (
-                <ColorField
+                <IconField
                   key={token.id}
                   label={token.label}
-                  value={settings.icons.colors[token.id] || DEFAULT_COLORS[token.id]}
-                  defaultValue={DEFAULT_COLORS[token.id]}
-                  onChange={(value) => actions.setColor(token.id, value)}
+                  color={settings.icons.colors[token.id] || DEFAULT_COLORS[token.id]}
+                  defaultColor={DEFAULT_COLORS[token.id]}
+                  onColorChange={(value) => actions.setColor(token.id, value)}
+                  size={tokenHasSize(token.id) ? settings.icons.sizes[token.id] ?? 1 : null}
+                  onSizeChange={(value) => actions.setTokenSize(token.id, value)}
                 />
               ))}
             </div>
           ))}
-          <button type="button" className="admin-wide-btn" onClick={actions.resetColors}>
-            Reset all colours
-          </button>
+          <div className="admin-row">
+            <button type="button" onClick={actions.resetColors}>Reset all colours</button>
+            <button type="button" onClick={actions.resetSizes}>Reset all sizes</button>
+          </div>
         </PanelGroup>
 
         <PanelGroup id="adm-layers" title="Layer appearance" open={isOpen("adm-layers")} onToggle={setOpen}>
@@ -139,6 +149,10 @@ export default function AdminPanel({ settings, actions, sources, sync, onClose }
           </button>
         </PanelGroup>
 
+        <PanelGroup id="adm-borders" title="Country borders" open={isOpen("adm-borders")} onToggle={setOpen}>
+          <BorderSection settings={settings} actions={actions} staleKeys={staleBorders} />
+        </PanelGroup>
+
         <PanelGroup id="adm-ui" title="Interface" open={isOpen("adm-ui")} onToggle={setOpen}>
           <SliderField
             label="Text size"
@@ -190,6 +204,70 @@ export default function AdminPanel({ settings, actions, sources, sync, onClose }
         </PanelGroup>
       </div>
     </aside>
+  );
+}
+
+// The ledger for redrawn boundaries. Editing itself happens on the map (select
+// a country, "Edit border" on its card); this is where you see what has been
+// changed and take it back, which is the half a direct-manipulation gesture
+// cannot show you.
+function BorderSection({ settings, actions, staleKeys }) {
+  const borders = settings.borders || {};
+  const keys = Object.keys(borders).sort();
+  const stats = borderStats(borders);
+  const stale = new Set(staleKeys || []);
+
+  return (
+    <>
+      <div className="admin-note">
+        Boundaries come from Natural Earth at 1:110m, where the average country is drawn with about
+        forty points &mdash; a generalisation for looking at the world, not a survey. An edit here
+        redraws that line; it does not correct it. Every country whose border has been redrawn says so
+        on its own card.
+      </div>
+
+      {keys.length === 0 ? (
+        <div className="admin-note">
+          Nothing redrawn. Click a country, then <b>Edit border</b> on its card.
+        </div>
+      ) : (
+        <>
+          {keys.map((key) => {
+            const entry = borders[key];
+            const rings = Object.keys(entry.rings || {}).length;
+            const points = Object.values(entry.rings || {}).reduce((sum, r) => sum + r.length, 0);
+            return (
+              <div className={`admin-border-row${stale.has(key) ? " stale" : ""}`} key={key}>
+                <span className="admin-border-name">{key}</span>
+                <span className="admin-border-meta">
+                  {stale.has(key)
+                    ? "source geometry changed — not applied"
+                    : `${rings} ${rings === 1 ? "ring" : "rings"}, ${points.toLocaleString()} points`}
+                </span>
+                <button type="button" onClick={() => actions.revertBorderCountry(key)}>
+                  {stale.has(key) ? "Discard" : "Revert"}
+                </button>
+              </div>
+            );
+          })}
+          {stale.size > 0 && (
+            <div className="admin-note">
+              A stale edit is one made against a different version of the source geometry &mdash; the
+              points it names are no longer in the same places, so it is held rather than applied. It
+              is kept in case the source comes back; discarding is the only thing that removes it.
+            </div>
+          )}
+          <div className="admin-note">
+            {stats.points.toLocaleString()} of {stats.limit.toLocaleString()} points used. The whole
+            configuration is saved as one file, so this ceiling is what stops boundary geometry from
+            crowding out every other setting in it.
+          </div>
+          <button type="button" className="admin-wide-btn" onClick={actions.clearBorderEdits}>
+            Discard every border edit
+          </button>
+        </>
+      )}
+    </>
   );
 }
 
@@ -293,9 +371,9 @@ function ConfigSection({ actions, sync }) {
       </button>
       {message && <div className="admin-note">{message}</div>}
       <div className="admin-note">
-        A configuration holds icon colours and sizes, layer appearance, interface settings and every
-        data edit. It does not hold whether Admin Mode is on, so loading someone else's cannot put a
-        reader into an editing mode.
+        A configuration holds icon colours and sizes, layer appearance, interface settings, every data
+        edit and every redrawn boundary. It does not hold whether Admin Mode is on, so loading someone
+        else's cannot put a reader into an editing mode.
       </div>
     </>
   );

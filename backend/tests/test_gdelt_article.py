@@ -259,3 +259,58 @@ def test_a_looked_at_article_with_no_excerpt_is_not_overwritten_by_an_unscraped_
     kept = store[gdelt._conflict_key(scraped)]
     assert "article_excerpt" in kept
     assert kept["article_excerpt"] is None
+
+
+# --- decoding --------------------------------------------------------------
+#
+# Real, from the live layer: "FAA investigates air ?safety incident? involving
+# Trump?s Marine One", where each "?" is U+FFFD. The page declared UTF-8 and
+# served cp1252 curly quotes, so httpx's decode replaced every one of them.
+
+
+class _FakeResponse:
+    """Just enough of httpx.Response for _decode_page: .text and .content.
+
+    .text is what httpx would have produced from the *declared* charset, which
+    is the thing being wrong; .content is the bytes actually served.
+    """
+
+    def __init__(self, raw: bytes, declared: str):
+        self.content = raw
+        self.text = raw.decode(declared, errors="replace")
+
+
+def test_a_page_declaring_the_wrong_charset_is_decoded_again():
+    raw = "FAA investigates air \u201csafety incident\u201d involving Trump\u2019s Marine One".encode("cp1252")
+    resp = _FakeResponse(raw, declared="utf-8")
+    assert "\ufffd" in resp.text, "the fixture has to reproduce the failure"
+
+    decoded = gdelt._decode_page(resp)
+    assert "\ufffd" not in decoded
+    assert "Trump\u2019s Marine One" in decoded
+
+
+def test_a_correctly_declared_page_is_left_alone():
+    """The retry must never run on text that decoded cleanly."""
+    raw = "Strike on Kherson market kills three \u2014 officials".encode("utf-8")
+    resp = _FakeResponse(raw, declared="utf-8")
+    assert gdelt._decode_page(resp) == resp.text
+
+
+def test_a_mis_declared_utf8_page_is_read_as_utf8():
+    """The other direction: real UTF-8 bytes, a server claiming something else."""
+    raw = "Shelling reported near Херсон".encode("utf-8")
+    resp = _FakeResponse(raw, declared="ascii")
+    assert "�" in resp.text
+    assert gdelt._decode_page(resp) == "Shelling reported near Херсон"
+
+
+def test_text_that_cannot_be_repaired_is_returned_unchanged():
+    """A genuinely corrupt byte stays corrupt rather than becoming nonsense.
+
+    0x81 is undefined in cp1252 and invalid as UTF-8, so neither retry can
+    claim it -- which is the point of excluding latin-1, since latin-1 would
+    have "succeeded" here and returned an invented character.
+    """
+    resp = _FakeResponse(b"Strike on Kherson \x81 market", declared="utf-8")
+    assert gdelt._decode_page(resp) == resp.text

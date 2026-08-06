@@ -4,18 +4,32 @@
 // Reuses the /api/events payload already fetched for the map (see
 // useOsintData.js's eventsRaw), same as NewsBroadcastPanel does for GDELT:
 // no extra polling loop, and the list can never disagree with what the map
-// is drawing, because it's the same array.
-import { useCallback, useMemo, useState } from "react";
+// is drawing, because it's the same array run through the same filter
+// (map/severity.js's passesEventFilter).
+import { useCallback, useEffect, useMemo, useState } from "react";
 import LocateIcon from "./icons/LocateIcon";
-import { severityBand, severityColor, isImprecise } from "../map/severity";
+import {
+  severityBand, severityColor, isImprecise, passesEventFilter, DEFAULT_EVENT_FILTER,
+} from "../map/severity";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 
 const MAX_ITEMS = 6;
+// A country view has one country's worth of events to draw on, so it can
+// afford (and needs) a longer list than the world board.
+const MAX_ITEMS_SCOPED = 8;
 
 // Below this, an event isn't worth interrupting anyone for. Severity is
 // server-computed (event_fusion.py's _severity_for) and already accounts for
 // event type, casualties, corroboration and reporting volume.
 const MIN_SEVERITY = 40;
+
+// The floor exists to keep the world board from being a firehose. Once a
+// reader has clicked one country they have already said what they want to look
+// at, and "nothing here clears the global bar" is a less useful answer than
+// that country's actual worst few -- so the scoped list falls back to the
+// user's own event filter alone. Ranking is unchanged, so the order still
+// reads worst-first.
+const MIN_SEVERITY_SCOPED = 0;
 
 const SOURCE_BADGE = { acled: "ACLED", ucdp: "UCDP", gdelt: "GDELT" };
 
@@ -65,7 +79,9 @@ function EscalationRow({ zone, onLocate }) {
   );
 }
 
-export default function NotableEventsPanel({ eventsRaw, escalation, onLocate, isMobile }) {
+export default function NotableEventsPanel({
+  eventsRaw, eventFilter = DEFAULT_EVENT_FILTER, escalation, countryScope, onLocate, isMobile,
+}) {
   // Expanded by default on desktop -- this is the panel that answers "what
   // should I look at", so hiding it defeats the point. Collapsed on mobile,
   // where it would otherwise cover most of the map.
@@ -79,27 +95,57 @@ export default function NotableEventsPanel({ eventsRaw, escalation, onLocate, is
     enabled: !isMobile,
   });
 
+  const scoped = !!countryScope?.active;
+  const scopeKeys = scoped ? countryScope.keys : null;
+
+  // Same reasoning as the news ticker's: a country click is a request to read
+  // this board for that country, so it opens on each new selection -- which
+  // matters most on mobile, where it starts collapsed.
+  useEffect(() => {
+    if (scopeKeys) setCollapsed(false);
+  }, [scopeKeys]);
+
   const items = useMemo(() => {
+    const floor = scoped ? MIN_SEVERITY_SCOPED : MIN_SEVERITY;
     const scored = [];
     for (const e of eventsRaw || []) {
       const severity = Number.isFinite(e.severity) ? e.severity : 0;
-      if (severity < MIN_SEVERITY) continue;
+      if (severity < floor) continue;
       if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
+      // The panel's own floor above is a separate question from what the user
+      // asked the layer to show -- this list must never name an event the map
+      // is currently filtering out, or "show on map" leads nowhere.
+      if (!passesEventFilter(e, eventFilter)) continue;
+      // Point-in-country rather than the event's own `country` string: see
+      // map/countryScope.js on why the feeds' country fields can't be trusted
+      // to agree with the shape the reader clicked.
+      if (scoped && !countryScope.contains(e.lat, e.lon)) continue;
       scored.push({ event: e, score: rankScore(e) });
     }
     // id is the tiebreak so equal-scoring events can't swap places between
     // polls -- a list that reshuffles on its own is unreadable.
     scored.sort((a, b) => b.score - a.score || String(a.event.id).localeCompare(String(b.event.id)));
-    return scored.slice(0, MAX_ITEMS).map((s) => s.event);
-  }, [eventsRaw]);
+    return scored.slice(0, scoped ? MAX_ITEMS_SCOPED : MAX_ITEMS).map((s) => s.event);
+  }, [eventsRaw, eventFilter, scoped, countryScope]);
 
-  const zones = escalation || [];
+  // Zones are regions, not countries, so they're kept on overlap rather than
+  // containment -- a spike straddling the border is still the answer to "where
+  // should I be looking" for the country next to it.
+  const zones = useMemo(() => {
+    const all = escalation || [];
+    if (!scoped) return all;
+    return all.filter((z) => countryScope.intersectsBounds(z.bounds));
+  }, [escalation, scoped, countryScope]);
 
   // Nothing worth showing -- render nothing at all rather than an empty
   // widget claiming to be a threat board. Note that an empty escalation list
   // is the normal state (it means nothing is above baseline, or there isn't
   // enough history yet to say), so it alone never justifies the panel.
-  if (!items.length && !zones.length) return null;
+  //
+  // A country selection is the exception: there the panel was asked a direct
+  // question, and "nothing" is an answer worth printing rather than a reason
+  // to disappear and leave the click looking broken.
+  if (!items.length && !zones.length && !scoped) return null;
 
   return (
     <aside id="notableEvents" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
@@ -122,6 +168,9 @@ export default function NotableEventsPanel({ eventsRaw, escalation, onLocate, is
       >
         <span className="notable-pulse" />
         <span className="notable-title">NOTABLE ACTIVITY</span>
+        {/* Names the filter in the header, so a short list reads as "scoped to
+            Sudan" rather than "the world went quiet". */}
+        {scoped && <span className="notable-scope" title={countryScope.label}>{countryScope.label}</span>}
         <span className="notable-count">{zones.length ? `${zones.length}↑ ${items.length}` : items.length}</span>
         <span className="notable-caret" aria-hidden="true">&#9662;</span>
       </div>
@@ -141,6 +190,13 @@ export default function NotableEventsPanel({ eventsRaw, escalation, onLocate, is
               <NotableItem key={e.id} event={e} onLocate={onLocate} />
             ))}
           </>
+        )}
+        {!items.length && !zones.length && (
+          <div className="notable-empty">
+            No recorded conflict activity in {countryScope.label} in the current
+            window. Widen the conflict filter, or clear the selection to see the
+            world board.
+          </div>
         )}
       </div>
     </aside>

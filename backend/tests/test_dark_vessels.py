@@ -131,6 +131,16 @@ def test_too_little_health_history_does_not_suppress_everything():
     assert record["gap_hours"] == 9.0
 
 
+def test_recorded_failures_suppress_a_gap_even_with_no_baseline_to_compare_to():
+    """The case this guard was silently failing on in production. Through a
+    total feed outage there are no successful counts to take a median of, so
+    requiring a baseline before reading the failures meant a dead stream
+    reported every vessel in every watched box as having gone dark."""
+    outage = [(ts, None, False) for ts in (1_000_000.0, 1_005_000.0, 1_010_000.0, 1_030_000.0)]
+    assert dv.feed_health_baseline(outage) is None  # nothing successful to measure against
+    assert dv.build_gap_records([gap()], {}, outage) == []
+
+
 def test_the_vessels_identity_and_designation_travel_with_the_gap():
     ships = {
         "636014321": {

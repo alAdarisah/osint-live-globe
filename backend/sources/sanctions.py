@@ -261,8 +261,21 @@ async def _fetch() -> list[dict]:
     return parse_sdn(text)
 
 
+async def _rehydrate(state) -> None:
+    """Serve the last stored SDN list until the live one downloads.
+
+    for_vessel/for_aircraft answer "no opinion" against an empty index, which
+    is the safe answer but also the wrong one when we already know the listing
+    -- and with a 24-hour refresh that backs off to 24 hours on failure, a bad
+    boot fetch meant a whole day of unmarked designated hulls.
+    """
+    if await storage.warm_reference(state, "sanctions", "OFAC SDN"):
+        install(state.data)
+
+
 async def start():
     state = registry.register("sanctions", key_configured=True)  # no key required
+    await _rehydrate(state)
     consecutive_failures = 0
     while True:
         ok = False
@@ -285,6 +298,9 @@ async def start():
                 len(index.by_callsign),
                 len(index.by_tail),
             )
+            # No lat/lon anywhere in a designation, so it goes to the
+            # whole-document store rather than the point store.
+            await storage.record_reference("sanctions", entries)
             await storage.record_source_health("sanctions", len(entries), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)

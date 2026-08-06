@@ -60,6 +60,103 @@ VERIFIED_NEWS_DOMAINS = {
 # domains) tells the two apart.
 VERIFIED_LABELS = frozenset(VERIFIED_NEWS_DOMAINS.values())
 
+
+# --- how much weight does the masthead carry ------------------------------
+#
+# The allowlist above is a yes/no: do we vouch for this newsroom at all. That
+# is the right question for "may this page move a pin", and the wrong one for
+# "how much should a reader believe this happened". A wire service with a
+# standards desk and a correction policy and a stringer in the country is not
+# the same kind of evidence as a domain nobody has ever heard of, and until now
+# the map treated the two identically once both passed the violence gate.
+#
+# Three tiers, because two is not enough and four is more precision than the
+# evidence supports:
+#
+#   1 major        international wire services, and the newsrooms of record and
+#                  public broadcasters that carry their own foreign desks. A
+#                  report here is checked before it is published, and wrong
+#                  ones get corrected in public.
+#   2 established  the rest of the allowlist. Real, editorially staffed
+#                  newsrooms -- national papers, regional heavyweights,
+#                  specialist defence press -- but a narrower remit, a smaller
+#                  desk, or a single national vantage point.
+#   3 unknown      not on the allowlist. This is most of what GDELT indexes:
+#                  local papers, aggregators, SEO farms and unlabelled
+#                  AI-generated sites, with no way to tell them apart from the
+#                  domain alone. Naming the outlet is still honest (see
+#                  outlet_label); vouching for it is not.
+#
+# Tier 1 is deliberately short. Every addition dilutes what "a major newsroom
+# reported this" is allowed to mean, and the whole point of the tier is that a
+# reader can act on it.
+TIER_MAJOR = 1
+TIER_ESTABLISHED = 2
+TIER_UNKNOWN = 3
+
+MAJOR_OUTLET_DOMAINS = frozenset({
+    # Wire services: the primary reporting almost everything else runs.
+    "reuters.com", "apnews.com", "afp.com",
+    # Public broadcasters with their own foreign desks.
+    "bbc.com", "bbc.co.uk", "npr.org", "pbs.org", "dw.com", "france24.com",
+    "abc.net.au", "cbc.ca", "aljazeera.com",
+    # Newspapers of record and international business press.
+    "theguardian.com", "nytimes.com", "washingtonpost.com", "wsj.com",
+    "ft.com", "economist.com", "bloomberg.com",
+    "lemonde.fr", "spiegel.de", "elpais.com",
+    # US network news divisions.
+    "cnn.com", "cbsnews.com", "nbcnews.com", "abcnews.go.com",
+})
+
+# The same set as display names, for the callers that hold labels rather than
+# domains -- which is most of them, because outlet_count and `outlets` are
+# assembled from labels well before anything asks how much to trust them.
+MAJOR_LABELS = frozenset(
+    name for domain, name in VERIFIED_NEWS_DOMAINS.items() if domain in MAJOR_OUTLET_DOMAINS
+)
+
+
+def outlet_tier(name: str | None) -> int:
+    """TIER_MAJOR / TIER_ESTABLISHED / TIER_UNKNOWN for one outlet.
+
+    Accepts either a display label ("BBC News") or a bare domain
+    ("edition.bbc.co.uk"), because both forms are in circulation: GDELT's
+    Mentions table yields domains, while a merged record carries the labels
+    outlet_label already produced. Resolving the domain first means a caller
+    never has to know which one it is holding.
+    """
+    if not name:
+        return TIER_UNKNOWN
+    label = name.strip()
+    if not label:
+        return TIER_UNKNOWN
+    # A domain resolves to its masthead; a label that is already a masthead
+    # resolves to itself, since no allowlisted name is also a hostname.
+    known = _known_domain(_strip_host(label))
+    if known:
+        label = VERIFIED_NEWS_DOMAINS[known]
+    if label in MAJOR_LABELS:
+        return TIER_MAJOR
+    if label in VERIFIED_LABELS:
+        return TIER_ESTABLISHED
+    return TIER_UNKNOWN
+
+
+def best_tier(names) -> int:
+    """The strongest tier among a set of outlets, TIER_UNKNOWN when empty.
+
+    "Strongest" rather than an average on purpose: once Reuters has carried a
+    story, the fact that thirty content farms also republished it says nothing
+    against it. Coverage breadth is counted separately (outlet_count); this
+    answers only "did anyone we vouch for report this".
+    """
+    return min((outlet_tier(name) for name in names or () if name), default=TIER_UNKNOWN)
+
+
+def count_at_tier(names, tier: int) -> int:
+    """How many distinct outlets sit at `tier` or better."""
+    return sum(1 for name in {n for n in names or () if n} if outlet_tier(name) <= tier)
+
 # How many outlet names travel with each event to the browser.
 MAX_OUTLET_NAMES = 8
 
@@ -95,6 +192,10 @@ _MAX_NAME_LENGTH = 60
 # whole purpose is that the piece is not a dispatch.
 NON_NEWS_PATH_SEGMENTS = frozenset({
     "magazine", "opinion", "opinions", "op-ed", "oped", "commentary",
+    # The Guardian's opinion section. Named, not labelled "opinion" anywhere in
+    # the path, which is how a Peter Beinart column on Democratic strategy
+    # reached the conflict layer coded INSURGENT/REB.
+    "commentisfree",
     "editorial", "editorials", "column", "columns", "perspective",
     "perspectives", "analysis", "essay", "essays", "longread", "longreads",
     "review", "reviews", "book", "books", "obituary", "obituaries",

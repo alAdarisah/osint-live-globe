@@ -147,6 +147,7 @@ async def _fetch() -> list[dict]:
 
 async def start():
     state = registry.register("airports", key_configured=True)  # no key required
+    await storage.warm_points(state, "airports", "Airfields")
     consecutive_failures = 0
     while True:
         ok = False

@@ -782,6 +782,133 @@ html, body {
   stroke-width: 1.6;
 }
 
+/* The country whose boundary is being dragged (Admin Mode only, see
+   map/borderEdit.js). A dashed stroke rather than another solid one: the point
+   is that this outline is provisional and under the hand, which is exactly what
+   a dashed line already means everywhere else. */
+.country-shape.country-editing {
+  fill: rgba(var(--accent-rgb), 0.1);
+  stroke: var(--accent);
+  stroke-width: 1.8;
+  stroke-dasharray: 5 4;
+}
+
+/* --- boundary editing handles ------------------------------------------- */
+
+/* Markers in their own pane (z 660), NOT paths -- the .country-shape
+   pointer-events kill above applies to SVG and would make a handle undraggable.
+   See the note at the top of map/borderEdit.js. */
+.border-handle {
+  box-sizing: border-box;
+  border-radius: 2px;
+  background: var(--accent);
+  border: 1.5px solid #04121a;
+  /* Reads over both the light and the dark basemap without a second rule. */
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55), 0 1px 3px rgba(0, 0, 0, 0.5);
+  cursor: grab;
+  transition: transform 0.08s ease;
+}
+.border-handle:hover { transform: scale(1.35); }
+.border-handle:active { cursor: grabbing; transform: scale(1.15); }
+
+/* The midpoint of a segment: drag it and it becomes a real vertex. Hollow and
+   dimmer so the two kinds are never confused at a glance -- a filled square
+   moves something that exists, a hollow one creates something. */
+.border-handle.ghost {
+  background: transparent;
+  border: 1.5px dashed var(--accent);
+  border-radius: 50%;
+  opacity: 0.55;
+  box-shadow: none;
+}
+.border-handle.ghost:hover { opacity: 1; }
+
+#borderEditBar {
+  position: fixed;
+  left: 50%;
+  bottom: 74px;
+  transform: translateX(-50%);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  max-width: min(880px, 94vw);
+  padding: 8px 14px;
+  border: 1px solid rgba(var(--accent-rgb), 0.5);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(6px);
+  font-size: calc(0.78rem * var(--ui-text-scale));
+  color: var(--text);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+}
+.border-edit-badge {
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: var(--accent);
+  color: #04121a;
+  font-weight: 700;
+  font-size: 0.72em;
+  letter-spacing: 0.09em;
+}
+.border-edit-name { font-weight: 600; }
+.border-edit-hint { opacity: 0.72; }
+.border-edit-hint b { font-weight: 600; opacity: 1; }
+.border-edit-warning { color: #ffc46b; }
+.border-edit-link { display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+#borderEditBar button {
+  padding: 3px 10px;
+  border: 1px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+#borderEditBar button:disabled { opacity: 0.4; cursor: default; }
+#borderEditBar button:not(:disabled):hover { background: rgba(var(--accent-rgb), 0.16); }
+.border-edit-done { background: rgba(var(--accent-rgb), 0.22) !important; font-weight: 600; }
+.border-edit-notice {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ff9d9d;
+}
+
+/* The "Edit border" verb, in the country card's own header. */
+.country-info-edit {
+  margin-left: auto;
+  margin-right: 6px;
+  padding: 2px 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.82em;
+  cursor: pointer;
+}
+.country-info-edit:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.16); }
+.country-info-edit:disabled { opacity: 0.42; cursor: not-allowed; }
+.country-info-edit.active { background: var(--accent); color: #04121a; font-weight: 600; }
+
+/* Says a boundary is not what the source serves -- the country-card twin of
+   the edited-record note on a pin. */
+.edited-note { color: #ffc46b; }
+
+.admin-border-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
+}
+.admin-border-name { font-weight: 600; min-width: 3.5em; }
+.admin-border-meta { flex: 1; opacity: 0.72; font-size: 0.88em; }
+.admin-border-row.stale .admin-border-meta { color: #ffc46b; opacity: 1; }
+
 /* Cities are SVG glyphs sized by population tier (decorators.js's CITY_TIERS),
    so they pick up .entity-icon-wrap's shared halo like every other marker --
    the hand-rolled dot with its own border/box-shadow is gone. */
@@ -861,6 +988,30 @@ html, body {
   border: 1px solid rgba(var(--accent-rgb), 0.3) !important;
   font-size: 11.5px;
   padding: 4px 8px;
+  /* Conflict tooltips now lead with the incident's own headline (see
+     decorateEvent), which can be a full sentence. Leaflet's default is
+     white-space: nowrap, so without this a long headline became a strip of
+     text wider than the map. 320px matches the popup's maxWidth, so hovering
+     and clicking a pin produce the same measure.
+
+     `width: max-content` is what makes that work. Leaflet tooltips are
+     absolutely positioned inside a zero-width pane, so simply dropping the
+     nowrap left the box shrink-to-fitting against nothing -- it collapsed to a
+     ~90px column with one word per line. max-content sizes to the text and
+     lets max-width do the capping instead. */
+  width: max-content;
+  max-width: 320px;
+  white-space: normal;
+}
+/* The headline itself, not the meta lines under it: two lines is enough to
+   tell one incident from another, and an unbounded one would cover the pins
+   around the one being read. */
+.map-tooltip b {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .map-tooltip::before { display: none; }
 
@@ -1352,11 +1503,37 @@ html, body {
   color: var(--accent);
 }
 
+/* The selected country, stated in the header. Capped and ellipsised because
+   country names run long ("Democratic Republic of the Congo") and the count
+   after it must not be pushed off the panel. */
+.notable-scope {
+  font-size: 9px;
+  letter-spacing: 0.6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+  text-transform: uppercase;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .notable-count {
   margin-left: auto;
   font-size: 10px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
+}
+
+/* Only ever shown for a country selection -- the world board renders nothing
+   at all when it is empty. See NotableEventsPanel.jsx. */
+.notable-empty {
+  padding: 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
 }
 
 .notable-caret {
@@ -1496,17 +1673,9 @@ html, body {
   border-radius: 3px;
 }
 
-/* On the layer row itself, so the word is visible before the fold is opened. */
-/* A country whose connectivity has collapsed in the last 24 hours (IODA). A
-   tint on the shape rather than a pin, because the measurement is national and
-   a pin on the capital would claim a precision it does not have. */
-.country-shape.country-offline {
-  stroke: #4fd1c5;
-  stroke-width: 1.4;
-  fill: #4fd1c5;
-  fill-opacity: 0.14;
-}
-
+/* The connectivity block in the country card (popups.js's buildConnectivity).
+   The map side of the same IODA measurement is a pin, not a country tint --
+   see rebuildOutagePoints in createMapController.js. */
 .outage-block {
   margin: 6px 0;
   padding: 6px 8px;
@@ -1554,6 +1723,20 @@ html, body {
   font-weight: 600;
 }
 
+/* How long ago a ship or aircraft last reported its position (see
+   lastPingDetail in map/decorators.js). Dim by default -- on a healthy feed it
+   is a few seconds old and is context, not news. */
+.ping-age { color: var(--text-dim, #8f9bb3); }
+
+/* Amber once the fix is old enough that the icon is a memory rather than a
+   sighting. Deliberately not the red the emergency and designation lines use:
+   an old position is still real data, it just isn't now, and this is the cue
+   for spotting an icon that has outlived its feed. */
+.stale-ping {
+  color: #ff9500;
+  font-weight: 600;
+}
+
 /* An OFAC designation is the strongest claim any popup on this map makes, so
    it is boxed rather than left as another line in the list -- and boxed in the
    same colour as the ring on the marker that was clicked. */
@@ -1594,6 +1777,17 @@ html, body {
 
 .popup .meta.imprecise-note { color: #ffb454; }
 .popup .meta.evidence { color: #7fd1ff; }
+
+/* What the backend concluded about the coordinate (geoverify.py). A confirmed
+   or refined placement reads as ordinary metadata; a contested one is the same
+   amber as the imprecise note, because it is the same warning -- the dot may
+   not be where the thing happened. */
+.popup .meta.placement-note { color: var(--text-dim); }
+.popup .meta.placement-note.placement-doubted { color: #ffb454; }
+/* The machine's own words for why, kept visibly subordinate to the sentence
+   above them: "the headline names Kyiv, 7833 km from the pin" is evidence a
+   reader can check, not a conclusion they have to take on trust. */
+.popup .placement-reason { opacity: 0.75; }
 
 /* An officials pin published by the government itself rather than reported by
    a newsroom. A solid ring, deliberately unlike .imprecise's dashed one: that
@@ -1665,6 +1859,10 @@ html, body {
   font-size: 10px;
   color: var(--text-dim);
 }
+/* The per-story reliability word on a collapsed news pin. Carries its band's
+   colour inline (set by the decorator, from the same palette the bar uses) and
+   only needs to out-weigh the dimmed outlet and timestamp it sits beside. */
+.leaflet-popup-content .coverage-meta .rel-chip { font-weight: 600; }
 
 .officials-legend {
   display: flex;
@@ -1672,11 +1870,11 @@ html, body {
   gap: 3px 10px;
 }
 
-/* "How much to trust this" -- the confidence half of a conflict popup, boxed
-   off from the description of the event itself so the two are not read as one
-   continuous set of facts. A bare "Severity: 24/100" said nothing about
-   whether 24 meant "minor incident" or "we barely know anything about this";
-   the bar plus the reasons underneath say which. */
+/* The two scored blocks of a conflict popup -- "How much to trust this" and
+   "How severe" -- boxed off from the description of the event itself so the
+   three are not read as one continuous set of facts. A bare "24/100" said
+   nothing about whether 24 meant "minor incident" or "we barely know anything
+   about this"; the bar plus the reasons underneath say which. */
 .leaflet-popup-content .sev-block {
   margin: 8px 0;
   padding: 7px 8px;
@@ -1715,6 +1913,35 @@ html, body {
   word-break: break-word;
 }
 .leaflet-popup-content .outlets-more { color: var(--text-dim); }
+
+/* The reliability block leads the popup's two scored panels, so its border
+   carries the verdict: a reader who opens a pin should know within a glance
+   whether a newsroom stands behind it, before reading a word. Only the two
+   weak bands are tinted -- colouring "Reliable" green as well would turn the
+   panel into decoration, and the bar already says it. */
+.leaflet-popup-content .rel-block.rel-low {
+  border-color: rgba(255, 149, 0, 0.55);
+}
+.leaflet-popup-content .rel-block.rel-very_low {
+  border-color: rgba(255, 77, 77, 0.65);
+  background: rgba(255, 77, 77, 0.06);
+}
+
+/* A pin nothing much vouches for (decorators.js's `weak`). Desaturated rather
+   than hidden, the same argument .entity-icon-wrap.historical and .inferred
+   below make: the reader is told what kind of evidence this is and left to
+   decide, instead of the map deciding for them. Composes with .imprecise --
+   the two marks answer different questions and a pin can carry both.
+
+   Much gentler than .historical's 0.35, and that is measured rather than
+   taste: on a live window 93 of 100 fused events are a CAMEO code from a
+   domain no allowlist holds, so this class lands on almost the whole layer.
+   At .historical's strength that is not a mark, it is a dimmer switch on the
+   conflict map. At this strength the handful of pins a real newsroom stands
+   behind keep their full paint and visibly lead. */
+.entity-icon-wrap.weakly-sourced {
+  filter: saturate(0.65);
+}
 
 /* Conflict-layer filters. Same visual register as the infra name filter
    directly below them in the panel. */
@@ -2200,6 +2427,43 @@ html, body {
   cursor: pointer;
 }
 .admin-color-label { flex: 1 1 auto; min-width: 0; }
+
+/* One pin per row: swatch, name, size slider, percentage. The name is the only
+   part allowed to shrink -- a slider narrower than about 70px cannot be aimed,
+   and a percentage that reflows to two lines breaks the row rhythm. */
+.admin-icon-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+.admin-icon-field input[type="color"] {
+  flex: none;
+  width: 26px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+.admin-icon-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-icon-size { flex: 0 0 76px; width: 76px; margin: 0; }
+.admin-icon-size-value {
+  flex: none;
+  width: 3.4em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+}
+.admin-icon-size-value.modified { color: var(--accent); opacity: 1; }
 
 .admin-check-field {
   display: flex;

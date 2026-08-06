@@ -88,6 +88,11 @@ async def _fetch() -> tuple[list[dict], str]:
 
 async def start():
     state = registry.register("jamming", key_configured=True)  # no key required
+    # The upstream data only updates once a day and this refreshes every six
+    # hours, so the stored copy is very nearly current -- and event_fusion
+    # reads this layer as physical corroboration, which is worth having from
+    # the first fuse rather than from the first successful jamming fetch.
+    await storage.warm_points(state, "jamming", "GPS jamming")
     consecutive_failures = 0
     while True:
         ok = False

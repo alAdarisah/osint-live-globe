@@ -90,6 +90,14 @@ export const SVG = {
   fire: '<path fill="currentColor" d="M12 2 C8 7 5 10 5 14 a7 7 0 0 0 14 0 C19 10 16 7 12 2 Z"/><path fill="#0b0d10" d="M12 10 C10 13 9 14.5 9 16.5 a3 3 0 0 0 6 0 C15 14.5 14 13 12 10 Z"/>',
   jammingSignal: '<path fill="none" stroke="currentColor" stroke-width="2" d="M4 18 A8 8 0 0 1 20 18"/><path fill="none" stroke="currentColor" stroke-width="2" d="M8 18 A4 4 0 0 1 16 18"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/><line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="2.4"/>',
   globe: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/><ellipse cx="12" cy="12" rx="4" ry="9" fill="none" stroke="currentColor" stroke-width="1.4"/><line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="1.4"/>',
+  // A country losing the internet (backend/sources/outages.py). The globe above
+  // struck through, borrowing the same "signal, cancelled" slash jammingSignal
+  // uses -- the two are the only layers on this map about connectivity being
+  // taken away, and they should read as relatives at a glance.
+  connectivityLoss: '<circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<ellipse cx="12" cy="12" rx="3.8" ry="8.6" fill="none" stroke="currentColor" stroke-width="1.3"/>' +
+    '<line x1="3.4" y1="12" x2="20.6" y2="12" stroke="currentColor" stroke-width="1.3"/>' +
+    '<line x1="4.2" y1="19.8" x2="19.8" y2="4.2" stroke="currentColor" stroke-width="2.4"/>',
   // ---- aircraft status rings (backend/sources/adsb.py) ----
   //
   // Appended to whatever airframe glyph an aircraft already has, rather than
@@ -101,12 +109,40 @@ export const SVG = {
   // it cannot be confused with the single emergency ring above at a glance.
   sanctionRing: '<circle cx="12" cy="12" r="11.3" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
     '<circle cx="12" cy="12" r="9.1" fill="none" stroke="currentColor" stroke-width="1.1" stroke-opacity="0.7"/>',
-  // A runway seen from above, for the OurAirports reference layer. Deliberately
-  // unlike every aircraft glyph: this is a place, not a contact.
-  airfield: '<rect x="2" y="10.4" width="20" height="3.2" rx="0.6" fill="currentColor" transform="rotate(-30 12 12)"/>' +
+  // Runways seen from above, for the OurAirports reference layer. Deliberately
+  // unlike every aircraft glyph: this is a place, not a contact. The four
+  // variants differ in *layout*, not just in size, because size alone is only
+  // legible when two fields happen to sit side by side:
+  //
+  //   large    two parallel runways -- the plan-view signature of a hub
+  //   medium   one paved, marked runway (outline + centreline)
+  //   small    one short unmarked strip, no surround at all
+  //   military the same marked runway, inside the shield the base layers use
+  //
+  // The circle is the "this is a fixed place" surround, dropped on the small
+  // strip: those are the most numerous fields on the map and the quietest ones,
+  // so they get the least ink.
+  airfieldLarge: '<g transform="rotate(-30 12 12)">' +
+    '<rect x="2.6" y="7.9" width="18.8" height="2.7" rx="0.5" fill="currentColor"/>' +
+    '<rect x="4.8" y="13.4" width="14.4" height="2.7" rx="0.5" fill="currentColor"/>' +
+    '</g>' +
     '<circle cx="12" cy="12" r="9.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-opacity="0.55"/>',
-  airfieldMilitary: '<rect x="2" y="10.4" width="20" height="3.2" rx="0.6" fill="currentColor" transform="rotate(-30 12 12)"/>' +
-    '<path fill="none" stroke="currentColor" stroke-width="1.6" d="M12 2.4 20.6 6.9v5.4c0 4.5-3.6 7.7-8.6 9.3-5-1.6-8.6-4.8-8.6-9.3V6.9Z"/>',
+  // Also the layer's own ticker glyph (LayersSection.jsx), so it has to stand
+  // in for the whole layer as well as for the medium tier.
+  airfield: '<g transform="rotate(-30 12 12)">' +
+    '<rect x="2.4" y="10.3" width="19.2" height="3.4" rx="0.6" fill="currentColor" fill-opacity="0.18" stroke="currentColor" stroke-width="1.5"/>' +
+    '<line x1="6.6" y1="12" x2="17.4" y2="12" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.6 2.4"/>' +
+    '</g>' +
+    '<circle cx="12" cy="12" r="9.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-opacity="0.55"/>',
+  airfieldSmall: '<rect x="4.6" y="10.7" width="14.8" height="2.6" rx="0.4" fill="currentColor" transform="rotate(-30 12 12)"/>',
+  // Same shield as armyBase, so a military field reads as a relative of the
+  // military base layer rather than as a fourth unrelated shape, with the
+  // medium field's marked runway held inside it instead of cutting across it.
+  airfieldMilitary: '<path fill="none" stroke="currentColor" stroke-width="1.6" d="M12 2 L21 7 L21 13 C21 18 17 21.5 12 22 C7 21.5 3 18 3 13 L3 7 Z"/>' +
+    '<g transform="rotate(-30 12 12)">' +
+    '<rect x="9.8" y="6.2" width="4.4" height="11.6" rx="0.5" fill="currentColor" fill-opacity="0.18" stroke="currentColor" stroke-width="1.5"/>' +
+    '<line x1="12" y1="8.8" x2="12" y2="15.2" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.3 2.1"/>' +
+    '</g>',
   // Dashed, deliberately: the aircraft is *not* fully shown, and a broken
   // outline says that without a word.
   hiddenRing: '<circle cx="12" cy="12" r="11.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="3 2.6" stroke-opacity="0.9"/>',

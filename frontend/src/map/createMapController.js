@@ -12,7 +12,9 @@
 // layers -> selection/trails -> per-source renderers -> event wiring.
 
 import { L } from "./leafletGlobal";
-import { isImprecise, ageHours, ageHoursFromDateAdded, NEWS_WINDOW_HOURS } from "./severity";
+import {
+  passesEventFilter, DEFAULT_EVENT_FILTER, ageHoursFromDateAdded, NEWS_WINDOW_HOURS,
+} from "./severity";
 import {
   createBaseLayer,
   basemapUrlFor,
@@ -78,11 +80,15 @@ import {
   launchIconSize,
   decorateOsmInfra,
   osmInfraIconSize,
+  decorateOutage,
+  outageIconSize,
 } from "./decorators";
 import { setIconTheme, themedStyle } from "./iconTheme";
 import { placeAll } from "./declutter";
 import { collapseByProximity, collapseByKey, COLLAPSE_MAX_ZOOM } from "./collapse";
-import { buildCountryIndex, findCountryAt } from "./countryHitTest";
+import { buildCountryIndex, findCountryAt, representativePointOf } from "./countryHitTest";
+import { createBorderEditor } from "./borderEdit";
+import { countryFingerprints } from "../settings/borderOverrides";
 import { countryCardSections, cityPopupHtml, normalizeCountryName } from "./popups";
 import { updateTrails, renderTrailLayer } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
@@ -123,9 +129,14 @@ const AIRPORTS_MIN_ZOOM = 7;
 // themselves have no gate -- a cable is only legible as a whole line.
 const CABLE_LANDINGS_MIN_ZOOM = 5;
 // Thousands of features across the conflict theatres, and every one of them is
-// context rather than an event -- gated a step deeper than the curated
-// infrastructure layer, which has no gate at all.
-const OSM_INFRA_MIN_ZOOM = 6;
+// context rather than an event. On by default (see DEFAULT_LAYER_VISIBILITY in
+// App.jsx), so the gate is what keeps it honest: deeper than airfields, deep
+// enough that it never lands on a regional or country-wide view, and only
+// appears once the map is already showing one town's worth of ground.
+// Exported because the fetch is gated on the same number: useOsintData.js does
+// not poll /api/osm-infrastructure at all until the map is this deep, so the
+// gate has to be one constant rather than two that can drift apart.
+export const OSM_INFRA_MIN_ZOOM = 9;
 const MARKER_LAYER_MIN_ZOOM = {
   events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictHistory: 4,
   officials: OFFICIALS_MIN_ZOOM, hazards: HAZARDS_MIN_ZOOM,
@@ -155,13 +166,17 @@ const ID_FIELD = {
   events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24", conflictHistory: "id",
   officials: "id", hazards: "id", airports: "id", darkVessels: "id", cableLandings: "id",
   launches: "id", osmInfra: "id",
+  // One pin per country, so the country code *is* the identity -- a country
+  // whose score changes between polls has to update its existing marker rather
+  // than be torn down and rebuilt under a new key.
+  outagePoints: "country_code",
 };
 const DECORATORS = {
   events: decorateEvent, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
   conflictHistory: decorateHistoricalEvent, officials: decorateOfficials,
   hazards: decorateHazard, airports: decorateAirport, darkVessels: decorateDarkVessel,
   cableLandings: decorateCableLanding, launches: decorateLaunch,
-  osmInfra: decorateOsmInfra,
+  osmInfra: decorateOsmInfra, outagePoints: decorateOutage,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
@@ -170,7 +185,7 @@ const ICON_SIZE_FOR = {
   events: eventIconSize, gdelt: gdeltIconSize, conflictHistory: historicalIconSize,
   officials: officialsIconSize, hazards: hazardIconSize, airports: airportIconSize,
   darkVessels: darkVesselIconSize, cableLandings: cableLandingIconSize,
-  launches: launchIconSize, osmInfra: osmInfraIconSize,
+  launches: launchIconSize, osmInfra: osmInfraIconSize, outagePoints: outageIconSize,
 };
 
 const REGION_FLY_DURATION = 1.2;
@@ -211,7 +226,7 @@ function boundsToPlainObject(bounds) {
 /**
  * @param {HTMLElement} container - the empty <div> to mount the Leaflet map into
  * @param {object} initial - { theme }
- * @param {object} callbacks - { onCountsChange, onZoomNotesChange, onBoundsChange, onRegionAutoReset }
+ * @param {object} callbacks - { onCountsChange, onZoomNotesChange, onBoundsChange, onZoomChange, onRegionAutoReset }
  */
 export function createMapController(container, initial, callbacks) {
   const map = L.map(container, { worldCopyJump: true, minZoom: 2, zoomControl: true }).setView([20, 15], 3);
@@ -279,9 +294,12 @@ export function createMapController(container, initial, callbacks) {
     // coordinates and this does not (see backend/sources/osm_infra.py).
     osmInfra: [],
     // Submarine cable routes (lines) and their landing points (markers), plus
-    // IODA's country-keyed internet-outage scores. `outages` is a dict, not an
-    // array -- it is a country-scoped measure and has no points of its own.
-    cables: [], cableLandings: [], outages: {},
+    // IODA's country-keyed internet-outage scores. `outages` is the dict as
+    // served, keyed by ISO2 and read straight out of here by the country card;
+    // `outagePoints` is the marker array derived from it once the country
+    // boundaries are in (see rebuildOutagePoints). Same two-keys-one-source
+    // split as cables/cableLandings above.
+    cables: [], cableLandings: [], outages: {}, outagePoints: [],
     // Country-keyed humanitarian aggregates (ISO3), read by the country card
     // only -- see backend/sources/humanitarian.py for why none of it is drawn.
     humanitarian: {},
@@ -293,6 +311,7 @@ export function createMapController(container, initial, callbacks) {
     events: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
     conflictHistory: new Map(), officials: new Map(), hazards: new Map(), airports: new Map(), darkVessels: new Map(),
     cableLandings: new Map(), launches: new Map(), osmInfra: new Map(),
+    outagePoints: new Map(),
   };
   const shipTrails = new Map();
   const aircraftTrails = new Map();
@@ -394,21 +413,21 @@ export function createMapController(container, initial, callbacks) {
 
   // ---------- conflict-event filters ----------
   //
-  // What the user asked to see. Applied per item in renderMarkerLayer through
-  // LAYER_ITEM_FILTER rather than by special-casing "events" inside the generic
-  // loop, so adding a filter to another layer later is a table entry.
-  let eventFilter = { maxAgeHours: 72, minSeverity: 0, showImprecise: true };
+  // What the user asked to see. The predicate itself lives in severity.js so
+  // the notable-events panel and the zone briefing can apply the identical
+  // test to the identical array; this holds only the current settings. Applied
+  // per item in renderMarkerLayer through LAYER_ITEM_FILTER rather than by
+  // special-casing "events" inside the generic loop, so adding a filter to
+  // another layer later is a table entry.
+  let eventFilter = { ...DEFAULT_EVENT_FILTER };
 
-  function passesEventFilter(item) {
-    if (!eventFilter.showImprecise && isImprecise(item)) return false;
-    if ((item.severity || 0) < eventFilter.minSeverity) return false;
-    if (eventFilter.maxAgeHours != null) {
-      const age = ageHours(item);
-      // An event we can't date is kept: hiding it would silently drop data on
-      // the basis of a missing field rather than of anything the user chose.
-      if (Number.isFinite(age) && age > eventFilter.maxAgeHours) return false;
-    }
-    return true;
+  // The moment every age is measured against. Null means "live", i.e. now.
+  // Replay sets it to the scrubbed timestamp: without that, a snapshot from
+  // two days ago is measured against the wall clock and the whole conflict
+  // layer filters itself out of a view the backend just served.
+  let ageReference = null;
+  function ageNow() {
+    return ageReference ?? Date.now();
   }
 
   // ---------- news filter ----------
@@ -462,7 +481,7 @@ export function createMapController(container, initial, callbacks) {
   }
 
   const LAYER_ITEM_FILTER = {
-    events: passesEventFilter,
+    events: (item) => passesEventFilter(item, eventFilter, ageNow()),
     gdelt: passesNewsFilter,
     officials: passesOfficialsFilter,
   };
@@ -480,9 +499,17 @@ export function createMapController(container, initial, callbacks) {
     { maxZoom: 7, cap: 900 },
   ];
 
+  // Reported to the panel (see zoomNotes.eventsCapped) rather than applied
+  // silently. The boot view is zoom 3, where this keeps 150 of what can be
+  // 2500 events, and a layer showing 6% of its own count with no explanation
+  // reads as a broken layer rather than as a deliberately thinned one.
   function capBySeverity(items, zoom) {
     const rule = ZOOM_MARKER_CAP.find((r) => zoom <= r.maxZoom);
-    if (!rule || items.length <= rule.cap) return items;
+    if (!rule || items.length <= rule.cap) {
+      zoomNotes.eventsCapped = 0;
+      return items;
+    }
+    zoomNotes.eventsCapped = rule.cap;
     return [...items].sort((a, b) => (b.severity || 0) - (a.severity || 0)).slice(0, rule.cap);
   }
 
@@ -563,9 +590,43 @@ export function createMapController(container, initial, callbacks) {
   let layerByCountryKey = new Map();
   let hoveredCountryKey = null;
 
+  // Admin Mode's boundary editor. Null unless someone is dragging a border
+  // right now (see beginBorderEdit); while it is live it owns raw.countries'
+  // geometry, which is what the two guards below are protecting.
+  let borderSession = null;
+  // A /api/countries payload that landed mid-session, held until the session
+  // ends rather than dropped -- the poll is five minutes apart and throwing one
+  // away could leave the map a rename behind for that long.
+  let pendingCountries = null;
+
   function countryLayerFor(key) {
     return key == null ? null : layerByCountryKey.get(key) || null;
   }
+
+  const borderEditor = createBorderEditor({
+    map,
+    getFeatureCollection: () => raw.countries,
+    // The editor works on its own copy of whatever it touches and swaps the
+    // collection out rather than writing into the one it was handed -- see
+    // adopt() there for why that distinction is the whole of it.
+    replaceFeatureCollection: (fc) => { raw.countries = fc; },
+    getLayerFor: countryLayerFor,
+    onCommit: (commits) => callbacks.onBorderRingCommit?.(commits),
+    onStateChange: (state) => callbacks.onBorderEditChange?.(state),
+    // A dragged vertex invalidates three things derived from the geometry, and
+    // all three are cheap enough to redo per gesture rather than per frame:
+    // the hit-test index (a country whose shape moved but whose index did not
+    // is selectable in the wrong place), the polygons React holds for panel
+    // scoping (published by reference -- see reportCountrySelection), and the
+    // outage pins, which are positioned from the country's own geometry.
+    onGeometryChanged: () => {
+      countryIndex = buildCountryIndex(raw.countries);
+      focusedCountryLayer = countryLayerFor(focusedCountryKey);
+      reportCountrySelection();
+      rebuildOutagePoints();
+      renderMarkerLayer("outagePoints");
+    },
+  });
 
   // Same shape as updateCountryWarFlare below: iterate the already-rendered
   // countriesLayer and toggle a CSS class per feature, rather than rebuilding
@@ -640,12 +701,32 @@ export function createMapController(container, initial, callbacks) {
     return key == null ? null : countryIndex.find((e) => e.key === key) || null;
   }
 
-  /** Tell React which countries are selected, in click order. */
+  /** Fallback for sources that name a country rather than code it. */
+  function countryEntryForName(name) {
+    const wanted = normalizeCountryName(name);
+    if (!wanted) return null;
+    return countryIndex.find((e) => normalizeCountryName(e.name) === wanted) || null;
+  }
+
+  /**
+   * Tell React which countries are selected, in click order.
+   *
+   * The borders ride along (by reference -- nothing is copied) because the
+   * selection is not only a label any more: the notable-activity board and the
+   * news ticker scope themselves to these shapes. See map/countryScope.js for
+   * why that is done in geometry rather than by country name.
+   */
   function reportCountrySelection() {
     callbacks.onCountrySelectionChange?.(
       [...selectedCountryKeys].map((key) => {
         const entry = countryEntryFor(key);
-        return { key, iso: entry?.iso ?? null, name: entry?.name || key };
+        return {
+          key,
+          iso: entry?.iso ?? null,
+          name: entry?.name || key,
+          bbox: entry?.bbox ?? null,
+          polygons: entry?.polygons ?? null,
+        };
       })
     );
   }
@@ -941,6 +1022,7 @@ export function createMapController(container, initial, callbacks) {
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
     osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
+    outagePoints: 0,
   };
   // Total number loaded from the backend for each layer, independent of the
   // current viewport/zoom filtering that `counts` reflects -- shown in the
@@ -956,6 +1038,7 @@ export function createMapController(container, initial, callbacks) {
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
     osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
+    outagePoints: 0,
   };
   // backend/infrastructure.py site "type" -> the counts/totals key it rolls
   // up into, so Critical Infrastructure can show a per-type sub-ticker (see
@@ -968,6 +1051,9 @@ export function createMapController(container, initial, callbacks) {
   const zoomNotes = {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
+    // Not a zoom gate but a zoom-dependent thinning, so it travels with the
+    // rest: how many events capBySeverity kept, or 0 when it kept everything.
+    eventsCapped: 0,
   };
 
   // Layers that report a breakdown as well as a total, so the control panel can
@@ -1005,6 +1091,18 @@ export function createMapController(container, initial, callbacks) {
     callbacks.onCountsChange?.({ ...counts, ...totalsSuffixed });
   }
   function reportZoomNotes() { callbacks.onZoomNotesChange?.({ ...zoomNotes }); }
+
+  // The current zoom, handed to React so the fetch layer can hold off on
+  // sources that are pointless above a certain height (see POLL_CONFIG's
+  // minZoom in useOsintData.js). Reported only on an actual change: this runs
+  // on every moveend, and a pan is not a zoom.
+  let lastReportedZoom = null;
+  function reportZoom() {
+    const zoom = map.getZoom();
+    if (zoom === lastReportedZoom) return;
+    lastReportedZoom = zoom;
+    callbacks.onZoomChange?.(zoom);
+  }
 
   // ---------- cross-layer icon placement ----------
   //
@@ -1046,6 +1144,10 @@ export function createMapController(container, initial, callbacks) {
     // Below the curated infrastructure it sits alongside: where the two
     // disagree about the same site, the hand-checked coordinate keeps its pixel.
     adsbCivilian: 20, cities: 10, airports: 5, cableLandings: 15, osmInfra: 25,
+    // Below every layer whose coordinate means something. An outage pin's
+    // position is a drawing decision, not a measurement (see decorateOutage),
+    // so where two pins want the same pixel this is the one that should move.
+    outagePoints: 8,
   };
 
   // Buckets that share one render function, so a settle pass triggered by any
@@ -1181,16 +1283,26 @@ export function createMapController(container, initial, callbacks) {
       reportZoomNotes();
     }
     const itemFilter = LAYER_ITEM_FILTER[key];
+    // `|| []` because a source can hand us nothing: /api/replay omits a key
+    // entirely when it has no history for it, and an undefined here used to
+    // take the whole render down rather than drawing an empty layer.
+    const items = raw[key] || [];
     let visible = [];
     if (!belowMinZoom) {
-      for (const item of raw[key]) {
+      for (const item of items) {
         if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
         if (!bounds.contains([item.lat, item.lon])) continue;
         if (itemFilter && !itemFilter(item)) continue;
         visible.push(item);
       }
     }
-    if (key === "events") visible = capBySeverity(visible, map.getZoom());
+    if (key === "events") {
+      // Reported only on a change: reportZoomNotes hands React a fresh object
+      // every call, and this runs on every pan.
+      const cappedBefore = zoomNotes.eventsCapped;
+      visible = capBySeverity(visible, map.getZoom());
+      if (zoomNotes.eventsCapped !== cappedBefore) reportZoomNotes();
+    }
     if (key === "gdelt") visible = collapseNews(visible, map.getZoom());
     if (key === "officials") visible = collapseOfficials(visible, map.getZoom());
     registerPlacement(
@@ -1206,7 +1318,7 @@ export function createMapController(container, initial, callbacks) {
       (marker, item) => updateMarker(marker, item, decorate, key, sizeOf)
     );
     counts[key] = visible.length;
-    totals[key] = raw[key].length;
+    totals[key] = items.length;
     const subcount = LAYER_SUBCOUNT_KEY[key];
     if (subcount) {
       for (const bucket of subcount.keys) {
@@ -1219,7 +1331,7 @@ export function createMapController(container, initial, callbacks) {
         const bucket = subcount.of(item);
         if (bucket) counts[bucket] += 1;
       }
-      for (const item of raw[key]) {
+      for (const item of items) {
         const bucket = subcount.of(item);
         if (bucket) totals[bucket] += 1;
       }
@@ -1734,9 +1846,47 @@ export function createMapController(container, initial, callbacks) {
       counts.countries = features.length;
       totals.countries = features.length;
       reportCounts();
+      // The outage pins are positioned from these boundaries, so a rebuilt
+      // country index invalidates them -- and on first load this is what turns
+      // an already-fetched outage dict into pins at all.
+      rebuildOutagePoints();
+      renderMarkerLayer("outagePoints");
+      // The selection publishes each country's polygons to React by reference
+      // (see reportCountrySelection), and those arrays have just been replaced.
+      // Without this the notable-activity board and the news ticker keep
+      // scoping themselves to shapes that no longer exist -- which stayed
+      // invisible while a rebuild only ever happened on a rename, and does not
+      // once a boundary can be redrawn.
+      reportCountrySelection();
+      // 177 short strings, so React can hold these and the admin panel can spot
+      // an edit made against geometry the source no longer serves -- without
+      // the multi-megabyte collection itself ever entering React state.
+      callbacks.onCountryFingerprints?.(countryFingerprints(raw.countries));
     }
     updateCountryWarFlare();
     updateCountryHighlights();
+  }
+
+  /**
+   * Close a boundary-editing session and put the map back in charge.
+   *
+   * The rebuild at the end is not housekeeping, it is the check: everything the
+   * session drew was written straight into the working geometry, and this
+   * repaints from whatever React actually persisted. If the two disagree --
+   * a ring refused for being over the size ceiling, say -- this is where that
+   * becomes visible rather than on the next reload.
+   */
+  function endBorderEdit() {
+    if (!borderSession) return;
+    borderEditor.end();
+    borderSession = null;
+    countriesLayer.eachLayer((layer) => layer.getElement?.()?.classList.remove("country-editing"));
+    if (pendingCountries) {
+      raw.countries = pendingCountries;
+      pendingCountries = null;
+    }
+    lastCountriesSignature = null;
+    renderCountries();
   }
 
   // Flags a country as an active war zone (a pulsing red flare, same visual
@@ -1913,7 +2063,7 @@ export function createMapController(container, initial, callbacks) {
     const marker = L.marker([site.lat, site.lon], { icon: d.icon });
     marker._item = site;
     marker._iconHtml = d.icon.options.html;
-    applyStacking(marker, infraIconSize());
+    applyStacking(marker, infraIconSize(site));
     marker.bindPopup(() => infraDecoration(marker._item).detail, { maxWidth: 320 });
     marker.bindTooltip(() => infraDecoration(marker._item).tooltip, {
       className: "map-tooltip",
@@ -1939,7 +2089,7 @@ export function createMapController(container, initial, callbacks) {
     );
     registerPlacement(
       "infra",
-      visible.map((s) => ({ id: s.id, lat: s.lat, lon: s.lon, size: infraIconSize() }))
+      visible.map((s) => ({ id: s.id, lat: s.lat, lon: s.lon, size: infraIconSize(s) }))
     );
     // Diff-sync like every other point layer -- re-runs on every ACLED/GDELT
     // update too (see renderAll) so a flare turns on/off promptly, without
@@ -2017,15 +2167,33 @@ export function createMapController(container, initial, callbacks) {
     reportCounts();
   }
 
-  // A country-scoped measure gets a country-scoped rendering: the shape is
-  // tinted, and nothing is drawn at a point. IODA reports at national
-  // resolution and a pin on a capital would claim a precision it does not have.
-  function updateCountryOutageTint() {
-    countriesLayer.eachLayer((layer) => {
-      const key = countryKeyOfProps(layer.feature?.properties || {});
-      const el = layer.getElement?.();
-      if (el) el.classList.toggle("country-offline", !!(key && raw.outages[key]));
-    });
+  // IODA's country-keyed scores -> one marker item per affected country.
+  //
+  // This layer used to tint the whole country shape instead. Two things were
+  // wrong with that: a filled country is the gesture the *selection* highlight
+  // already owns, so three countries looked selected that nobody had clicked;
+  // and a tint states a fact about the territory, while what IODA has is a
+  // measurement. A pin is a thing on the map that can be clicked and explained,
+  // and decorateOutage's popup does the explaining the tint could not.
+  //
+  // Depends on the country boundaries, which arrive on their own schedule --
+  // renderCountries calls this too, so whichever of the two lands second is the
+  // one that produces the pins.
+  function rebuildOutagePoints() {
+    const points = [];
+    for (const [key, record] of Object.entries(raw.outages || {})) {
+      // Natural Earth carries "-99" as the ISO2 of a handful of countries
+      // (France and Norway among them), so those shapes are keyed by name
+      // instead and an ISO2 lookup alone would silently draw nothing for them.
+      // The name IODA reports is the second way in, through the same alias
+      // table the country card matches events with.
+      const entry = countryEntryFor(key) || countryEntryForName(record?.country);
+      if (!entry) continue; // no boundary for this country at all -- nothing to hang a pin on
+      const point = representativePointOf(entry);
+      if (!point) continue;
+      points.push({ ...record, country: record.country || entry.name, lat: point.lat, lon: point.lon });
+    }
+    raw.outagePoints = points;
   }
 
   function renderAll() {
@@ -2058,6 +2226,7 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("airports");
     renderMarkerLayer("darkVessels");
     renderMarkerLayer("cableLandings");
+    renderMarkerLayer("outagePoints");
     renderMarkerLayer("launches");
     renderMarkerLayer("osmInfra");
     renderMarkerLayer("ais");
@@ -2170,6 +2339,7 @@ export function createMapController(container, initial, callbacks) {
     }
     renderAll();
     callbacks.onBoundsChange?.(boundsToPlainObject(map.getBounds()));
+    reportZoom();
     clearTimeout(moveEndWindTimer);
     moveEndWindTimer = setTimeout(refreshWindArrows, 500); // debounced: don't hammer Open-Meteo mid-drag
   });
@@ -2210,6 +2380,18 @@ export function createMapController(container, initial, callbacks) {
     // has already had its chance to claim the click.
     if (countriesVisible) {
       const entry = findCountryAt(countryIndex, e.latlng.lat, e.latlng.lng);
+      // While a boundary is being edited, a click inside the country being
+      // worked on does nothing: the alternative is that a missed grab at a
+      // handle deselects the very thing under the pointer and closes the
+      // editor. Clicking a *different* country still moves on, so switching
+      // subject stays one gesture rather than two.
+      if (borderSession) {
+        if (entry && entry.key !== borderSession.countryKey) {
+          endBorderEdit();
+          selectCountryEntry(entry, false);
+        }
+        return;
+      }
       if (entry) {
         // Ctrl (Windows/Linux), Cmd (macOS) or Shift adds to the selection
         // instead of replacing it -- the same modifier every file manager and
@@ -2241,6 +2423,15 @@ export function createMapController(container, initial, callbacks) {
   let hoverFrame = null;
   let pendingHoverLatLng = null;
   map.on("mousemove", (e) => {
+    // mousemove is not one of the events L.Marker stops (that list is
+    // click/dblclick/mouseover/mouseout/contextmenu), so moving over a vertex
+    // handle arrives here with sourceTarget set to the marker -- the bail
+    // below would then leave the last country highlighted for as long as the
+    // pointer stayed on the handle. Editing has its own highlight anyway.
+    if (borderSession) {
+      setHoveredCountry(null);
+      return;
+    }
     if (e.sourceTarget && e.sourceTarget !== map) return;
     pendingHoverLatLng = e.latlng;
     if (hoverFrame != null) return;
@@ -2283,6 +2474,7 @@ export function createMapController(container, initial, callbacks) {
   }
   document.addEventListener("visibilitychange", onVisibilityChange);
   callbacks.onBoundsChange?.(boundsToPlainObject(map.getBounds()));
+  reportZoom();
 
   // ---------- public API (consumed by useLeafletMap.js) ----------
 
@@ -2290,6 +2482,15 @@ export function createMapController(container, initial, callbacks) {
     map,
 
     applyData(key, data) {
+      // A poll landing mid-edit must not replace the geometry under the
+      // handles. The guard is on the assignment rather than on the render,
+      // because the assignment is the destructive half -- skipping only the
+      // redraw would leave the editor dragging vertices of an object the map
+      // had already thrown away.
+      if (key === "countries" && borderSession) {
+        pendingCountries = data;
+        return;
+      }
       raw[key] = data;
       // Invalidates nearbyEventsFor's cache -- these are the only two
       // sources it reads, so nothing else needs to bust it.
@@ -2307,9 +2508,12 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "infra") renderInfra();
       else if (key === "pipelines") renderPipelines();
     else if (key === "cables") renderCables();
-    // Country-keyed, like conflictStats: read straight out of `raw` by the
-    // country card and by the outage tint, with no marker layer of its own.
-    else if (key === "outages") updateCountryOutageTint();
+    // Served as a country-keyed dict (read as-is by the country card), drawn
+    // from the derived point array -- same split as cables/cableLandings.
+    else if (key === "outages") {
+      rebuildOutagePoints();
+      renderMarkerLayer("outagePoints");
+    }
       else if (key === "jamming") renderJamming();
       else if (key === "satellites") renderSatellites();
       // Neither of these is a point array with a layer of its own, so both
@@ -2347,6 +2551,16 @@ export function createMapController(container, initial, callbacks) {
       renderMarkerLayer("events");
     },
 
+    // The moment ages are measured against. Replay passes its scrubbed
+    // timestamp; null restores the wall clock. Redraws immediately, since
+    // moving the reference is exactly as consequential as moving the window.
+    setAgeReference(ts) {
+      const next = Number.isFinite(ts) ? ts : null;
+      if (next === ageReference) return;
+      ageReference = next;
+      renderMarkerLayer("events");
+    },
+
     // Closes the info card without touching the selection. The country stays
     // highlighted, which is the whole point of a selection that outlives a
     // glance: shutting a card is not the same gesture as deselecting.
@@ -2368,6 +2582,53 @@ export function createMapController(container, initial, callbacks) {
       if (focusedCountryKey === key) focusCountry([...selectedCountryKeys].pop() ?? null);
       else updateCountryHighlights();
       reportCountrySelection();
+    },
+
+    /**
+     * Repaint the boundaries from whatever is now in `raw.countries`.
+     *
+     * renderCountries fingerprints on the feature count and the ISO list, so a
+     * change that only moved vertices does not look like a change to it (the
+     * reasoning is written out above renderCountries, and it is the right
+     * trade for a five-minute poll of a dataset that changes once a day).
+     * Applying a stored border edit is exactly that kind of change, so it needs
+     * a way to say "this one really did".
+     */
+    refreshCountriesNow() {
+      // The session is the authority on its own country's geometry while it is
+      // live, and its own commits are what trigger this -- repainting here
+      // would rebuild the layer out from under the open handles.
+      if (borderSession) return;
+      lastCountriesSignature = null;
+      renderCountries();
+    },
+
+    /**
+     * Start dragging one country's boundary.
+     * @returns {boolean} whether a session actually opened
+     */
+    beginBorderEdit(countryKey, options) {
+      if (borderSession) return false;
+      if (!countryLayerFor(countryKey)) return false;
+      if (!borderEditor.begin(countryKey, options)) return false;
+      borderSession = { countryKey };
+      countriesLayer.eachLayer((layer) => {
+        const key = countryKeyOfProps(layer.feature?.properties || {});
+        layer.getElement?.()?.classList.toggle("country-editing", key === countryKey);
+      });
+      return true;
+    },
+
+    endBorderEdit() {
+      endBorderEdit();
+    },
+
+    setBorderLinkMode(on) {
+      borderEditor.setLinkMode(on);
+    },
+
+    undoBorderEdit() {
+      return borderEditor.undo();
     },
 
     /** Drop the whole selection -- the "Clear" the highlight waits for. */
@@ -2442,6 +2703,11 @@ export function createMapController(container, initial, callbacks) {
       clearTimeout(moveEndWindTimer);
       clearTimeout(regionFlightTimer);
       if (hoverFrame != null) cancelAnimationFrame(hoverFrame);
+      // A live editing session holds its own animation frame and a map listener,
+      // and its handles' Draggables have listeners on `document` -- all of which
+      // would outlive the map otherwise.
+      borderEditor.destroy();
+      borderSession = null;
       document.removeEventListener("visibilitychange", onVisibilityChange);
       // Aborts any pan/zoom animation still in flight. Leaflet's own animation
       // frame keeps running after remove() otherwise, and then reads panes that

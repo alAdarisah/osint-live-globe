@@ -8,12 +8,15 @@
 import { useMemo } from "react";
 import { timeAgoFromDateAdded } from "../utils/format";
 import { boundsContainsPoint } from "../utils/geo";
+import { passesEventFilter, DEFAULT_EVENT_FILTER } from "../map/severity";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 
 const NEWS_MAX_ITEMS = 5;
 const TOP_EVENTS_MAX = 4;
 
-export default function ConflictBriefingCard({ zone, eventsRaw, gdeltRaw, onClose, onLocate }) {
+export default function ConflictBriefingCard({
+  zone, eventsRaw, eventFilter = DEFAULT_EVENT_FILTER, gdeltRaw, onClose, onLocate,
+}) {
   const { panelRef, style, handleProps } = useDraggablePanel("conflictBriefing");
 
   const bounds = useMemo(() => {
@@ -22,12 +25,17 @@ export default function ConflictBriefingCard({ zone, eventsRaw, gdeltRaw, onClos
     return { south, west, north, east };
   }, [zone]);
 
+  // Filtered the same way the map is: the tally under a zone's name has to
+  // count the pins the reader can actually see in it, or the briefing and the
+  // map state two different things about the same place.
   const eventsInZone = useMemo(() => {
     if (!bounds) return [];
     return eventsRaw.filter(
-      (e) => typeof e.lat === "number" && typeof e.lon === "number" && boundsContainsPoint(bounds, e.lat, e.lon)
+      (e) => typeof e.lat === "number" && typeof e.lon === "number"
+        && boundsContainsPoint(bounds, e.lat, e.lon)
+        && passesEventFilter(e, eventFilter)
     );
-  }, [eventsRaw, bounds]);
+  }, [eventsRaw, eventFilter, bounds]);
 
   const newsInZone = useMemo(() => {
     if (!bounds) return [];

@@ -263,6 +263,11 @@ export function createEntityClusterGroups(map) {
     // OpenStreetMap-derived infrastructure, off by default and kept strictly
     // apart from the curated infra layer (see backend/sources/osm_infra.py).
     osmInfra: L.layerGroup(),
+    // One pin per country IODA currently reports offline, at that country's
+    // representative interior point. Added here, i.e. on by default, because
+    // the country tint it replaced was unconditional too -- a national blackout
+    // is not something a reader should have to switch on to find out about.
+    outagePoints: L.layerGroup().addTo(map),
   };
   return { groups };
 }

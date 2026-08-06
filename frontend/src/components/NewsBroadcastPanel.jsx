@@ -3,6 +3,10 @@
 // viewport (same pattern the map controller's renderers use) so it always
 // reflects whatever region is currently in view/selected, not just the
 // initial selection.
+//
+// Unless a country is selected, in which case that wins: a reader who clicked
+// Sudan wants Sudan's headlines, and panning one degree away shouldn't empty
+// the ticker. See map/countryScope.js.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { timeAgoFromDateAdded } from "../utils/format";
 import { padBounds, boundsContainsPoint } from "../utils/geo";
@@ -11,7 +15,7 @@ import LocateIcon from "./icons/LocateIcon";
 
 const NEWS_MAX_ITEMS = 8;
 
-export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, onLocate }) {
+export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, countryScope, onLocate }) {
   // Starts collapsed on every viewport -- the news ticker is opt-in, same
   // "quiet by default" treatment as the layer checkboxes in App.jsx's
   // DEFAULT_LAYER_VISIBILITY.
@@ -23,14 +27,28 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
   const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
   const { panelRef, style, handleProps } = useDraggablePanel("newsBroadcast", { onClick: toggleCollapsed });
 
+  const scoped = !!countryScope?.active;
+  const scopeKeys = scoped ? countryScope.keys : null;
+
+  // Each new country selection opens the ticker. Clicking a country *is* the
+  // request to see its news, and leaving the answer folded away behind a caret
+  // would make the click look like it did nothing. Keyed on the selection
+  // itself, so it fires once per pick rather than fighting a reader who then
+  // collapses it again.
+  useEffect(() => {
+    if (scopeKeys) setCollapsed(false);
+  }, [scopeKeys]);
+
   const items = useMemo(() => {
-    if (!mapBounds) return [];
-    const bounds = padBounds(mapBounds, 0.25);
+    const bounds = mapBounds ? padBounds(mapBounds, 0.25) : null;
+    if (!scoped && !bounds) return [];
     const seen = new Set();
     const filtered = [];
     for (const d of gdeltRaw) {
       if (typeof d.lat !== "number" || typeof d.lon !== "number") continue;
-      if (!boundsContainsPoint(bounds, d.lat, d.lon)) continue;
+      // A country selection replaces the viewport test rather than narrowing
+      // it -- the whole point is that the list survives panning away.
+      if (scoped ? !countryScope.contains(d.lat, d.lon) : !boundsContainsPoint(bounds, d.lat, d.lon)) continue;
       // /api/news only ever serves items with a real scraped title (see
       // backend/app.py's _gdelt_filter) -- this re-check is a defensive
       // backstop, not an expected path.
@@ -42,7 +60,7 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
     }
     filtered.sort((a, b) => (b.date_added || "").localeCompare(a.date_added || ""));
     return filtered.slice(0, NEWS_MAX_ITEMS);
-  }, [gdeltRaw, mapBounds]);
+  }, [gdeltRaw, mapBounds, scoped, countryScope]);
 
   const [lastUpdateTs, setLastUpdateTs] = useState(() => Date.now());
   useEffect(() => {
@@ -63,8 +81,11 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
     <aside id="newsBroadcast" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
       <div {...handleProps} className={`news-header ${handleProps.className || ""}`}>
         <span className="live-dot" />
+        {/* The selected country replaces the region label rather than sitting
+            next to it: the header states what the list below is actually
+            filtered to, and it is filtered to one or the other. */}
         <span className="news-title">
-          LIVE &mdash; <span>{regionLabel}</span>
+          LIVE &mdash; <span>{scoped ? countryScope.label : regionLabel}</span>
         </span>
         <span className="news-updated">{updatedText}</span>
         <button
@@ -79,7 +100,11 @@ export default function NewsBroadcastPanel({ gdeltRaw, mapBounds, regionLabel, o
       </div>
       <div className="news-list">
         {items.length === 0 ? (
-          <div className="news-empty">No recent headlines for this area.</div>
+          <div className="news-empty">
+            {scoped
+              ? `No recent headlines for ${countryScope.label}.`
+              : "No recent headlines for this area."}
+          </div>
         ) : (
           items.map((item) => <NewsItem key={item.source_url || item.event_id} item={item} onLocate={onLocate} />)
         )}

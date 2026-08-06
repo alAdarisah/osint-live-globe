@@ -30,6 +30,15 @@ _ROWS = [
     geonames_row(geonameid="702550", name="Lviv", asciiname="Lviv", alternatenames="Lvov",
                  country_code="UA", admin1="06", lat="49.83826", lon="24.02324",
                  feature_code="PPLA", population="717803"),
+    # Two countries, so "the text is about a different country than the pin"
+    # is testable. PCLI is GeoNames' independent-political-entity code, which is
+    # what gazetteer.COUNTRY_FEATURE_CODES keys on.
+    geonames_row(geonameid="337996", name="Ethiopia", asciiname="Ethiopia", alternatenames="",
+                 country_code="ET", admin1="00", lat="8.0", lon="38.0",
+                 feature_code="PCLI", population="109224559"),
+    geonames_row(geonameid="51537", name="Somalia", asciiname="Somalia", alternatenames="",
+                 country_code="SO", admin1="00", lat="6.0", lon="48.0",
+                 feature_code="PCLI", population="10112453"),
     # Two Tripolis, so ambiguity is testable rather than hypothetical.
     geonames_row(geonameid="2210247", name="Tripoli", asciiname="Tripoli", alternatenames="",
                  country_code="LY", admin1="47", lat="32.87519", lon="13.18746",
@@ -373,18 +382,81 @@ def test_a_dateline_only_article_never_refines_an_imprecise_pin(index):
 # --- unverified ------------------------------------------------------------
 
 
-def test_a_row_that_was_never_scraped_is_unverified(index):
-    """Today's behaviour, unchanged: no text, no opinion."""
+def test_a_row_with_only_a_headline_is_still_read(index):
+    """A headline is weaker evidence than a body, not an absence of evidence.
+
+    This used to return UNVERIFIED: the check was gated on the article body,
+    and the body is only fetched for verified-domain URLs. Measured over a live
+    window that left 122 of 127 rows with no verdict at all, so the layer that
+    exists to catch a wrong pin was inert on 96% of the pins.
+    """
     row = _row()
     del row["article_excerpt"]
     result = gv.reconcile(row, index)
-    assert result["geo_verdict"] == gv.UNVERIFIED
+    assert result["geo_verdict"] == gv.CONFIRMED
+    assert "headline" in result["geo_reason"]
+    # ...and it says so by scoring below the same verdict read from a body.
+    assert result["geo_confidence"] < gv.reconcile(_row(), index)["geo_confidence"]
+
+
+def test_a_headline_naming_somewhere_far_away_contests_the_pin(index):
+    """The reported failure: a Kyiv headline on a pin in Washington DC."""
+    result = gv.reconcile(
+        _row(lat=38.9072, lon=-77.0369, geo_country_code="US",
+             real_title="Ukraine: Russian strikes on Kyiv region kill at least 17",
+             article_excerpt=None),
+        index,
+    )
+    assert result["geo_verdict"] == gv.CONTESTED
+    # Doubted, never moved: the pin stays where GDELT put it.
     assert "lat" not in result
 
 
-def test_a_scraped_row_with_no_body_is_still_unverified(index):
+def test_a_text_about_another_country_contests_the_pin(index):
+    """"Fears of renewed conflict in Ethiopia", pinned in Somalia.
+
+    No locality is named, so the locality path cannot see this at all -- and
+    before this check the row came back "unverified", i.e. a pin in the wrong
+    country presented exactly like every other unchecked one.
+    """
+    result = gv.reconcile(
+        _row(lat=6.0, lon=48.0, geo_precision="country", geo_country_code="SO",
+             real_title="Fears of renewed conflict in Ethiopia", article_excerpt=None),
+        index,
+    )
+    assert result["geo_verdict"] == gv.CONTESTED
+    assert result["geo_text_place"] == "Ethiopia"
+    assert "another country" in result["geo_reason"]
+    assert "lat" not in result  # doubted, never moved
+
+
+def test_a_text_naming_two_countries_says_nothing(index):
+    """"US nearly out of missiles leaving Trump short of options in Iran".
+
+    Two countries named is not a claim about where an event happened, and
+    picking one of them to weigh against the pin would be guessing.
+    """
+    result = gv.reconcile(
+        _row(lat=6.0, lon=48.0, geo_precision="country", geo_country_code="SO",
+             real_title="Ethiopia and Somalia trade accusations", article_excerpt=None),
+        index,
+    )
+    assert result["geo_verdict"] == gv.UNVERIFIED
+
+
+def test_a_text_about_the_pins_own_country_is_not_contested(index):
+    result = gv.reconcile(
+        _row(lat=8.0, lon=38.0, geo_precision="country", geo_country_code="ET",
+             real_title="Fears of renewed conflict in Ethiopia", article_excerpt=None),
+        index,
+    )
+    assert result["geo_verdict"] == gv.UNVERIFIED
+
+
+def test_a_row_with_no_text_at_all_is_unverified(index):
     result = gv.reconcile(_row(real_title=None, article_excerpt=None), index)
     assert result["geo_verdict"] == gv.UNVERIFIED
+    assert result["geo_reason"] == "no-text"
 
 
 def test_text_naming_only_a_country_confirms_nothing(index):
@@ -457,3 +529,15 @@ def test_precision_only_ever_improves(index):
     ):
         result = gv.reconcile(verdict_row, index)
         assert result.get("geo_precision", "locality") == "locality"
+
+
+def test_a_month_abbreviation_is_never_a_place(index):
+    """Real: a pin was moved to a settlement called Nov by a date in the text.
+
+    Refinement moves the coordinate, so a false positive here is worse than no
+    verdict -- it replaces "we don't know" with a confident wrong answer.
+    """
+    from backend.sources import geoverify as gvm
+    for token in ("Nov", "Jan", "Sept", "Dec", "Mar", "Aug"):
+        assert token.lower() in gvm._STOPWORDS, f"{token} must not resolve as a place"
+    assert "Kyiv".lower() not in gvm._STOPWORDS, "the list must stay small enough to be harmless"

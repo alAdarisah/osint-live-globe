@@ -96,6 +96,7 @@ async def start():
     # A dict, not a list -- same shape as hdx_conflict_stats, and read the same
     # way by the country card rather than drawn as markers.
     state.data = {}
+    await storage.warm_reference(state, "outages", "Internet outages")
     consecutive_failures = 0
     while True:
         ok = False

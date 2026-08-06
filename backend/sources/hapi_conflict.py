@@ -160,6 +160,12 @@ async def _fetch(identifier: str) -> list[dict]:
 async def start():
     identifier = _app_identifier()
     state = registry.register("hapi_conflict", key_configured=bool(identifier))
+    # Warmed before the identifier check, deliberately. District-month
+    # aggregates change monthly at most, so a stored copy stays useful for a
+    # long time -- including on a machine that never had HAPI_CONTACT_EMAIL
+    # set, where this source is otherwise permanently blank. /api/health still
+    # reports last_success as null, so nothing here claims the data is fresh.
+    await storage.warm_reference(state, "hapi_conflict", "HAPI conflict")
     if not identifier:
         # Not a key, but HAPI still requires a valid contact address. Stay
         # inert and say so, rather than retrying a request that can only 403.

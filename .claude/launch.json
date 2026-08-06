@@ -10,6 +10,13 @@
       "autoPort": true
     },
     {
+      "name": "frontend-8080",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "8080", "--strictPort"],
+      "cwd": "frontend",
+      "port": 8080
+    },
+    {
       "name": "backend-dev",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "backend.app"],

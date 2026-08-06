@@ -26,6 +26,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { defaultSettings, mergeSettings, EDITABLE_SOURCES } from "../settings/defaults";
+import { borderStats, sanitizeRing, MAX_TOTAL_POINTS } from "../settings/borderOverrides";
 import { setIconTheme } from "../map/iconTheme";
 
 const STORAGE_KEY = "osint-admin-settings";
@@ -189,6 +190,7 @@ export function useAppSettings() {
     setIconTheme({
       scale: settings.icons.scale,
       colors: settings.icons.colors,
+      sizes: settings.icons.sizes,
       layers: settings.layers,
     });
   }, [settings.icons, settings.layers]);
@@ -235,6 +237,21 @@ export function useAppSettings() {
 
   const resetColors = useCallback(
     () => update((prev) => ({ ...prev, icons: { ...prev.icons, colors: defaultSettings().icons.colors } })),
+    [update]
+  );
+
+  /** One kind of pin's own size multiplier, on top of the global and layer ones. */
+  const setTokenSize = useCallback(
+    (token, value) =>
+      update((prev) => ({
+        ...prev,
+        icons: { ...prev.icons, sizes: { ...prev.icons.sizes, [token]: value } },
+      })),
+    [update]
+  );
+
+  const resetSizes = useCallback(
+    () => update((prev) => ({ ...prev, icons: { ...prev.icons, sizes: defaultSettings().icons.sizes } })),
     [update]
   );
 
@@ -318,6 +335,88 @@ export function useAppSettings() {
     [update]
   );
 
+  // --- redrawn boundaries -----------------------------------------------
+
+  // What the last border commit had to say for itself: null normally, a string
+  // when a ring was refused. The editor is a direct-manipulation gesture, so a
+  // refusal has to surface somewhere the hand that made it is looking.
+  const [borderNotice, setBorderNotice] = useState(null);
+
+  /**
+   * Commit the rings one drag touched.
+   *
+   * The whole gesture arrives as one array rather than a call per ring, because
+   * moving a shared vertex moves it in every country that owns it -- a single
+   * drag on the Ukraine/Russia border legitimately rewrites two rings, and
+   * committing them separately would be two localStorage writes, two debounce
+   * windows, and a moment where the map on disk has a seam in it.
+   *
+   * @param {Array<{countryKey: string, fp: string|null, polygonIndex: number,
+   *                ringIndex: number, ring: Array<[number, number]>}>} commits
+   */
+  const setBorderRings = useCallback(
+    (commits) => {
+      if (!Array.isArray(commits) || !commits.length) return;
+      let refused = null;
+      update((prev) => {
+        const borders = { ...prev.borders };
+        let total = borderStats(borders).points;
+
+        for (const commit of commits) {
+          const { countryKey, fp, polygonIndex, ringIndex, ring } = commit || {};
+          if (!countryKey) continue;
+          const clean = sanitizeRing(ring);
+          if (!clean) {
+            refused = `That edit would leave ${countryKey} with too few points to be a shape.`;
+            continue;
+          }
+          const entry = borders[countryKey];
+          const key = `${polygonIndex}:${ringIndex}`;
+          // Replacing a ring already stored costs nothing new, so only a
+          // genuinely new ring is measured against the ceiling.
+          const previous = entry?.rings?.[key]?.length || 0;
+          if (total - previous + clean.length > MAX_TOTAL_POINTS) {
+            refused =
+              `There is no room left for boundary edits (${MAX_TOTAL_POINTS.toLocaleString()} points). ` +
+              `Revert a country in the Admin panel to make room.`;
+            continue;
+          }
+          total = total - previous + clean.length;
+          borders[countryKey] = {
+            // The fingerprint is whatever the edit started from and never
+            // changes as the ring does -- it identifies the *source* geometry
+            // these ring keys address, not the shape being drawn.
+            fp: entry?.fp ?? fp ?? null,
+            rings: { ...(entry?.rings || {}), [key]: clean },
+          };
+        }
+
+        return { ...prev, borders };
+      });
+      setBorderNotice(refused);
+    },
+    [update]
+  );
+
+  /** Put one country's boundary back to what the source serves. */
+  const revertBorderCountry = useCallback(
+    (countryKey) =>
+      update((prev) => {
+        if (!prev.borders?.[countryKey]) return prev;
+        const borders = { ...prev.borders };
+        delete borders[countryKey];
+        return { ...prev, borders };
+      }),
+    [update]
+  );
+
+  const clearBorderEdits = useCallback(
+    () => update((prev) => (Object.keys(prev.borders).length ? { ...prev, borders: {} } : prev)),
+    [update]
+  );
+
+  const clearBorderNotice = useCallback(() => setBorderNotice(null), []);
+
   const resetAll = useCallback(() => update(() => defaultSettings()), [update]);
 
   /** The current config as a JSON string, for download. */
@@ -344,18 +443,20 @@ export function useAppSettings() {
 
   const actions = useMemo(
     () => ({
-      setIconScale, setColor, resetColors, setLayerStyle, setUi,
+      setIconScale, setColor, resetColors, setTokenSize, resetSizes, setLayerStyle, setUi,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
+      setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,
     }),
     [
-      setIconScale, setColor, resetColors, setLayerStyle, setUi,
+      setIconScale, setColor, resetColors, setTokenSize, resetSizes, setLayerStyle, setUi,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
+      setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,
     ]
   );
 
-  return { settings, adminMode, toggleAdminMode, actions, sync };
+  return { settings, adminMode, toggleAdminMode, actions, sync, borderNotice };
 }
 
 // "#6fe3ff" -> "111, 227, 255", the form the rgba(var(--accent-rgb), a) rules

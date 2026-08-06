@@ -3,17 +3,59 @@
 Everything here is pure -- no registry, no network, no database.
 """
 
+import itertools
+import time
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
 from backend.sources import event_fusion as ef
 
 
+_row_counter = itertools.count()
+
+# Fixture dates are expressed relative to this rather than pinned to literal
+# timestamps. Parts of the pipeline compare an event's date against the wall
+# clock -- reliability.screen removes a thinly-sourced record once it is more
+# than MAX_REPORT_LAG_DAYS old, and outlets.url_age_months reads the date out of
+# a URL path -- so a hardcoded "today" stops being today the moment the calendar
+# moves past it, and rows these tests need on the map start being correctly
+# dropped as stale.
+#
+# Everything is anchored to one value read once at import, so no two fixtures in
+# a run can disagree about when "now" was, and a run that straddles midnight
+# cannot date half its rows a day apart from the other half.
+_INGESTED = datetime.now(timezone.utc) - timedelta(hours=2)
+
+
+def _added(days: int = 0, hours: int = 0) -> str:
+    """A GDELT DATEADDED stamp (YYYYMMDDHHMMSS) that far before now."""
+    return (_INGESTED - timedelta(days=days, hours=hours)).strftime("%Y%m%d%H%M%S")
+
+
+def _sqldate(days: int = 0) -> str:
+    """A GDELT SQLDATE stamp (YYYYMMDD) that many days before now."""
+    return (_INGESTED - timedelta(days=days)).strftime("%Y%m%d")
+
+
+def _isodate(days: int = 0) -> str:
+    """The same day as _sqldate, in the YYYY-MM-DD shape ACLED/UCDP use."""
+    return (_INGESTED - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
 def _gdelt(**over) -> dict:
+    # source_url is unique per row unless a test says otherwise. Two rows coded
+    # from the same article are now merged regardless of distance (see
+    # _same_article_and_family), so a shared default would have made every
+    # fixture row one incident and quietly disabled the distance tests below.
+    # Tests that want that merge pass source_url explicitly.
     base = {
-        "event_id": "1", "lat": 46.6, "lon": 32.6, "date_added": "20260805101500",
+        "event_id": "1", "lat": 46.6, "lon": 32.6, "date_added": _added(),
         "event_root_code": 19, "event_code": "190", "mentions": 3, "goldstein": -10.0,
         "avg_tone": -6.0, "location": "Kherson, Khersons'ka Oblast', Ukraine",
         "geo_precision": "locality", "geo_feature_id": "-1041356",
         "actor1": "RUSSIA", "actor2": "AIR FORCE", "actor2_type": "MIL",
-        "source_url": "https://www.reuters.com/x",
+        "source_url": f"https://www.reuters.com/{next(_row_counter)}",
     }
     base.update(over)
     return base
@@ -21,7 +63,7 @@ def _gdelt(**over) -> dict:
 
 def _structured(**over) -> dict:
     base = {
-        "id": "SDN1234", "lat": 15.5, "lon": 32.5, "date": "2026-08-04",
+        "id": "SDN1234", "lat": 15.5, "lon": 32.5, "date": _isodate(days=1),
         "event_type": "Battle", "sub_event_type": "Armed clash",
         "actor1": "RSF", "actor2": "SAF", "fatalities": 12,
         "country": "Sudan", "notes": "Clashes in Omdurman", "source": "acled",
@@ -76,26 +118,26 @@ def test_merged_record_carries_precision_and_feature_id():
 
 def test_event_date_comes_from_sqldate_not_ingest_time():
     """The pipeline used to date every event by when GDELT ingested it."""
-    normalized = ef._normalize_gdelt(_gdelt(event_date="20260803", date_added="20260805101500"))
-    assert normalized["dt"].date().isoformat() == "2026-08-03"
+    normalized = ef._normalize_gdelt(_gdelt(event_date=_sqldate(days=2), date_added=_added()))
+    assert normalized["dt"].date().isoformat() == _isodate(days=2)
 
 
 def test_retrospective_reports_are_rejected():
     # A story filed today about something a year ago is not a live event.
-    old = _gdelt(event_date="20250805", date_added="20260805101500")
+    old = _gdelt(event_date=_sqldate(days=365), date_added=_added())
     assert ef._gdelt_event_dt(old) is None
     # Ordinary reporting lag is not retrospective.
-    lagged = _gdelt(event_date="20260801", date_added="20260805101500")
-    assert ef._gdelt_event_dt(lagged).date().isoformat() == "2026-08-01"
+    lagged = _gdelt(event_date=_sqldate(days=4), date_added=_added())
+    assert ef._gdelt_event_dt(lagged).date().isoformat() == _isodate(days=4)
 
 
 def test_missing_sqldate_falls_back_to_ingest_time():
     no_date = _gdelt(event_date=None)
-    assert ef._gdelt_event_dt(no_date).date().isoformat() == "2026-08-05"
+    assert ef._gdelt_event_dt(no_date).date().isoformat() == _isodate()
 
 
 def test_undated_rows_never_reach_the_map():
-    fused = ef._fuse([], [_gdelt(event_date="20250805", date_added="20260805101500")])
+    fused = ef._fuse([], [_gdelt(event_date=_sqldate(days=365), date_added=_added())])
     assert fused == []
 
 
@@ -207,7 +249,7 @@ def test_corroboration_distinguishes_outlets_from_datasets():
     assert lone["corroborated"] is False
 
     _reset_identity()
-    two_datasets = ef._fuse([_structured(lat=46.6, lon=32.6, date="2026-08-05")],
+    two_datasets = ef._fuse([_structured(lat=46.6, lon=32.6, date=_isodate())],
                             [_gdelt(outlet_count=1)])[0]
     assert two_datasets["corroboration"] == "multi_dataset"
 
@@ -239,7 +281,7 @@ def test_merge_names_outlets_from_every_dataset_not_just_gdelt():
     count directly above it already claims."""
     _reset_identity()
     fused = ef._fuse(
-        [_structured(lat=46.6, lon=32.6, date="2026-08-05", outlets=["Radio Dabanga"])],
+        [_structured(lat=46.6, lon=32.6, date=_isodate(), outlets=["Radio Dabanga"])],
         [_gdelt(outlets=["Reuters"])],
     )[0]
     assert fused["corroboration"] == "multi_dataset", "fixture must actually merge"
@@ -291,7 +333,7 @@ def test_a_higher_priority_source_joining_does_not_re_key():
     original_id = first[0]["id"]
 
     # ACLED outranks GDELT and becomes the primary member...
-    joined = ef._fuse([_structured(id="A1", lat=46.6, lon=32.6, date="2026-08-05")],
+    joined = ef._fuse([_structured(id="A1", lat=46.6, lon=32.6, date=_isodate())],
                       [_gdelt(event_id="200")])
     assert len(joined) == 1
     assert joined[0]["source"] == "acled", "prose comes from the richer source"
@@ -327,6 +369,267 @@ def test_ingested_at_is_the_earliest_observation_in_the_cluster():
     fused = ef._fuse([], [_gdelt(event_id="500", _seen_at=1000.0),
                           _gdelt(event_id="501", lat=46.61, _seen_at=900.0)])
     assert fused[0]["ingested_at"] == 900.0
+
+
+def test_a_rows_own_seen_at_survives_the_accumulator():
+    """A restart must not re-date the violence window to boot time.
+
+    gdelt.py stamps _seen_at into the accumulator it persists, so a rehydrated
+    row arrives here already carrying its real first-seen time. Taking `now`
+    instead -- the old behaviour -- made every restored event report an ingest
+    time of "whenever the process booted".
+    """
+    # Inside the 3-day retention window, or the accumulator's own prune would
+    # evict the row before the assertion could see it.
+    first_seen = time.time() - 3600
+    ef._violent_gdelt.clear()
+    ef._accumulate_violent_gdelt([_gdelt(event_id="600", _seen_at=first_seen)])
+    assert ef._violent_gdelt["600"]["_seen_at"] == first_seen
+
+    # A later poll of the same event keeps the first sighting, not the latest.
+    ef._accumulate_violent_gdelt([_gdelt(event_id="600", _seen_at=time.time())])
+    assert ef._violent_gdelt["600"]["_seen_at"] == first_seen
+    ef._violent_gdelt.clear()
+
+
+def test_a_row_with_no_seen_at_is_stamped_rather_than_dropped():
+    """The legacy path: rows persisted before gdelt.py stamped _seen_at."""
+    ef._violent_gdelt.clear()
+    row = _gdelt(event_id="601")
+    row.pop("_seen_at", None)
+    ef._accumulate_violent_gdelt([row])
+    assert ef._violent_gdelt["601"]["_seen_at"] is not None
+    ef._violent_gdelt.clear()
+
+
+# --- what the headline says happened ---------------------------------------
+#
+# Every headline below is real: each one reached the live conflict layer with
+# CAMEO coding it root 19 and putting an armed actor in a slot. The actor codes
+# are identical to the ones a genuine air strike carries, so the armed-actor
+# test cannot separate them -- only the act described can.
+
+
+@pytest.mark.parametrize("headline, actor_note", [
+    ("Army personnel among 2 killed, 2 injured after SUV crashes into tree in Rajasthan",
+     "coded ARMY/MIL -- it read the word 'Army'"),
+    ("FAA investigates air safety incident involving Trump's Marine One",
+     "coded ARMY/MIL -- it read 'Marine'"),
+    ("Polish swimmer becomes the first person to swim from Sweden to Poland across the Baltic Sea",
+     "coded FIGHTER/UAF"),
+    ("Together, these Republicans and Democrats are vouching for election security",
+     "coded GUNMAN/UAF"),
+    ("Abdul El-Sayed offers a template for Democrats to defeat Trumpism",
+     "coded INSURGENT/REB"),
+])
+def test_a_headline_naming_no_violent_act_is_rejected(headline, actor_note):
+    assert not ef._is_violent_gdelt_row(_gdelt(real_title=headline)), actor_note
+
+
+@pytest.mark.parametrize("headline", [
+    "Ukraine: Russian strikes on Kyiv region kill at least 17",
+    "Israeli army launches large-scale assault in East Jerusalem refugee camp",
+    "US Marine veteran serving as Las Vegas police officer killed in shootout with armed suspect",
+    "Shelling kills three at a market in Kherson",
+    "Gunmen ambush convoy in northern Nigeria",
+])
+def test_a_headline_naming_a_violent_act_is_kept(headline):
+    assert ef._is_violent_gdelt_row(_gdelt(real_title=headline))
+
+
+def test_a_row_with_no_headline_still_rides_on_cameo():
+    """The veto only applies where there is text to read.
+
+    Title backfill runs for verified-domain URLs only, so most rows have no
+    headline at all -- rejecting those for failing a test they cannot sit would
+    empty the layer rather than clean it.
+    """
+    assert ef._is_violent_gdelt_row(_gdelt(real_title=None))
+
+
+def test_an_anniversary_piece_is_not_a_current_event():
+    """Real, and it was drawn as today's violence in Canberra.
+
+    GDELT stamps an anniversary piece with *today's* SQLDATE -- the article
+    really was published today -- so the report-lag gate cannot see it.
+    """
+    row = _gdelt(
+        real_title=(
+            "When thousands crossed ceasefire line: 61 years since Operation Gibraltar "
+            "sparked 1965 Indo-Pak war"
+        ),
+        event_date=_sqldate(),
+    )
+    assert not ef._is_violent_gdelt_row(row)
+
+
+def test_a_year_named_in_passing_does_not_make_current_fighting_history():
+    """A live conflict is routinely framed against its own start."""
+    # Four years back: inside _RETROSPECTIVE_YEARS, and it has to stay inside it
+    # as the clock moves, or this pins the opposite of what it says.
+    began = _INGESTED.year - 4
+    row = _gdelt(
+        real_title=f"Russian strikes kill 17 in the war Moscow began in {began}",
+        event_date=_sqldate(),
+    )
+    assert ef._is_violent_gdelt_row(row)
+
+
+def test_an_opinion_column_is_rejected_by_its_section():
+    """The Guardian's opinion section is named, not labelled 'opinion'."""
+    row = _gdelt(
+        real_title="Abdul El-Sayed offers a template to defeat the insurgent attack",
+        source_url=(
+            "https://www.theguardian.com/commentisfree/"
+            f"{_INGESTED.strftime('%Y/%b/%d').lower()}/abdul-el-sayed"
+        ),
+    )
+    assert not ef._is_violent_gdelt_row(row)
+
+
+# --- one article, one incident ---------------------------------------------
+#
+# GDELT emits a row per actor geography, so a single dispatch arrives as
+# several rows at coordinates continents apart. Measured live, one DW article
+# about Russian strikes on Kyiv was drawn as three pins -- United States,
+# Ukraine, Russia -- at full severity each.
+
+
+def _article_rows(url="https://www.dw.com/en/kyiv-strikes/a-1", **over):
+    """The three rows one article produces, at the three actor geographies."""
+    return [
+        _gdelt(event_id="700", lat=38.9072, lon=-77.0369, source_url=url,
+               geo_feature_id="us", location="Washington, District of Columbia, United States", **over),
+        _gdelt(event_id="701", lat=50.4547, lon=30.5238, source_url=url,
+               geo_feature_id="ua", location="Kyiv, Kyyiv, Misto, Ukraine", **over),
+        _gdelt(event_id="702", lat=55.7558, lon=37.6173, source_url=url,
+               geo_feature_id="ru", location="Moscow, Moskva, Russia", **over),
+    ]
+
+
+def test_rows_from_one_article_become_one_pin():
+    _reset_identity()
+    fused = ef._fuse([], _article_rows())
+    assert len(fused) == 1, "one article describing one act is one incident"
+
+
+def test_rows_from_different_articles_stay_apart():
+    """The merge is keyed on the article, not on 'both are GDELT rows'.
+
+    The second article's rows sit at their own coordinates and feature ids, so
+    nothing but the URL could join the two groups -- otherwise the FeatureID
+    pass would merge them for a better reason and prove nothing about this one.
+    """
+    _reset_identity()
+    other = [
+        _gdelt(event_id="730", lat=15.5, lon=32.5, source_url="https://www.dw.com/en/other/a-2",
+               geo_feature_id="sd"),
+        _gdelt(event_id="731", lat=-1.28, lon=36.82, source_url="https://www.dw.com/en/other/a-2",
+               geo_feature_id="ke"),
+    ]
+    assert len(ef._fuse([], _article_rows() + other)) == 2
+
+
+def test_one_article_describing_two_kinds_of_act_stays_two_incidents():
+    """Guarded on the CAMEO root, like the FeatureID pass it sits beside.
+
+    A dispatch covering both a strike and the reprisal for it is describing two
+    acts, and merging them would lose one.
+    """
+    _reset_identity()
+    url = "https://www.dw.com/en/both/a-3"
+    rows = [
+        _gdelt(event_id="710", lat=50.45, lon=30.52, source_url=url,
+               geo_feature_id="ua", event_root_code=19),
+        _gdelt(event_id="711", lat=55.75, lon=37.61, source_url=url,
+               geo_feature_id="ru", event_root_code=18),
+    ]
+    assert len(ef._fuse([], rows)) == 2
+
+
+def test_rows_with_no_article_are_not_merged_into_each_other():
+    """A missing URL is not an identity two rows can share.
+
+    The outlets come from the Mentions table rather than from a URL, which is a
+    real production shape and is what keeps this about clustering: a row with
+    neither a URL nor an outlet is untraceable, and _screen_unreliable removes
+    it before it can be counted here (see the test below).
+    """
+    _reset_identity()
+    rows = [
+        _gdelt(event_id="720", lat=38.9072, lon=-77.0369, source_url=None,
+               geo_feature_id="us", outlets=["Reuters"]),
+        _gdelt(event_id="721", lat=50.4547, lon=30.5238, source_url=None,
+               geo_feature_id="ua", outlets=["Reuters"]),
+    ]
+    assert len(ef._fuse([], rows)) == 2
+
+
+def test_a_named_but_unvouched_for_outlet_stays_on_the_map_as_unreliable():
+    """Thin is a label, not a deletion.
+
+    This is the case the whole ordering exists to protect: most conflict
+    reporting comes from newsrooms no allowlist will ever hold, and screening on
+    the score alone would narrow the map to whatever the wire services covered.
+    """
+    _reset_identity()
+    rows = [
+        _gdelt(event_id="740", real_title="Shelling reported in Kherson",
+               source_url="https://sudantribune.example/news/shelling"),
+    ]
+    fused = ef._fuse([], rows)
+    assert len(fused) == 1
+    assert fused[0]["reliability_band"] == "very_low"
+    assert fused[0]["reliability"] < 45
+
+
+def test_a_wire_service_report_reads_as_reliable_on_the_fused_record():
+    _reset_identity()
+    rows = [
+        _gdelt(event_id="741", real_title="Strike hits Kherson apartment block",
+               source_url="https://www.reuters.com/world/kherson-strike",
+               outlets=["Reuters", "BBC News"], outlet_count=6),
+    ]
+    fused = ef._fuse([], rows)
+    assert fused[0]["reliability_band"] == "high"
+    assert fused[0]["reliability_outlet"] in ("Reuters", "BBC News")
+
+
+def test_an_untraceable_unreliable_row_is_removed():
+    """No article, no outlet, nothing vouching for it: there is nothing to show.
+
+    The two conditions are both load-bearing. Scoring badly is not enough on its
+    own -- a thin report from a named outlet stays on the map, labelled -- and a
+    concrete failure is not enough on its own either, since a well-sourced
+    record is never screened at all.
+    """
+    _reset_identity()
+    rows = [
+        _gdelt(event_id="730", lat=38.9072, lon=-77.0369, source_url=None,
+               geo_feature_id="us"),
+    ]
+    assert ef._fuse([], rows) == []
+
+
+def test_the_surviving_pin_is_the_one_the_text_backs():
+    """Merging is only half the fix: the survivor has to be the right one.
+
+    All three members are locality-precision GDELT rows, so precision and
+    source priority tie and the choice falls to geo_confidence -- which is what
+    geoverify sets after reading the headline and finding Kyiv in it.
+    """
+    _reset_identity()
+    rows = _article_rows()
+    confidence = {"700": 25, "701": 76, "702": 25}  # contested, confirmed, contested
+    normalized = []
+    for row in rows:
+        item = ef._normalize_gdelt(row)
+        item["geo_confidence"] = confidence[row["event_id"]]
+        normalized.append(item)
+
+    merged = ef._merge_cluster(normalized)
+    assert round(merged["lat"], 2) == 50.45, "the pin must land on Kyiv, not Washington"
+    assert merged["geo_confidence"] == 76
 
 
 # --- clustering ------------------------------------------------------------
@@ -383,8 +686,8 @@ def test_shared_place_but_different_act_does_not_cluster():
 
 
 def test_events_more_than_the_match_window_apart_stay_separate():
-    a = _pt(46.6, 32.6, event_date="20260801", date_added="20260801101500")
-    b = _pt(46.6, 32.6, event_date="20260805", date_added="20260805101500")
+    a = _pt(46.6, 32.6, event_date=_sqldate(days=4), date_added=_added(days=4))
+    b = _pt(46.6, 32.6, event_date=_sqldate(), date_added=_added())
     assert len(ef._cluster([a, b])) == 2
 
 
@@ -419,11 +722,11 @@ def test_keep_and_demote_policies_pass_every_record_through(monkeypatch):
 
 def test_aggregate_policy_collapses_a_country_day_into_one_record(monkeypatch):
     records = [
-        {"geo_precision": "country", "country": "Sudan", "date": "2026-08-05",
+        {"geo_precision": "country", "country": "Sudan", "date": _isodate(),
          "event_type": "Fighting", "severity": 30, "fatalities": 2, "id": "a"},
-        {"geo_precision": "country", "country": "Sudan", "date": "2026-08-05",
+        {"geo_precision": "country", "country": "Sudan", "date": _isodate(),
          "event_type": "Fighting", "severity": 55, "fatalities": 9, "id": "b"},
-        {"geo_precision": "locality", "country": "Ukraine", "date": "2026-08-05",
+        {"geo_precision": "locality", "country": "Ukraine", "date": _isodate(),
          "event_type": "Fighting", "severity": 40, "fatalities": 0, "id": "c"},
     ]
     monkeypatch.setattr(ef, "COUNTRY_CENTROID_POLICY", "aggregate")
@@ -510,7 +813,7 @@ def test_gdelt_row_without_a_headline_reports_no_casualty_figure():
 
 
 def test_structured_sources_always_report_their_count():
-    normalized = ef._normalize_structured("ucdp", {"id": "x", "fatalities": 0, "date": "2026-08-05"})
+    normalized = ef._normalize_structured("ucdp", {"id": "x", "fatalities": 0, "date": _isodate()})
     assert normalized["fatalities_reported"] is True
 
 
@@ -583,17 +886,21 @@ def test_a_magazine_retrospective_is_not_a_conflict_event():
     essay = {
         "event_root_code": 18, "event_code": "1831", "actor1_type": "REB",
         "actor2_group": "TAL",
-        "source_url": "https://www.theatlantic.com/magazine/2026/09/al-qaeda-25-years-post-9-11/687965/",
+        "source_url": (
+            "https://www.theatlantic.com/magazine/"
+            f"{_INGESTED.strftime('%Y/%m')}/al-qaeda-25-years-post-9-11/687965/"
+        ),
     }
     assert ef._is_violent_gdelt_row(essay) is False
     # The same coded event from a news dispatch is exactly what the layer is for.
-    dispatch = {**essay, "source_url": "https://www.reuters.com/world/africa/tunis-blast-2026-08-05/"}
+    dispatch = {**essay,
+                "source_url": f"https://www.reuters.com/world/africa/tunis-blast-{_isodate()}/"}
     assert ef._is_violent_gdelt_row(dispatch) is True
 
 
 def test_the_section_filter_does_not_thin_ordinary_reporting():
     for url in (
-        "https://www.reuters.com/world/europe/strike-on-kherson-2026-08-05/",
+        f"https://www.reuters.com/world/europe/strike-on-kherson-{_isodate()}/",
         "https://apnews.com/article/sudan-rsf-omdurman-abc123",
         None,
     ):
@@ -609,9 +916,9 @@ def test_the_section_filter_does_not_thin_ordinary_reporting():
 # the pin that had absorbed it. The record carries the headlines now, plus the
 # news ids behind them so the frontend can suppress just the redundant marker.
 
-def _titled(event_id, title, url, outlet="Reuters", added="20260805101500", **over):
+def _titled(event_id, title, url, outlet="Reuters", added=None, **over):
     return _gdelt(event_id=event_id, real_title=title, source_url=url,
-                  source_name=outlet, date_added=added, **over)
+                  source_name=outlet, date_added=added or _added(), **over)
 
 
 def test_a_merged_headline_survives_on_the_record():
@@ -624,7 +931,7 @@ def test_a_merged_headline_survives_on_the_record():
         "title": "Strike hits Kherson apartment block",
         "url": "https://www.reuters.com/a",
         "outlet": "Reuters",
-        "published": "20260805101500",
+        "published": _added(),
     }]
 
 
@@ -670,7 +977,7 @@ def test_two_rows_citing_one_article_are_one_piece_of_coverage():
 def test_coverage_is_newest_first_and_bounded():
     members = [
         ef._normalize_gdelt(_titled(str(i), f"Report {i}", f"https://www.reuters.com/{i}",
-                                    "Reuters", added=f"202608051{i:02d}00"))
+                                    "Reuters", added=_added(hours=i)))
         for i in range(12)
     ]
     record = ef._merge_cluster(members)

@@ -11,6 +11,7 @@
 // (days-wide) windows, not the FIRMS/cities scale this comment warns about.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJson, urlForRegion } from "../api";
+import { OSM_INFRA_MIN_ZOOM } from "../map/createMapController";
 
 const BOOT_SOURCES = [
   { key: "countries", label: "Country boundaries" },
@@ -65,9 +66,15 @@ const POLL_CONFIG = [
   // months; this is polled at all only so a long-lived tab eventually notices.
   { key: "humanitarian", url: "/api/humanitarian", intervalMs: 60 * 60000 },
   // OpenStreetMap infrastructure. Swept server-side once a day over the conflict
-  // theatres and browser-cached for an hour, so this is only about picking up a
-  // new sweep, not about freshness.
-  { key: "osmInfra", url: "/api/osm-infrastructure", intervalMs: 30 * 60000 },
+  // theatres and browser-cached for an hour, so the interval is only about
+  // picking up a new sweep, not about freshness.
+  //
+  // `minZoom` defers the fetch itself, not just the drawing: this layer is on by
+  // default but never drawn above OSM_INFRA_MIN_ZOOM, so on a session that stays
+  // at world zoom the megabytes were being fetched, parsed and handed to the map
+  // purely to be filtered back out. Nothing else here is gated -- every other
+  // source is either small or feeds a panel that reads it at any zoom.
+  { key: "osmInfra", url: "/api/osm-infrastructure", intervalMs: 30 * 60000, minZoom: OSM_INFRA_MIN_ZOOM },
   { key: "satellites", url: "/api/satellites", intervalMs: 10000 }, // position, not elements -- see backend/sources/satellites.py
   { key: "conflictStats", url: "/api/conflict-stats", intervalMs: 60 * 60000 }, // HDX file itself only changes weekly -- see backend/sources/hdx_conflict_stats.py
   // Server-side aggregate over a week of history (backend/escalation.py),
@@ -90,8 +97,15 @@ const POLL_CONFIG = [
  *   applied here, between the fetch and everything downstream, so the map and
  *   the panels can never be looking at differently-edited copies of one feed
  *   (see settings/applyOverrides.js).
+ * @param zoom        the map's current zoom, or null before the map reports one.
+ *   Read only by the POLL_CONFIG `minZoom` gate below -- this hook still knows
+ *   nothing about Leaflet, just about how deep the reader has gone.
+ * @param zoomOverrides Admin Mode's per-layer zoom gates, the same object the
+ *   map controller is given (see setLayerZoomOverrides in App.jsx). Honoured
+ *   here too, so lowering a gate in the admin panel actually fetches the layer
+ *   at the zoom it now claims to draw at.
  */
-export function useOsintData({ onData, flyToRegion, transform }) {
+export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoomOverrides }) {
   const [regions, setRegions] = useState({});
   const [currentRegionKey, setCurrentRegionKey] = useState(null); // null == world/unscoped
   const [currentRegionLabel, setCurrentRegionLabel] = useState("World");
@@ -136,14 +150,32 @@ export function useOsintData({ onData, flyToRegion, transform }) {
   const transformRef = useRef(transform);
   transformRef.current = transform;
 
-  // Each entry is a zero-arg fn that re-runs that source's fetch immediately
+  // Each value is a zero-arg fn that re-runs that source's fetch immediately
   // (cancelling its own pending scheduled tick first) -- see registerPoller
   // below. refetchAllNow calls every one of them, which is what makes a
-  // region switch feel instant instead of waiting up to intervalMs.
-  const tickersRef = useRef([]);
+  // region switch feel instant instead of waiting up to intervalMs. Keyed
+  // rather than a flat list because the zoom gate below has to reach one
+  // specific source's tick the moment its gate opens.
+  const tickersRef = useRef(new Map());
 
   const refetchAllNow = useCallback(() => {
     tickersRef.current.forEach((tick) => tick());
+  }, []);
+
+  // Read inside tick(), which is registered once and must see the current
+  // values rather than the ones from the render that created it -- the same
+  // ref treatment onData/transform get above.
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const zoomOverridesRef = useRef(zoomOverrides);
+  zoomOverridesRef.current = zoomOverrides;
+
+  // The zoom a gated source starts fetching at: Admin Mode's override for that
+  // layer when it has one, the shipped gate otherwise. Mirrors minZoomFor in
+  // createMapController.js, which decides the same thing for the drawing.
+  const gateFor = useCallback((key, shipped) => {
+    const override = zoomOverridesRef.current?.[key];
+    return Number.isFinite(override) ? override : shipped;
   }, []);
 
   // The last payload each source delivered, exactly as the server sent it.
@@ -167,11 +199,22 @@ export function useOsintData({ onData, flyToRegion, transform }) {
       );
     }
 
-    function registerPoller(key, url, intervalMs, onSuccess) {
+    function registerPoller(key, url, intervalMs, minZoom, onSuccess) {
       let timer = null;
       let firstLoadReported = false;
       async function tick() {
         if (timer) clearTimeout(timer);
+        if (minZoom != null) {
+          const zoomNow = zoomRef.current;
+          if (zoomNow == null || zoomNow < gateFor(key, minZoom)) {
+            // Above the gate this source is not drawn at all, so fetching it
+            // would be work nobody can see. Kept on the interval rather than
+            // dropped: the zoom effect below fires the moment the reader gets
+            // deep enough, so this timer is only the fallback.
+            timer = setTimeout(tick, intervalMs);
+            return;
+          }
+        }
         if (document.hidden && firstLoadReported) {
           // Nobody's looking at a backgrounded tab -- skip the network
           // round-trip and just re-check next interval. The visibilitychange
@@ -205,7 +248,7 @@ export function useOsintData({ onData, flyToRegion, transform }) {
         }
       }
       timeouts.push(() => clearTimeout(timer));
-      tickersRef.current.push(tick);
+      tickersRef.current.set(key, tick);
       tick();
     }
 
@@ -218,7 +261,7 @@ export function useOsintData({ onData, flyToRegion, transform }) {
         setConflictHistoryAsOf((rows && rows.length && rows[0].as_of) || null),
     };
     for (const src of POLL_CONFIG) {
-      registerPoller(src.key, src.url, src.intervalMs, REACTIVE_SETTERS[src.key]);
+      registerPoller(src.key, src.url, src.intervalMs, src.minZoom ?? null, REACTIVE_SETTERS[src.key]);
     }
 
     // Defined inside the effect so it can see REACTIVE_SETTERS, and reached
@@ -283,13 +326,28 @@ export function useOsintData({ onData, flyToRegion, transform }) {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisibilityChange);
       timeouts.forEach((clear) => clear());
-      tickersRef.current = [];
+      tickersRef.current = new Map();
     };
     // Deliberately mount-once: pollers read the live region via
     // currentRegionKeyRef (and the latest onData via onDataRef) rather than
     // being recreated per region change or per App render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A gated source's first fetch, the moment the reader is deep enough for it
+  // to be drawn -- without this it would wait out the rest of its interval
+  // (half an hour, for osmInfra) staring at data it is now allowed to have.
+  // Only the first: once fetched, the source is back on its normal cadence and
+  // re-fetching on every zoom step past the gate would be pointless traffic.
+  useEffect(() => {
+    if (zoom == null) return;
+    for (const src of POLL_CONFIG) {
+      if (src.minZoom == null) continue;
+      if (zoom < gateFor(src.key, src.minZoom)) continue;
+      if (fetchedRef.current[src.key] !== undefined) continue;
+      tickersRef.current.get(src.key)?.();
+    }
+  }, [zoom, zoomOverrides, gateFor]);
 
   const selectRegion = useCallback(
     (key) => {
