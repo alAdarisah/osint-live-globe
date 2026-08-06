@@ -67,6 +67,26 @@ export function timeAgoFromUnix(seconds) {
   return timeAgoFromMillis(seconds * 1000);
 }
 
+/**
+ * The same instant as a fixed clock reading: "13:31:04 UTC" within the last
+ * day, "2026-08-05 13:31 UTC" beyond it.
+ *
+ * The companion to timeAgoFromUnix rather than a replacement for it. "2m ago"
+ * is what a reader wants and what goes stale the moment it is written -- marker
+ * popups are not re-rendered while they are open (see createMapController.js),
+ * and a replayed contact's card is read against a moment that isn't now. The
+ * absolute form stays true in both cases, and the date appears exactly when it
+ * starts to matter.
+ */
+export function utcClockFromUnix(seconds) {
+  if (!Number.isFinite(seconds)) return "";
+  const dt = new Date(seconds * 1000);
+  if (Number.isNaN(dt.getTime())) return "";
+  const iso = dt.toISOString(); // YYYY-MM-DDTHH:MM:SS.sssZ
+  const withinADay = Math.abs(Date.now() - dt.getTime()) < 86400000;
+  return withinADay ? `${iso.slice(11, 19)} UTC` : `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
 export function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;

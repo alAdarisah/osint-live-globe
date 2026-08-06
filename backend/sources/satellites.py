@@ -74,11 +74,39 @@ async def start():
     state = registry.register("satellites", key_configured=True)  # no key required
     elements: list[dict] = []
     last_elements_fetch = 0.0
+    # The element sets are the collected data here; the positions below are
+    # arithmetic over them, recomputed every ten seconds. So the elements are
+    # what gets stored and restored, and the positions never are -- a stored
+    # position is a claim about where a satellite was, which is wrong within
+    # the minute and must not be drawn as if it were current.
+    #
+    # Orbital elements decay slowly enough that yesterday's set still
+    # propagates usefully, so a boot with Celestrak unreachable keeps tracking
+    # instead of showing nothing.
+    if await storage.wait_for_warm_pool():
+        stored = await storage.reference("satellite_elements")
+        if stored:
+            elements = stored
+            log.info("Satellites: warmed %d stored element sets while the fetch runs", len(elements))
     while True:
         try:
             if time.time() - last_elements_fetch >= ELEMENTS_REFRESH_INTERVAL or not elements:
-                elements = await _fetch_elements()
-                last_elements_fetch = time.time()
+                try:
+                    elements = await _fetch_elements()
+                    last_elements_fetch = time.time()
+                    await storage.record_reference("satellite_elements", elements)
+                except Exception as exc:  # noqa: BLE001 - the set in hand still propagates
+                    # Only fatal when there is nothing to propagate at all.
+                    # Otherwise keep computing from the elements we have: they
+                    # decay slowly, and a blank sky is a worse answer than a
+                    # slightly stale one. Same discipline as hazards.py's
+                    # weekly volcano report inside its 5-minute quake loop.
+                    if not elements:
+                        raise
+                    log.warning(
+                        "Satellite element refresh failed; propagating the %d sets in hand: %s",
+                        len(elements), exc,
+                    )
             state.data = _positions(elements)
             state.last_success = time.time()
             state.last_error = None

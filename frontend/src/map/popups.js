@@ -350,14 +350,37 @@ function buildHumanitarian(props, raw) {
       here rather than on the map for exactly that reason.</p>`;
 }
 
-// A country losing the internet is one of the few things on this map that is
-// genuinely national in scope, so it belongs in the country card rather than as
-// a pin. IODA's `score` is a composite of three detection methods and is
-// unbounded -- it is emphatically not a percentage of the country offline, and
-// this says so rather than dressing it up as one.
-function buildConnectivity(props, raw) {
+/** IODA's record for this country shape, by ISO2 where the shape has one.
+ *
+ *  Natural Earth ships "-99" as the ISO2 of five features in ne_110m -- Norway,
+ *  France, Northern Cyprus, Somaliland and Kosovo -- so a code-only lookup left
+ *  a French or Norwegian outage out of the card with nothing to show for it.
+ *  Those shapes are keyed by name everywhere else in this app, and IODA names
+ *  its entities too, so the name is the second way in. It is tried only when
+ *  there is no usable code: a country that *has* an ISO2 and is absent from the
+ *  dict genuinely has no outage, and matching it on name from there could only
+ *  ever produce a false positive.
+ *
+ *  Mirrors rebuildOutagePoints in createMapController.js, which resolves the
+ *  same two sides in the same order for the map pins.
+ */
+function outageFor(props, raw) {
+  const outages = raw.outages || {};
   const code = props.iso_a2 && props.iso_a2 !== "-99" ? props.iso_a2 : null;
-  const outage = code ? (raw.outages || {})[code] : null;
+  if (code) return outages[code] || null;
+  const wanted = normalizeCountryName(props.name);
+  if (!wanted) return null;
+  return Object.values(outages).find((o) => normalizeCountryName(o.country) === wanted) || null;
+}
+
+// A country losing the internet is genuinely national in scope, so the card is
+// where the numbers live -- the map pin (see decorateOutage) is a way to find
+// the country, not a claim about where inside it anything happened. IODA's
+// `score` is a composite of three detection methods and is unbounded -- it is
+// emphatically not a percentage of the country offline, and this says so rather
+// than dressing it up as one.
+function buildConnectivity(props, raw) {
+  const outage = outageFor(props, raw);
   if (!outage) return "";
   const signals = Object.keys(outage.signals || {});
   return `
@@ -427,7 +450,16 @@ export function countryCardSections(props, raw, bounds) {
     {
       id: "sources",
       title: "Sources & caveats",
-      html: `<p class="meta">Live counts use the country's bounding box, so figures near borders are
+      // The boundary disclosure sits at the top of this fold rather than in a
+      // section of its own, and it is not optional: applyOverrides marks an
+      // edited record for the same reason, and a national border that has been
+      // redrawn without saying so is the stronger version of that problem.
+      html: `${
+        props.__bordersEdited
+          ? `<p class="meta edited-note">This country's boundary has been redrawn in Admin Mode. It is
+             not what the source serves.</p>`
+          : ""
+      }<p class="meta">Live counts use the country's bounding box, so figures near borders are
         approximate. Population/density: World Bank. HDI: UNDP. Listed events matched by country name.</p>`,
     },
   ];

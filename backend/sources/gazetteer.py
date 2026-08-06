@@ -31,11 +31,17 @@ own column 3 already carries the transliterations ("Kherson" / "Херсон" /
 "Cherson"), and the standalone file is a ~200MB download for names this one
 already has.
 
-Everything is held in memory, like cities.py and capitals.py, rather than in
-Postgres. Placement accuracy must not depend on the database being up -- every
-storage write in this codebase is already a failure-tolerant no-op when the
-pool is down (see backend/storage.py), and a geocoder that silently stopped
-resolving in that state would move pins rather than merely stop recording them.
+Lookups are served entirely from memory, like cities.py and capitals.py.
+Placement accuracy must not depend on the database being up -- every storage
+write in this codebase is already a failure-tolerant no-op when the pool is
+down (see backend/storage.py), and a geocoder that silently stopped resolving
+in that state would move pins rather than merely stop recording them.
+
+The index is still *persisted*, though, and reloaded at startup if it is there:
+building it means three GeoNames downloads and ~200k parsed rows, and a failed
+attempt backs off to the full 24-hour refresh, which would leave every geocode
+at "no opinion" until tomorrow. Postgres is the cache that avoids that, never
+the thing a lookup goes through -- see _persist and _rehydrate below.
 """
 
 import asyncio
@@ -45,7 +51,7 @@ import math
 import time
 import unicodedata
 import zipfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 
 import httpx
 
@@ -147,7 +153,11 @@ _ADMIN_RADIUS_KM = {
 # blunt instrument -- country_radius_km() below refines it from Natural Earth's
 # actual geometry whenever the countries source has loaded.
 _COUNTRY_RADIUS_KM = 400.0
-_COUNTRY_FEATURE_CODES = frozenset({"PCLI", "PCL", "PCLD", "PCLF", "PCLIX", "PCLS"})
+# Public: geoverify asks "is this resolved place a country" when deciding
+# whether a text and a pin disagree about which country an event is in, and
+# that question deserves this table's answer rather than a second copy of it.
+COUNTRY_FEATURE_CODES = frozenset({"PCLI", "PCL", "PCLD", "PCLF", "PCLIX", "PCLS"})
+_COUNTRY_FEATURE_CODES = COUNTRY_FEATURE_CODES
 
 # Anything unrecognised. Deliberately coarser than a district: an unknown
 # feature code means we do not know what kind of thing this is, and the one
@@ -297,6 +307,22 @@ class Gazetteer:
 
     def __len__(self) -> int:
         return len(self._places)
+
+    def alternates(self) -> dict[int, list[str]]:
+        """The non-primary surface forms, keyed by geonameid.
+
+        Derived from the name index on demand rather than kept beside it. The
+        pair (places, alternates) is exactly what __init__ takes, so being able
+        to hand it back is what lets the whole index round-trip through storage
+        -- and deriving it costs one pass instead of a second permanent copy of
+        several hundred thousand names.
+        """
+        out: dict[int, list[str]] = {}
+        for bucket in self._by_name.values():
+            for geonameid, surface, primary in bucket:
+                if not primary:
+                    out.setdefault(geonameid, []).append(surface)
+        return out
 
     @property
     def places(self) -> list[Place]:
@@ -606,8 +632,59 @@ async def _fetch() -> Gazetteer:
     return build_index(cities, alternates, admin1, admin2)
 
 
+# The Place fields, so a stored payload is rebuilt by name rather than by
+# position -- a reordered dataclass must not silently swap lat and lon.
+_PLACE_FIELDS = tuple(f.name for f in fields(Place))
+
+
+async def _persist(index: Gazetteer) -> None:
+    """Store the index as its two halves: the places, then their other names.
+
+    Places carry a lat/lon and are entities, so they go to the point store the
+    same way cities do. The alternate-name map is a name->id document with no
+    geometry of its own and goes to the reference store. Together they are
+    exactly Gazetteer.__init__'s arguments, which is what makes _rehydrate
+    below able to reconstruct a byte-equivalent index.
+    """
+    await storage.record_snapshot(
+        "gazetteer_places", [asdict(p) for p in index.places], id_field="geonameid"
+    )
+    await storage.record_reference("gazetteer_alternates", index.alternates())
+
+
+async def _rehydrate(state) -> None:
+    """Rebuild the index from storage so placement works before the download.
+
+    _fetch pulls three GeoNames archives and parses ~200k rows, which takes
+    real time on every boot -- and on failure backs off to the full 24-hour
+    refresh, leaving every geocode at "no opinion" until tomorrow. The stored
+    copy makes the placement path work from the first request instead.
+    """
+    if len(current()):
+        return
+    if not await storage.wait_for_warm_pool():
+        return
+    rows = await storage.entity_latest("gazetteer_places")
+    if not rows:
+        return
+    try:
+        places = [Place(**{f: row[f] for f in _PLACE_FIELDS}) for row in rows]
+    except (KeyError, TypeError):
+        # A payload written by an older shape of Place. Not an error worth
+        # failing a boot over -- the live fetch below replaces it anyway.
+        log.warning("Stored gazetteer rows do not match the current Place shape; skipping warm")
+        return
+    # JSON object keys are strings; the index is keyed by geonameid.
+    stored_alternates = await storage.reference("gazetteer_alternates") or {}
+    alternates = {int(k): v for k, v in stored_alternates.items()}
+    install(Gazetteer(places, alternates))
+    state.data = [{"places": len(places)}]
+    log.info("Gazetteer: warmed %d places from storage while the download runs", len(places))
+
+
 async def start():
     state = registry.register("gazetteer", key_configured=True)  # no key required
+    await _rehydrate(state)
     consecutive_failures = 0
     while True:
         ok = False
@@ -623,6 +700,7 @@ async def start():
             state.last_error = None
             ok = True
             log.info("Gazetteer: %d resolvable places indexed", len(index))
+            await _persist(index)
             await storage.record_source_health("gazetteer", len(index), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)

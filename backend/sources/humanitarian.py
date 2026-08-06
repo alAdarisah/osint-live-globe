@@ -254,6 +254,10 @@ async def start():
     # source is always at least partly alive and /api/health should say which
     # part is missing rather than showing it as unconfigured outright.
     state = registry.register("humanitarian", key_configured=bool(identifier))
+    # Both publishers move on the order of months and this refreshes twice a
+    # day, so a stored copy is very nearly current -- warm it before the
+    # identifier check so the UNHCR-only configuration starts populated too.
+    await storage.warm_reference(state, "humanitarian", "Humanitarian")
     if not identifier:
         state.last_error = (
             "HAPI_CONTACT_EMAIL not set in .env -- food security, IDP counts and "

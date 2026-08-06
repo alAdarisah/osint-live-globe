@@ -112,6 +112,10 @@ async def _fetch() -> dict:
 
 async def start():
     state = registry.register("countries", key_configured=True)  # no key required
+    # A world GeoJSON is a slow first fetch, and it backs off to the full
+    # 24-hour refresh on failure. Boundaries are annual-ish data, so last
+    # night's copy is as good as tonight's -- serve it while the fetch runs.
+    await storage.warm_reference(state, "countries", "Countries")
     consecutive_failures = 0
     while True:
         ok = False

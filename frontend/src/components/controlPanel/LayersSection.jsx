@@ -4,7 +4,7 @@ import {
   MILITARY_ROLE_STYLE, MILITARY_ROLE_ORDER, HAZARD_STYLE, HAZARD_KIND_ORDER,
   AIRCRAFT_FLAG_STYLE, AIRCRAFT_FLAG_ORDER, AIRFIELD_STYLE, AIRFIELD_ORDER, AIRFIELD_MILITARY_STYLE,
   SANCTION_COLOR, DARK_VESSEL_STYLE, DARK_VESSEL_ORDER, CABLE_LANDING_STYLE, CABLE_PLANNED_STYLE,
-  LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER,
+  LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import LayerIcon from "./LayerIcon";
@@ -147,17 +147,23 @@ export default function LayersSection({
         {/* The window/severity selects stay outside the fold: they are controls,
             not reference, and burying a control is how a panel gets worse. */}
         <div className="event-filters">
+          {/* Whole dates, not hours. Every source behind this layer dates
+              events to the day and nothing finer (see event_fusion.py's
+              _parse_gdelt_dt and _parse_structured_dt), so an hours-based
+              window was a control the data could not honour: "last 6 hours"
+              excluded every ACLED/UCDP event unless the UTC hour happened to
+              be under 6. */}
           <label>
             Window
             <select
-              value={eventFilter.maxAgeHours ?? "all"}
+              value={eventFilter.maxAgeDays ?? "all"}
               onChange={(e) => onEventFilterChange({
-                maxAgeHours: e.target.value === "all" ? null : Number(e.target.value),
+                maxAgeDays: e.target.value === "all" ? null : Number(e.target.value),
               })}
             >
-              <option value="6">Last 6 hours</option>
-              <option value="24">Last 24 hours</option>
-              <option value="72">Last 72 hours</option>
+              <option value="0">Today</option>
+              <option value="1">Last 2 days</option>
+              <option value="2">Last 3 days</option>
               <option value="all">All available</option>
             </select>
           </label>
@@ -187,13 +193,28 @@ export default function LayersSection({
           Zoom in to show conflict events
         </div>
 
+        {/* Why the drawn count can sit far below the backend total. The cap is
+            deliberate (see capBySeverity), but applying it silently is what
+            made a thinned layer read as a broken one. Gated on the layer being
+            on as well as capped: the controller keeps rendering (and so keeps
+            capping) a layer that has been removed from the map, and a note
+            about pins nobody can see explains nothing. */}
+        <div
+          id="conflictCapNote"
+          className={`sublegend${layerVisibility.events && zoomNotes.eventsCapped ? " visible" : ""}`}
+        >
+          Showing the {zoomNotes.eventsCapped} most severe here &mdash; zoom in for the rest.
+        </div>
+
         <LayerDetails id="det-events" open={isOpen("det-events")} onToggle={setOpen}>
           <div className="sublegend">
             ACLED (where an account is configured) + UCDP GED Candidate + GDELT, cross-referenced and merged
             into one pin per real incident. <b>Violence only</b> &mdash; armed clashes, assaults and mass
             violence; verbal and diplomatic conflict (accusations, demands, threats) is excluded here and
             has its own layer, Officials &amp; Diplomacy, below. Pin size and colour follow severity; blue
-            means independently corroborated. Pins fade as they age. Only the last 3 days show on the map.
+            means independently corroborated. Pins fade as they age. The backend keeps roughly the last
+            three days; <b>Window</b> above narrows that further and defaults to showing all of it. Events
+            are dated to the day by every source here, so the window counts whole dates rather than hours.
             Where a pin absorbed the news coverage of its incident, the headlines are listed inside it.
           </div>
           <div className="sublegend">
@@ -209,7 +230,10 @@ export default function LayersSection({
             ))}
           </div>
           <div className="sublegend">
-            <span className="imprecise-swatch" /> Dashed ring &mdash; approximate location only
+            <span className="imprecise-swatch" /> Dashed ring &mdash; don&rsquo;t read this dot as a
+            location: either it is only a country or region centroid, or the reporting names
+            somewhere else and the position is contested. The pin is never moved to settle that
+            &mdash; open it for what was checked and why.
           </div>
           <div className="sublegend">
             <LayerIcon svg={SVG.news} color="#ffd60a" token="news.pin" />
@@ -671,9 +695,11 @@ export default function LayersSection({
             {" "}grey landing is <b>planned</b> &mdash; the site is not settled and nothing is there yet.
           </div>
           <div className="sublegend">
-            Countries whose connectivity has collapsed in the last 24 hours are tinted on the map and carry a
-            line in their country card, from IODA (Georgia Tech). That is a <b>country-level</b> measurement,
-            so it is deliberately never drawn as a pin.
+            A <LayerIcon svg={SVG.connectivityLoss} color={OUTAGE_STYLE.color} token={OUTAGE_STYLE.token} />
+            {" "}pin marks a country whose connectivity has collapsed in the last 24 hours, from IODA
+            (Georgia Tech), which also carries a line in that country&apos;s card. That is a
+            {" "}<b>country-level</b> measurement: the pin sits at the middle of the country because the layer
+            has to draw somewhere, and says nothing about where inside it the network went away.
           </div>
         </LayerDetails>
 

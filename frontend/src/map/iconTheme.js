@@ -103,6 +103,30 @@ export const DEFAULT_COLORS = Object.freeze(
   Object.fromEntries(PALETTE_GROUPS.flatMap((g) => g.tokens.map((t) => [t.id, t.value])))
 );
 
+/**
+ * The tokens that also carry a size, and so get a size control.
+ *
+ * Not every colour names something with a size of its own. Three do not, and
+ * offering a slider that moves nothing would be worse than offering none:
+ *
+ *   event.corroborated    recolours a pin already sized by its severity
+ *   sanctions.designated  a ring drawn around a hull or airframe, not a pin
+ *   cable.route           a polyline; its landing points are sized separately
+ *
+ * Everything else resolves to a marker whose pixel size passes through
+ * scaledSize, which is what a per-token multiplier acts on.
+ */
+const COLOUR_ONLY_TOKENS = new Set(["event.corroborated", "sanctions.designated", "cable.route"]);
+
+export function tokenHasSize(token) {
+  return token in DEFAULT_COLORS && !COLOUR_ONLY_TOKENS.has(token);
+}
+
+/** Every sizable token at its shipped multiplier -- which is 1, by definition. */
+export const DEFAULT_SIZES = Object.freeze(
+  Object.fromEntries(Object.keys(DEFAULT_COLORS).filter(tokenHasSize).map((id) => [id, 1]))
+);
+
 // Anything else is either a typo or a stale saved config from an older build;
 // both should fall back to the shipped colour rather than paint a marker
 // `undefined`.
@@ -113,11 +137,19 @@ let globalScale = 1;
 // Per-layer { scale, opacity } -- see SETTINGS_LAYERS in settings/defaults.js
 // for which keys exist and what each one covers.
 let layerStyles = {};
+// Per-token size multiplier. The third and narrowest of the three size dials,
+// under the global one and the per-layer one: "every pin", then "every pin in
+// this layer", then "this kind of pin". A layer like AIS carries three of these
+// (navy, tanker, civilian), which is the whole reason this level exists -- there
+// was no way to make navy hulls stand out without also enlarging the civilian
+// traffic they need to stand out from.
+let tokenSizes = {};
 
 /**
  * @param {object} next
  * @param {number} [next.scale]   global size multiplier, 1 == shipped sizes
  * @param {Record<string,string>} [next.colors]  token -> hex override
+ * @param {Record<string,number>} [next.sizes]   token -> size multiplier
  * @param {Record<string,{scale?:number,opacity?:number}>} [next.layers]
  */
 export function setIconTheme(next = {}) {
@@ -128,6 +160,13 @@ export function setIconTheme(next = {}) {
       if (token in DEFAULT_COLORS && typeof value === "string" && HEX.test(value)) merged[token] = value;
     }
     palette = merged;
+  }
+  if (next.sizes) {
+    const merged = {};
+    for (const [token, value] of Object.entries(next.sizes)) {
+      if (tokenHasSize(token) && Number.isFinite(value)) merged[token] = clampScale(value);
+    }
+    tokenSizes = merged;
   }
   if (next.layers) layerStyles = next.layers;
 }
@@ -146,14 +185,26 @@ export function iconScale() {
   return globalScale;
 }
 
+/** One kind of pin's own size multiplier (1 when it has never been configured). */
+export function tokenScale(token) {
+  const value = token ? tokenSizes[token] : null;
+  return Number.isFinite(value) ? value : 1;
+}
+
 /**
- * A shipped pixel size, put through the global and (optionally) the per-layer
- * multiplier. Rounded, and that rounding matters: the number is rendered into
+ * A shipped pixel size, put through the global, per-layer and per-token
+ * multipliers. Rounded, and that rounding matters: the number is rendered into
  * the icon's HTML string, which createMapController's updateMarker compares to
  * decide whether to rebuild a marker's DOM (see svgIcons.js's buildDivIcon).
  * A fractional size would differ between otherwise-identical renders.
+ *
+ * `token` is optional and every caller that can name one should pass it -- the
+ * size a pin is *drawn* at and the size the placement pass *reserves* for it
+ * come from the same call, so a token applied in one and not the other would
+ * leave a 30px icon being routed around a 15px hole (see the note at the top of
+ * decorators.js).
  */
-export function scaledSize(px, layerKey) {
+export function scaledSize(px, layerKey, token) {
   // Some style objects carry no size of their own (the military-base subtypes
   // share one fixed infra size). Scaling a missing number would produce NaN and
   // an icon 4px wide; handing it back untouched leaves the caller's own
@@ -161,7 +212,7 @@ export function scaledSize(px, layerKey) {
   if (!Number.isFinite(px)) return px;
   const layer = layerKey ? layerStyles[layerKey] : null;
   const layerScale = Number.isFinite(layer?.scale) ? layer.scale : 1;
-  return Math.max(4, Math.round(px * globalScale * layerScale));
+  return Math.max(4, Math.round(px * globalScale * layerScale * tokenScale(token)));
 }
 
 /** A layer's opacity multiplier (1 when it has never been configured). */
@@ -184,7 +235,7 @@ export function themedStyle(style, layerKey) {
   return {
     ...style,
     color: paletteColor(style.token, style.color),
-    size: scaledSize(style.size, layerKey),
+    size: scaledSize(style.size, layerKey, style.token),
     opacity: layerOpacity(layerKey),
   };
 }

@@ -281,6 +281,10 @@ async def _fetch_volcanoes(client: httpx.AsyncClient) -> list[dict]:
 
 async def start():
     state = registry.register("hazards", key_configured=True)  # no key required
+    # The quake half refreshes every 5 minutes, so this matters least here --
+    # but the volcano half is on a 6-hour clock and a failed boot fetch would
+    # otherwise drop the weekly report for that whole window.
+    await storage.warm_points(state, "hazards", "Hazards")
     consecutive_failures = 0
     volcanoes: list[dict] = []
     volcanoes_fetched_at = 0.0

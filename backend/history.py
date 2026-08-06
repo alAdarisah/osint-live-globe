@@ -22,10 +22,14 @@ class HistoryBuffer:
         self._kind = kind
 
     async def at(self, ts: float) -> list[dict]:
-        """Nearest position at or before ts, per entity. Falls back to each
-        entity's earliest kept position if ts predates everything (e.g.
-        scrubbing to a point before this process was even running), and to
-        empty if nothing's been captured yet at all."""
+        """Nearest position at or before ts, per entity, limited to entities
+        whose last fix was recent enough at that moment to still say where
+        they were (config.REPLAY_WINDOW_SECONDS). So a vessel first heard
+        after ts isn't there yet, and one that has since gone quiet is --
+        which is the whole point of dragging the scrubber.
+
+        Empty if nothing was recorded across ts, rather than pretending the
+        oldest positions we happen to hold were where things were then."""
         return await storage.history_at(self._kind, ts)
 
 

@@ -126,29 +126,34 @@ async def _fetch() -> list[dict]:
     return viirs_items + hms_items
 
 
-async def start():
+async def ingest_once():
+    """One poll. Runs in the ingest process, on the schedule in backend/ingest."""
     key_configured = bool(config.FIRMS_MAP_KEY)
-    state = registry.register("firms", key_configured=key_configured)
-    while True:
-        if not key_configured:
-            state.last_error = "FIRMS_MAP_KEY not set in .env"
-        else:
-            try:
-                fetched = await _fetch()
-                state.data = _filter_supported(fetched)
-                state.last_success = time.time()
-                state.last_error = None
-                log.info(
-                    "FIRMS: %d hotspots after confidence+event-correlation filtering (%d fetched)",
-                    len(state.data), len(fetched),
-                )
-                # No id field of its own -- storage.py synthesizes one from
-                # lat/lon/acq_date/acq_time so the same detection reappearing
-                # across polls updates its row instead of adding a new one.
-                await storage.record_snapshot("firms", state.data)
-                await storage.record_source_health("firms", len(state.data), True)
-            except Exception as exc:  # noqa: BLE001 - keep the poller alive
-                state.last_error = str(exc)
-                log.warning("FIRMS fetch failed: %s", exc)
-                await storage.record_source_health("firms", None, False, str(exc))
-        await asyncio.sleep(config.FIRMS_POLL_INTERVAL)
+    state = registry.ensure("firms", key_configured=key_configured)
+    if not key_configured:
+        # Recorded rather than only set on the state: this process serves no
+        # /api/health of its own, so a missing key that is never written to
+        # source_health would leave the backend saying "waiting for the ingest
+        # service to run for the first time" forever, which points at the wrong
+        # problem entirely.
+        state.last_error = "FIRMS_MAP_KEY not set in .env"
+        await storage.record_source_health("firms", None, False, state.last_error)
+        return
+    try:
+        fetched = await _fetch()
+        state.data = _filter_supported(fetched)
+        state.last_success = time.time()
+        state.last_error = None
+        log.info(
+            "FIRMS: %d hotspots after confidence+event-correlation filtering (%d fetched)",
+            len(state.data), len(fetched),
+        )
+        # No id field of its own -- storage.py synthesizes one from
+        # lat/lon/acq_date/acq_time so the same detection reappearing
+        # across polls updates its row instead of adding a new one.
+        await storage.record_snapshot("firms", state.data)
+        await storage.record_source_health("firms", len(state.data), True)
+    except Exception as exc:  # noqa: BLE001 - one failed poll is not a dead source
+        state.last_error = str(exc)
+        log.warning("FIRMS fetch failed: %s", exc)
+        await storage.record_source_health("firms", None, False, str(exc))

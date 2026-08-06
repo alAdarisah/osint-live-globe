@@ -211,11 +211,47 @@ def _regions_to_sweep() -> list[tuple[str, tuple]]:
     ]
 
 
-async def start():
-    state = registry.register("osm_infra", key_configured=True)  # no key required
+async def _warm(state) -> dict[str, list[dict]]:
+    """Seed the per-theatre map from storage, so a sweep never shrinks the layer.
+
+    This is the slowest source here by a wide margin -- a full pass is ~20
+    minutes of rate-limited Overpass queries, refreshed daily, and Overpass
+    times out often enough that a boot can leave the layer empty for the rest
+    of the day. Seeding `by_region` rather than just `state.data` is what makes
+    that safe: each theatre is replaced only when its own sweep succeeds, so
+    publishing after the first region can't drop the other twelve.
+    """
+    stored = await storage.entity_latest("osm_infra")
+    if not stored:
+        return {}
+    by_region: dict[str, list[dict]] = {}
+    for site in stored:
+        by_region.setdefault(site.get("region_key") or "", []).append(site)
+    state.data = flatten(by_region)
+    log.info(
+        "OSM infrastructure: warmed %d stored sites across %d theatres while the sweep runs",
+        len(state.data), len(by_region),
+    )
+    return by_region
+
+
+async def sweep_forever():
+    """Overpass sweeps, for the life of the ingest process.
+
+    Not a scheduled job like the other ingest sources, for two reasons that both
+    live in the loop below: a full pass takes ~20 minutes and publishes each
+    theatre as it lands rather than at the end, and a failed pass lengthens its
+    own retry (FAILURE_RETRY_INTERVAL scaled by consecutive failures). A fixed
+    interval would either start a second sweep on top of a running one or throw
+    that adaptive retry away -- and Overpass is a volunteer service that asks
+    callers not to do either.
+    """
+    state = registry.ensure("osm_infra", key_configured=True)  # no key required
     # Per region, so one theatre failing keeps its previous copy instead of
     # blanking while the rest of the sweep continues.
     by_region: dict[str, list[dict]] = {}
+    if await storage.wait_for_warm_pool():
+        by_region = await _warm(state)
     consecutive_failures = 0
     while True:
         swept = 0

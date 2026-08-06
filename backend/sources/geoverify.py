@@ -117,6 +117,24 @@ _VERDICT_CONFIDENCE = {
 # still ranks a Reuters reading above a content farm's.
 _UNTRUSTED_PENALTY = 16
 
+# How much confidence a verdict loses when the only text available was the
+# headline. Measured against a live window, 122 of 127 rows reached this module
+# with no article body at all -- the body is only fetched for verified-domain
+# URLs -- so gating the whole check on one made it inert on 96% of the layer
+# and every one of those pins was served as "unverified" with nothing looking
+# at it. A headline is genuinely weaker evidence than a headline plus body: it
+# is one sentence, it carries no dateline, and it names one place if it names
+# any. But "Ukraine: Russian strikes on Kyiv region kill at least 17" on a pin
+# in Washington DC is a contradiction a headline states perfectly well, and
+# refusing to read it is not caution -- it is declining to look.
+_HEADLINE_ONLY_PENALTY = 14
+
+# Refining -- *moving* a pin -- on a headline alone is a stronger claim than
+# doubting one, so it is discounted harder than the other verdicts. The move
+# stays guarded by everything else that makes it safe (imprecise pin only,
+# unambiguous in the gazetteer, inside the country GDELT already named).
+_HEADLINE_ONLY_REFINE_PENALTY = 22
+
 # Fallback when nothing corroborates the coordinate: how much the upstream
 # precision alone is worth. These are the numbers a row scores today, made
 # explicit.
@@ -178,6 +196,14 @@ _STOPWORDS = frozenset({
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
     "january", "february", "march", "april", "may", "june", "july", "august",
     "september", "october", "november", "december",
+    # The abbreviated forms, which is how a date is actually written in a
+    # headline or a byline. Missing them put a live pin on a settlement called
+    # Nov -- "placed only to country; the report names Nov" -- and a refinement
+    # *moves* the pin, so a false one here is worse than no verdict at all.
+    # "mar" and "may" are also ordinary words, and "sun"/"sat" are common
+    # enough as fragments that the same argument applies.
+    "mon", "tue", "tues", "wed", "weds", "thu", "thur", "thurs", "fri", "sat", "sun",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
     "president", "minister", "ministry", "government", "army", "military",
     "police", "forces", "official", "officials", "reuters", "ap", "afp",
     "north", "south", "east", "west", "central", "northern", "southern",
@@ -329,6 +355,34 @@ def _localities(
     return localities
 
 
+def _names_one_other_country(
+    resolved: list[tuple[str, gazetteer.Candidate]], iso2: str | None
+) -> tuple[str, gazetteer.Candidate] | None:
+    """The country the text is about, when that is not the country of the pin.
+
+    Only fires when the text names exactly *one* country, and that is the whole
+    safety of it. A piece naming two ("US nearly out of long-range missiles
+    leaving Trump short of options in Iran") has no single claim to weigh
+    against the coordinate, and reading one of the two as the answer would be
+    guessing. Naming one is a claim, and if the pin is elsewhere the two
+    disagree.
+
+    Returns None when there is no country named, more than one, or the one
+    named is where the pin already is.
+    """
+    countries = {
+        cand.place.country_code: (name, cand)
+        for name, cand in resolved
+        if cand.place.feature_code in gazetteer.COUNTRY_FEATURE_CODES
+    }
+    if len(countries) != 1:
+        return None
+    code, entry = next(iter(countries.items()))
+    if not iso2 or code == iso2:
+        return None
+    return entry
+
+
 def _agrees_with_pin(
     localities: list[tuple[str, gazetteer.Candidate]], lat: float, lon: float
 ) -> tuple[str, gazetteer.Candidate, float] | None:
@@ -391,16 +445,22 @@ def reconcile(row: dict, index: gazetteer.Gazetteer | None = None) -> dict:
     if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
         return unchecked
 
-    # "Was this article ever looked at?" -- the key's presence, not its value.
-    # A fetch that returned no body and a row nobody fetched are different
-    # states, and only the first licenses any conclusion about what the text
-    # does or does not say.
-    scraped = "article_excerpt" in row
-    text = " ".join(
-        part for part in (row.get("real_title"), row.get("article_excerpt")) if part
-    ).strip()
-    if not scraped or not text:
+    # Whatever text there is: the scraped body when a fetch got one, the
+    # headline alone when it did not. This used to require the body -- the key's
+    # presence, not its value -- which meant no conclusion was ever drawn about
+    # the 96% of rows nobody fetches an article for. The distinction still
+    # matters, so it is carried as `headline_only` and priced into every verdict
+    # below rather than used as a veto.
+    excerpt = (row.get("article_excerpt") or "").strip()
+    headline = (row.get("real_title") or "").strip()
+    text = " ".join(part for part in (headline, excerpt) if part).strip()
+    if not text:
         return _unverified(precision, reason="no-text")
+    headline_only = not excerpt
+    # What the reason strings call the thing that was read. Saying "the report"
+    # about a bare headline would overstate what was actually checked, and these
+    # strings are shown to the reader in the pin's popup.
+    read = "the headline" if headline_only else "the report"
 
     iso2 = capitals.to_iso2(row.get("geo_country_code"))
     resolved = _resolve_text_places(candidate_names(text), iso2, index)
@@ -429,8 +489,29 @@ def reconcile(row: dict, index: gazetteer.Gazetteer | None = None) -> dict:
     localities = _localities(non_dateline, iso2)
     if not localities:
         # The text names places, but only areas -- "Sudan", "the Sahel". That is
-        # agreement about a region, which the precision field already says.
-        return _unverified(precision, reason="text-names-no-locality")
+        # agreement about a region, which the precision field already says...
+        country_conflict = _names_one_other_country(non_dateline, iso2)
+        if country_conflict is None:
+            return _unverified(precision, reason="text-names-no-locality")
+        # ...unless the one area it names is a *different country* from the one
+        # the pin sits in. "Fears of renewed conflict in Ethiopia" on a pin in
+        # Somalia is not a boundary disagreement, and no locality is needed to
+        # see it. Doubt only -- there is nothing here precise enough to move a
+        # pin to, so the coordinate stays where it is and stops claiming to be
+        # certain.
+        name, candidate = country_conflict
+        return {
+            "geo_verdict": CONTESTED,
+            "geo_confidence": max(
+                1, _VERDICT_CONFIDENCE[CONTESTED] - (_HEADLINE_ONLY_PENALTY if headline_only else 0)
+            ),
+            # The whole named country is the uncertainty: the event is somewhere
+            # in it, and the pin is somewhere else entirely.
+            "geo_radius_km": max(candidate.radius_km, _radius_for_precision(precision)),
+            "geo_text_place": name,
+            "geo_place_id": candidate.place.geonameid,
+            "geo_reason": f"{read} is about {name}; the pin is in another country",
+        }
 
     # Does the article name anywhere at the pin? Asked of every place it names,
     # before choosing between them -- a piece that names both the pin's city and
@@ -440,11 +521,11 @@ def reconcile(row: dict, index: gazetteer.Gazetteer | None = None) -> dict:
         name, candidate, distance_km = agreement
         return {
             "geo_verdict": CONFIRMED,
-            "geo_confidence": _VERDICT_CONFIDENCE[CONFIRMED],
+            "geo_confidence": _VERDICT_CONFIDENCE[CONFIRMED] - (_HEADLINE_ONLY_PENALTY if headline_only else 0),
             "geo_radius_km": candidate.radius_km,
             "geo_text_place": name,
             "geo_place_id": candidate.place.geonameid,
-            "geo_reason": f"the report names {name}, {distance_km:.0f} km from the pin",
+            "geo_reason": f"{read} names {name}, {distance_km:.0f} km from the pin",
         }
 
     # Nothing named is at the pin. The first place named is the article's own
@@ -460,7 +541,7 @@ def reconcile(row: dict, index: gazetteer.Gazetteer | None = None) -> dict:
     # came back "contested" -- which was not GDELT being wrong two thirds of the
     # time, it was this layer reading scattered background mentions as a claim.
     if not _text_is_consistent(localities, candidate):
-        return _unverified(precision, reason="the report names places far apart")
+        return _unverified(precision, reason=f"{read} names places far apart")
 
     # The pin is on something coarser than a place and the text names exactly
     # one consistent place inside it. This is the upgrade the whole layer exists
@@ -486,10 +567,10 @@ def reconcile(row: dict, index: gazetteer.Gazetteer | None = None) -> dict:
             "lon": place.lon,
             "geo_precision": "locality",
             "geo_verdict": REFINED,
-            "geo_confidence": (
+            "geo_confidence": max(1, (
                 _VERDICT_CONFIDENCE[REFINED] if row.get("article_trusted")
                 else _VERDICT_CONFIDENCE[REFINED] - _UNTRUSTED_PENALTY
-            ),
+            ) - (_HEADLINE_ONLY_REFINE_PENALTY if headline_only else 0)),
             "geo_radius_km": candidate.radius_km,
             "geo_text_place": name,
             "geo_place_id": place.geonameid,
@@ -499,21 +580,23 @@ def reconcile(row: dict, index: gazetteer.Gazetteer | None = None) -> dict:
             "original_lon": lon,
             "original_geo_precision": precision,
             "geo_reason": (
-                f"placed only to {precision}; the report names {name}"
+                f"placed only to {precision}; {read} names {name}"
             ),
         }
 
     if distance_km > CONTEST_KM:
         return {
             "geo_verdict": CONTESTED,
-            "geo_confidence": _VERDICT_CONFIDENCE[CONTESTED],
+            "geo_confidence": max(
+                1, _VERDICT_CONFIDENCE[CONTESTED] - (_HEADLINE_ONLY_PENALTY if headline_only else 0)
+            ),
             # The disagreement itself is the uncertainty: the truth is
             # somewhere between the two claims, so the ring has to cover both.
             "geo_radius_km": max(distance_km, candidate.radius_km),
             "geo_text_place": name,
             "geo_place_id": place.geonameid,
             "geo_reason": (
-                f"the report names {name}, {distance_km:.0f} km from the pin"
+                f"{read} names {name}, {distance_km:.0f} km from the pin"
             ),
         }
 
@@ -522,11 +605,14 @@ def reconcile(row: dict, index: gazetteer.Gazetteer | None = None) -> dict:
     # over GDELT's. Say so rather than pretending either.
     return {
         "geo_verdict": CONFIRMED,
-        "geo_confidence": _VERDICT_CONFIDENCE[CONFIRMED] - 20,
+        "geo_confidence": max(
+            1,
+            _VERDICT_CONFIDENCE[CONFIRMED] - 20 - (_HEADLINE_ONLY_PENALTY if headline_only else 0),
+        ),
         "geo_radius_km": max(distance_km, candidate.radius_km),
         "geo_text_place": name,
         "geo_place_id": place.geonameid,
-        "geo_reason": f"the report names {name}, {distance_km:.0f} km from the pin",
+        "geo_reason": f"{read} names {name}, {distance_km:.0f} km from the pin",
     }
 
 

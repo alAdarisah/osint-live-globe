@@ -18,7 +18,11 @@ OWM_API_KEY = os.getenv("OWM_API_KEY", "").strip()
 FIRMS_POLL_INTERVAL = int(os.getenv("FIRMS_POLL_INTERVAL", "900"))       # FIRMS updates a few times/day
 GDELT_POLL_INTERVAL = int(os.getenv("GDELT_POLL_INTERVAL", "900"))        # GDELT updates every 15 min
 ADSB_POLL_INTERVAL_ANON = int(os.getenv("ADSB_POLL_INTERVAL_ANON", "900"))    # 100 calls/day anonymous limit
-ADSB_POLL_INTERVAL_AUTH = int(os.getenv("ADSB_POLL_INTERVAL_AUTH", "60"))     # 4000 calls/day authenticated
+# OpenSky charges credits, not calls, and a global states/all is its dearest
+# request at 4 of them -- so the 4000/day budget is really 1000 polls, and the
+# old 60s interval asked for 1440. It ran dry every afternoon and answered 429
+# until the next reset. 120s fits inside the budget with room for restarts.
+ADSB_POLL_INTERVAL_AUTH = int(os.getenv("ADSB_POLL_INTERVAL_AUTH", "120"))
 ACLED_POLL_INTERVAL = int(os.getenv("ACLED_POLL_INTERVAL", "1800"))
 UCDP_POLL_INTERVAL = int(os.getenv("UCDP_POLL_INTERVAL", "21600"))  # UCDP's candidate file only updates monthly
 
@@ -73,14 +77,29 @@ ENTITY_STALE_AFTER = {
     "officials": 2 * 86400,
     "firms": 2 * 86400,
     "jamming": 2 * 86400,
+    # Derived from the AIS movement log, so it can only ever be as old as the
+    # window that log keeps -- matching HISTORY_RETENTION_SECONDS means a
+    # finding is evicted exactly when the evidence behind it is.
+    "dark_vessels": 3 * 86400,
     # Earthquakes drop out of USGS's own 1-day feed after 24h, but the weekly
     # volcano report in the same payload stays current for a full week -- the
     # longer of the two governs, or every volcano pin would be evicted six days
     # before its report is superseded.
     "hazards": 8 * 86400,
     "acled": 7 * 86400,
+    # UCDP's reviewed record, which lags a month or more by design. It was
+    # falling through to the 1-day default, which happened to be harmless only
+    # because it is re-fetched every poll: pause collection for a day -- an
+    # ingest container down over a weekend, an ACLED outage -- and a verified
+    # archive would evict itself for want of a refresh it does not conceptually
+    # need. 30 days, like the other slow-moving reference data below.
+    "conflict_history": 30 * 86400,
     "events": 7 * 86400,
     "cities": 30 * 86400,
+    # Same family and same cadence as cities: GeoNames reference data, refetched
+    # daily, and the rows are places that by definition do not move. A short
+    # window would evict the whole placement index between downloads.
+    "gazetteer_places": 30 * 86400,
     # Same reasoning as cities: reference data the backend only refetches once a
     # day, so a 30-minute window would evict it continuously.
     "airports": 30 * 86400,
@@ -93,6 +112,107 @@ ENTITY_STALE_AFTER = {
     "osm_infra": 30 * 86400,
 }
 ENTITY_STALE_AFTER_DEFAULT = int(os.getenv("ENTITY_STALE_AFTER_DEFAULT", "86400"))
+
+# How stale a recorded fix may be and still count as "where this thing was"
+# when the replay scrubber asks for a moment (see storage.history_at). Kept
+# apart from ENTITY_STALE_AFTER above, which answers a different question --
+# when to forget a row entirely -- and is measured from *now* rather than from
+# the moment being replayed.
+#
+# Wider than the eviction windows on purpose. entity_history only receives a
+# row when an entity actually moves, so a 30-minute read drops every vessel
+# that was moored, drifting slowly, or simply between position reports at that
+# moment -- which is what made the ship and aircraft layers thin out and
+# flicker as the scrubber crossed a poll boundary. Anything absent falls back
+# to that kind's ENTITY_STALE_AFTER.
+REPLAY_WINDOW_SECONDS = {
+    # An aircraft's position is meaningless within the hour, but so is a gap:
+    # this is the ceiling on how old a fix may be, not how old it usually is.
+    # With a healthy poller every airborne aircraft is re-recorded each minute,
+    # so what an hour actually admits is the ones that landed or left coverage.
+    "adsb": 3600,
+    # Ships report far less often than aircraft, and a moored one can go hours
+    # without moving a metre -- a window as tight as the aircraft's would
+    # replay a busy anchorage as empty water.
+    "ais": 3 * 3600,
+}
+
+# How often the backend re-checks whether a mirrored kind has changed (see
+# backend/mirror.py). This is the *fallback* tick, not the normal path: writers
+# announce on Postgres NOTIFY and the mirror wakes on that within milliseconds,
+# so this only governs how long a dropped listener connection can hide new data.
+# Cheap to keep short -- an unchanged kind costs one indexed row and does not
+# touch the payload.
+INGEST_MIRROR_INTERVAL = int(os.getenv("INGEST_MIRROR_INTERVAL", "20"))
+
+# How many of its own intervals a source may miss before /api/health calls the
+# ingest service overdue. Above 2 so that one slow poll (an ACLED login retrying,
+# an Overpass sweep running long) isn't reported as a failure; low enough that a
+# dead ingest container is visible within a couple of minutes for the fast
+# sources rather than after an hour.
+INGEST_STALE_MULTIPLIER = float(os.getenv("INGEST_STALE_MULTIPLIER", "2.5"))
+
+# How often the ingest process re-reads the airports/sanctions indexes it needs
+# to annotate aircraft and ships (see backend/ingest/__main__.py). Those are
+# collected by the *backend*, so the ingest process reads them out of Postgres
+# rather than fetching them again -- this interval is about picking up the
+# backend's daily refresh, not about calling anyone.
+INGEST_REFERENCE_REFRESH = int(os.getenv("INGEST_REFERENCE_REFRESH", "3600"))
+
+# How often the refine process recomputes the escalation ranking (see
+# backend/escalation.py). It aggregates a week of conflict_events across every
+# region, which is why it is precomputed at all rather than run per request --
+# app.py used to do exactly that behind a 2-minute cache. Matched to the cadence
+# of its only input: event_fusion writes on GDELT's interval, so recomputing
+# faster would re-derive the same answer from the same rows.
+ESCALATION_REFRESH_INTERVAL = int(os.getenv("ESCALATION_REFRESH_INTERVAL", str(GDELT_POLL_INTERVAL)))
+
+# Redis, in front of Postgres for the payloads the backend serves (see
+# backend/cachestore.py). Empty disables caching entirely and everything is
+# served straight from Postgres, which is the correct behaviour for a local
+# `python -m backend.app` and the fallback whenever Redis is unreachable.
+REDIS_URL = os.getenv("REDIS_URL", "")
+
+# How long a cached payload lives. Longer than any producing interval, since the
+# entry is invalidated by its watermark rather than by expiry -- the TTL is only
+# there so a kind that stops being produced eventually stops occupying memory.
+CACHE_TTL = int(os.getenv("CACHE_TTL", str(6 * 3600)))
+
+# Payloads above this are not cached at all. A single FIRMS snapshot runs to
+# 175k points; one entry big enough to push Redis past maxmemory would evict
+# every other kind to hold itself, which is a worse outcome than that one kind
+# being read from Postgres.
+CACHE_MAX_PAYLOAD_BYTES = int(os.getenv("CACHE_MAX_PAYLOAD_BYTES", str(64 * 1024 * 1024)))
+
+# How often the cache worker looks (see backend/cacheworker). It only reads
+# counters and a handful of keys, so this is cheap; a minute is fast enough that
+# a problem is visible before anyone reports it and slow enough that the alert
+# table records episodes rather than samples.
+CACHE_WORKER_INTERVAL = int(os.getenv("CACHE_WORKER_INTERVAL", "60"))
+
+# Fraction of maxmemory at which Redis is reported as about to evict, and the
+# hit ratio below which something is reported as wrong. The ratio threshold is
+# high on purpose: entries here are invalidated by watermark rather than by
+# expiry, so in normal operation almost every lookup should hit -- a low ratio
+# means keys are vanishing, not that the cache is working hard.
+CACHE_MEMORY_WARN_FRACTION = float(os.getenv("CACHE_MEMORY_WARN_FRACTION", "0.85"))
+CACHE_HIT_RATIO_WARN = float(os.getenv("CACHE_HIT_RATIO_WARN", "0.5"))
+# Below this many lookups a ratio is noise -- two misses on a fresh Redis is
+# 0%, and reporting that would train everyone to ignore the alert.
+CACHE_MIN_SAMPLES_FOR_RATIO = int(os.getenv("CACHE_MIN_SAMPLES_FOR_RATIO", "50"))
+
+# How many consecutive probes a kind must be uncached before that is reported.
+# An empty cache is normal after any Redis restart -- the backend fills it on
+# the read path, and only reads on a change, so a daily source is legitimately
+# uncached for hours. At 60s probes, 30 is half an hour: long past a deploy,
+# well short of the slowest producer.
+CACHE_UNCACHED_PROBES = int(os.getenv("CACHE_UNCACHED_PROBES", "30"))
+
+# Where alerts are pushed, in addition to the log and the alerts table. A
+# Discord or Slack incoming-webhook URL; unset means those two sinks only, which
+# is the default because a webhook is the one sink that can reach someone who is
+# not looking at the map.
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "").strip()
 
 # Postgres connection (see backend/storage.py). docker-compose.yml sets this
 # explicitly to reach the `postgres` service over the compose network, so

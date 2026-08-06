@@ -6,7 +6,8 @@
 // that nothing would ever clean up, which is the same reasoning useAccordion.js
 // gives for its own single key.
 
-import { DEFAULT_COLORS } from "../map/iconTheme";
+import { DEFAULT_COLORS, DEFAULT_SIZES } from "../map/iconTheme";
+import { sanitizeBorders } from "./borderOverrides";
 
 // Bumped only when a saved config could no longer be merged onto the defaults
 // safely. Every load runs through mergeSettings below, which takes the shipped
@@ -42,7 +43,7 @@ export const SETTINGS_LAYERS = [
   { key: "airports", label: "Airfields", zoomGate: 7 },
   { key: "cables", label: "Submarine cables", zoomGate: null },
   { key: "launches", label: "Orbital launches", zoomGate: null },
-  { key: "osmInfra", label: "Infrastructure (OpenStreetMap)", zoomGate: 6 },
+  { key: "osmInfra", label: "Infrastructure (OpenStreetMap)", zoomGate: 9 },
 ];
 
 const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null };
@@ -97,6 +98,11 @@ export function defaultSettings() {
     icons: {
       scale: 1,
       colors: { ...DEFAULT_COLORS },
+      // Per-kind size multipliers, the narrowest of the three size dials (the
+      // other two are `scale` just above and layers[key].scale below). Keyed by
+      // the same tokens as `colors`, minus the three that name a colour with no
+      // pin of its own -- see DEFAULT_SIZES in map/iconTheme.js.
+      sizes: { ...DEFAULT_SIZES },
     },
     layers: Object.fromEntries(SETTINGS_LAYERS.map((l) => [l.key, { ...DEFAULT_LAYER_STYLE }])),
     ui: {
@@ -108,6 +114,10 @@ export function defaultSettings() {
     },
     // { [sourceKey]: { edits: { [id]: {field: value, __hidden?: true} }, added: [record] } }
     data: Object.fromEntries(EDITABLE_SOURCES.map((s) => [s.key, { edits: {}, added: [] }])),
+    // Redrawn national boundaries, sparse -- only the rings someone dragged.
+    // { [countryKey]: { fp, rings: { "<polygon>:<ring>": [[lon, lat], ...] } } }
+    // See settings/borderOverrides.js for the schema and why it is that shape.
+    borders: {},
   };
 }
 
@@ -144,6 +154,14 @@ export function mergeSettings(stored) {
         }
       }
     }
+    if (isPlainObject(stored.icons.sizes)) {
+      for (const [token, value] of Object.entries(stored.icons.sizes)) {
+        // Same rule as the colours: an unknown token is a typo or a leftover
+        // from a build with a layer this one does not have, and either way the
+        // shipped multiplier is the right answer.
+        if (token in base.icons.sizes) base.icons.sizes[token] = pickNumber(value, 1, 0.3, 3);
+      }
+    }
   }
 
   if (isPlainObject(stored.layers)) {
@@ -175,6 +193,12 @@ export function mergeSettings(stored) {
       if (Array.isArray(entry.added)) base.data[source.key].added = entry.added.filter(isPlainObject);
     }
   }
+
+  // Geometry, so validated somewhere it can be reasoned about as geometry --
+  // ring closure, the length floor the hit-test depends on, and the total-point
+  // ceiling that keeps the whole configuration inside what the backend will
+  // accept. See settings/borderOverrides.js.
+  if (isPlainObject(stored.borders)) base.borders = sanitizeBorders(stored.borders).borders;
 
   return base;
 }

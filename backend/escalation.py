@@ -14,6 +14,7 @@ all when there isn't enough history to make an honest claim -- a cold
 database should produce silence, not a fabricated spike.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -186,3 +187,36 @@ async def compute() -> list[dict]:
     # region seeing real casualties outranks a 3x spike of minor incidents.
     results.sort(key=lambda r: (r["ratio"], r["severity_sum"]), reverse=True)
     return results
+
+
+# The stored name compute()'s result is published under, and the one
+# /api/escalation reads back. Whole-document, so reference_snapshots rather than
+# a table of its own: the ranking is one ordered list that is replaced wholesale
+# every pass, which is exactly the shape that table exists for.
+REFERENCE_NAME = "escalation"
+
+
+async def rank_forever():
+    """Recompute the ranking on a loop, in the refine process.
+
+    This used to run inside the request for /api/escalation, behind a 2-minute
+    cache -- so every couple of minutes one unlucky client paid for a week of
+    conflict_events aggregated across every region, and did so on the same event
+    loop serving the rest of the map. Precomputing it costs nothing in
+    freshness: the only input is what event_fusion writes, and this runs on the
+    same cadence.
+
+    An empty result is written, not skipped. "No region is escalating" and "we
+    have not computed this yet" are different answers, and the second one is
+    what a stale stored ranking would keep implying.
+    """
+    while True:
+        try:
+            results = await compute()
+            await storage.record_reference(REFERENCE_NAME, results)
+            await storage.record_source_health(REFERENCE_NAME, len(results), True)
+            log.info("Escalation: %d regions above baseline", len(results))
+        except Exception as exc:  # noqa: BLE001 - keep the loop alive
+            log.warning("Escalation ranking failed: %s", exc)
+            await storage.record_source_health(REFERENCE_NAME, None, False, str(exc))
+        await asyncio.sleep(config.ESCALATION_REFRESH_INTERVAL)

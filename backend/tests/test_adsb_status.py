@@ -55,6 +55,33 @@ def test_ground_aircraft_take_their_altitude_from_the_geometric_field():
     assert parked["altitude"] == 3300
 
 
+# --- when the position was last true ---------------------------------------
+#
+# An aircraft icon outlives its transmission: the live payload keeps whatever
+# the last successful poll returned for as long as the upstream is failing, and
+# every replayed contact is old by definition. `updated` is what lets the popup
+# say so, and it has to mean the same thing whichever of the two feeds an
+# aircraft arrived from -- readsb reports an age, OpenSky reports a timestamp.
+
+
+def test_the_readsb_age_becomes_an_absolute_timestamp(monkeypatch):
+    monkeypatch.setattr(adsb.time, "time", lambda: 1_786_000_000.0)
+    assert adsb.normalize_airplanes_live(ac(seen_pos=4.2))["updated"] == 1_785_999_995.8
+
+
+def test_the_position_age_is_preferred_over_the_message_age(monkeypatch):
+    """`seen` is time since any message, `seen_pos` since the last *position*.
+    The icon is drawn at a position, so it is the position that has to be dated."""
+    monkeypatch.setattr(adsb.time, "time", lambda: 1_786_000_000.0)
+    record = adsb.normalize_airplanes_live(ac(seen=1.0, seen_pos=30.0))
+    assert record["updated"] == 1_785_999_970.0
+
+
+def test_an_aircraft_reporting_no_age_at_all_carries_no_timestamp():
+    """Rather than defaulting to now, which would date a stale contact as live."""
+    assert adsb.normalize_airplanes_live(ac())["updated"] is None
+
+
 # --- emergencies -----------------------------------------------------------
 
 

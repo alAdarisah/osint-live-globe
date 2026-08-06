@@ -13,6 +13,9 @@ import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
 import { useAppSettings } from "./hooks/useAppSettings";
 import { applyOverrides } from "./settings/applyOverrides";
+import { applyBorderOverrides, staleBorderKeys } from "./settings/borderOverrides";
+import { DEFAULT_EVENT_FILTER } from "./map/severity";
+import { makeCountryScope } from "./map/countryScope";
 import { boundsContainsPoint } from "./utils/geo";
 
 import LoadingScreen from "./components/LoadingScreen";
@@ -28,6 +31,7 @@ import TimelineBar from "./components/TimelineBar";
 import Attribution from "./components/Attribution";
 import CountryInfoCard from "./components/CountryInfoCard";
 import CountrySelectionBar from "./components/CountrySelectionBar";
+import BorderEditBar from "./components/BorderEditBar";
 import AdminPanel from "./components/admin/AdminPanel";
 
 // "Tickers" (the layer checkboxes) default off except critical
@@ -58,10 +62,12 @@ const DEFAULT_LAYER_VISIBILITY = {
   cables: false,
   // Off: a few dozen pads, and not what this map is primarily for.
   launches: false,
-  // Off, and this is the one that most has to be: it is crowd-sourced geometry
-  // sitting next to a list whose coordinates a person checked, and it should
-  // never appear unless a reader asked for it.
-  osmInfra: false,
+  // On, but only ever at close range (OSM_INFRA_MIN_ZOOM in
+  // createMapController.js): it is crowd-sourced geometry sitting next to a
+  // list whose coordinates a person checked, so it stays off the overview
+  // entirely and only fills in once a reader has zoomed into one place, where
+  // its provenance is stated on every pin.
+  osmInfra: true,
 };
 
 export default function App() {
@@ -73,7 +79,7 @@ export default function App() {
   // three separate consumers need it in three different forms -- the map wants
   // an icon theme, the fetch layer wants a record-override function, and the
   // admin panel wants the object itself.
-  const { settings, adminMode, toggleAdminMode, actions, sync } = useAppSettings();
+  const { settings, adminMode, toggleAdminMode, actions, sync, borderNotice } = useAppSettings();
 
   // Panel starts open on desktop, but an 85vw-wide open drawer would cover
   // most of a small screen on first load, so it starts closed on phones
@@ -90,6 +96,9 @@ export default function App() {
   const mapApi = useLeafletMap(mapContainerRef, {
     theme,
     onRegionAutoReset: () => regionAutoResetRef.current(),
+    // The editor commits whole rings as they are dragged; persisting them is
+    // the settings layer's job, exactly as it is for a record edit.
+    onBorderRingCommit: actions.setBorderRings,
     initialLayerVisibility: DEFAULT_LAYER_VISIBILITY,
   });
 
@@ -99,12 +108,36 @@ export default function App() {
   // replay even exists. Cheap ref instead of state since flipping it never
   // needs to trigger a re-render on its own.
   const replayActiveRef = useRef(false);
+  // Admin Mode's per-layer zoom gates. Computed here rather than inside the
+  // effect that pushes them to the map, because the fetch layer needs the same
+  // object: a source whose drawing is gated on zoom has its *fetch* gated on
+  // the same number (see POLL_CONFIG's minZoom in useOsintData.js), and the two
+  // must agree about an override.
+  const layerZoomOverrides = useMemo(() => {
+    const overrides = {};
+    for (const [key, layer] of Object.entries(settings.layers)) {
+      if (Number.isFinite(layer.minZoom)) overrides[key] = layer.minZoom;
+    }
+    return overrides;
+  }, [settings.layers]);
+
   const dataApi = useOsintData({
     onData: (key, data) => {
       if (!replayActiveRef.current) mapApi.applyData(key, data);
     },
     flyToRegion: mapApi.flyToRegion,
-    transform: useCallback((key, data) => applyOverrides(key, data, settings.data), [settings.data]),
+    // Two override passes, because the countries feed is a FeatureCollection
+    // rather than an array of records and applyOverrides deliberately passes
+    // anything that is not an array straight through.
+    transform: useCallback(
+      (key, data) =>
+        key === "countries"
+          ? applyBorderOverrides(data, settings.borders)
+          : applyOverrides(key, data, settings.data),
+      [settings.data, settings.borders]
+    ),
+    zoom: mapApi.zoom,
+    zoomOverrides: layerZoomOverrides,
   });
   regionAutoResetRef.current = dataApi.resetRegionToWorld;
 
@@ -135,6 +168,16 @@ export default function App() {
     mapApi.setImagery(imageryKey, imageryDate);
   }, [imageryKey, imageryDate, mapApi.setImagery]);
 
+  // Event ages follow the scrubber for the same reason the imagery date does.
+  // /api/replay serves the state of the world at a past moment, but the conflict
+  // filter measures age against the wall clock -- so without this, scrubbing
+  // back two days made every event in the snapshot "two days old" and the
+  // window filtered out the very data the backend had just returned. null hands
+  // the controller back to Date.now() the moment replay ends.
+  useEffect(() => {
+    mapApi.setAgeReference(replayApi.isReplaying ? replayApi.replayAt : null);
+  }, [replayApi.isReplaying, replayApi.replayAt, mapApi.setAgeReference]);
+
   // --- Admin Mode, pushed into the map ---------------------------------
   //
   // useAppSettings already writes the palette into map/iconTheme.js, but a
@@ -149,12 +192,8 @@ export default function App() {
   }, [settings.icons, settings.layers, mapApi.setIconTheme]);
 
   useEffect(() => {
-    const overrides = {};
-    for (const [key, layer] of Object.entries(settings.layers)) {
-      if (Number.isFinite(layer.minZoom)) overrides[key] = layer.minZoom;
-    }
-    mapApi.setLayerZoomOverrides(overrides);
-  }, [settings.layers, mapApi.setLayerZoomOverrides]);
+    mapApi.setLayerZoomOverrides(layerZoomOverrides);
+  }, [layerZoomOverrides, mapApi.setLayerZoomOverrides]);
 
   // Record edits apply to the payloads already in hand rather than waiting for
   // the next poll, which for news is a minute away and for the officials feed
@@ -162,6 +201,18 @@ export default function App() {
   useEffect(() => {
     dataApi.reapplyTransform(["events", "gdelt", "officials"]);
   }, [settings.data, dataApi.reapplyTransform]);
+
+  // The same idea for boundaries, but it takes two calls rather than one.
+  // reapplyTransform pushes the re-merged FeatureCollection into the map, and
+  // renderCountries then declines to redraw it: its fingerprint is the feature
+  // count plus the ISO list, which a moved vertex does not change (the reason
+  // is written out at createMapController.js:1774). So the forced repaint has
+  // to follow, not lead. Both are no-ops while an edit session owns the
+  // geometry -- see the guards in applyData and refreshCountriesNow.
+  useEffect(() => {
+    dataApi.reapplyTransform(["countries"]);
+    mapApi.refreshCountriesNow();
+  }, [settings.borders, dataApi.reapplyTransform, mapApi.refreshCountriesNow]);
 
   // Ranks conflict zones by how much is currently happening in each, so the
   // "Choose Conflict Zone" menu (see RegionBar.jsx) lists the hottest first
@@ -241,27 +292,29 @@ export default function App() {
 
   const [infraFilterText, setInfraFilterText] = useState("");
 
-  // What the user has asked the conflict layer to show. Held in React (rather
-  // than only inside the map controller) because the notable-events panel and
-  // the zone briefing read the same feed and should agree with the map about
-  // what is currently in scope.
   // The cut-off date of the UCDP record, surfaced in the layer's own label so
   // the lag is stated where the layer is switched on, not buried in a popup.
   const historyAsOf = dataApi.conflictHistoryAsOf;
 
-  const [eventFilter, setEventFilter] = useState({
-    maxAgeHours: 72, minSeverity: 0, showImprecise: true,
-  });
+  // What the user has asked the conflict layer to show. Held in React rather
+  // than only inside the map controller because the notable-events panel and
+  // the zone briefing read the same feed and have to agree with the map about
+  // what is in scope; the predicate they all apply lives in map/severity.js.
+
+  const [eventFilter, setEventFilter] = useState(DEFAULT_EVENT_FILTER);
+  // The map is told in an effect rather than from inside the state updater.
+  // An updater runs during render, and mapApi.setEventFilter redraws the layer
+  // synchronously, which reaches reportCounts/reportZoomNotes and so sets state
+  // on another component mid-render -- and StrictMode double-invokes updaters,
+  // so the redraw ran twice per change. Same reasoning useReplay.js records for
+  // keeping its fetch out of one.
   const onEventFilterChange = useCallback(
-    (patch) => {
-      setEventFilter((prev) => {
-        const next = { ...prev, ...patch };
-        mapApi.setEventFilter(next);
-        return next;
-      });
-    },
-    [mapApi.setEventFilter]
+    (patch) => setEventFilter((prev) => ({ ...prev, ...patch })),
+    []
   );
+  useEffect(() => {
+    mapApi.setEventFilter(eventFilter);
+  }, [eventFilter, mapApi.setEventFilter]);
   const onInfraFilterChange = useCallback(
     (text) => {
       setInfraFilterText(text);
@@ -282,6 +335,87 @@ export default function App() {
     (lat, lon) => mapApi.flyTo(lat, lon, 7),
     [mapApi.flyTo]
   );
+
+  // Clicking a country narrows the two read-out panels to that country. The
+  // map keeps drawing everything -- this scopes what is *said*, not what is
+  // fetched or painted, so dropping the selection restores the world view with
+  // no refetch. Inactive (and therefore a no-op predicate) when nothing is
+  // selected, which is why both panels can apply it unconditionally.
+  const countryScope = useMemo(
+    () => makeCountryScope(mapApi.countrySelection),
+    [mapApi.countrySelection]
+  );
+
+  // Border edits made against a geometry the source no longer serves. Computed
+  // only while the admin panel is open, because it is the only thing that can
+  // report them and the check walks every feature.
+  const staleBorders = useMemo(
+    () => (adminMode ? staleBorderKeys(mapApi.countryFingerprints, settings.borders) : []),
+    [adminMode, mapApi.countryFingerprints, settings.borders]
+  );
+
+  // --- boundary editing --------------------------------------------------
+  //
+  // Offered only in Admin Mode, and only over the whole world. Under a conflict
+  // zone the backend serves a bbox subset of countries (see regions.py's
+  // filter_geojson), so a neighbour outside the zone is not loaded, cannot be
+  // moved with its partner, and would leave a seam nobody can see because the
+  // country it belongs to is not on screen. Refusing is one boolean; the
+  // alternative is silent corruption.
+  const borderEditBlockedReason = dataApi.currentRegionKey
+    ? "Editing a boundary needs the whole world loaded, so both sides of it can move together. Switch back to World first."
+    : null;
+
+  const beginBorderEdit = useCallback(() => {
+    const key = mapApi.selectedCountry?.key;
+    if (key) mapApi.beginBorderEdit(key);
+  }, [mapApi.selectedCountry, mapApi.beginBorderEdit]);
+
+  const borderEditProps = useMemo(
+    () => ({
+      offered: adminMode,
+      active: mapApi.borderEdit.active,
+      blockedReason: borderEditBlockedReason,
+      onBegin: beginBorderEdit,
+      onEnd: mapApi.endBorderEdit,
+    }),
+    [adminMode, mapApi.borderEdit.active, borderEditBlockedReason, beginBorderEdit, mapApi.endBorderEdit]
+  );
+
+  // Escape and undo, on the document because the gesture they belong to happens
+  // on the map, which has no focus of its own. Leaflet's own keyboard handler
+  // binds the arrows and +/- on the container and neither of these, so there is
+  // nothing to fight over.
+  useEffect(() => {
+    if (!mapApi.borderEdit.active) return undefined;
+    function onKeyDown(event) {
+      // The admin panel is full of text inputs; Escape and Ctrl+Z inside one of
+      // them belong to the field, not to the map.
+      const target = event.target;
+      if (target?.closest?.("input, textarea, select, [contenteditable]")) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        mapApi.endBorderEdit();
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        mapApi.undoBorderEdit();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [mapApi.borderEdit.active, mapApi.endBorderEdit, mapApi.undoBorderEdit]);
+
+  // A region change swaps the whole feature set under the working geometry, so
+  // the session cannot survive one.
+  useEffect(() => {
+    if (mapApi.borderEdit.active && dataApi.currentRegionKey) mapApi.endBorderEdit();
+  }, [dataApi.currentRegionKey, mapApi.borderEdit.active, mapApi.endBorderEdit]);
+
+  // Leaving Admin Mode has to close an open session, or the handles outlive the
+  // only thing that was meant to gate them.
+  useEffect(() => {
+    if (!adminMode && mapApi.borderEdit.active) mapApi.endBorderEdit();
+  }, [adminMode, mapApi.borderEdit.active, mapApi.endBorderEdit]);
 
   return (
     <>
@@ -307,6 +441,7 @@ export default function App() {
         gdeltRaw={dataApi.gdeltRaw}
         mapBounds={mapApi.mapBounds}
         regionLabel={dataApi.currentRegionLabel}
+        countryScope={countryScope}
         onLocate={onLocateNewsItem}
       />
 
@@ -314,17 +449,21 @@ export default function App() {
         <ConflictBriefingCard
           zone={briefingZone}
           eventsRaw={dataApi.eventsRaw}
+          eventFilter={eventFilter}
           gdeltRaw={dataApi.gdeltRaw}
           onClose={() => setBriefingZone(null)}
           onLocate={onLocateNewsItem}
         />
       )}
 
-      {/* Ranks the same /api/events data the map draws, so the two can't
-          disagree. Renders nothing when no event clears its severity floor. */}
+      {/* Ranks the same /api/events data the map draws, through the same
+          filter, so the two can't disagree. Renders nothing when no event
+          clears its severity floor. */}
       <NotableEventsPanel
         eventsRaw={dataApi.eventsRaw}
+        eventFilter={eventFilter}
         escalation={dataApi.escalation}
+        countryScope={countryScope}
         onLocate={onLocateNewsItem}
         isMobile={isMobileViewport}
       />
@@ -362,7 +501,23 @@ export default function App() {
 
       <Attribution />
 
-      <CountryInfoCard country={mapApi.selectedCountry} onClose={mapApi.closeCountryCard} />
+      <CountryInfoCard
+        country={mapApi.selectedCountry}
+        onClose={mapApi.closeCountryCard}
+        borderEdit={borderEditProps}
+      />
+
+      <BorderEditBar
+        state={mapApi.borderEdit}
+        countryName={
+          mapApi.countrySelection.find((c) => c.key === mapApi.borderEdit.countryKey)?.name ?? null
+        }
+        onEnd={mapApi.endBorderEdit}
+        onUndo={mapApi.undoBorderEdit}
+        onToggleLink={mapApi.setBorderLinkMode}
+        notice={borderNotice}
+        onDismissNotice={actions.clearBorderNotice}
+      />
 
       <CountrySelectionBar
         selection={mapApi.countrySelection}
@@ -384,6 +539,7 @@ export default function App() {
             gdelt: dataApi.gdeltRaw,
             officials: dataApi.officialsRaw,
           }}
+          staleBorders={staleBorders}
           onClose={toggleAdminMode}
         />
       )}

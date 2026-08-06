@@ -107,6 +107,7 @@ async def _fetch() -> dict[str, list[dict]]:
 
 async def start():
     state = registry.register("hdx_conflict_stats", key_configured=True)
+    await storage.warm_reference(state, "hdx_conflict_stats", "HDX conflict stats")
     consecutive_failures = 0
     while True:
         ok = False

@@ -6,9 +6,11 @@
 
 import { L } from "./leafletGlobal";
 import { SVG, OFFICIALS_KIND_ICON, buildDivIcon } from "./svgIcons";
-import { esc, fmtNumber, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
+import { esc, fmtNumber, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix } from "../utils/format";
 import {
   severityBand, severityColor, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
+  placementDoubtful, positionUncertain, VERDICT_NOTE,
+  reliabilityBand, reliabilityColor, reliabilityWeak,
   ageHoursFromDateAdded, newsAgeOpacity, newsAgeScale,
 } from "./severity";
 import { paletteColor, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
@@ -37,13 +39,20 @@ function icon(svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, 
 // events we can actually place.
 export function eventIconSize(d) {
   const severity = Number.isFinite(d.severity) ? d.severity : 0;
-  return scaledSize((13 + (severity / 100) * 18) * (isImprecise(d) ? 0.8 : 1), "events");
+  // Sized through its own severity band's token, so the four bands can be
+  // scaled apart from each other -- which is the point of a severity ramp that
+  // is already four separate colours.
+  return scaledSize(
+    (13 + (severity / 100) * 18) * (isImprecise(d) ? 0.8 : 1),
+    "events",
+    severityBand(severity)?.token
+  );
 }
 
 // Sized by deaths, since UCDP always reports them -- but capped well below the
 // live layer's largest pins so the record never dominates the map.
 export function historicalIconSize(d) {
-  return scaledSize(10 + Math.min(Math.sqrt(d.fatalities || 0) * 2.2, 8), "conflictHistory");
+  return scaledSize(10 + Math.min(Math.sqrt(d.fatalities || 0) * 2.2, 8), "conflictHistory", "event.history");
 }
 
 // Reach sets the base size; age shrinks it. Rounded to whole pixels for the
@@ -54,7 +63,7 @@ export function historicalIconSize(d) {
 export function gdeltIconSize(d) {
   const base = 14 + Math.min(Math.log10((d.mentions || 1) + 1), 3) * 2.5;
   const scaled = base * newsAgeScale(ageHoursFromDateAdded(d.date_added));
-  return scaledSize(d.collapsedCount > 1 ? scaled + 4 : scaled, "gdelt");
+  return scaledSize(d.collapsedCount > 1 ? scaled + 4 : scaled, "gdelt", "news.pin");
 }
 
 // Officials pins are sized by how widely the act was carried, not by severity:
@@ -65,7 +74,9 @@ export function officialsIconSize(d) {
   const base = 15 + Math.min(Math.log10((d.outlet_count || 0) + 1), 2) * 3.5;
   const scaled = base * newsAgeScale(officialsAgeHours(d));
   // Room for the count badge, same +4 gdeltIconSize gives a collapsed news pin.
-  return scaledSize(d.collapsedCount > 1 ? scaled + 4 : scaled, "officials");
+  // Tokened by the act's own kind, matching officialsColor -- a cooperative and
+  // a hostile act are already two colours and can now be two sizes.
+  return scaledSize(d.collapsedCount > 1 ? scaled + 4 : scaled, "officials", officialsToken(d));
 }
 
 export const INFRA_ICON_SIZE = 18;
@@ -73,8 +84,23 @@ export const INFRA_ICON_SIZE = 18;
 // Same shipped size, put through the icon theme. A function rather than a
 // second const because the multipliers change at runtime, and both the pin and
 // the placement pass have to read the current value (see createMapController).
-export function infraIconSize() {
-  return scaledSize(INFRA_ICON_SIZE, "infra");
+//
+// Takes the site so it can find that site's token: the seven infrastructure
+// types are seven separately sizable pins, and a size the placement pass
+// computed without knowing which type it was reserving for would leave a
+// deliberately-enlarged refinery overlapping its neighbours.
+export function infraIconSize(d) {
+  return scaledSize(INFRA_ICON_SIZE, "infra", infraBaseStyle(d)?.token);
+}
+
+// The shipped style a site is drawn from, before the theme touches it. Military
+// bases are keyed on `subtype` rather than `type` and carry no palette token of
+// their own -- they follow the layer, which is what the admin panel says.
+function infraBaseStyle(d) {
+  if (!d) return null;
+  return d.type === "military"
+    ? MILITARY_SUBTYPE_STYLE[d.subtype] || MILITARY_SUBTYPE_STYLE.joint
+    : INFRA_STYLE[d.type] || INFRA_STYLE.port;
 }
 
 // ---------- cities ----------
@@ -129,7 +155,7 @@ export function decorateCity(city, { offset } = {}) {
   // it happens to be a capital would invert the one thing the graduated
   // symbols exist to show.
   const base = city.is_capital ? Math.max(CAPITAL_TIER.size, populationTier.size) : tier.size;
-  const size = scaledSize(base, "cities");
+  const size = scaledSize(base, "cities", "city.marker");
   const color = paletteColor("city.marker", CITY_COLOR);
   return { tier, size, icon: icon(tier.svg, color, size, 0, "city-marker", layerOpacity("cities"), "", offset) };
 }
@@ -303,12 +329,77 @@ function editedNote(d) {
   return `<div class="meta edited-note">Modified: this record was ${what} and no longer matches the source feed.</div>`;
 }
 
+// What the backend concluded about the coordinate, and why. Every fused event
+// carries a verdict (geoverify.py always returns one), and until now not one of
+// them reached the reader -- a pin the pipeline had judged to be in the wrong
+// country was drawn and described exactly like a corroborated one.
+//
+// "unverified" is deliberately silent. It means nothing was checked, which is
+// the default state and already implied by the source line; printing a note for
+// it on most pins would bury the two verdicts that actually matter.
+function placementLine(d) {
+  const note = VERDICT_NOTE[d.geo_verdict];
+  if (!note) return "";
+  const doubted = placementDoubtful(d);
+  const reason = (d.geo_reason || "").trim();
+  return `
+    <div class="meta placement-note${doubted ? " placement-doubted" : ""}">
+      ${esc(note)}${reason ? ` <span class="placement-reason">(${esc(reason)})</span>` : ""}
+    </div>`;
+}
+
+// "How much to trust this", answering the question the heading actually asks.
+//
+// This block used to draw the severity bar, which measures how *consequential*
+// an event is -- so a fabricated massacre and a confirmed one filled the bar
+// identically, and the one number a reader was invited to read as credibility
+// was the one number that said nothing about it. Scored by
+// backend/sources/reliability.py; the reasons are its own, not restated here.
+//
+// Returns "" for a record with no score at all rather than inventing one. That
+// is a real case: /api/replay serves snapshots written before this field
+// existed, and a bar drawn from a missing value would be a confident-looking
+// zero.
+// `extra` is whatever the caller wants said between the score and the reasons.
+// The conflict popup puts its corroboration sentence there; the news popup has
+// no equivalent and passes nothing, because corroborationLine reads
+// `corroboration` -- a field event_fusion writes on a *fused* record -- and off
+// a single article it would print "Uncorroborated" over a story seven newsrooms
+// carried. The reasons list already says the true version of that.
+const RELIABILITY_REASONS_SHOWN = 4;
+
+function reliabilityBlock(d, extra = "") {
+  const band = reliabilityBand(d);
+  if (!band) return "";
+  const score = Number.isFinite(d.reliability) ? d.reliability : band.min;
+  const reasons = (d.reliability_reasons || []).slice(0, RELIABILITY_REASONS_SHOWN);
+  return `
+    <div class="sev-block rel-block rel-${band.key}">
+      <div class="sev-head">How much to trust this</div>
+      <div class="sev-bar"><span style="width:${Math.max(2, score)}%;background:${reliabilityColor(band)}"></span></div>
+      <div class="meta">Reliability ${score}/100 &mdash; ${esc(band.label)}</div>
+      ${extra}
+      ${reasons.length ? `<ul class="sev-reasons">${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+      ${outletLine(d)}
+    </div>`;
+}
+
 export function decorateEvent(d, { offset } = {}) {
   const sources = (d.corroborated_by && d.corroborated_by.length ? d.corroborated_by : [d.source]).filter(Boolean);
   const sourceLine = sources.map((s) => SOURCE_LABEL[s] || s).join(", ");
   const severity = Number.isFinite(d.severity) ? d.severity : 0;
   const band = severityBand(severity);
   const imprecise = isImprecise(d);
+  // The backend's own verdict on the coordinate (geoverify.py). "contested"
+  // means the reporting names somewhere else -- the pin has not been moved,
+  // but it must stop being drawn as though it were known.
+  const doubtful = placementDoubtful(d);
+  const uncertain = positionUncertain(d);
+  // How much the *reporting* can be trusted, which is a separate question from
+  // whether the coordinate is right -- see backend/sources/reliability.py. Null
+  // on records archived before it shipped, so every use below is guarded.
+  const trustBand = reliabilityBand(d);
+  const weak = reliabilityWeak(d);
   const where = d.location || d.country || "";
   const kind = d.event_type || "Conflict event";
   // The lead is whatever actually says what happened: a real scraped headline
@@ -316,26 +407,55 @@ export function decorateEvent(d, { offset } = {}) {
   // bare taxonomy label -- which is where this used to start, and which on its
   // own ("Unconventional violence") tells a reader nothing.
   const lead = (d.notes || "").trim() || (d.summary || "").trim() || kind;
-  const tooltip = `<b>${esc(kind)}</b> &middot; ${esc(band.label)}<br/>${esc(where)}${d.date ? " &middot; " + esc(d.date) : ""}` +
-    `${imprecise ? '<br/><i>approximate location</i>' : ""}<br/>${esc(casualtyLine(d))}`;
+  // The tooltip leads with the same thing the popup's <h3> does, for the same
+  // reason. It used to open with `kind` alone, so hovering a pin answered
+  // "what category is this" ("Unconventional violence") while only a click
+  // answered "what happened" -- and a reader scanning a busy map is asking the
+  // second question. The taxonomy label drops to the meta line, where it is
+  // still worth having: it is the vocabulary the legend and the icon share.
+  //
+  // `kind` is skipped there when the lead already is it -- an event with no
+  // headline and no coded sentence falls back to the label, and printing it
+  // twice reads as a bug.
+  const meta = [lead === kind ? null : kind, band.label, where, d.date]
+    .filter(Boolean).map(esc).join(" &middot; ");
+  const tooltip = `<b>${esc(lead)}</b><br/>${meta}<br/>${esc(casualtyLine(d))}` +
+    `${imprecise ? "<br/><i>approximate location</i>" : ""}` +
+    // Said on hover, not only on click: this is the one thing that can make
+    // the pin's own position wrong, and a reader scanning the map should not
+    // have to open it to find that out.
+    `${doubtful ? `<br/><i>${esc(d.geo_text_place ? `position doubted — the reporting names ${d.geo_text_place}` : "position doubted")}</i>` : ""}` +
+    // Same argument as the line above, for the other thing that can make a pin
+    // misleading. Who is behind a report decides how much of it to believe, and
+    // making a reader click to discover that nothing vouches for this one puts
+    // the weakest pins on equal footing with the strongest at a glance.
+    `${weak ? `<br/><i>${esc(trustBand.label.toLowerCase())} sourcing — ${esc(d.reliability_outlet || "no newsroom we vouch for")}</i>` : ""}`;
   const intensity = goldsteinLabel(d.goldstein);
   // event_fusion's classifier assigns the same label to both fields for
   // GDELT-derived events, so only show the subtype when it adds something.
   const subtype = d.sub_event_type && d.sub_event_type !== d.event_type ? d.sub_event_type : null;
   const reasons = (d.severity_reasons || []).slice(0, 4);
   const provenance = provenanceFor(d);
+  // Empty for records archived before reliability scoring shipped -- the
+  // severity block below picks the corroboration and outlet lines back up in
+  // that case, so an old record loses the bar and nothing else.
+  const trust = reliabilityBlock(
+    d,
+    `<div class="meta">${esc(corroborationLine(d, sources))}</div>`
+  );
   const detail = `
     <h3>${esc(lead)}</h3>
     <div class="meta">${esc(kind)}${subtype ? " &mdash; " + esc(subtype) : ""} &middot; ${esc(where)}${d.date ? " &middot; " + esc(d.date) : ""}</div>
     <div class="meta">${esc(casualtyLine(d))}</div>
     ${imprecise ? `<div class="meta imprecise-note">${esc(PRECISION_NOTE[d.geo_precision] || PRECISION_NOTE.unknown)}</div>` : ""}
+    ${placementLine(d)}
+    ${trust}
     <div class="sev-block">
-      <div class="sev-head">How much to trust this</div>
+      <div class="sev-head">How severe</div>
       <div class="sev-bar"><span style="width:${Math.max(2, severity)}%;background:${severityColor(band)}"></span></div>
       <div class="meta">Severity ${severity}/100 &mdash; ${esc(band.label)}</div>
-      <div class="meta">${esc(corroborationLine(d, sources))}</div>
       ${reasons.length ? `<ul class="sev-reasons">${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
-      ${outletLine(d)}
+      ${trust ? "" : `<div class="meta">${esc(corroborationLine(d, sources))}</div>${outletLine(d)}`}
       ${d.jamming_nearby ? `<div class="meta evidence">GPS interference detected within 60 km (${Math.round(d.jamming_nearby * 100)}% bad fixes)</div>` : ""}
       ${d.thermal_nearby ? `<div class="meta evidence">Thermal anomaly detected within 10 km the same day</div>` : ""}
     </div>
@@ -354,7 +474,20 @@ export function decorateEvent(d, { offset } = {}) {
   // legible without hiding context.
   const opacity = ageOpacity(ageHours(d)) * layerOpacity("events");
   return {
-    icon: icon(acledIcon(d), color, size, 0, "", opacity, imprecise ? "imprecise" : "", offset),
+    // Two independent doubts, two independent marks, because they are answers
+    // to different questions and a pin can carry either, both or neither:
+    //
+    //   imprecise       dashed ring -- "do not read this dot as a location",
+    //                   whether because the geocode is only national or because
+    //                   the reporting contradicts it.
+    //   weakly-sourced  desaturated -- "nothing much vouches for this", the
+    //                   same visual argument .historical and .inferred already
+    //                   make for records that are real but not live evidence.
+    icon: icon(
+      acledIcon(d), color, size, 0, "", opacity,
+      [uncertain ? "imprecise" : "", weak ? "weakly-sourced" : ""].filter(Boolean).join(" "),
+      offset
+    ),
     tooltip,
     detail,
   };
@@ -518,8 +651,17 @@ export function decorateHazard(d, { offset } = {}) {
 // the whole map.
 function newsLine(item) {
   const headline = esc((item.real_title || "").trim());
-  const meta = [item.source_name, timeAgoFromDateAdded(item.date_added)]
-    .filter(Boolean).map(esc).join(" &middot; ");
+  // A collapsed pin is a list of separate stories from separate newsrooms, so
+  // one bar under the whole list would be a score for nothing. Each row carries
+  // its own band instead -- the word only, since eight bars stacked in a popup
+  // read as a chart rather than as eight verdicts.
+  const band = reliabilityBand(item);
+  const bits = [item.source_name, timeAgoFromDateAdded(item.date_added)]
+    .filter(Boolean).map(esc);
+  if (band) {
+    bits.push(`<span class="rel-chip" style="color:${reliabilityColor(band)}">${esc(band.label)}</span>`);
+  }
+  const meta = bits.join(" &middot; ");
   const link = item.source_url
     ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener noreferrer">${headline}</a>`
     : headline;
@@ -530,6 +672,13 @@ function newsLine(item) {
 // conflict popup's COVERAGE_SHOWN because these are genuinely different
 // stories rather than repeat coverage of one, so truncating loses more.
 const COLLAPSED_SHOWN = 8;
+
+// How many of them the *tooltip* names. A collapsed pin used to hover as one
+// headline plus "+8 more stories here", which answered "how many" and left the
+// question a reader is actually asking -- what are they? -- to a click. Three
+// is what fits: the tooltip is capped at 320px and each headline clamps to two
+// lines, so past three the box is taller than the pins it is covering.
+const COLLAPSED_TOOLTIP_SHOWN = 3;
 
 export function decorateGdelt(d, { offset } = {}) {
   const headline = (d.real_title || "").trim();
@@ -543,9 +692,18 @@ export function decorateGdelt(d, { offset } = {}) {
   const collapsed = d.collapsed || null;
   const extra = collapsed ? collapsed.length - 1 : 0;
 
+  // Hovering a news pin has to answer "what is this story", and for a collapsed
+  // pin that means naming more than the one headline that happened to win the
+  // head slot. The remainder still counts itself, so nothing is hidden -- the
+  // tooltip just stops being a bare tally.
+  const rest = collapsed ? collapsed.slice(1, COLLAPSED_TOOLTIP_SHOWN) : [];
+  const restLeft = extra - rest.length;
   const tooltip = collapsed
     ? `<b>${esc(headline)}</b><br/>${agency ? `${esc(agency)} &middot; ` : ""}${esc(when)}` +
-      `<br/><i>+${extra} more ${extra === 1 ? "story" : "stories"} here</i>`
+      rest.map((c) => `<br/><b>${esc((c.real_title || "").trim())}</b>`).join("") +
+      (restLeft > 0
+        ? `<br/><i>+${restLeft} more ${restLeft === 1 ? "story" : "stories"} here</i>`
+        : "<br/><i>click to open all of them</i>")
     : `<b>${esc(headline)}</b><br/>${agency ? `${esc(agency)} &middot; ` : ""}${esc(when)}`;
 
   const detail = collapsed
@@ -556,10 +714,11 @@ export function decorateGdelt(d, { offset } = {}) {
         ? `<div class="meta">+${collapsed.length - COLLAPSED_SHOWN} more &mdash; zoom in to separate them</div>`
         : '<div class="meta">Zoom in to see these as separate pins.</div>'}`
     : `
-    <p class="news-sentence">${esc(headline)}</p>
+    <h3>${esc(headline)}</h3>
     ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     ${editedNote(d)}
-    <div class="meta">Source: ${agency ? esc(agency) : "GDELT"} &middot; ${esc(when)}${corroboratedNote}</div>`;
+    <div class="meta">Source: ${agency ? esc(agency) : "GDELT"} &middot; ${esc(when)}${corroboratedNote}</div>
+    ${reliabilityBlock(d)}`;
 
   const color = d.corroborated
     ? paletteColor("event.corroborated", CORROBORATED_COLOR)
@@ -614,10 +773,24 @@ export const OFFICIALS_KIND_LABEL = {
   protest: "Protest",
 };
 
+// Which of the three diplomatic tokens an act belongs to. Split out from
+// officialsColor because the size dial reads it too, and a kind that was
+// coloured hostile while being sized neutral would be one act drawn as two.
+function officialsToken(d) {
+  if (COOPERATIVE_KINDS.has(d?.kind)) return "officials.cooperative";
+  if (HOSTILE_KINDS.has(d?.kind)) return "officials.hostile";
+  return "officials.neutral";
+}
+
+const OFFICIALS_TOKEN_COLOR = {
+  "officials.cooperative": OFFICIALS_COOPERATIVE_COLOR,
+  "officials.hostile": OFFICIALS_HOSTILE_COLOR,
+  "officials.neutral": OFFICIALS_NEUTRAL_COLOR,
+};
+
 function officialsColor(d) {
-  if (COOPERATIVE_KINDS.has(d.kind)) return paletteColor("officials.cooperative", OFFICIALS_COOPERATIVE_COLOR);
-  if (HOSTILE_KINDS.has(d.kind)) return paletteColor("officials.hostile", OFFICIALS_HOSTILE_COLOR);
-  return paletteColor("officials.neutral", OFFICIALS_NEUTRAL_COLOR);
+  const token = officialsToken(d);
+  return paletteColor(token, OFFICIALS_TOKEN_COLOR[token]);
 }
 
 // published_at is unix seconds here rather than GDELT's packed string, because
@@ -860,6 +1033,51 @@ export function sanctionDetail(d) {
     </div>`;
 }
 
+// ---------- last position report (AIS + ADS-B) ----------
+//
+// Also above both, and for a reason the other layers don't have: a ship or an
+// aircraft icon can outlive the transmission it stands for. The AIS layer keeps
+// a vessel for 30 minutes after its last report (STALE_AFTER in
+// backend/sources/ais.py) and ADS-B keeps whatever the last successful poll
+// returned for as long as the upstream is failing, so both layers can be
+// drawing a position that was true a while ago -- and every replayed contact is
+// old by definition. Stating the age on the pin is what lets a reader tell a
+// live contact from a remembered one instead of having to trust that the map
+// only draws current things.
+
+/** Beyond this, a fix is old enough to be worth flagging rather than just noting. */
+const STALE_PING_SECONDS = 15 * 60;
+
+function pingAgeSeconds(seconds) {
+  if (!Number.isFinite(seconds)) return null;
+  return Date.now() / 1000 - seconds;
+}
+
+/**
+ * The popup line: how long ago the contact last reported, and the clock time it
+ * reported at. Both, because these cards are not re-rendered while open (see
+ * createMapController.js) so the relative half freezes the moment it is drawn.
+ */
+export function lastPingDetail(seconds) {
+  const age = pingAgeSeconds(seconds);
+  if (age === null) {
+    // Not the same as "not heard from": OpenSky sends state vectors with no
+    // position timestamp, and rows recorded before this field existed have none
+    // either. Saying so beats implying the contact is stale or implying it's live.
+    return '<div class="meta">Last position report: not stated by the feed</div>';
+  }
+  const cls = age > STALE_PING_SECONDS ? "meta stale-ping" : "meta";
+  return `<div class="${cls}">Last position report: ${esc(timeAgoFromUnix(seconds))} &middot; ${esc(utcClockFromUnix(seconds))}</div>`;
+}
+
+/** The same fact for the hover tooltip, where only the age is worth the room. */
+export function lastPingTooltip(seconds) {
+  const age = pingAgeSeconds(seconds);
+  if (age === null) return "";
+  const cls = age > STALE_PING_SECONDS ? "stale-ping" : "ping-age";
+  return `<br/><span class="${cls}">Last ping ${esc(timeAgoFromUnix(seconds))}</span>`;
+}
+
 // ---------- AIS ships ----------
 
 // AIS "Type" (ship type code, from ShipStaticData -- see backend/sources/
@@ -914,7 +1132,8 @@ export function decorateAis(d, { selectedMmsi } = {}) {
   const designated = isSanctioned(d);
   const tooltip = `<b>${esc(d.name || "Unknown vessel")}</b>${typeLabel}` +
     `${designated ? `<br/><span class="sanction-flag">OFAC-designated &middot; ${esc(d.sanctions.program || "")}</span>` : ""}` +
-    `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn`;
+    `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn` +
+    lastPingTooltip(d.updated);
   const detail = `
     <h3>${esc(d.name || "Unknown vessel")}</h3>
     <div class="meta">MMSI ${esc(d.mmsi)}${d.imo ? ` &middot; IMO ${esc(d.imo)}` : ""}${
@@ -923,6 +1142,7 @@ export function decorateAis(d, { selectedMmsi } = {}) {
     ${sanctionDetail(d)}
     <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg;</div>
     <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
+    ${lastPingDetail(d.updated)}
     ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS ship-type code (or USS/USNS naming when static data hasn\'t arrived yet). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
     ${tanker ? '<p class="meta">Identified as an oil/chemical tanker from its AIS ship-type code.</p>' : ""}
     <div class="meta">Source: aisstream.io (AIS)${designated ? " &middot; designations: US Treasury OFAC" : ""}</div>`;
@@ -947,7 +1167,7 @@ export function decorateAis(d, { selectedMmsi } = {}) {
 // promises human-checked coordinates and this does not, so the two must never
 // be mistaken for each other.
 export const OSM_INFRA_STYLE = {
-  military_airfield: { svg: SVG.airfieldMilitary, color: "#ff8c3a", size: 15, label: "Military airfield", token: "osm.military" },
+  military_airfield: { svg: SVG.airfieldMilitary, color: "#ff8c3a", size: 16, label: "Military airfield", token: "osm.military" },
   military_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 14, label: "Military area", token: "osm.military" },
   power_plant: { svg: SVG.powerPlant, color: "#9be15d", size: 14, label: "Power plant", token: "osm.power" },
   border_control: { svg: SVG.borderCrossing, color: "#c9b6ff", size: 13, label: "Border crossing", token: "osm.border" },
@@ -1100,6 +1320,60 @@ export function decorateCableLanding(d, { offset } = {}) {
   };
 }
 
+// ---------- internet outages (backend/sources/outages.py) ----------
+//
+// IODA measures at national resolution and nothing finer. This used to be drawn
+// as a tint over the whole country shape, which was wrong twice over: it read
+// as a fact about the boundary rather than a measurement, and it was the same
+// gesture (a filled country) the selection highlight already owned, so three
+// countries appeared "selected" that nobody had clicked.
+//
+// A pin instead, at the country's representative interior point (see
+// representativePointOf in countryHitTest.js). The point is where the layer is
+// *drawn*, not where anything happened, and the popup leads with that rather
+// than letting the pin imply a precision the data does not have.
+
+export const OUTAGE_STYLE = {
+  svg: SVG.connectivityLoss, color: "#4fd1c5", size: 20,
+  label: "Connectivity disruption", token: "outage.country",
+};
+
+export function outageStyle() {
+  return themedStyle(OUTAGE_STYLE, "outagePoints");
+}
+
+export function outageIconSize() {
+  return outageStyle().size;
+}
+
+export function decorateOutage(d, { offset } = {}) {
+  const style = outageStyle();
+  const name = d.country || d.country_code || "Unknown country";
+  // "ping-slash24.median" -> "ping-slash24": the suffix is IODA's aggregation,
+  // not a fourth signal, and it only makes the list harder to read.
+  const signals = Object.keys(d.signals || {}).map((key) => key.split(".")[0]);
+  const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)} (country-wide)`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(style.label)}</div>
+    <div>IODA composite score: ${fmtNumber(Math.round(d.score || 0))}${
+      d.event_count ? ` &middot; ${esc(d.event_count)} event(s)` : ""
+    }</div>
+    ${signals.length ? `<div class="meta">Seen in: ${signals.map((s) => esc(s)).join(", ")}</div>` : ""}
+    <p class="meta"><b>Measured for the whole country, not for this point.</b> IODA reports no location finer
+      than the national level. This pin sits at the centre of the country's main landmass so the layer has
+      somewhere to draw, and says nothing about where inside it connectivity was lost.</p>
+    <p class="meta">The score is IODA's own composite and is unbounded &mdash; it is a comparison against the
+      same country's normal and against other countries in the same window, not a share of the country
+      offline.</p>
+    <div class="meta">Source: IODA (Internet Outage Detection and Analysis, Georgia Tech)</div>`;
+  return {
+    icon: icon(style.svg, style.color, style.size, 0, "outage-marker", layerOpacity("outagePoints"), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
 // ---------- dark vessels (backend/sources/dark_vessels.py) ----------
 //
 // The only layer on this map derived from our own recorded history rather than
@@ -1119,10 +1393,17 @@ export function darkVesselStyle(kind) {
 }
 
 export function darkVesselIconSize(d) {
-  const style = darkVesselStyle(d.kind);
+  // The *shipped* size, not darkVesselStyle()'s -- that one has already been
+  // through scaledSize, and putting it through a second time squared every
+  // multiplier, so a global icon size of 1.5 drew these hulls at 2.25x.
+  const base = (DARK_VESSEL_STYLE[d?.kind] || DARK_VESSEL_FALLBACK).size || 22;
   // A designated hull is why anyone turned this layer on; it gets the larger
   // pin so it is findable among the ordinary gaps.
-  return scaledSize((style.size || 22) * (d.sanctions ? 1.25 : 1), "darkVessels");
+  return scaledSize(
+    base * (d.sanctions ? 1.25 : 1),
+    "darkVessels",
+    (DARK_VESSEL_STYLE[d?.kind] || DARK_VESSEL_FALLBACK).token
+  );
 }
 
 function decorateAisGap(d) {
@@ -1414,7 +1695,8 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
   const airfield = d.nearest_airfield;
   const tooltip = `<b>${esc(d.callsign || d.icao24)}</b>${aircraftLine ? ` &middot; ${esc(aircraftLine)}` : ` &middot; ${esc(label)}`}` +
     `${emergencyLine ? `<br/><span class="aircraft-emergency">${emergencyLine}</span>` : ""}` +
-    `<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h`;
+    `<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h` +
+    lastPingTooltip(d.updated);
   const detail = `
     <h3>${esc(d.callsign || d.icao24)}</h3>
     ${emergencyLine ? `<div class="aircraft-emergency"><b>Emergency:</b> ${emergencyLine}</div>` : ""}
@@ -1426,6 +1708,7 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
     <div>Altitude: ${esc(Math.round(d.altitude || 0))} m</div>
     <div>Ground speed: ${esc(Math.round((d.velocity || 0) * 3.6))} km/h</div>
     <div>On ground: ${d.on_ground ? "yes" : "no"}</div>
+    ${lastPingDetail(d.updated)}
     ${d.squawk && !d.emergency_squawk ? `<div>Squawk: ${esc(d.squawk)}</div>` : ""}
     ${d.display_limited ? `<div class="meta">Listed as: ${esc(d.display_limited_note || d.display_limited)}</div>` : ""}
     ${airfield
@@ -1453,17 +1736,22 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
 
 // Reference context, not a feed: these do not move and nothing about them is
 // live, so they are drawn quietly and sized by how much traffic the field
-// actually takes. Exported for the control panel's legend.
+// actually takes. The three tiers used to share one glyph and differ only in
+// size, which told a reader nothing unless two fields happened to be adjacent;
+// each now draws its own runway layout (see svgIcons.js). Exported for the
+// control panel's legend.
 export const AIRFIELD_STYLE = {
-  large_airport: { svg: SVG.airfield, size: 17, label: "Large airport", token: "airfield.civil", color: "#7f93a8" },
+  large_airport: { svg: SVG.airfieldLarge, size: 17, label: "Large airport", token: "airfield.civil", color: "#7f93a8" },
   medium_airport: { svg: SVG.airfield, size: 14, label: "Medium airport", token: "airfield.civil", color: "#7f93a8" },
-  small_airport: { svg: SVG.airfield, size: 11, label: "Small airfield", token: "airfield.civil", color: "#7f93a8" },
+  // A point bigger than the old 11: the strip carries no surrounding circle,
+  // so it needs the extra length to stay a runway rather than a tick mark.
+  small_airport: { svg: SVG.airfieldSmall, size: 12, label: "Small airfield", token: "airfield.civil", color: "#7f93a8" },
 };
 const AIRFIELD_FALLBACK = AIRFIELD_STYLE.small_airport;
 // Its own colour, because "which of these is military" is the whole reason an
 // aircraft-watcher turns this layer on.
 export const AIRFIELD_MILITARY_STYLE = {
-  svg: SVG.airfieldMilitary, size: 16, label: "Military by name", token: "airfield.military", color: "#ff8c3a",
+  svg: SVG.airfieldMilitary, size: 17, label: "Military by name", token: "airfield.military", color: "#ff8c3a",
 };
 export const AIRFIELD_ORDER = ["large_airport", "medium_airport", "small_airport"];
 
@@ -1542,10 +1830,7 @@ export const MILITARY_SUBTYPE_STYLE = {
 };
 
 export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
-  const base = d.type === "military"
-    ? MILITARY_SUBTYPE_STYLE[d.subtype] || MILITARY_SUBTYPE_STYLE.joint
-    : INFRA_STYLE[d.type] || INFRA_STYLE.port;
-  const style = themedStyle(base, "infra");
+  const style = themedStyle(infraBaseStyle(d), "infra");
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)}${hot ? " &middot; HOT ZONE" : ""}`;
   const events = nearbyEvents || [];
   const activitySection = hot
@@ -1561,7 +1846,7 @@ export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
     <p class="meta">Source: publicly documented location (open-source reference), approximate.</p>`;
   const cls = `infra-marker${hot ? " infra-hot" : ""}`;
   return {
-    icon: icon(style.svg, style.color, infraIconSize(), 0, cls, layerOpacity("infra"), "", offset),
+    icon: icon(style.svg, style.color, infraIconSize(d), 0, cls, layerOpacity("infra"), "", offset),
     tooltip,
     detail,
   };

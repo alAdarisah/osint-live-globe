@@ -122,6 +122,10 @@ async def _fetch() -> tuple[list[dict], list[dict]]:
 
 async def start():
     state = registry.register("cables", key_configured=True)  # no key required
+    # Refetched once a day, and a failed fetch backs off to the same day, so a
+    # bad boot used to leave the layer empty until tomorrow. The stored copy is
+    # served in the meantime; the fetch below overwrites it when it lands.
+    await storage.warm_reference(state, "cables", "Submarine cables")
     consecutive_failures = 0
     while True:
         ok = False
@@ -132,9 +136,14 @@ async def start():
             state.last_error = None
             ok = True
             log.info("Submarine cables: %d routes, %d landing points", len(cables), len(landings))
-            # Only the landing points are entities with a position; the routes
-            # are lines and have no place in a point store.
+            # Two writes, because this source publishes two shapes. The landing
+            # points are entities with a position and belong in the point store
+            # (that is what puts them on the replay timeline); the routes are
+            # lines, which have no place there, so the served document is also
+            # stored whole -- without that the routes were the one thing this
+            # source collected that never reached Postgres at all.
             await storage.record_snapshot("cable_landings", landings, id_field="id")
+            await storage.record_reference("cables", state.data)
             await storage.record_source_health("cables", len(cables), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)

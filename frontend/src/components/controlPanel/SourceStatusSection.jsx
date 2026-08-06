@@ -1,8 +1,29 @@
 export default function SourceStatusSection({ health }) {
-  const rows = Object.entries(health).filter(([name]) => name !== "owm_weather"); // driven into WeatherSection instead, not a polled source
+  // /api/health carries the per-source states plus an `alerts` array from the
+  // cache worker (see backend/cacheworker). Filtering on shape rather than on a
+  // list of names: anything without an item_count is not a source row, so a
+  // future addition to that payload can't render as a source with undefined
+  // everything.
+  const rows = Object.entries(health).filter(
+    ([name, info]) => name !== "owm_weather" && info && typeof info === "object" && "item_count" in info,
+  ); // owm_weather is driven into WeatherSection instead, not a polled source
+  const alerts = Array.isArray(health.alerts) ? health.alerts : [];
 
   return (
     <>
+      {alerts.length > 0 && (
+        <>
+          <h2>Alerts</h2>
+          <ul id="alertList">
+            {alerts.map((alert) => (
+              <li key={`${alert.subject}:${alert.condition}`}>
+                <span className={`dot ${alert.severity === "critical" ? "err" : "warn"}`} />{" "}
+                {alert.subject.toUpperCase()}: {alert.detail}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       <h2>Source status</h2>
       <ul id="healthList">
         {rows.map(([name, info]) => {

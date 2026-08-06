@@ -1,8 +1,8 @@
-# API-only backend image. Unlike the root Dockerfile (which bakes the
-# frontend build in for the single-container Render deploy), this one ships
-# no frontend/dist at all -- app.py detects that and serves the API alone,
-# with the React app running as its own nginx container that proxies /api
-# here (see docker-compose.yml and frontend/nginx.conf).
+# The Python image, shared by the backend and the ingest process -- same
+# dependencies, different CMD (see docker-compose.yml). It ships no
+# frontend/dist at all: app.py detects that and serves the API alone, with the
+# React app running as its own nginx container that proxies /api here (see
+# frontend/nginx.conf).
 FROM python:3.12-slim
 
 WORKDIR /app

@@ -31,7 +31,7 @@ const CARD_MARGIN = 14;
 const DEFAULT_OPEN = { profile: true, conflict: true };
 const STORAGE_KEY = "osint-country-card-accordion";
 
-export default function CountryInfoCard({ country, onClose }) {
+export default function CountryInfoCard({ country, onClose, borderEdit }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN, STORAGE_KEY);
   const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel("countryInfoCard");
 
@@ -67,6 +67,21 @@ export default function CountryInfoCard({ country, onClose }) {
           replaces the header's own class. */}
       <div {...handleProps} className={`country-info-header ${handleProps.className || ""}`}>
         <span className="country-info-name">{country.name}</span>
+        {/* Deliberately inside the drag handle but with its own pointerdown
+            guard: useDraggablePanel already ignores a press that starts on a
+            button (its escape hatch lists button/a/input/select/textarea), so
+            this stays clickable while the rest of the header still drags. */}
+        {borderEdit?.offered && (
+          <button
+            type="button"
+            className={`country-info-edit${borderEdit.active ? " active" : ""}`}
+            onClick={borderEdit.active ? borderEdit.onEnd : borderEdit.onBegin}
+            disabled={!borderEdit.active && !!borderEdit.blockedReason}
+            title={borderEdit.blockedReason || "Drag this country's boundary"}
+          >
+            {borderEdit.active ? "Done" : "Edit border"}
+          </button>
+        )}
         <button type="button" className="country-info-close" onClick={onClose} aria-label="Close">
           &times;
         </button>

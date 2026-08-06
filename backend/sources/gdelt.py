@@ -508,6 +508,50 @@ def _parse_article(html_text: str) -> Article:
     return Article(title=title, description=description, excerpt=excerpt, dateline=dateline)
 
 
+def _decode_page(resp: httpx.Response) -> str:
+    """The page's text, retrying the decode when the declared charset was wrong.
+
+    httpx decodes `resp.text` using the charset the server declares. A page that
+    says UTF-8 while serving cp1252 punctuation -- curly quotes and apostrophes,
+    which is most of what a headline contains besides letters -- produces U+FFFD
+    for each one, and that is unrecoverable afterwards:
+
+        FAA investigates air ?safety incident? involving Trump?s Marine One
+
+    _fix_mojibake cannot help here and correctly declines to try. It repairs the
+    opposite failure, text that survived the decode as the wrong characters
+    ("â€™"), and its round-trip refuses any result still containing U+FFFD.
+    The repair has to happen at the decode, from the original bytes.
+
+    Only ever a fallback: the declared charset is right the overwhelming
+    majority of the time, so this reruns only when the first decode actually
+    produced replacement characters, and keeps the retry only when it produces
+    none.
+
+    latin-1 is deliberately *not* in the retry list, for the reason
+    _decode_export spells out at length: it can decode any byte at all, so it
+    never fails and would happily turn every legitimate multi-byte sequence on
+    a genuinely UTF-8 page into mojibake on the strength of one bad byte.
+    cp1252 has undefined bytes and can therefore say no, which is what makes it
+    usable as evidence rather than just as a decoder of last resort.
+    """
+    text = resp.text
+    if "�" not in text:
+        return text
+    # UTF-8 first: bytes that are valid UTF-8 came out wrong because the server
+    # declared something else, and re-reading them as UTF-8 is the whole repair.
+    # cp1252 second: bytes that are *not* valid UTF-8 on a page that claimed to
+    # be are almost always Windows punctuation.
+    for codec in ("utf-8", "cp1252"):
+        try:
+            retried = resp.content.decode(codec)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if "�" not in retried:
+            return retried
+    return text
+
+
 async def _fetch_article(client: httpx.AsyncClient, url: str) -> Article:
     global _article_cache_bytes
     cached = _ARTICLE_CACHE.get(url)
@@ -518,7 +562,7 @@ async def _fetch_article(client: httpx.AsyncClient, url: str) -> Article:
         try:
             resp = await client.get(url, headers=_FETCH_HEADERS, timeout=6, follow_redirects=True)
             if resp.status_code == 200:
-                article = _parse_article(resp.text)
+                article = _parse_article(_decode_page(resp))
         except Exception:  # noqa: BLE001 - a slow/broken site just means no article
             pass
     _ARTICLE_CACHE[url] = article
@@ -688,7 +732,13 @@ def _republish() -> None:
     if _news_state is None or _conflict_state is None or _officials_state is None:
         return  # backfill fired before start() finished registering
     rows = list(_ACCUMULATED.values())
-    _news_state.data = _news_slice(rows)
+    # Re-scored, not carried over: the scrape that just finished is exactly what
+    # changes the answer -- it attaches the headline and can repoint source_url
+    # at the Mentions-table article, which is the outlet the score is mostly
+    # about.
+    news = _news_slice(rows)
+    _score_news(news)
+    _news_state.data = news
     _conflict_state.data = rows
     _officials_state.data = list(_ACCUMULATED_OFFICIALS.values())
 
@@ -1233,17 +1283,53 @@ def _news_slice(rows: list[dict]) -> list[dict]:
     )[:NEWS_MAX_ITEMS]
 
 
+def _score_news(items: list[dict]) -> None:
+    """Attach the reliability fields the News popup reads.
+
+    A news pin used to say who published a story and how long ago, and nothing
+    at all about whether that publisher is a wire service or a domain registered
+    last week -- while the conflict pin sitting next to it, often coded from the
+    very same article, showed a scored "How much to trust this" panel. Same
+    evidence, two different standards of disclosure.
+
+    Scored by the same module the conflict layer uses, so the two bars are the
+    same measurement. See reliability.assess_news for what it translates.
+
+    Mutates in place. These dicts are the accumulator's own -- _news_slice hands
+    back references, not copies -- which is deliberate and is how corroboration
+    is already attached: the fields survive into the next poll and are simply
+    recomputed over it.
+    """
+    # Imported here rather than at module scope: reliability.py reads
+    # MAX_REPORT_LAG_DAYS out of this module, and a top-level import in both
+    # directions cannot resolve -- whichever loads first sees the other half
+    # built.
+    from backend.sources import reliability
+
+    for item in items:
+        item.update(reliability.assess_news(item))
+
+
 def _accumulate(store: dict[str, dict], rows: list[dict]) -> None:
     """Merge this poll's rows into a persistent accumulator.
 
     The windows overlap by design (a 120-minute read every 15 minutes), so most
     rows arriving here are already held. What survives from the prior copy is
     everything that was *earned* over time rather than published in the file:
-    a scraped headline, and the running outlet tally.
+    a scraped headline, the running outlet tally, and the first-seen stamp.
     """
+    now = time.time()
     for ev in rows:
         key = _conflict_key(ev)
         prior = store.get(key)
+        # When we first saw this row. Stamped here rather than downstream in
+        # event_fusion so that it rides into the gdelt_conflict snapshot and
+        # therefore survives a restart: rehydrating without it made every
+        # restored row report an ingest time of "whenever the process booted",
+        # which is not a fact about the event. Distinct from date_added (when
+        # GDELT ingested the article) and from dt (when it happened) -- this is
+        # the only sub-day timestamp that belongs to this application.
+        ev["_seen_at"] = prior.get("_seen_at", now) if prior else now
         if prior:
             if prior.get("real_title") and not ev.get("real_title"):
                 # Carry an already-backfilled title (and the URL it came from)
@@ -1346,6 +1432,9 @@ async def _fetch() -> tuple[list[dict], list[dict], list[dict]]:
         matches = _corroborated_by(ev, acled_rows)
         ev["corroborated"] = bool(matches)
         ev["corroborated_by"] = matches
+    # After the corroboration pass, not before: a matching ACLED record is one
+    # of the things the score is made of.
+    _score_news(result)
 
     return result, conflict_rows, officials_rows
 

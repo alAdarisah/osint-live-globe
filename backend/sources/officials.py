@@ -390,6 +390,10 @@ async def _wait_for_inputs() -> None:
 
 async def start():
     state = registry.register("officials", key_configured=True)  # no key required
+    # Same reasoning as event_fusion's: this layer is a fusion of two feeds
+    # that each have to arrive first, so it is empty for the opening minute of
+    # a restart unless the previous run's result is served meanwhile.
+    await storage.warm_points(state, "officials", "Officials & diplomacy")
     await _wait_for_inputs()
     while True:
         try:
