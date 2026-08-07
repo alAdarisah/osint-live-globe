@@ -11,7 +11,7 @@
 // (days-wide) windows, not the FIRMS/cities scale this comment warns about.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJson, urlForRegion } from "../api";
-import { OSM_INFRA_MIN_ZOOM } from "../map/createMapController";
+import { OSM_INFRA_MIN_ZOOM, GFW_DETECTIONS_MIN_ZOOM } from "../map/createMapController";
 
 const BOOT_SOURCES = [
   { key: "countries", label: "Country boundaries" },
@@ -94,6 +94,37 @@ const POLL_CONFIG = [
   // the same document. Not zoom-gated despite attaching to a zoom-gated layer:
   // it is ~180 kB once, and the airfields toggle can be switched on at any time.
   { key: "airfieldActivity", url: "/api/airfield-activity", intervalMs: 30 * 60000 },
+  // Global Fishing Watch's AIS disabling events. Refetched server-side every six
+  // hours, and the batch itself is five or more days behind, so the hourly poll
+  // is only about a long-lived tab noticing a new batch. Most of these return
+  // 304 on the ETag.
+  { key: "gfwGaps", url: "/api/gfw-gaps", intervalMs: 60 * 60000 },
+  // Radar and optical vessel detections, same six-hour server cadence -- but the
+  // only one of these eight large enough to earn osmInfra's fetch gate above.
+  // Detections cluster inside the AIS watch boxes, so the payload is far denser
+  // than its row count suggests, and below GFW_DETECTIONS_MIN_ZOOM it would be
+  // fetched and parsed purely to be filtered back out.
+  { key: "gfwDetections", url: "/api/gfw-detections", intervalMs: 60 * 60000, minZoom: GFW_DETECTIONS_MIN_ZOOM },
+  // EASA conflict-zone bulletins. Refetched twice a day server-side; an hour is
+  // the finest resolution the server can honestly offer, and a newly issued
+  // bulletin is the kind of thing worth arriving inside the hour.
+  { key: "czib", url: "/api/czib", intervalMs: 60 * 60000 },
+  // GDACS flood alerts, refetched every 30 minutes server-side. Same
+  // server-cadence-over-three ratio darkVessels uses above.
+  { key: "floods", url: "/api/floods", intervalMs: 10 * 60000 },
+  // Two published gazetteers, neither of which is a feed. NGA refetches monthly
+  // and Global Dam Watch has not moved since 2024 -- these are polled only so a
+  // tab left open across a release picks it up.
+  { key: "ports", url: "/api/ports", intervalMs: 6 * 60 * 60000 },
+  { key: "dams", url: "/api/dams", intervalMs: 6 * 60 * 60000 },
+  // Cross-border electricity. Swept hourly server-side; the underlying 15-minute
+  // metering resolution is invisible to a client sitting behind that sweep.
+  { key: "energyFlows", url: "/api/energy-flows", intervalMs: 20 * 60000 },
+  // FAO's balance sheets and price index. The publishers issue these about ten
+  // times a year and monthly respectively -- same slot and same reasoning as
+  // humanitarian above.
+  { key: "foodTrade", url: "/api/food-trade", intervalMs: 60 * 60000 },
+  { key: "foodPriceIndex", url: "/api/food-price-index", intervalMs: 60 * 60000 },
 ];
 
 /**

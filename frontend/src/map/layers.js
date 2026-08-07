@@ -268,6 +268,28 @@ export function createEntityClusterGroups(map) {
     // the country tint it replaced was unconditional too -- a national blackout
     // is not something a reader should have to switch on to find out about.
     outagePoints: L.layerGroup().addTo(map),
+    // Global Fishing Watch's own record of AIS disabling (gfw_gaps.py). Off by
+    // default for the same reason darkVessels is: every record is an inference
+    // about intent. That the inference is somebody else's does not change what
+    // kind of claim it is.
+    gfwGaps: L.layerGroup(),
+    // Radar and optical vessel detections (gfw_detections.py). Off by default
+    // for a different reason -- these are measurements, but a scene weeks old
+    // drawn beside live AIS is exactly the confusion the layer risks, so it
+    // should appear because a reader asked for it.
+    gfwDetections: L.layerGroup(),
+    // EASA conflict-zone bulletins (czib.py). Off by default: a standing
+    // regulatory advisory is reference for a specific question rather than
+    // something to watch, the same footing the cables layer sits on.
+    czib: L.layerGroup(),
+    // GDACS flood alerts (floods.py). Its own key rather than a third kind
+    // inside hazards -- see the decision record in that module's docstring.
+    floods: L.layerGroup(),
+    // NGA World Port Index (ports.py). Reference furniture for the vessels
+    // drawn above it, off by default and gated by zoom.
+    ports: L.layerGroup(),
+    // Global Dam Watch (dams.py). Reference material a reader goes looking for.
+    dams: L.layerGroup(),
   };
   return { groups };
 }

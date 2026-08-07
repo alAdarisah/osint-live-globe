@@ -44,6 +44,15 @@ export const SETTINGS_LAYERS = [
   { key: "cables", label: "Submarine cables", zoomGate: null },
   { key: "launches", label: "Orbital launches", zoomGate: null },
   { key: "osmInfra", label: "Infrastructure (OpenStreetMap)", zoomGate: 9 },
+  { key: "gfwGaps", label: "AIS disabling (GFW)", zoomGate: 5 },
+  // The one layer here whose zoom gate also moves the *fetch* -- see
+  // GFW_DETECTIONS_MIN_ZOOM in createMapController.js and the minZoom entry in
+  // useOsintData.js's POLL_CONFIG, which read the same constant.
+  { key: "gfwDetections", label: "Satellite vessel detections (GFW)", zoomGate: 6 },
+  { key: "czib", label: "Airspace warnings (EASA CZIB)", zoomGate: null },
+  { key: "floods", label: "Floods (GDACS)", zoomGate: 3 },
+  { key: "ports", label: "Ports (NGA WPI)", zoomGate: 5 },
+  { key: "dams", label: "Dams & reservoirs (GDW)", zoomGate: 7 },
 ];
 
 const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null };

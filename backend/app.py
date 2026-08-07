@@ -516,6 +516,25 @@ async def gfw_gaps_endpoint(request: Request, region: str | None = None):
     return _cached_source_response(request, "gfw_gaps", region, regions.filter_points)
 
 
+@app.get("/api/gfw-detections")
+async def gfw_detections_endpoint(request: Request, region: str | None = None):
+    """Radar and optical vessel detections as Global Fishing Watch publishes them.
+
+    The only thing in this project's maritime stack entitled to say *detected*:
+    an instrument measured a hull, whether or not anyone aboard wanted it
+    measured (see backend/sources/gfw_detections.py). Whether that hull was
+    also broadcasting AIS is a second and separate claim -- GFW's correlation,
+    not a measurement -- and the layer keeps the two apart.
+
+    Note what must not be read from an empty box here. The v3 API ships no
+    coverage or footprint dataset, so every record carries
+    `footprint_known: False` and this endpoint cannot distinguish water that
+    was imaged and found empty from water that was never imaged. Absence is
+    not evidence of absence at sea.
+    """
+    return _cached_source_response(request, "gfw_detections", region, regions.filter_points)
+
+
 # Which payload fields travel with a track, per kind.
 #
 # Named rather than serving the whole payload: entity_history rows are the full

@@ -11,13 +11,20 @@ const COUNT_KEYS = [
   "aisCivilian", "aisNavy", "aisTanker", "adsbCivilian", "adsbMilitary",
   "infraMilitary", "infraRefinery", "infraLng", "infraPort", "infraDesalination",
   "infraNuclear", "infraFab", "infraPipelineNode", "pipelineRoutes",
+  "gfwGaps", "gfwDetections", "gfwDetMatched", "gfwDetUnmatched",
+  "czib", "czibActive", "czibWithdrawn", "floods", "floodsCurrent",
+  "ports", "portsOil", "dams", "damsLarge",
 ];
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
 );
 // eventsCapped is a count rather than a flag -- how many events capBySeverity
 // kept at the current zoom, 0 when it kept everything. See createMapController.
-const EMPTY_ZOOM_NOTES = { adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false, ais: false, jamming: false, officials: false, eventsCapped: 0 };
+const EMPTY_ZOOM_NOTES = {
+  adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false,
+  ais: false, jamming: false, officials: false, eventsCapped: 0,
+  gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
+};
 
 const NO_BORDER_EDIT = { active: false, countryKey: null, linkMode: true, canUndo: false };
 

@@ -85,6 +85,18 @@ import {
   osmInfraIconSize,
   decorateOutage,
   outageIconSize,
+  decorateGfwGap,
+  gfwGapIconSize,
+  decorateGfwDetection,
+  gfwDetectionIconSize,
+  decorateCzib,
+  czibIconSize,
+  decorateFlood,
+  floodIconSize,
+  decoratePort,
+  portIconSize,
+  decorateDam,
+  damIconSize,
 } from "./decorators";
 import { setIconTheme, themedStyle } from "./iconTheme";
 import { placeAll } from "./declutter";
@@ -145,16 +157,39 @@ const CABLE_LANDINGS_MIN_ZOOM = 5;
 // not poll /api/osm-infrastructure at all until the map is this deep, so the
 // gate has to be one constant rather than two that can drift apart.
 export const OSM_INFRA_MIN_ZOOM = 9;
+// Satellite vessel detections are concentrated inside the eight AIS watch boxes,
+// so they are far denser than their count suggests. Exported for the same reason
+// OSM_INFRA_MIN_ZOOM is: useOsintData.js does not fetch /api/gfw-detections at
+// all below this zoom, and one constant cannot drift from itself.
+export const GFW_DETECTIONS_MIN_ZOOM = 6;
 const MARKER_LAYER_MIN_ZOOM = {
   events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictHistory: 4,
   officials: OFFICIALS_MIN_ZOOM, hazards: HAZARDS_MIN_ZOOM,
+  // GDACS's flood events, on the same gate as its sibling hazards layer so the
+  // two behave identically in the panel group they share.
+  floods: HAZARDS_MIN_ZOOM,
   // Hard gate: the served slice is still ~40k airfields worldwide, which below
   // this zoom is a texture rather than a layer.
   airports: AIRPORTS_MIN_ZOOM, cableLandings: CABLE_LANDINGS_MIN_ZOOM,
   osmInfra: OSM_INFRA_MIN_ZOOM,
+  gfwDetections: GFW_DETECTIONS_MIN_ZOOM,
+  // A 30-day global window of AIS disabling events is ~20k rows. Deeper than
+  // the conflict layers because a gap is not an incident report; shallower than
+  // airfields, whose gate is the template for this one.
+  gfwGaps: 5,
+  // Same band as cable landings: a place layer that is context for the vessels
+  // drawn above it. Deliberately shallower than airports, which has a hundred
+  // times as many rows.
+  ports: 5,
+  // Same band as airfields. 3,555 barriers clipped to eleven theatres is locally
+  // very dense, and everything in the popup -- capacity, height, river -- is
+  // structure-scale detail that means nothing at regional zoom.
+  dams: 7,
   // Deliberately absent: darkVessels has no zoom gate. There are only ever a
   // handful worldwide, and "somewhere a designated tanker went dark" is exactly
-  // the thing worth seeing at world zoom.
+  // the thing worth seeing at world zoom. czib is absent for the same reason --
+  // "a regulator has told airlines to stop flying through a national airspace"
+  // is precisely a world-zoom fact, and there are only a few dozen of them.
 };
 // Gates only the interactive per-point FIRMS layer -- the heat layer itself
 // always stays on regardless of zoom.
@@ -185,6 +220,7 @@ const ID_FIELD = {
   events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24", conflictHistory: "id",
   officials: "id", hazards: "id", airports: "id", darkVessels: "id", cableLandings: "id",
   launches: "id", osmInfra: "id",
+  gfwGaps: "id", gfwDetections: "id", czib: "id", floods: "id", ports: "id", dams: "id",
   // One pin per country, so the country code *is* the identity -- a country
   // whose score changes between polls has to update its existing marker rather
   // than be torn down and rebuilt under a new key.
@@ -196,6 +232,8 @@ const DECORATORS = {
   hazards: decorateHazard, airports: decorateAirport, darkVessels: decorateDarkVessel,
   cableLandings: decorateCableLanding, launches: decorateLaunch,
   osmInfra: decorateOsmInfra, outagePoints: decorateOutage,
+  gfwGaps: decorateGfwGap, gfwDetections: decorateGfwDetection,
+  czib: decorateCzib, floods: decorateFlood, ports: decoratePort, dams: decorateDam,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
@@ -205,6 +243,8 @@ const ICON_SIZE_FOR = {
   officials: officialsIconSize, hazards: hazardIconSize, airports: airportIconSize,
   darkVessels: darkVesselIconSize, cableLandings: cableLandingIconSize,
   launches: launchIconSize, osmInfra: osmInfraIconSize, outagePoints: outageIconSize,
+  gfwGaps: gfwGapIconSize, gfwDetections: gfwDetectionIconSize,
+  czib: czibIconSize, floods: floodIconSize, ports: portIconSize, dams: damIconSize,
 };
 
 const REGION_FLY_DURATION = 1.2;
@@ -214,6 +254,11 @@ const REGION_FLY_DURATION = 1.2;
 const COUNTRY_CARD_FEEDS = new Set([
   "events", "gdelt", "officials", "escalation", "conflictStats", "conflictDistricts",
   "outages", "humanitarian",
+  // Three country-keyed feeds that draw no pin of their own: a cross-border
+  // electricity flow is an edge between two countries rather than a place, and
+  // a marketing-year balance sheet is a forecast about a whole state. Both are
+  // read only by the country card and the choropleth.
+  "energyFlows", "foodTrade", "foodPriceIndex",
 ]);
 
 // leaflet.heat's setLatLngs() always calls its own redraw(), which
@@ -331,6 +376,22 @@ export function createMapController(container, initial, callbacks) {
     // (see backend/sources/airfield_activity.py) rather than fetched, and
     // attached to existing pins rather than drawn as a layer.
     airfieldActivity: {},
+    // Global Fishing Watch's two published maritime layers. Kept apart from
+    // darkVessels above on purpose: that array is this app's inference from its
+    // own three-day AIS history, these are another organisation's findings
+    // arriving five or more days late, and the two can never describe the same
+    // event. Merging them would manufacture a corroboration that does not exist.
+    gfwGaps: [], gfwDetections: [],
+    // EASA airspace bulletins and GDACS flood alerts. Both country- or
+    // region-precision, both drawn ringed.
+    czib: [], floods: [],
+    // Two published gazetteers: harbours (NGA) and barriers (Global Dam Watch).
+    // Neither is a feed and nothing in either is current.
+    ports: [], dams: [],
+    // Country-keyed and drawn nowhere, same footing as `humanitarian` above.
+    // energyFlows is keyed by ISO2 (Energy-Charts' own key), foodTrade by ISO3,
+    // and foodPriceIndex is a single global document rather than a country map.
+    energyFlows: {}, foodTrade: {}, foodPriceIndex: {},
   };
   // ais/aisNavy/aisTanker/adsb/adsbMilitary are no longer here -- their
   // markers live inside entityWebglLayer's own per-bucket entry maps now
@@ -340,6 +401,8 @@ export function createMapController(container, initial, callbacks) {
     conflictHistory: new Map(), officials: new Map(), hazards: new Map(), airports: new Map(), darkVessels: new Map(),
     cableLandings: new Map(), launches: new Map(), osmInfra: new Map(),
     outagePoints: new Map(),
+    gfwGaps: new Map(), gfwDetections: new Map(),
+    czib: new Map(), floods: new Map(), ports: new Map(), dams: new Map(),
   };
   // Keyed by event id, same as markersByKey.events, so a circle and its pin
   // are added and dropped by the same diff against the same visible set.
@@ -1183,6 +1246,10 @@ export function createMapController(container, initial, callbacks) {
     osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
     outagePoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
+    gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
+    czib: 0, czibActive: 0, czibWithdrawn: 0,
+    floods: 0, floodsCurrent: 0,
+    ports: 0, portsOil: 0, dams: 0, damsLarge: 0,
   };
   // Total number loaded from the backend for each layer, independent of the
   // current viewport/zoom filtering that `counts` reflects -- shown in the
@@ -1200,6 +1267,10 @@ export function createMapController(container, initial, callbacks) {
     osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
     outagePoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
+    gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
+    czib: 0, czibActive: 0, czibWithdrawn: 0,
+    floods: 0, floodsCurrent: 0,
+    ports: 0, portsOil: 0, dams: 0, damsLarge: 0,
   };
   // backend/infrastructure.py site "type" -> the counts/totals key it rolls
   // up into, so Critical Infrastructure can show a per-type sub-ticker (see
@@ -1212,6 +1283,8 @@ export function createMapController(container, initial, callbacks) {
   const zoomNotes = {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
+    gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
+    // czib is deliberately absent: it has no gate, so it can never have a note.
     // Not a zoom gate but a zoom-dependent thinning, so it travels with the
     // rest: how many events capBySeverity kept, or 0 when it kept everything.
     eventsCapped: 0,
@@ -1255,6 +1328,41 @@ export function createMapController(container, initial, callbacks) {
       // question nobody asked.
       of: (item) => (item.upcoming ? "launchesUpcoming" : null),
     },
+    gfwDetections: {
+      keys: ["gfwDetMatched", "gfwDetUnmatched"],
+      // The split that is the whole point of the layer: a matched detection is
+      // a ship the AIS layer is already drawing, an unmatched one is a hull an
+      // instrument saw with nothing in the transponder picture to pair it with.
+      of: (item) => (item.matched ? "gfwDetMatched" : "gfwDetUnmatched"),
+    },
+    czib: {
+      // Withdrawn bulletins are drawn, not filtered out -- so the honest way to
+      // stop them reading as live warnings is to count them separately rather
+      // than to hide them and leave the row saying 4 (33) with no explanation.
+      keys: ["czibActive", "czibWithdrawn"],
+      of: (item) => (item.active ? "czibActive" : "czibWithdrawn"),
+    },
+    floods: {
+      // Most of what GDACS publishes at any moment is over. Closed events roll
+      // up into nothing, the same way a flown launch does, so this ticker
+      // answers "how many are actually happening".
+      keys: ["floodsCurrent"],
+      of: (item) => (item.is_current ? "floodsCurrent" : null),
+    },
+    ports: {
+      keys: ["portsOil"],
+      of: (item) => (item.oil_terminal ? "portsOil" : null),
+    },
+    dams: {
+      keys: ["damsLarge"],
+      // 100 million m3 is Global Dam Watch's own threshold, the one its release
+      // notes count by -- not a cutoff this app invented.
+      of: (item) => (Number(item.capacity_mcm) >= 100 ? "damsLarge" : null),
+    },
+    // gfwGaps deliberately has none. intentional_disabling is true on every row
+    // in the feed, so a ticker reading "19,976 of 19,976 judged deliberate"
+    // would describe GFW's inclusion criterion rather than distinguish anything.
+    // It is said once, in the layer's fold.
   };
   function reportCounts() {
     const totalsSuffixed = {};
@@ -1315,6 +1423,35 @@ export function createMapController(container, initial, callbacks) {
     // Below the curated infrastructure it sits alongside: where the two
     // disagree about the same site, the hand-checked coordinate keeps its pixel.
     adsbCivilian: 20, cities: 10, airports: 5, cableLandings: 15, osmInfra: 25,
+    // The strongest maritime coordinate on this map, and the only one that is a
+    // measurement rather than a broadcast or an inference: it outranks every
+    // guess drawn near it. Below conflict events, which is the layer this map
+    // is primarily for.
+    gfwDetections: 97,
+    // Directly under darkVessels: the same class of claim -- a real last-known
+    // position that an inference is drawn from -- but arriving five or more days
+    // late, so where the two want the same pixel the live one holds it.
+    gfwGaps: 93,
+    // Below the curated infrastructure list it sits beside, because 85% of these
+    // coordinates are snapped to a river network rather than published for the
+    // structure. Far above osmInfra all the same: this is a peer-reviewed
+    // dataset that grades its own rows, not crowd-sourced geometry.
+    dams: 75,
+    // Below hazards, above news. A quake epicentre is an instrument solution
+    // worth defending; a GLOFAS basin centroid is a modelled point with no true
+    // position to defend. Above machine-coded reporting because it is still a
+    // structured publisher record.
+    floods: 41,
+    // Below outage pins, above airfields. Both are country-precision drawing
+    // decisions, but an outage pin is at least placed by the country's own
+    // geometry -- this one sits at the population-weighted mean of the country's
+    // towns, which is even less about the airspace the bulletin covers.
+    czib: 7,
+    // Just above airfields. Not tied with them because the Dark Vessels layer's
+    // ship-to-ship popup says the pair is away from any port on the curated
+    // list, and a port pin nudged off its own harbour would visually contradict
+    // the pin making the claim.
+    ports: 6,
     // Below every layer whose coordinate means something. An outage pin's
     // position is a drawing decision, not a measurement (see decorateOutage),
     // so where two pins want the same pixel this is the one that should move.
@@ -2116,7 +2253,9 @@ export function createMapController(container, initial, callbacks) {
   // The feeds a country fill can be computed from. `countries` is absent on
   // purpose: renderCountries repaints itself after rebuilding the shapes, and
   // adding it here would run the pass twice on every boundary refresh.
-  const CHOROPLETH_FEEDS = new Set(["conflictStats", "humanitarian", "outages"]);
+  const CHOROPLETH_FEEDS = new Set([
+    "conflictStats", "humanitarian", "outages", "energyFlows", "foodTrade",
+  ]);
 
   /**
    * Recompute the selected metric over the current features and repaint.
@@ -2634,6 +2773,16 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("outagePoints");
     renderMarkerLayer("launches");
     renderMarkerLayer("osmInfra");
+    // Same reasoning as hazards above -- all six bounds-filter to the viewport
+    // and none polls faster than every ten minutes, so without a pan/zoom
+    // re-render each would sit empty everywhere the map moved to since its last
+    // poll. The slowest here refreshes every six hours.
+    renderMarkerLayer("gfwGaps");
+    renderMarkerLayer("gfwDetections");
+    renderMarkerLayer("czib");
+    renderMarkerLayer("floods");
+    renderMarkerLayer("ports");
+    renderMarkerLayer("dams");
     renderMarkerLayer("ais");
     renderMarkerLayer("adsb");
     renderFirms();
@@ -2951,8 +3100,14 @@ export function createMapController(container, initial, callbacks) {
       // dict (hdx_conflict_stats.py) and escalation is a ranked region list
       // (escalation.py); both are read straight out of `raw` by popups.js
       // when a country card is built.
+      // energyFlows (ISO2), foodTrade (ISO3) and foodPriceIndex (one global
+      // document) join the same branch for the same reason: a cross-border
+      // electricity flow is an edge between two countries and a marketing-year
+      // balance sheet is a forecast about a whole state, so neither has a point
+      // to draw. Both surface as a country-card section and a country fill.
       else if (key === "conflictStats" || key === "escalation" || key === "conflictDistricts"
-             || key === "humanitarian") {
+             || key === "humanitarian" || key === "energyFlows" || key === "foodTrade"
+             || key === "foodPriceIndex") {
         /* reference data read on demand by popups.js -- no marker layer */
       }
       // Keyed by airfield ident, not a point layer of its own: it re-sizes and

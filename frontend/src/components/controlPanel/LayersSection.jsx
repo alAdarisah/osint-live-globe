@@ -5,6 +5,8 @@ import {
   AIRCRAFT_FLAG_STYLE, AIRCRAFT_FLAG_ORDER, AIRFIELD_STYLE, AIRFIELD_ORDER, AIRFIELD_MILITARY_STYLE,
   SANCTION_COLOR, DARK_VESSEL_STYLE, DARK_VESSEL_ORDER, CABLE_LANDING_STYLE, CABLE_PLANNED_STYLE,
   LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
+  GFW_GAP_STYLE, GFW_DETECTION_STYLE, GFW_DETECTION_ORDER,
+  CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR, CONFIDENCE_THRESHOLD } from "../../map/severity";
 import LayerIcon from "./LayerIcon";
@@ -82,12 +84,22 @@ function activeCount(layerVisibility, keys) {
 // not a layer in its own right, and the group heading counts layers.
 const GROUP_LAYERS = {
   conflict: ["events", "conflictHistory", "officials"],
-  traffic: ["aisNavy", "aisTanker", "aisCivilian", "darkVessels", "adsbMilitary", "adsbCivilian", "adsbFlagged"],
+  // The two GFW layers sit directly after darkVessels: same subject, different
+  // publisher, and a reader comparing this map's inference against somebody
+  // else's record should not have to hunt for the second one.
+  traffic: [
+    "aisNavy", "aisTanker", "aisCivilian", "darkVessels", "gfwGaps", "gfwDetections",
+    "adsbMilitary", "adsbCivilian", "adsbFlagged",
+  ],
   // Airfields sit with infrastructure rather than with the aircraft layers:
   // it is a place layer, and the aircraft that need it already get their
   // nearest field named inside their own popup.
-  ground: ["infra", "osmInfra", "airports", "cables", "firms", "jamming"],
-  hazards: ["hazards"],
+  ground: ["infra", "osmInfra", "airports", "ports", "dams", "cables", "firms", "jamming"],
+  // Its own group rather than a ninth row under traffic: a regulator's ruling
+  // about a volume of airspace is neither traffic nor infrastructure, and
+  // traffic already carries nine layers.
+  airspace: ["czib"],
+  hazards: ["hazards", "floods"],
   space: ["satellites", "launches"],
 };
 
@@ -455,6 +467,100 @@ export default function LayersSection({
           </div>
         </LayerDetails>
 
+        <label className="layer-row" data-layer="gfwGaps">
+          <input
+            type="checkbox"
+            checked={layerVisibility.gfwGaps}
+            onChange={(e) => onToggleLayer("gfwGaps", e.target.checked)}
+          />
+          <LayerIcon svg={GFW_GAP_STYLE.svg} color={GFW_GAP_STYLE.color} token={GFW_GAP_STYLE.token} />
+          {" "}AIS Disabling (Global Fishing Watch) <span className="inferred-tag">GFW&apos;s finding</span>
+          <span className="count">{counts.gfwGaps} ({counts.gfwGapsTotal})</span>
+        </label>
+        <div id="gfwGapsZoomNote" className={`sublegend${zoomNotes.gfwGaps ? " visible" : ""}`}>
+          Zoom in to show AIS disabling events
+        </div>
+        <LayerDetails id="det-gfwGaps" open={isOpen("det-gfwGaps")} onToggle={setOpen}>
+          <div className="sublegend">
+            The independent second opinion on Dark Vessels above &mdash; and the reason both exist. That
+            layer reads one AIS upstream, so when the upstream stops it does not degrade, it inverts: no
+            feed means no gaps means an empty layer that looks like calm water. This one has no such
+            coupling.
+          </div>
+          <div className="sublegend">
+            <b>Both claims here are Global Fishing Watch&apos;s.</b> That a transmission stopped, measured
+            against <i>their</i> satellite reception; and that the stop was deliberate, inferred by their
+            published methodology. This map asserts neither &mdash; it reports that they assert them.
+          </div>
+          <div className="sublegend">
+            <b>Nothing here is current.</b> Every event is five or more days old by the time it arrives,
+            which is why the age is on the face of every popup. A gap on this layer and a gap on Dark
+            Vessels can never be the same event, and neither confirms the other.
+          </div>
+          <div className="sublegend">
+            Every row in the feed is flagged deliberate, so that flag describes GFW&apos;s inclusion
+            criterion rather than singling any one event out. It is not shown as a distinguishing mark.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="gfwDetections">
+          <input
+            type="checkbox"
+            checked={layerVisibility.gfwDetections}
+            onChange={(e) => onToggleLayer("gfwDetections", e.target.checked)}
+          />
+          <LayerIcon svg={SVG.hullDetection} color={GFW_DETECTION_STYLE.unmatched.color} token={GFW_DETECTION_STYLE.unmatched.token} />
+          {" "}Satellite Vessel Detections (GFW)
+          <span className="count">{counts.gfwDetections} ({counts.gfwDetectionsTotal})</span>
+        </label>
+        <div className="subticker-list">
+          {GFW_DETECTION_ORDER.map((kind) => (
+            <div className="subticker-row" key={kind}>
+              <LayerIcon svg={SVG.hullDetection} color={GFW_DETECTION_STYLE[kind].color} token={GFW_DETECTION_STYLE[kind].token} />
+              {GFW_DETECTION_STYLE[kind].label}
+              <span className="count">
+                {counts[kind === "matched" ? "gfwDetMatched" : "gfwDetUnmatched"]}{" "}
+                ({counts[kind === "matched" ? "gfwDetMatchedTotal" : "gfwDetUnmatchedTotal"]})
+              </span>
+            </div>
+          ))}
+        </div>
+        {/* The only zoom note here that also has to explain a zero *total*.
+            This layer's fetch is gated on the same zoom as its drawing, so above
+            the gate nothing has been downloaded and the count reads 0 (0) --
+            which without this line is indistinguishable from a dead feed. */}
+        <div id="gfwDetectionsZoomNote" className={`sublegend${zoomNotes.gfwDetections ? " visible" : ""}`}>
+          Zoom in to load satellite vessel detections &mdash; not fetched at this zoom, so the total
+          reads zero until you do.
+        </div>
+        <LayerDetails id="det-gfwDetections" open={isOpen("det-gfwDetections")} onToggle={setOpen}>
+          <div className="sublegend">
+            The first thing in this map&apos;s maritime stack entitled to say <b>detected</b>. Everything
+            else at sea is either a broadcast a vessel chose to make or an inference drawn from the shape of
+            what it stopped broadcasting. A radar or optical return is neither &mdash; it is an
+            instrument&apos;s reading of a hull, made whether or not anyone aboard wanted it made.
+          </div>
+          <div className="sublegend">
+            <b>Two claims, stacked, and they must not merge.</b> That a hull was at this point at this time
+            is a measurement. That it was not broadcasting AIS is Global Fishing Watch&apos;s inference,
+            produced by correlating the return against AIS tracks. Every popup keeps them apart and names
+            whose is whose.
+          </div>
+          <div className="sublegend">
+            <b>Absence proves nothing here.</b> There is no footprint dataset, so this layer cannot
+            distinguish water it looked at and found empty from water it never looked at.
+          </div>
+          <div className="sublegend">
+            Two products share this layer. Optical (Sentinel-2) is currently the live one; the radar (SAR)
+            product&apos;s batch has stalled and legitimately publishes nothing. Every record states which
+            instrument saw it and how far behind that product was running.
+          </div>
+          <div className="sublegend">
+            Off by default and gated by zoom, because a several-week-old return drawn at world zoom beside
+            live ship positions is exactly the confusion this layer risks.
+          </div>
+        </LayerDetails>
+
         <label className="layer-row" data-layer="adsbMilitary">
           <input
             type="checkbox"
@@ -694,6 +800,96 @@ export default function LayersSection({
           </div>
         </LayerDetails>
 
+        <label className="layer-row" data-layer="ports">
+          <input
+            type="checkbox"
+            checked={layerVisibility.ports}
+            onChange={(e) => onToggleLayer("ports", e.target.checked)}
+          />
+          <LayerIcon svg={PORT_STYLE.svg} color={PORT_STYLE.color} token={PORT_STYLE.token} />
+          {" "}Ports (NGA World Port Index)
+          <span className="count">{counts.ports} ({counts.portsTotal})</span>
+        </label>
+        <div className="subticker-list">
+          <div className="subticker-row">
+            <LayerIcon svg={PORT_STYLE.svg} color={PORT_STYLE.color} token={PORT_STYLE.token} />
+            With an oil terminal
+            <span className="count">{counts.portsOil} ({counts.portsOilTotal})</span>
+          </div>
+        </div>
+        <div id="portsZoomNote" className={`sublegend${zoomNotes.ports ? " visible" : ""}`}>
+          Zoom in to show ports
+        </div>
+        <LayerDetails id="det-ports" open={isOpen("det-ports")} onToggle={setOpen}>
+          <div className="sublegend">
+            NGA Pub 150 &mdash; every port with its own coordinate, harbour size and type, keyless and in
+            the public domain as a work of the US Government. <b>A gazetteer, not a feed:</b> nothing in it
+            is an event and nothing in it is current. Pins are sized by NGA&apos;s own coded harbour size.
+          </div>
+          <div className="sublegend">
+            Served clipped to the union of this map&apos;s conflict theatres and the water it actually
+            receives AIS from. That second clause is not redundant: ports sitting in watched water and in no
+            theatre would otherwise have left the Eastern Mediterranean a coverage hole.
+          </div>
+          <div className="sublegend">
+            <b>This is what stops the Dark Vessels layer guessing.</b> Its ship-to-ship inference is only as
+            good as its answer to &ldquo;are these two simply in port&rdquo;, and before this arrived that
+            answer came from a few dozen hand-curated harbours.
+          </div>
+          <div className="sublegend">
+            <b>Vintage is stated, not implied.</b> The file carries no publication date of any kind, so this
+            map treats it as roughly 2024 reference data and says so on every pin rather than letting a
+            fetch timestamp imply freshness.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="dams">
+          <input
+            type="checkbox"
+            checked={layerVisibility.dams}
+            onChange={(e) => onToggleLayer("dams", e.target.checked)}
+          />
+          <LayerIcon svg={DAM_STYLE.svg} color={DAM_STYLE.color} token={DAM_STYLE.token} />
+          {" "}Dams &amp; Reservoirs (Global Dam Watch)
+          <span className="count">{counts.dams} ({counts.damsTotal})</span>
+        </label>
+        <div className="subticker-list">
+          <div className="subticker-row">
+            <LayerIcon svg={DAM_STYLE.svg} color={DAM_STYLE.color} token={DAM_STYLE.token} />
+            Holding 100 million m&sup3; or more
+            <span className="count">{counts.damsLarge} ({counts.damsLargeTotal})</span>
+          </div>
+        </div>
+        <div id="damsZoomNote" className={`sublegend${zoomNotes.dams ? " visible" : ""}`}>
+          Zoom in to show dams
+        </div>
+        <LayerDetails id="det-dams" open={isOpen("det-dams")} onToggle={setOpen}>
+          <div className="sublegend">
+            A dam is infrastructure whose failure is catastrophic downstream and whose deliberate targeting
+            is a war crime. The useful record is not &ldquo;a dam is here&rdquo; but &ldquo;a dam is here and
+            this is how much it holds&rdquo;, which is why the pins are sized by reservoir capacity and not
+            by generation. Served clipped to the conflict theatres rather than worldwide.
+          </div>
+          <div className="sublegend">
+            <b>Most of these coordinates are river snaps.</b> Global Dam Watch publishes a location for the
+            structure on only about 15% of its rows; for the rest the point is the river reach the barrier
+            regulates. Every popup says which it is, and the snapped ones carry the dashed ring. Nine in ten
+            snaps land within 350 m &mdash; but one in the dataset is 92 km out, so the ring is not
+            decoration.
+          </div>
+          <div className="sublegend">
+            <b>No severity is assigned.</b> Every other severity on this map comes from something a publisher
+            measured. Global Dam Watch publishes nothing of the kind, and deriving &ldquo;how dangerous is
+            this dam&rdquo; from its capacity would be this app&apos;s claim dressed up as theirs. The
+            capacity is on the pin; the conclusion is the reader&apos;s.
+          </div>
+          <div className="sublegend">
+            Reservoir outlines &mdash; &ldquo;what floods if this fails&rdquo; &mdash; are the natural next
+            question and are deliberately not drawn: the answer is tens of megabytes of polygon geometry
+            needing a shapefile reader this project does not have.
+          </div>
+        </LayerDetails>
+
         <label className="layer-row" data-layer="cables">
           <input
             type="checkbox"
@@ -769,6 +965,57 @@ export default function LayersSection({
         </LayerDetails>
       </PanelGroup>
 
+      <PanelGroup id="grp-airspace" title="Airspace &amp; Aviation" count={groupCount("airspace")}
+        open={isOpen("grp-airspace")} onToggle={setOpen}>
+        <label className="layer-row" data-layer="czib">
+          <input
+            type="checkbox"
+            checked={layerVisibility.czib}
+            onChange={(e) => onToggleLayer("czib", e.target.checked)}
+          />
+          <LayerIcon svg={CZIB_STYLE.active.svg} color={CZIB_STYLE.active.color} token={CZIB_STYLE.active.token} />
+          {" "}Airspace Warnings (EASA)
+          <span className="count">{counts.czib} ({counts.czibTotal})</span>
+        </label>
+        <div className="subticker-list">
+          {CZIB_ORDER.map((kind) => (
+            <div className="subticker-row" key={kind}>
+              <LayerIcon svg={CZIB_STYLE[kind].svg} color={CZIB_STYLE[kind].color} token={CZIB_STYLE[kind].token} />
+              {CZIB_STYLE[kind].label}
+              <span className="count">
+                {counts[kind === "active" ? "czibActive" : "czibWithdrawn"]}{" "}
+                ({counts[kind === "active" ? "czibActiveTotal" : "czibWithdrawnTotal"]})
+              </span>
+            </div>
+          ))}
+        </div>
+        <LayerDetails id="det-czib" open={isOpen("det-czib")} onToggle={setOpen}>
+          <div className="sublegend">
+            A CZIB is the European Union Aviation Safety Agency formally telling operators not to fly
+            through a named airspace, with a bulletin number, an issue date and a review date. That makes it
+            the <b>best-attributed evidence on this map</b>: a named regulator, a document you can look up,
+            and a stated expiry.
+          </div>
+          <div className="sublegend">
+            <b>These are country-precision pins and nothing finer.</b> A bulletin is about a national flight
+            information region, so every pin carries the dashed ring and every popup says so. EASA ships a
+            coordinate with each bulletin and this map ignores it &mdash; it geocodes the country&apos;s
+            <i>name</i>, so Afghanistan&apos;s is Kabul, which is not where the bulletin is about.
+          </div>
+          <div className="sublegend">
+            <b>A bulletin can be several pins.</b> One document naming eleven countries produces eleven
+            identical pins, each carrying the full list and the count, so clicking any one of them shows it
+            is one decision seen eleven times rather than eleven findings.
+          </div>
+          <div className="sublegend">
+            <b>Withdrawn bulletins are kept, drawn grey, and never counted as warnings.</b> Over half of
+            what EASA currently publishes is withdrawn, some of it for years. This map thins its
+            presentation rather than deleting its data &mdash; the two tickers above are the honest version
+            of that.
+          </div>
+        </LayerDetails>
+      </PanelGroup>
+
       <PanelGroup id="grp-hazards" title="Natural Hazards" count={groupCount("hazards")}
         open={isOpen("grp-hazards")} onToggle={setOpen}>
         <label className="layer-row" data-layer="hazards">
@@ -808,6 +1055,51 @@ export default function LayersSection({
             issued each Thursday with the USGS. A volcano pin describes a week, not this moment, and says
             so &mdash; it is not a live sensor reading. Reports published without a coordinate are dropped
             rather than placed by guesswork.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="floods">
+          <input
+            type="checkbox"
+            checked={layerVisibility.floods}
+            onChange={(e) => onToggleLayer("floods", e.target.checked)}
+          />
+          <LayerIcon svg={FLOOD_STYLE.svg} color="currentColor" /> Floods (GDACS)
+          <span className="count">{counts.floods} ({counts.floodsTotal})</span>
+        </label>
+        <div className="subticker-list">
+          <div className="subticker-row">
+            <LayerIcon svg={FLOOD_STYLE.svg} color="currentColor" />
+            Still open
+            <span className="count">{counts.floodsCurrent} ({counts.floodsCurrentTotal})</span>
+          </div>
+        </div>
+        <div id="floodsZoomNote" className={`sublegend${zoomNotes.floods ? " visible" : ""}`}>
+          Zoom in to show floods
+        </div>
+        <LayerDetails id="det-floods" open={isOpen("det-floods")} onToggle={setOpen}>
+          <div className="sublegend">
+            GDACS &mdash; the European Commission&apos;s Joint Research Centre with the UN &mdash; runs the
+            GLOFAS hydrological model over the world&apos;s river basins and issues a Green/Orange/Red alert
+            per flood event. Keyless, and the reference feed most humanitarian responders already work from.
+          </div>
+          <div className="sublegend">
+            <b>Kept out of the Earthquakes &amp; Volcanoes layer on purpose.</b> Those two carry measured
+            positions &mdash; an instrument solution, a volcano&apos;s summit. This is a modelled centroid
+            over an affected basin, GDACS&apos;s own word, so every pin here carries the dashed ring. And a
+            quake is instantaneous where a flood event stays open for weeks and is revised across dozens of
+            episodes; one layer cannot honestly age both.
+          </div>
+          <div className="sublegend">
+            <b>Most of what this layer holds is over.</b> GDACS keeps closed events in the feed and this map
+            keeps them too, drawn grey. The &ldquo;still open&rdquo; ticker above is how many are actually
+            happening.
+          </div>
+          <div className="sublegend">
+            Colour and size follow the same severity scale the conflict and earthquake layers use, from
+            GDACS&apos;s alert level and nothing finer. Their numeric alert score is shown in each popup but
+            does not drive the colour: it is a different quantity on a different scale, and deriving a
+            0&ndash;100 from it would be a claim GDACS has not made.
           </div>
         </LayerDetails>
       </PanelGroup>
