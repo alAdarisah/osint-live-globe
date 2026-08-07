@@ -272,19 +272,30 @@ export function createEntityClusterGroups(map) {
   return { groups };
 }
 
-export function createCountriesLayer(map) {
+/**
+ * @param getFill  (properties) => {fillColor, fillOpacity} | null. Null leaves
+ *   the shape unpainted, which is what an unmeasured country must look like --
+ *   see choropleth.js on why that has to stay distinct from a value of zero.
+ *   Defaulted, so a caller that wants no fill can omit it entirely.
+ */
+export function createCountriesLayer(map, getFill = () => null) {
   // Stroke starts fully transparent -- boundaries only appear via the
   // .hovered/.country-hot/.country-selected CSS classes, which set their own
   // stroke color and win over this base regardless. Without that, every
   // untouched country's outline sat faintly visible at world zoom, which read
   // as visual noise.
-  function countryStyle() {
+  function countryStyle(feature) {
+    // The fill is the only thing a metric may move. Everything else here is
+    // structural -- the transparent stroke, the class the highlight CSS hangs
+    // off, and interactive:false -- and a metric that could reach any of it
+    // would be able to break hover, selection or hit-testing from a dropdown.
+    const fill = feature && feature.properties ? getFill(feature.properties) : null;
     return {
       className: "country-shape",
       color: "rgba(111, 227, 255, 0)",
       weight: 1,
-      fillColor: "#6fe3ff",
-      fillOpacity: 0,
+      fillColor: (fill && fill.fillColor) || "#6fe3ff",
+      fillOpacity: fill ? fill.fillOpacity : 0,
       // The shapes are paint only. Hover and selection are hit-tested from the
       // map's own mousemove/click against the geometry (see
       // countryHitTest.js), which is the only arrangement that survives an
@@ -300,6 +311,30 @@ export function createCountriesLayer(map) {
     map.createPane("countriesPane").style.zIndex = 350;
   }
   return L.geoJSON(null, { style: countryStyle, pane: "countriesPane" }).addTo(map);
+}
+
+// Where a conflict event could actually be, as opposed to where its pin is.
+//
+// Every fused event carries geo_radius_km -- the backend's own statement of how
+// far out the coordinate may be -- and until now none of it was drawn. A row
+// geocoded to a national centroid claims 400 km of slack and was rendered as a
+// dot, which asserts a precision the pipeline had already disclaimed. The pin
+// stays (it is the click target, and it keeps its dashed .imprecise ring); this
+// is the area drawn underneath it.
+//
+// Its own pane at 380: above the country shapes at 350 so a circle is not
+// buried by a fill, below the default overlayPane at 400 so it never paints
+// over the pins it belongs to. pointerEvents is off on the whole pane rather
+// than per-circle -- a 400 km disc that could take a click would swallow every
+// marker inside it, which is the same failure countryHitTest.js exists to
+// avoid.
+export function createUncertaintyLayer(map) {
+  if (!map.getPane("uncertaintyPane")) {
+    const pane = map.createPane("uncertaintyPane");
+    pane.style.zIndex = 380;
+    pane.style.pointerEvents = "none";
+  }
+  return L.layerGroup().addTo(map);
 }
 
 export function createCitiesGroup(map) {

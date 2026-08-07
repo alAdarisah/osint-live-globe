@@ -21,12 +21,22 @@ Both are *inferences*, and neither is safe to present as a detection:
   the whole feed was quiet over the same window -- but coverage is thin far
   from shore and no guard fixes that.
 - Two ships close together may be passing, rafted for a pilot transfer, or
-  sitting in an anchorage this module does not know about.
+  sitting in an anchorage. Ports are excluded (see `_port_index`); anchorages
+  are not a port index's business, and no list here holds them.
 
 So every record carries `inferred: True`, states its own evidence, and the
 layer renders with the dashed treatment the map already uses for anything whose
 position or meaning is uncertain. This module is allowed to say "worth a look".
 It is not allowed to say "detected".
+
+**Someone else's record of the same hull.** Records also carry `gfw_prior`,
+which is what Global Fishing Watch has logged about that MMSI (see
+backend/sources/gfw_gaps.py). It is a prior and not a corroboration, and the
+distinction is forced by arithmetic rather than caution: GFW's batch runs five
+or more days behind and the history this module reads is three days deep, so
+the two cannot be describing the same event. A prior answers "has this hull
+gone dark deliberately before", which is worth knowing and is not evidence
+about tonight. Nothing here upgrades an inference on the strength of one.
 """
 
 import asyncio
@@ -69,9 +79,20 @@ MAX_GAP_RECORDS = 120
 STS_MAX_SEPARATION_KM = 0.5
 STS_MAX_SPEED_KN = 1.0
 STS_MIN_DURATION_HOURS = 1.0
-# Anywhere within this of a known port is a port call, not a transfer at sea.
-# The curated port list is small (see backend/infrastructure.py), so this is a
-# partial exclusion and the popup says so.
+# Anywhere within this of a charted port is a port call, not a transfer at sea.
+#
+# Two lists feed it (see `_port_index`): the 40 curated harbours in
+# backend/infrastructure.py, and every port the NGA World Port Index places
+# inside this map's theatres or AIS watch boxes -- 393 of them, of which 263 sit
+# in watched water against the curated list's 12. That is the difference between
+# one excluded port in the whole Persian Gulf and fifty-two of them.
+#
+# It is still not a zero-false-positive exclusion, and the popup must not say it
+# is. WPI is an index of *ports*; a designated anchorage, a lightering area or a
+# stretch of sheltered water where tankers habitually wait appears in neither
+# list, and two hulls sitting in one will still surface here. Each record
+# carries `ports_checked` so the popup can state what was actually applied
+# rather than describing a list it cannot see.
 STS_PORT_EXCLUSION_KM = 25.0
 MAX_STS_RECORDS = 80
 
@@ -92,12 +113,25 @@ def _in_watched_waters(lat: float, lon: float) -> bool:
     )
 
 
-def _port_index() -> ProximityIndex:
-    """Curated ports and naval terminals, as an exclusion index."""
-    return ProximityIndex(
-        [s for s in infrastructure.INFRA_SITES if s.get("type") == "port"],
-        cell_deg=0.5,
-    )
+def _port_index(wpi_ports: list[dict] | None = None) -> ProximityIndex:
+    """Every port this map knows of, as one exclusion index.
+
+    Both lists, not one. The curated entries in backend/infrastructure.py are
+    hand-checked and carry notes a bulk file cannot ("de facto wartime
+    capital"), and several of them -- offshore loading platforms, naval
+    terminals -- are not ports in NGA's sense at all and appear nowhere in WPI.
+    The World Port Index supplies the coverage: 2,951 real harbours, of which
+    the ports source stores the 393 inside this map's theatres and AIS boxes.
+    Dropping either list would lose something the other does not have.
+
+    `wpi_ports` comes from entity_latest (see `_compute`). An empty list is a
+    working state, not an error -- it is what the first minutes after a fresh
+    deployment look like, before backend/sources/ports.py has landed its first
+    snapshot -- and it degrades to exactly the curated-only behaviour this
+    module had before.
+    """
+    curated = [s for s in infrastructure.INFRA_SITES if s.get("type") == "port"]
+    return ProximityIndex(curated + list(wpi_ports or []), cell_deg=0.5)
 
 
 def feed_health_baseline(series: list[tuple[float, int | None, bool]]) -> float | None:
@@ -145,9 +179,19 @@ def build_gap_records(
     gaps: list[dict],
     ships_by_mmsi: dict[str, dict],
     health: list[tuple[float, int | None, bool]],
+    priors: dict[str, dict] | None = None,
 ) -> list[dict]:
-    """Position gaps -> the ones worth showing, with their own evidence attached."""
+    """Position gaps -> the ones worth showing, with their own evidence attached.
+
+    `priors` is what Global Fishing Watch has recorded about each *hull* (see
+    backend/sources/gfw_gaps.py), keyed by MMSI. It is not corroboration of the
+    gap being built here and must never be rendered as such: GFW's batch runs
+    five or more days behind and our AIS history is three days deep, so the two
+    cannot describe the same event. What it answers is the prior question --
+    has this hull done this before, and did GFW call it deliberate.
+    """
     baseline = feed_health_baseline(health)
+    priors = priors or {}
     out: list[dict] = []
     for gap in gaps:
         hours = gap["gap_seconds"] / 3600.0
@@ -186,15 +230,53 @@ def build_gap_records(
             "gap_hours": round(hours, 1),
             "resumed_km_away": round(distance_km, 1),
             "implied_speed_kn": round(implied_speed_kn, 1),
+            # Someone else's record of this hull, or None. Named `prior` rather
+            # than anything resembling `corroborated` on purpose -- see the
+            # docstring above and gfw_gaps.py's.
+            "gfw_prior": priors.get(str(gap["entity_id"])),
             "inferred": True,
         })
-    out.sort(key=lambda r: (r.get("sanctions") is not None, r["gap_hours"]), reverse=True)
+    # This order decides what survives the cap below, and nothing else. It is
+    # explicitly *not* a reading order: the backend serves these from Postgres
+    # (see storage.entity_latest, ORDER BY entity_id) so by the time a reader
+    # sees them they are in MMSI order and this sort is gone. Measured, not
+    # assumed -- the served payload came back 207828770, 210888000, 219407000
+    # while this function had ordered them by duration.
+    #
+    # What it does do matters at the margin the cap creates: a pass with 123
+    # candidates and MAX_GAP_RECORDS at 120 discards three, and a hull carrying
+    # an OFAC designation or a GFW record of deliberate disabling should not be
+    # one of them. The gap itself is no better evidenced for either flag, and
+    # nothing downstream reads position in this list as confidence.
+    out.sort(
+        key=lambda r: (
+            r.get("sanctions") is not None,
+            bool((r.get("gfw_prior") or {}).get("intentional_events")),
+            r["gap_hours"],
+        ),
+        reverse=True,
+    )
     return out[:MAX_GAP_RECORDS]
 
 
-def build_sts_records(ships: list[dict], ports: ProximityIndex, now: float | None = None) -> list[dict]:
-    """Pairs of vessels sitting alongside each other, away from any port."""
+def build_sts_records(
+    ships: list[dict],
+    ports: ProximityIndex,
+    now: float | None = None,
+    priors: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Pairs of vessels sitting alongside each other, away from any port.
+
+    `priors` is the same per-hull GFW record `build_gap_records` takes, attached
+    per vessel rather than per pair -- a transfer is between two hulls and only
+    one of them may have the history. It is not corroboration of the transfer:
+    GFW's encounters product was measured against this inference and does not
+    cover it at all (see gfw_gaps.py), so nothing here has a second opinion on
+    the pairing itself. What a prior says is that one of these two has been
+    recorded going dark deliberately before.
+    """
     now = time.time() if now is None else now
+    priors = priors or {}
     candidates = []
     for ship in ships:
         lat, lon = ship.get("lat"), ship.get("lon")
@@ -243,11 +325,19 @@ def build_sts_records(ships: list[dict], ports: ProximityIndex, now: float | Non
                 "lon": (ship["lon"] + other["lon"]) / 2,
                 "vessels": [
                     {"mmsi": s.get("mmsi"), "name": s.get("name"), "imo": s.get("imo"),
-                     "ship_type": s.get("ship_type"), "sanctions": s.get("sanctions")}
+                     "ship_type": s.get("ship_type"), "sanctions": s.get("sanctions"),
+                     "gfw_prior": priors.get(str(s.get("mmsi")))}
                     for s in (ship, other)
                 ],
                 "separation_m": round(separation * 1000),
                 "together_hours": round(together_hours, 1),
+                # The exclusion this pair survived, in its own words. Carried on
+                # the record because the size of the port index is the whole
+                # difference between "away from any port" as a claim and as a
+                # check -- and because it is not constant: it is curated-only
+                # until the ports source has written its first snapshot.
+                "ports_checked": len(ports),
+                "port_exclusion_km": STS_PORT_EXCLUSION_KM,
                 "sanctions": designated[0] if designated else None,
                 "designated_count": len(designated),
                 "inferred": True,
@@ -258,13 +348,23 @@ def build_sts_records(ships: list[dict], ports: ProximityIndex, now: float | Non
 
 async def _compute() -> list[dict]:
     since = time.time() - LOOKBACK_SECONDS
-    gaps, ships, health = await asyncio.gather(
+    gaps, ships, health, priors = await asyncio.gather(
         storage.position_gaps("ais", since, GAP_MIN_HOURS * 3600),
         storage.entity_latest_with_times("ais"),
         storage.source_health_series("ais", since),
+        # Written by the ingest process (see backend/sources/gfw_gaps.py) and
+        # read here rather than fetched, which is what keeps this module inside
+        # the refine tier's rule that nothing in it makes an outbound call.
+        # Absent -- no token, or a first run that has not landed yet -- is a
+        # normal state and degrades to no prior on any vessel, not an error.
+        storage.reference("gfw_vessel_priors"),
     )
     ships_by_mmsi = {str(s.get("mmsi")): s for s in ships if s.get("mmsi") is not None}
-    return build_gap_records(gaps, ships_by_mmsi, health) + build_sts_records(ships, _port_index())
+    priors = priors if isinstance(priors, dict) else {}
+    return (
+        build_gap_records(gaps, ships_by_mmsi, health, priors)
+        + build_sts_records(ships, _port_index(), priors=priors)
+    )
 
 
 async def derive_forever():

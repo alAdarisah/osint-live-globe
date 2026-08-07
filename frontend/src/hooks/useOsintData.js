@@ -88,6 +88,12 @@ const POLL_CONFIG = [
   // neither is rendered as one.
   { key: "conflictHistory", url: "/api/conflict-history", intervalMs: 6 * 60 * 60000 },
   { key: "conflictDistricts", url: "/api/conflict-districts", intervalMs: 6 * 60 * 60000 },
+  // Recorded traffic per airfield, derived from our own ADS-B history by the
+  // refine process every 30 minutes (see backend/sources/airfield_activity.py).
+  // Polled on the same cadence it is recomputed -- asking faster only re-serves
+  // the same document. Not zoom-gated despite attaching to a zoom-gated layer:
+  // it is ~180 kB once, and the airfields toggle can be switched on at any time.
+  { key: "airfieldActivity", url: "/api/airfield-activity", intervalMs: 30 * 60000 },
 ];
 
 /**

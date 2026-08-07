@@ -23,6 +23,11 @@ Translations along the way, since the two schemas aren't identical:
   * conflict_watch_events            -> conflict_events (+ the mentions/
     goldstein/avg_tone/source_url columns added later, left NULL for rows
     that predate them)
+
+Imported conflict rows keep pipeline_version NULL, which is both accurate --
+they were produced by a pipeline that predates the field -- and load-bearing:
+backend/escalation.py filters on an exact version, so an imported archive is
+readable and queryable without ever being counted as present-day escalation.
 """
 
 import argparse
@@ -90,7 +95,7 @@ async def _copy(pg: asyncpg.Connection, sqlite_conn: sqlite3.Connection, table: 
     return copied
 
 
-async def migrate(skip_history: bool) -> int:
+async def migrate(skip_history: bool, conflict_only: bool = False) -> int:
     db_path = config.DATA_DIR / "positions.db"
     if not db_path.exists():
         log.info("No SQLite database at %s -- nothing to migrate.", db_path)
@@ -103,7 +108,9 @@ async def migrate(skip_history: bool) -> int:
         # against a completely fresh database before the backend ever boots.
         await pg.execute(storage._SCHEMA)
 
-        if _table_exists(sqlite_conn, "entity_latest"):
+        if conflict_only:
+            log.info("entity_latest: skipped (--conflict-only)")
+        elif _table_exists(sqlite_conn, "entity_latest"):
             total = _count(sqlite_conn, "entity_latest")
             log.info("entity_latest: %d rows", total)
             await _copy(
@@ -117,8 +124,9 @@ async def migrate(skip_history: bool) -> int:
                 total,
             )
 
-        if skip_history:
-            log.info("entity_history: skipped (--skip-history)")
+        if skip_history or conflict_only:
+            log.info("entity_history: skipped (%s)",
+                     "--conflict-only" if conflict_only else "--skip-history")
         elif _table_exists(sqlite_conn, "entity_history"):
             total = _count(sqlite_conn, "entity_history")
             log.info("entity_history: %d rows (this is the slow one)", total)
@@ -173,8 +181,18 @@ def main() -> int:
         action="store_true",
         help="copy entity_latest + conflict events only, leaving the multi-million-row movement log behind",
     )
+    parser.add_argument(
+        "--conflict-only",
+        action="store_true",
+        help=(
+            "copy the conflict archive and nothing else. Use this when the live database has "
+            "moved on: the SQLite entity_latest holds positions from whenever collection stopped, "
+            "and importing them puts hours-old ships and aircraft back on the map until eviction "
+            "catches them. The conflict rows have no such problem -- they carry their own dates."
+        ),
+    )
     args = parser.parse_args()
-    return asyncio.run(migrate(args.skip_history))
+    return asyncio.run(migrate(args.skip_history, args.conflict_only))
 
 
 if __name__ == "__main__":

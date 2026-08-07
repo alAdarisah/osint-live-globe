@@ -6,7 +6,7 @@ import {
   SANCTION_COLOR, DARK_VESSEL_STYLE, DARK_VESSEL_ORDER, CABLE_LANDING_STYLE, CABLE_PLANNED_STYLE,
   LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
 } from "../../map/decorators";
-import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
+import { SEVERITY_BANDS, CORROBORATED_COLOR, CONFIDENCE_THRESHOLD } from "../../map/severity";
 import LayerIcon from "./LayerIcon";
 import { PanelGroup, LayerDetails } from "./Collapsible";
 
@@ -187,7 +187,38 @@ export default function LayersSection({
             />
             Show approximate locations
           </label>
+          {/* Fades rather than hides, which is why it is a separate control
+              from the one above rather than another value on it. Nearly every
+              event scores below the threshold (the backend checks a coordinate
+              only when the reporting gives it something to check against), so
+              hiding on this would empty the layer and read as a broken feed
+              instead of as an answer. */}
+          <label className="event-filter-check">
+            <input
+              type="checkbox"
+              checked={eventFilter.minConfidence >= CONFIDENCE_THRESHOLD}
+              onChange={(e) => onEventFilterChange({
+                minConfidence: e.target.checked ? CONFIDENCE_THRESHOLD : 0,
+              })}
+            />
+            Fade weakly-placed events
+          </label>
         </div>
+
+        {/* Where each pin's *coordinate* stands, as opposed to how severe or
+            how well-sourced the event is. Totals, not the on-screen count: this
+            answers "what is this layer made of", which does not change as the
+            reader pans. Kept out of the fold because the answer is lopsided and
+            a reader who never opens the details would otherwise never learn it. */}
+        {counts.eventsTotal > 0 && (
+          <div className="sublegend placement-tally">
+            <span>
+              {`Placement: ${counts.eventsVerifiedTotal || 0} verified · `
+                + `${counts.eventsDoubtedTotal || 0} doubted · `
+                + `${counts.eventsUnverifiedTotal || 0} unchecked`}
+            </span>
+          </div>
+        )}
 
         <div id="conflictZoomNote" className={`sublegend${zoomNotes.events ? " visible" : ""}`}>
           Zoom in to show conflict events

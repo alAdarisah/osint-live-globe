@@ -990,6 +990,202 @@ async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: 
     ]
 
 
+# One entity's recorded path, thinned to at most N points before it leaves the
+# database.
+#
+# The thinning is here rather than in the caller, and that is the whole point of
+# the query. entity_history is 5+ GB and 11M rows; the busiest single aircraft
+# holds ~800 points over three days, but nothing about the shape of this table
+# guarantees that for every kind -- satellites write a row every ten seconds
+# each -- so an endpoint that fetched the rows and sliced them in Python would
+# be one URL away from streaming a hundred thousand JSONB payloads out of the
+# heap. Bucketing in SQL means the cap is enforced before any payload is read.
+#
+# Both stages ride idx_history_entity (kind, entity_id, ts DESC): the bounds CTE
+# is an index-only min/max, and the outer scan is the same range again. The
+# bucket is a floor over seconds, so DISTINCT ON takes the first fix in each time
+# slice -- an even sample along the *clock*, not along the rows, which is what
+# keeps a burst of reports from spending the whole budget on one minute.
+#
+# Bucketed relative to the track's own first fix rather than to the unix epoch.
+# Absolute-epoch buckets are not aligned to t0, so a span of exactly N slices
+# straddles N+1 of them and the query returned budget+1 points -- which quietly
+# put MAX_TRACK_POINTS one over its own ceiling. Measuring from t0 makes the
+# bucket index run 0..budget-1 by construction.
+_ENTITY_TRACK = """
+WITH bounds AS (
+  SELECT min(ts) AS t0, max(ts) AS t1
+    FROM entity_history
+   WHERE kind = $1 AND entity_id = $2 AND ts >= $3
+),
+step AS (
+  SELECT t0,
+         GREATEST(1, CEIL(EXTRACT(EPOCH FROM (t1 - t0)) / $4::float))::bigint AS secs
+    FROM bounds
+   WHERE t0 IS NOT NULL
+)
+SELECT DISTINCT ON (bucket) ts, lat, lon, payload
+  FROM (
+    SELECT e.ts, e.lat, e.lon, e.payload,
+           FLOOR(EXTRACT(EPOCH FROM (e.ts - s.t0)) / s.secs)::bigint AS bucket
+      FROM entity_history e, step s
+     WHERE e.kind = $1 AND e.entity_id = $2 AND e.ts >= $3
+  ) sampled
+ ORDER BY bucket, ts
+"""
+
+# A hard ceiling on what any caller can ask for, independent of the query
+# parameter. 2000 points is already more than a polyline can usefully draw at
+# any zoom -- past that the samples are closer together than a screen pixel.
+MAX_TRACK_POINTS = 2000
+
+
+async def entity_track(
+    kind: str,
+    entity_id: str,
+    since: float,
+    max_points: int = 800,
+    fields: tuple[str, ...] = (),
+) -> list[dict]:
+    """One entity's recorded path, oldest first, at most `max_points` long.
+
+    `fields` are payload keys to carry alongside each fix. Named by the caller
+    rather than returning the whole payload: these rows are the full source
+    record (see record_snapshot), and a 900-point track of complete ADS-B
+    payloads is a megabyte of JSON to draw one line.
+
+    Note what entity_history does and does not hold: a row is written only when
+    an entity actually *moved* (see record_snapshot's moved-set), so a track is
+    a record of movement rather than of reporting. A stationary aircraft
+    contributes one point no matter how long it is heard for -- which is the
+    same property position_gaps relies on, read the other way round.
+    """
+    if _pool is None:
+        return []
+    when = datetime.fromtimestamp(since, tz=timezone.utc)
+    budget = max(2, min(int(max_points), MAX_TRACK_POINTS))
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(_ENTITY_TRACK, kind, str(entity_id), when, float(budget))
+    track = []
+    for r in rows:
+        point = {"ts": r["ts"].timestamp(), "lat": r["lat"], "lon": r["lon"]}
+        if fields:
+            payload = json.loads(r["payload"])
+            for key in fields:
+                value = payload.get(key)
+                if value is not None:
+                    point[key] = value
+        track.append(point)
+    return track
+
+
+# How busy each airfield has been, from the ADS-B movement log.
+#
+# adsb.py already resolves a nearest airfield for every aircraft below 10,000 ft
+# or on the ground (see its proximity index), and that field has been written to
+# every history row it appears on -- 2.07M of the last 24 hours' 5.1M rows -- and
+# read by nothing. This turns it into "how much traffic has this field seen, and
+# how much of it was military", which is the question the airfields layer exists
+# to support and could not previously answer.
+#
+# Two statements rather than one, deliberately. The full per-field per-hour
+# aggregate is 297k rows across 43,388 airfields -- most of them a single light
+# aircraft that passed overhead once -- and transferring all of it to throw
+# nearly all of it away is the expensive part, not the scan. So: totals first,
+# pick which fields are worth an hourly series, then fetch series for those only.
+_AIRFIELD_TOTALS = """
+SELECT payload->'nearest_airfield'->>'code' AS code,
+       max(payload->'nearest_airfield'->>'name') AS name,
+       bool_or(COALESCE((payload->'nearest_airfield'->>'military_name')::boolean, false)) AS military_field,
+       count(DISTINCT entity_id) AS aircraft,
+       count(DISTINCT entity_id) FILTER (
+         WHERE COALESCE((payload->>'military')::boolean, false)) AS military_aircraft
+  FROM entity_history
+ WHERE kind = 'adsb' AND ts >= $1
+   AND payload ? 'nearest_airfield'
+   AND payload->'nearest_airfield'->>'code' IS NOT NULL
+ GROUP BY 1
+"""
+
+_AIRFIELD_HOURLY = """
+SELECT payload->'nearest_airfield'->>'code' AS code,
+       date_trunc('hour', ts) AS hour,
+       count(DISTINCT entity_id) AS aircraft,
+       count(DISTINCT entity_id) FILTER (
+         WHERE COALESCE((payload->>'military')::boolean, false)) AS military
+  FROM entity_history
+ WHERE kind = 'adsb' AND ts >= $1
+   AND payload->'nearest_airfield'->>'code' = ANY($2::text[])
+ GROUP BY 1, 2
+"""
+
+
+async def airfield_activity(since: float, hours: int = 24, top: int = 300) -> dict:
+    """Traffic per airfield over the recent ADS-B log, as one document.
+
+    Ranked on two axes and capped on both: the `top` busiest fields by total
+    traffic, and the `top` busiest by *military* traffic. The second list is the
+    point of the whole aggregate -- a training field with sixty movements of
+    which fifty-nine are military never enters the top 300 by volume, and
+    ranking on volume alone would keep only a recitation of large civil
+    airports.
+
+    Ranking rather than a "has any military movement" filter, which is what this
+    first did: one military aircraft passing overhead tags whichever field it
+    was nearest, so that clause matched 8,703 of 8,867 fields and produced a
+    2.8 MB document. A single overflight is not military activity at a field.
+
+    Returns {code: {...}} rather than a list because every consumer looks a
+    field up by the code its pin already carries (see sources/airports.py).
+    """
+    if _pool is None:
+        return {}
+    when = datetime.fromtimestamp(since, tz=timezone.utc)
+    async with _pool.acquire() as conn:
+        totals = await conn.fetch(_AIRFIELD_TOTALS, when)
+        by_traffic = sorted(totals, key=lambda r: r["aircraft"], reverse=True)
+        by_military = sorted(totals, key=lambda r: r["military_aircraft"], reverse=True)
+        keep = {r["code"] for r in by_traffic[:top]}
+        keep.update(r["code"] for r in by_military[:top] if r["military_aircraft"])
+        if not keep:
+            return {}
+        hourly = await conn.fetch(_AIRFIELD_HOURLY, when, list(keep))
+
+    # Bucket index 0 is the oldest hour in the window, so the series reads
+    # left-to-right as time -- the order a sparkline is drawn in.
+    start = when.replace(minute=0, second=0, microsecond=0)
+    series: dict[str, list[int]] = {}
+    mil_series: dict[str, list[int]] = {}
+    for r in hourly:
+        idx = int((r["hour"] - start).total_seconds() // 3600)
+        if not 0 <= idx < hours:
+            continue
+        series.setdefault(r["code"], [0] * hours)[idx] = r["aircraft"]
+        mil_series.setdefault(r["code"], [0] * hours)[idx] = r["military"]
+
+    out = {}
+    for r in totals:
+        code = r["code"]
+        if code not in keep:
+            continue
+        out[code] = {
+            "code": code,
+            "name": r["name"],
+            "military_field": r["military_field"],
+            "aircraft": r["aircraft"],
+            "military_aircraft": r["military_aircraft"],
+            "hourly": series.get(code, [0] * hours),
+            "window_hours": hours,
+        }
+        # Only carried where there is something to carry. Most kept fields are
+        # busy civil airports with no military traffic at all, and shipping 300
+        # arrays of twenty-four zeros to say so is a third of the document.
+        mil_hourly = mil_series.get(code)
+        if mil_hourly and any(mil_hourly):
+            out[code]["hourly_military"] = mil_hourly
+    return out
+
+
 async def entity_latest_with_times(kind: str) -> list[dict]:
     """entity_latest rows with their timestamps alongside the payload.
 
@@ -1044,6 +1240,49 @@ async def entity_latest(kind: str, order_by_recency: bool = False) -> list[dict]
     return [json.loads(r["payload"]) for r in rows]
 
 
+def _deleted_count(status: str) -> int:
+    """Row count out of asyncpg's "DELETE n" command tag."""
+    try:
+        return int(status.rsplit(" ", 1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+async def sweep_stale_entities(conn, now: datetime) -> dict[str, int]:
+    """Evicts rows past their kind's ENTITY_STALE_AFTER, whatever the producer is doing.
+
+    record_snapshot() applies the same cutoff, but only as part of writing a
+    poll -- and it returns early when a poll yields nothing, which is exactly
+    the case where eviction matters. A source that dies leaves its last
+    positions in entity_latest indefinitely: AIS stopped on 2026-08-05 and 839
+    ships stayed on the map for 28 hours against a 30-minute window, with the
+    dark-vessel detector still reading gaps out of them. The alert was right and
+    active the whole time; nothing acted on it, because acting was the dead
+    poller's job.
+
+    So the cutoff is enforced from here too, on a loop that keeps running when
+    every source is down. Kinds come from the table rather than from a list, so
+    a kind that stops being produced is still swept -- a hand-maintained list
+    would have the same blind spot as the poller.
+    """
+    evicted: dict[str, int] = {}
+    kinds = [r["kind"] for r in await conn.fetch("SELECT DISTINCT kind FROM entity_latest")]
+    for kind in kinds:
+        status = await conn.execute(
+            "DELETE FROM entity_latest WHERE kind = $1 AND updated_at < $2",
+            kind, now - timedelta(seconds=_stale_after(kind)),
+        )
+        count = _deleted_count(status)
+        if count:
+            evicted[kind] = count
+            # Same announcement a write makes. Without it the mirror keeps
+            # serving the evicted rows until its fallback tick notices the
+            # watermark moved -- correct eventually, but the whole point here is
+            # that nothing else is going to speak for a dead source.
+            await conn.execute("SELECT pg_notify($1, $2)", NOTIFY_CHANNEL, kind)
+    return evicted
+
+
 async def retention_sweep_loop() -> None:
     """Prunes each table by its own window. Postgres reclaims space via
     autovacuum, so unlike the SQLite version there's no WAL checkpoint to
@@ -1066,6 +1305,16 @@ async def retention_sweep_loop() -> None:
                 await conn.execute(
                     "DELETE FROM source_health WHERE ts < $1",
                     now - timedelta(days=config.SOURCE_HEALTH_RETENTION_DAYS),
+                )
+                evicted = await sweep_stale_entities(conn, now)
+            if evicted:
+                # Logged rather than silent: rows disappearing from a layer is
+                # something you want to be able to point at afterwards, and for
+                # a dead source this line is the only record that its last
+                # positions were dropped rather than lost.
+                log.info(
+                    "Retention sweep evicted stale rows: %s",
+                    ", ".join(f"{k} {n}" for k, n in sorted(evicted.items())),
                 )
         except Exception:  # noqa: BLE001
             log.exception("Retention sweep failed")

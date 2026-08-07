@@ -77,6 +77,17 @@ _JOBS = (
         health_name="escalation",
         health_every=config.ESCALATION_REFRESH_INTERVAL,
     ),
+    # Like escalation, this writes one keyed document to reference_snapshots
+    # rather than a point layer -- the coordinates it attaches to already exist
+    # on the airports layer -- so it publishes nothing for the backend to mirror
+    # and app.py reads the table directly.
+    Job(
+        module="backend.sources.airfield_activity",
+        entrypoint="derive_forever",
+        publishes=(),
+        health_name="airfield_activity",
+        health_every=30 * 60,  # airfield_activity.REFRESH_INTERVAL
+    ),
 )
 
 

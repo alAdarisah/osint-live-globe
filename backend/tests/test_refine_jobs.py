@@ -21,11 +21,20 @@ def _job(module_suffix):
     return next(job for job in refine.all_jobs() if job.module.endswith(module_suffix))
 
 
-def test_the_refine_tier_is_exactly_the_three_derivations():
+def test_the_refine_tier_is_exactly_the_declared_derivations():
+    """Named for the property rather than the count, which used to be in the
+    name and rotted the moment a fourth derivation was added. The allowlist is
+    still explicit: a job appearing here is the one place the tier's defining
+    property -- that nothing in it fetches -- is decided rather than assumed."""
     assert {job.module for job in refine.all_jobs()} == {
         "backend.sources.event_fusion",
         "backend.sources.dark_vessels",
         "backend.escalation",
+        # Re-derives per-airfield movement counts from the ADS-B history the
+        # ingest process already stored. Publishes no layer of its own -- the
+        # coordinates are on the airports layer -- so it writes one keyed
+        # document and app.py reads that table directly.
+        "backend.sources.airfield_activity",
     }
 
 

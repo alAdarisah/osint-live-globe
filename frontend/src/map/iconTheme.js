@@ -96,6 +96,18 @@ export const PALETTE_GROUPS = [
       { id: "osm.border", label: "Border crossing (OpenStreetMap)", value: "#c9b6ff" },
     ],
   },
+  {
+    id: "choropleth",
+    label: "Country fill",
+    note: "The three-stop ramp the country shapes are painted with, low to high. Kept clear of"
+      + " the severity and reliability ramps on purpose: this covers whole countries, and"
+      + " sharing their colour language would read as one enormous pin.",
+    tokens: [
+      { id: "choropleth.low", label: "Low", value: "#2dd4bf" },
+      { id: "choropleth.mid", label: "Middle", value: "#6366f1" },
+      { id: "choropleth.high", label: "High", value: "#c026d3" },
+    ],
+  },
 ];
 
 /** token id -> shipped default. Also the whole set of ids that may be overridden. */
@@ -112,11 +124,15 @@ export const DEFAULT_COLORS = Object.freeze(
  *   event.corroborated    recolours a pin already sized by its severity
  *   sanctions.designated  a ring drawn around a hull or airframe, not a pin
  *   cable.route           a polyline; its landing points are sized separately
+ *   choropleth.*          a country fill; its size is the country
  *
  * Everything else resolves to a marker whose pixel size passes through
  * scaledSize, which is what a per-token multiplier acts on.
  */
-const COLOUR_ONLY_TOKENS = new Set(["event.corroborated", "sanctions.designated", "cable.route"]);
+const COLOUR_ONLY_TOKENS = new Set([
+  "event.corroborated", "sanctions.designated", "cable.route",
+  "choropleth.low", "choropleth.mid", "choropleth.high",
+]);
 
 export function tokenHasSize(token) {
   return token in DEFAULT_COLORS && !COLOUR_ONLY_TOKENS.has(token);

@@ -45,6 +45,42 @@ export function updateTrails(trailMap, items, idField, maxPoints, restrictTo) {
   }
 }
 
+/**
+ * Replace one entity's trail with a path recorded server-side.
+ *
+ * This is what turns a trail from "since you selected it" into "since we
+ * started hearing it". The backend has kept every position it recorded for the
+ * retention window (see /api/track and storage.entity_track); until now the
+ * only history the map could draw was whatever it had watched accumulate in
+ * this tab, so selecting an aircraft that had been flying for a day drew a
+ * single dot.
+ *
+ * Seeded into the *same* array the live poll appends to, deliberately. The
+ * recorded path and the live tail are one continuous thing to a reader, and
+ * giving the historical half its own layer would have meant a second colour
+ * language on the map for what is the same claim -- where this went. The
+ * existing age ramp in renderTrailLayer then reads correctly end to end: oldest
+ * and faintest at the start of the recorded track, brightest at the live end.
+ *
+ * `points` arrive oldest-first from the endpoint. Trimmed from the *front* when
+ * over budget, keeping the newest, which is the same end updateTrails keeps.
+ */
+export function seedTrailFromTrack(trailMap, id, points, maxPoints) {
+  if (id == null || !Array.isArray(points)) return;
+  const path = [];
+  for (const p of points) {
+    if (typeof p?.lat !== "number" || typeof p?.lon !== "number") continue;
+    const last = path[path.length - 1];
+    // Same duplicate guard updateTrails applies: entity_history only receives a
+    // row when a position changed, but a track can still be seeded twice by two
+    // selections in a row, and a zero-length segment renders as nothing while
+    // still costing the age ramp a step.
+    if (!last || last[0] !== p.lat || last[1] !== p.lon) path.push([p.lat, p.lon]);
+  }
+  if (!path.length) return;
+  trailMap.set(id, path.length > maxPoints ? path.slice(path.length - maxPoints) : path);
+}
+
 // `color` is either one colour for the whole layer or a `(id) => colour`
 // function, so a single trail layer can hold two visually distinct
 // categories -- satellites use it to draw military objects' tracks in the same

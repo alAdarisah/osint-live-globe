@@ -45,6 +45,17 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // so the admin panel can tell a stored edit that still fits from one made
   // against a geometry the source has since changed.
   const [countryFingerprints, setCountryFingerprints] = useState({});
+  // Which metric the country shapes are painted by, and how many of them the
+  // metric actually has a value for. The coverage half is not decoration: four
+  // of the six metrics know about only part of the world, and a reader looking
+  // at a mostly-blank map needs to be told whether that means "no harm here" or
+  // "nobody has measured here".
+  const [choropleth, setChoropleth] = useState({ metricId: null, covered: 0, total: 0 });
+  // What the admin-2 layer is currently showing: which count, which month, and
+  // how many districts that month actually has a record for.
+  const [districts, setDistricts] = useState({
+    metricId: "fatalities", month: null, districts: 0, countries: [],
+  });
 
   // onRegionAutoReset changes identity across renders (it closes over
   // region state) -- keep the latest one in a ref so the controller (created
@@ -74,6 +85,8 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
         onCountryPointChange: (point) => setSelectedCountry((prev) => (prev ? { ...prev, point } : prev)),
         onBorderEditChange: (state) => setBorderEdit(state?.active ? state : NO_BORDER_EDIT),
         onCountryFingerprints: setCountryFingerprints,
+        onChoroplethChange: setChoropleth,
+        onDistrictsChange: setDistricts,
         onBorderRingCommit: (commits) => onBorderRingCommitRef.current?.(commits),
       }
     );
@@ -120,6 +133,18 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
 
   const setAgeReference = useCallback((ts) => {
     controllerRef.current?.setAgeReference(ts);
+  }, []);
+
+  const setChoroplethMetric = useCallback((metricId) => {
+    controllerRef.current?.setChoroplethMetric(metricId);
+  }, []);
+
+  const setDistrictMetric = useCallback((metricId) => {
+    controllerRef.current?.setDistrictMetric(metricId);
+  }, []);
+
+  const setDistrictMonth = useCallback((month) => {
+    controllerRef.current?.setDistrictMonth(month);
   }, []);
 
   // Closing the card leaves the country highlighted -- the selection is cleared
@@ -182,6 +207,8 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, setAgeReference,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
     setIconTheme, setLayerZoomOverrides, setImagery,
+    choropleth, setChoroplethMetric,
+    districts, setDistrictMetric, setDistrictMonth,
     borderEdit, countryFingerprints,
     refreshCountriesNow, beginBorderEdit, endBorderEdit, setBorderLinkMode, undoBorderEdit,
   };

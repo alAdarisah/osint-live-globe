@@ -4,4 +4,8 @@ __pycache__/
 *.pyc
 frontend/node_modules/
 frontend/dist/
-data/
+# Contents only, not the directory itself -- git cannot re-include a file whose
+# parent is excluded, and the note saying what is in there belongs with the
+# code. The data is local and often huge; the map of it is three pages.
+data/*
+!data/README.md

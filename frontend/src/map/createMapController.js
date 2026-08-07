@@ -14,6 +14,8 @@
 import { L } from "./leafletGlobal";
 import {
   passesEventFilter, DEFAULT_EVENT_FILTER, ageHoursFromDateAdded, NEWS_WINDOW_HOURS,
+  confidenceDimmed, positionUncertain, uncertaintyRadiusMetres, verdictBucket,
+  severityBand, severityColor,
 } from "./severity";
 import {
   createBaseLayer,
@@ -28,6 +30,7 @@ import {
   GIBS_LAYERS,
   createEntityClusterGroups,
   createCountriesLayer,
+  createUncertaintyLayer,
   createCitiesGroup,
   createInfraGroup,
   createPipelinesGroup,
@@ -90,7 +93,12 @@ import { buildCountryIndex, findCountryAt, representativePointOf } from "./count
 import { createBorderEditor } from "./borderEdit";
 import { countryFingerprints } from "../settings/borderOverrides";
 import { countryCardSections, cityPopupHtml, normalizeCountryName } from "./popups";
-import { updateTrails, renderTrailLayer } from "./trails";
+import { buildChoropleth } from "./choropleth";
+import {
+  createDistrictsLayer, districtMetricById, indexDistrictCounts, buildDistrictScale,
+  districtFill, DISTRICT_COUNTRIES, buildDistrictIndex, findDistrictAt, districtPopupHtml,
+} from "./districts";
+import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { createEntityWebglLayer } from "./webglLayer";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
@@ -152,8 +160,19 @@ const MARKER_LAYER_MIN_ZOOM = {
 // always stays on regardless of zoom.
 const FIRMS_DETAIL_MIN_ZOOM = 5;
 
-const SHIP_TRAIL_MAX_POINTS = 60;
-const AIRCRAFT_TRAIL_MAX_POINTS = 90;
+// Raised from 60/90 when trails started being seeded from recorded history
+// (see seedTrailFromTrack). These are one budget shared by two producers: the
+// server track seeds the array and the live poll appends to it, and
+// updateTrails trims from the front once over the cap. A larger seed than the
+// cap would therefore be eaten one point per poll -- the recorded half would
+// visibly erode as the tab stayed open. So the cap is also what /api/track is
+// asked for, and the two can never disagree.
+//
+// Only ever one selected ship and one selected aircraft, so this is a few
+// hundred short polylines at most -- far below what the FIRMS canvas layer
+// already draws.
+const SHIP_TRAIL_MAX_POINTS = 300;
+const AIRCRAFT_TRAIL_MAX_POINTS = 400;
 // Satellites poll every 10s (see useOsintData.js's POLL_CONFIG) -- 36 points
 // is a several-minute trailing arc, same "grows from app-open" cold start as
 // ship/aircraft trails.
@@ -237,6 +256,10 @@ export function createMapController(container, initial, callbacks) {
   const jammingPingGroup = createJammingPingGroup();
   const jammingLayerWithPing = L.layerGroup([jammingLayer, jammingPingGroup]).addTo(map);
   const { groups } = createEntityClusterGroups(map);
+  // The area a conflict event could actually be in, drawn under its pin. Tied
+  // to the events layer rather than toggled separately -- it is the same claim
+  // as the pin, drawn honestly, not a layer a reader should have to find.
+  const uncertaintyLayer = createUncertaintyLayer(map);
   const citiesGroup = createCitiesGroup(map);
   const infraGroup = createInfraGroup();
   const pipelinesGroup = createPipelinesGroup();
@@ -303,6 +326,11 @@ export function createMapController(container, initial, callbacks) {
     // Country-keyed humanitarian aggregates (ISO3), read by the country card
     // only -- see backend/sources/humanitarian.py for why none of it is drawn.
     humanitarian: {},
+    // Recorded traffic per airfield, keyed by the OurAirports ident the
+    // airports layer already carries. Derived from this app's own ADS-B history
+    // (see backend/sources/airfield_activity.py) rather than fetched, and
+    // attached to existing pins rather than drawn as a layer.
+    airfieldActivity: {},
   };
   // ais/aisNavy/aisTanker/adsb/adsbMilitary are no longer here -- their
   // markers live inside entityWebglLayer's own per-bucket entry maps now
@@ -313,6 +341,12 @@ export function createMapController(container, initial, callbacks) {
     cableLandings: new Map(), launches: new Map(), osmInfra: new Map(),
     outagePoints: new Map(),
   };
+  // Keyed by event id, same as markersByKey.events, so a circle and its pin
+  // are added and dropped by the same diff against the same visible set.
+  const uncertaintyCircles = new Map();
+  // Same layer, separate diff: a refined event has both a circle and a line,
+  // and one Map keyed by event id cannot hold two shapes for one key.
+  const refinementLines = new Map();
   const shipTrails = new Map();
   const aircraftTrails = new Map();
   const satelliteTrails = new Map();
@@ -585,7 +619,32 @@ export function createMapController(container, initial, callbacks) {
   // sitting above the countries pane made every country unclickable from the
   // first zoom-in onwards, and no pane ordering fixes that without breaking
   // marker clicks instead.
-  const countriesLayer = createCountriesLayer(map);
+  // Which country-level number, if any, the shapes are painted by. Null is the
+  // shipped default: the fill is opt-in, because a permanently-tinted world
+  // would compete with every pin drawn on top of it.
+  let choroplethMetricId = null;
+  let choropleth = { metric: null, styleFor: () => null, covered: 0, total: 0 };
+  const countriesLayer = createCountriesLayer(map, (props) => choropleth.styleFor(props));
+
+  // ---------- admin-2 district record ----------
+  // Off until asked for: it is a historical monthly archive, not a live layer,
+  // and it covers six countries rather than the world. Everything it needs --
+  // the geometry per country and one month of counts -- is fetched on demand
+  // when it is switched on rather than polled, because none of it changes on
+  // any timescale a session would notice.
+  let districtMetricId = "fatalities";
+  let districtMonth = null;              // "YYYY-MM"; null until the months load
+  let districtCounts = new Map();        // p-code -> one month's record
+  let districtPosition = () => null;     // value -> 0..1 along the ramp
+  // Flat {pcode, bbox, polygons} list for click resolution -- see districts.js
+  // on why the country index's smallest-area-first ordering is not needed here.
+  let districtIndex = [];
+  const districtGeometryLoaded = new Set();
+  const districtsLayer = createDistrictsLayer(map, (pcode) => {
+    const record = districtCounts.get(pcode);
+    if (!record) return null;
+    return districtFill(districtPosition(districtMetricById(districtMetricId).valueOf(record)));
+  });
   let countryIndex = [];          // see buildCountryIndex -- smallest-area-first
   let layerByCountryKey = new Map();
   let hoveredCountryKey = null;
@@ -790,6 +849,7 @@ export function createMapController(container, initial, callbacks) {
   function layerForKey(key) {
     if (key === "firms") return firmsLayer;
     if (key === "countries") return countriesLayer;
+    if (key === "districts") return districtsLayer;
     if (key === "cities") return citiesGroup;
     if (key === "infra") return infraLayer; // wraps infraGroup + pipelinesGroup together
     if (key === "cables") return cablesLayer; // wraps cablesGroup + the landing-point markers
@@ -896,11 +956,38 @@ export function createMapController(container, initial, callbacks) {
     if (key === "events") {
       eventsVisible = visible;
       syncNewsLayer();
+      // The uncertainty circles are the same claim as the pins, so they follow
+      // the same toggle. Cleared rather than merely detached, on the same
+      // reasoning as the trail toggles above: the circles are rebuilt from the
+      // next render regardless, and keeping a few hundred detached paths alive
+      // to re-attach is more state than they are worth.
+      if (visible) {
+        map.addLayer(uncertaintyLayer);
+      } else {
+        map.removeLayer(uncertaintyLayer);
+        uncertaintyLayer.clearLayers();
+        uncertaintyCircles.clear();
+        refinementLines.clear();
+      }
     }
 
     if (key === "countries") {
       countriesVisible = visible;
       if (!visible) setHoveredCountry(null);
+      // addLayer above re-creates every path element from scratch, and the
+      // selection/flare/editing classes were on the elements it just threw
+      // away -- the state itself (selectedCountryKeys, the open card, a live
+      // border session) is untouched, so without this the highlight stayed
+      // gone until the next selection change wrote it again.
+      else repaintCountryClasses();
+    }
+
+    // Everything this layer needs is fetched the first time it is switched on
+    // rather than polled: about half a megabyte of boundaries per country and
+    // one month of counts, none of which changes while a tab is open.
+    if (key === "districts" && visible) {
+      loadDistrictGeometry();
+      if (districtMonth) loadDistrictMonth(districtMonth);
     }
 
     if (key === "satellites") {
@@ -923,6 +1010,29 @@ export function createMapController(container, initial, callbacks) {
   // toggle-select/seed-trail/open-popup/re-decorate behavior the old
   // marker-based handlers gave for free.
 
+  // Fetch and draw an entity's recorded path, then let the live poll carry on
+  // appending to the same array (see seedTrailFromTrack).
+  //
+  // Fire-and-forget rather than awaited: selection has to feel immediate, and
+  // the live seed below has already drawn whatever this tab watched happen. The
+  // recorded history arrives a moment later and extends it backwards.
+  //
+  // Guarded on the selection still being the same entity when the response
+  // lands. A reader clicking through three aircraft in quick succession would
+  // otherwise get the first one's track painted under the third one's pin.
+  async function loadRecordedTrack(kind, id, trailMap, maxPoints, stillSelected, redraw) {
+    try {
+      const data = await fetchJson(`/api/track/${kind}/${encodeURIComponent(id)}?points=${maxPoints}`);
+      if (!stillSelected() || !data?.points?.length) return;
+      seedTrailFromTrack(trailMap, id, data.points, maxPoints);
+      redraw();
+    } catch {
+      // A track is an enhancement to a trail that already draws. Failing loudly
+      // here would put an error in front of a reader who just clicked a plane
+      // and can already see where it has been since they did.
+    }
+  }
+
   function selectAircraft(item) {
     selectedIcao = selectedIcao === item.icao24 ? null : item.icao24;
     if (selectedIcao) {
@@ -930,6 +1040,11 @@ export function createMapController(container, initial, callbacks) {
       // poll -- otherwise the trail stayed empty until then, which just
       // looked like flight history didn't work.
       updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
+      const chosen = selectedIcao;
+      loadRecordedTrack(
+        "adsb", chosen, aircraftTrails, AIRCRAFT_TRAIL_MAX_POINTS,
+        () => selectedIcao === chosen, renderAdsbLayer
+      );
       const d = decorateAdsb(item, { selectedIcao });
       L.popup({ maxWidth: 320 }).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
     } else {
@@ -943,6 +1058,11 @@ export function createMapController(container, initial, callbacks) {
     selectedMmsi = selectedMmsi === item.mmsi ? null : item.mmsi;
     if (selectedMmsi) {
       updateTrails(shipTrails, raw.ais, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
+      const chosen = selectedMmsi;
+      loadRecordedTrack(
+        "ais", chosen, shipTrails, SHIP_TRAIL_MAX_POINTS,
+        () => selectedMmsi === chosen, () => renderMarkerLayer("ais")
+      );
       const d = decorateAis(item, { selectedMmsi });
       L.popup({ maxWidth: 320 }).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
     } else {
@@ -972,15 +1092,52 @@ export function createMapController(container, initial, callbacks) {
     marker.setZIndexOffset(-Math.round(size));
   }
 
+  // Only the conflict layer carries a placement confidence, so only it can be
+  // dimmed by one. Threaded through decorate rather than applied as a CSS class
+  // because the icon's HTML string is the change test updateMarker uses -- a
+  // dim applied outside that string would be undone by the next repaint.
+  function dimmedFor(key, item) {
+    return key === "events" && confidenceDimmed(item, eventFilter);
+  }
+
+  // The recorded-traffic record for an airfield pin, or null.
+  //
+  // Keyed on the OurAirports ident first: that is what adsb.py's proximity
+  // index reports as `nearest_airfield.code`, and it is the only one of the
+  // three that every field has (a grass strip has an ident but no ICAO or
+  // IATA). The other two are tried after so a field whose ident happens to be
+  // absent still matches.
+  function airfieldActivityFor(item) {
+    const table = raw.airfieldActivity || {};
+    return table[item.id] || table[item.icao] || table[item.iata] || null;
+  }
+
+  // Everything a decorator may need beyond the item itself. Built in one place
+  // because buildMarker and updateMarker must pass identical options -- the
+  // icon's HTML string is the change test updateMarker compares against, so an
+  // option supplied by one and not the other rebuilds every marker on the first
+  // update after it is created.
+  function decorateOptionsFor(key, item, id) {
+    return {
+      offset: offsetFor(key, id),
+      dimmed: dimmedFor(key, item),
+      activity: key === "airports" ? airfieldActivityFor(item) : undefined,
+    };
+  }
+
   function buildMarker(key, item, decorate, sizeOf) {
     const id = item[ID_FIELD[key]];
-    const d = decorate(item, { offset: offsetFor(key, id) });
+    const d = decorate(item, decorateOptionsFor(key, item, id));
     const marker = L.marker([item.lat, item.lon], { icon: d.icon });
     marker._item = item;
     marker._iconHtml = d.icon.options.html;
     applyStacking(marker, sizeOf(item));
-    marker.bindPopup(() => decorate(marker._item, { selectedIcao, selectedMmsi }).detail, { maxWidth: 320 });
-    marker.bindTooltip(() => decorate(marker._item, { selectedIcao, selectedMmsi }).tooltip, {
+    // Same options the icon was built from, so a popup opened on an airfield
+    // shows the traffic its glyph was already sized by. Rebuilt per open rather
+    // than captured, because the table behind it is refreshed on its own timer.
+    const lazyOptions = () => ({ selectedIcao, selectedMmsi, ...decorateOptionsFor(key, marker._item, id) });
+    marker.bindPopup(() => decorate(marker._item, lazyOptions()).detail, { maxWidth: 320 });
+    marker.bindTooltip(() => decorate(marker._item, lazyOptions()).tooltip, {
       className: "map-tooltip",
       direction: "top",
     });
@@ -989,7 +1146,9 @@ export function createMapController(container, initial, callbacks) {
 
   function updateMarker(marker, item, decorate, key, sizeOf) {
     const id = item[ID_FIELD[key]];
-    const d = decorate(item, { selectedIcao, selectedMmsi, offset: offsetFor(key, id) });
+    const d = decorate(item, {
+      selectedIcao, selectedMmsi, ...decorateOptionsFor(key, item, id),
+    });
     marker._item = item;
     marker.setLatLng([item.lat, item.lon]);
     applyStacking(marker, sizeOf(item));
@@ -1023,6 +1182,7 @@ export function createMapController(container, initial, callbacks) {
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
     osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
     outagePoints: 0,
+    eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
   };
   // Total number loaded from the backend for each layer, independent of the
   // current viewport/zoom filtering that `counts` reflects -- shown in the
@@ -1039,6 +1199,7 @@ export function createMapController(container, initial, callbacks) {
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
     osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
     outagePoints: 0,
+    eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
   };
   // backend/infrastructure.py site "type" -> the counts/totals key it rolls
   // up into, so Critical Infrastructure can show a per-type sub-ticker (see
@@ -1061,6 +1222,16 @@ export function createMapController(container, initial, callbacks) {
   // INFRA_TYPE_COUNT_KEY does for infrastructure). Each entry maps an item to
   // the counts key it rolls up into, or null to roll up into nothing.
   const LAYER_SUBCOUNT_KEY = {
+    // What the pipeline concluded about each pin's *position*, as three
+    // numbers. Not a filter and not a legend of colours -- a plain count, of
+    // the kind that is otherwise only discoverable by opening pins one at a
+    // time. It is worth stating up front because the answer is lopsided: almost
+    // nothing on this layer has had its coordinate checked, and a reader has no
+    // way to learn that from a map full of confident-looking dots.
+    events: {
+      keys: ["eventsVerified", "eventsDoubted", "eventsUnverified"],
+      of: verdictBucket,
+    },
     hazards: {
       keys: ["hazardsQuake", "hazardsVolcano"],
       of: (item) => (item.kind === "volcano" ? "hazardsVolcano" : "hazardsQuake"),
@@ -1262,6 +1433,122 @@ export function createMapController(container, initial, callbacks) {
     }
   }
 
+  // ---------- placement uncertainty ----------
+  //
+  // The circle is only worth drawing inside a legibility window, and the window
+  // has to be measured in screen pixels rather than zoom levels because the
+  // radii in the data differ by a factor of 27 (locality 15 km, region 120,
+  // country 400). A single zoom gate tuned for the 400 km discs would hide
+  // every 15 km one at the zoom where it finally means something.
+  //
+  // Under the floor the circle is a smudge beneath its own pin and says
+  // nothing. Over the ceiling it is a wash across the viewport with no readable
+  // edge -- at that point the popup's "could be up to 400 km away" is the
+  // honest way to say it, and the circle is just paint over other layers.
+  const UNCERTAINTY_MIN_PX = 10;
+  const UNCERTAINTY_MAX_VIEWPORT_FRACTION = 0.45;
+
+  // Metres to screen pixels along the parallel at `lat`, at the current zoom.
+  // Guarded near the poles, where the cosine goes to zero and a finite distance
+  // stops having a finite longitude span -- Infinity there puts the circle over
+  // the ceiling, which hides it, which is the right answer.
+  function metresToPixels(lat, metres) {
+    const cos = Math.cos((lat * Math.PI) / 180);
+    if (!(cos > 0.01)) return Infinity;
+    const zoom = map.getZoom();
+    const a = map.project([lat, 0], zoom);
+    const b = map.project([lat, metres / (111320 * cos)], zoom);
+    return Math.abs(b.x - a.x);
+  }
+
+  function uncertaintyOnScreen(item) {
+    if (!positionUncertain(item)) return false;
+    const metres = uncertaintyRadiusMetres(item);
+    if (metres === null) return false;
+    const px = metresToPixels(item.lat, metres);
+    if (px < UNCERTAINTY_MIN_PX) return false;
+    const size = map.getSize();
+    return px <= Math.min(size.x, size.y) * UNCERTAINTY_MAX_VIEWPORT_FRACTION;
+  }
+
+  // Severity's own colour, so a reader can tell which circle belongs to which
+  // pin when two overlap. Deliberately not given a palette token of its own: an
+  // override would let a circle and its pin disagree about the same event.
+  function uncertaintyStyle(item) {
+    const color = severityColor(severityBand(Number.isFinite(item.severity) ? item.severity : 0));
+    return {
+      pane: "uncertaintyPane",
+      interactive: false,
+      color,
+      weight: 1,
+      opacity: 0.45,
+      dashArray: "5 5",
+      fillColor: color,
+      fillOpacity: 0.05,
+    };
+  }
+
+  // Straight-line distance between two positions in screen pixels at the
+  // current zoom -- the honest measure for "is this worth drawing", since both
+  // ends are real coordinates rather than a radius along one bearing.
+  function pixelSpan(a, b) {
+    const zoom = map.getZoom();
+    return map.project(a, zoom).distanceTo(map.project(b, zoom));
+  }
+
+  // The one visual that shows the pipeline correcting itself: where geoverify
+  // moved a pin, a line back to where the source originally put it.
+  //
+  // Only for "refined". A "contested" pin has deliberately *not* been moved
+  // (see geoverify.py and VERDICT_NOTE) -- there is no second position, and
+  // drawing a line to one would assert the opposite of what the verdict says.
+  function refinementOnScreen(item) {
+    if (item.geo_verdict !== "refined") return false;
+    if (!Number.isFinite(item.original_lat) || !Number.isFinite(item.original_lon)) return false;
+    // Under the floor the line is a dot under its own pin.
+    return pixelSpan([item.lat, item.lon], [item.original_lat, item.original_lon]) >= UNCERTAINTY_MIN_PX;
+  }
+
+  function refinementPath(item) {
+    return [[item.original_lat, item.original_lon], [item.lat, item.lon]];
+  }
+
+  const REFINEMENT_STYLE = {
+    pane: "uncertaintyPane",
+    interactive: false,
+    color: "#6fe3ff",
+    weight: 1,
+    opacity: 0.55,
+    dashArray: "2 4",
+  };
+
+  function renderEventUncertainty(visible) {
+    const live = layerOnMap.events ? visible : [];
+    syncLayerMarkers(
+      uncertaintyCircles,
+      uncertaintyLayer,
+      live.filter(uncertaintyOnScreen),
+      (item) => item[ID_FIELD.events],
+      (item) => L.circle([item.lat, item.lon], {
+        ...uncertaintyStyle(item),
+        radius: uncertaintyRadiusMetres(item),
+      }),
+      (circle, item) => {
+        circle.setLatLng([item.lat, item.lon]);
+        circle.setRadius(uncertaintyRadiusMetres(item));
+        circle.setStyle(uncertaintyStyle(item));
+      }
+    );
+    syncLayerMarkers(
+      refinementLines,
+      uncertaintyLayer,
+      live.filter(refinementOnScreen),
+      (item) => item[ID_FIELD.events],
+      (item) => L.polyline(refinementPath(item), REFINEMENT_STYLE),
+      (line, item) => line.setLatLngs(refinementPath(item))
+    );
+  }
+
   function renderMarkerLayer(key) {
     if (key === "adsb") {
       renderAdsbLayer();
@@ -1273,7 +1560,14 @@ export function createMapController(container, initial, callbacks) {
     }
     const group = groups[key];
     const decorate = DECORATORS[key];
-    const sizeOf = ICON_SIZE_FOR[key];
+    // Airfields are the one layer whose size depends on data outside the item.
+    // The placement pass reserves whatever sizeOf returns, so it has to be given
+    // the same activity record the glyph is drawn from -- otherwise a field
+    // enlarged to 1.7x would be routed around a base-size hole, which is the
+    // exact mismatch the note at the top of decorators.js warns about.
+    const sizeOf = key === "airports"
+      ? (item) => airportIconSize(item, airfieldActivityFor(item))
+      : ICON_SIZE_FOR[key];
     const bounds = map.getBounds().pad(0.25);
     const idField = ID_FIELD[key];
     const minZoom = minZoomFor(key, MARKER_LAYER_MIN_ZOOM[key]);
@@ -1302,6 +1596,8 @@ export function createMapController(container, initial, callbacks) {
       const cappedBefore = zoomNotes.eventsCapped;
       visible = capBySeverity(visible, map.getZoom());
       if (zoomNotes.eventsCapped !== cappedBefore) reportZoomNotes();
+      // After the cap, so a circle can never outlive the pin it belongs to.
+      renderEventUncertainty(visible);
     }
     if (key === "gdelt") visible = collapseNews(visible, map.getZoom());
     if (key === "officials") visible = collapseOfficials(visible, map.getZoom());
@@ -1817,6 +2113,91 @@ export function createMapController(container, initial, callbacks) {
   // additions and renames.
   let lastCountriesSignature = null;
 
+  // The feeds a country fill can be computed from. `countries` is absent on
+  // purpose: renderCountries repaints itself after rebuilding the shapes, and
+  // adding it here would run the pass twice on every boundary refresh.
+  const CHOROPLETH_FEEDS = new Set(["conflictStats", "humanitarian", "outages"]);
+
+  /**
+   * Recompute the selected metric over the current features and repaint.
+   *
+   * One pass over 177 features and a `resetStyle` -- cheap enough to re-run on
+   * every poll that could move a value, which is what keeps the fill honest
+   * without a second cache to invalidate. resetStyle re-applies the style
+   * function in place rather than rebuilding the layer, so the hover and
+   * selection classes and the border editor's handles all survive it.
+   */
+  // ---------- district layer ----------
+
+  /**
+   * Load boundary geometry for the countries that have it, once per session.
+   *
+   * Per country rather than as one file: each is roughly half a megabyte of
+   * polygons and there is no reason a reader who opens the layer over Ukraine
+   * should wait for Venezuela. Loaded geometry is kept -- it is administrative
+   * boundaries, which do not change while a tab is open.
+   */
+  async function loadDistrictGeometry() {
+    for (const iso3 of DISTRICT_COUNTRIES) {
+      if (districtGeometryLoaded.has(iso3)) continue;
+      districtGeometryLoaded.add(iso3);
+      try {
+        const gj = await fetchJson(`/api/district-boundaries?country=${iso3}`);
+        if (gj?.features?.length) {
+          districtsLayer.addData(gj);
+          // Extended rather than rebuilt: each country arrives on its own
+          // request and the ones already in are still valid.
+          districtIndex = districtIndex.concat(buildDistrictIndex(gj.features));
+        }
+      } catch {
+        // A country with no stored boundary file simply has no districts drawn.
+        // Marked as attempted regardless, so a missing file is not re-requested
+        // on every toggle.
+      }
+    }
+    repaintDistricts();
+  }
+
+  /** Fetch one month of counts and repaint. */
+  async function loadDistrictMonth(month) {
+    if (!month) return;
+    try {
+      const rows = await fetchJson(`/api/conflict-districts?month=${encodeURIComponent(month)}`);
+      // Guarded on the month still being the one selected: scrubbing through a
+      // year fires a request per step and they do not necessarily land in
+      // order, so an early response could otherwise paint over a later one.
+      if (districtMonth !== month) return;
+      districtCounts = indexDistrictCounts(rows);
+      repaintDistricts();
+    } catch {
+      districtCounts = new Map();
+      repaintDistricts();
+    }
+  }
+
+  function repaintDistricts() {
+    const metric = districtMetricById(districtMetricId);
+    districtPosition = buildDistrictScale(metric, districtCounts);
+    districtsLayer.resetStyle();
+    callbacks.onDistrictsChange?.({
+      metricId: metric.id,
+      month: districtMonth,
+      districts: districtCounts.size,
+      countries: [...districtGeometryLoaded],
+    });
+  }
+
+  function refreshChoropleth() {
+    const features = raw.countries?.features || [];
+    choropleth = buildChoropleth(choroplethMetricId, features, raw);
+    if (features.length) countriesLayer.resetStyle();
+    callbacks.onChoroplethChange?.({
+      metricId: choropleth.metric ? choropleth.metric.id : null,
+      covered: choropleth.covered,
+      total: choropleth.total,
+    });
+  }
+
   function renderCountries() {
     const features = raw.countries.features || [];
     const signature = `${features.length}|${features
@@ -1846,6 +2227,10 @@ export function createMapController(container, initial, callbacks) {
       counts.countries = features.length;
       totals.countries = features.length;
       reportCounts();
+      // The shapes were just rebuilt from scratch, so whatever fill they were
+      // carrying went with them. Repainting here rather than leaving it to the
+      // next poll is what stops a boundary refresh blanking an active metric.
+      refreshChoropleth();
       // The outage pins are positioned from these boundaries, so a rebuilt
       // country index invalidates them -- and on first load this is what turns
       // an already-fetched outage dict into pins at all.
@@ -1863,8 +2248,7 @@ export function createMapController(container, initial, callbacks) {
       // the multi-megabyte collection itself ever entering React state.
       callbacks.onCountryFingerprints?.(countryFingerprints(raw.countries));
     }
-    updateCountryWarFlare();
-    updateCountryHighlights();
+    repaintCountryClasses();
   }
 
   /**
@@ -1924,6 +2308,27 @@ export function createMapController(container, initial, callbacks) {
       const el = layer.getElement?.();
       if (el) el.classList.toggle("country-hot", hot);
     });
+  }
+
+  /**
+   * Re-apply every per-shape CSS class after the country paths were rebuilt.
+   *
+   * Selection, war flare and the editing outline all live as classes on the
+   * SVG path elements, and each is normally written only by the event that
+   * changes it -- a click, an ACLED poll, opening an editing session. Anything
+   * that recreates the paths (Leaflet's remove/add in setLayerVisible, or a
+   * boundary rebuild) drops all three while the state that produced them is
+   * still current, so they have to be written back rather than waited for.
+   */
+  function repaintCountryClasses() {
+    updateCountryWarFlare();
+    updateCountryHighlights();
+    if (borderSession) {
+      countriesLayer.eachLayer((layer) => {
+        const key = countryKeyOfProps(layer.feature?.properties || {});
+        layer.getElement?.()?.classList.toggle("country-editing", key === borderSession.countryKey);
+      });
+    }
   }
 
   function cityKey(city) {
@@ -2375,6 +2780,30 @@ export function createMapController(container, initial, callbacks) {
     // it. Leaflet sets sourceTarget to whichever layer originated the event.
     if (e.sourceTarget && e.sourceTarget !== map) return;
 
+    // The district record, when that layer is on and the click landed in one.
+    //
+    // Deliberately additive rather than consuming the click: the district shapes
+    // are a fill over a country, exactly like the country choropleth fill, and
+    // that one does not intercept country selection either. Taking the click
+    // here would make every country covered by this layer unselectable for as
+    // long as it is switched on -- a feature removing a feature. So the popup
+    // opens and country selection below proceeds as it always has.
+    //
+    // Suppressed during a border-edit session: that gesture is already a
+    // precision one, and a popup opening under a missed grab at a vertex handle
+    // is exactly the wrong response.
+    if (layerOnMap.districts && !borderSession && districtIndex.length) {
+      const district = findDistrictAt(districtIndex, e.latlng.lat, e.latlng.lng);
+      if (district) {
+        L.popup({ maxWidth: 300, autoPan: false })
+          .setLatLng(e.latlng)
+          .setContent(districtPopupHtml(
+            district, districtCounts.get(district.pcode) || null, districtMonth, districtMetricId
+          ))
+          .openOn(map);
+      }
+    }
+
     // Country selection is a *fallback* hit-test rather than a handler on the
     // shapes themselves -- see countryHitTest.js. Everything above this point
     // has already had its chance to claim the click.
@@ -2526,9 +2955,19 @@ export function createMapController(container, initial, callbacks) {
              || key === "humanitarian") {
         /* reference data read on demand by popups.js -- no marker layer */
       }
+      // Keyed by airfield ident, not a point layer of its own: it re-sizes and
+      // re-describes pins the airports layer already draws, so a fresh document
+      // means re-rendering that layer rather than adding anything.
+      else if (key === "airfieldActivity") renderMarkerLayer("airports");
       else if (key === "conflictHistory") renderMarkerLayer("conflictHistory");
       else renderMarkerLayer(key);
       if (key === "events") updateCountryWarFlare();
+      // Three of the six country-fill metrics read these dicts, and the fill is
+      // computed once per poll rather than per paint. Repainting only on the
+      // feed that can actually move a value keeps a metric current without
+      // re-running the pass on every unrelated poll (renderCountries does its
+      // own after a boundary rebuild).
+      if (CHOROPLETH_FEEDS.has(key)) refreshChoropleth();
       // An open country card is built from `raw` at the moment it opens, so
       // without this it would keep showing the counts that were true when it
       // was clicked -- indefinitely, since the card outlives pans and zooms
@@ -2549,6 +2988,27 @@ export function createMapController(container, initial, callbacks) {
     setEventFilter(next) {
       eventFilter = { ...eventFilter, ...(next || {}) };
       renderMarkerLayer("events");
+    },
+
+    /** Which country-level number the shapes are painted by; null clears it. */
+    setChoroplethMetric(metricId) {
+      const next = metricId || null;
+      if (next === choroplethMetricId) return;
+      choroplethMetricId = next;
+      refreshChoropleth();
+    },
+
+    /** Which of the district counts to paint. Repaints from data already held. */
+    setDistrictMetric(metricId) {
+      districtMetricId = districtMetricById(metricId).id;
+      repaintDistricts();
+    },
+
+    /** Which month the district layer shows. Fetches that month's counts. */
+    setDistrictMonth(month) {
+      if (!month || month === districtMonth) return;
+      districtMonth = month;
+      loadDistrictMonth(month);
     },
 
     // The moment ages are measured against. Replay passes its scrubbed

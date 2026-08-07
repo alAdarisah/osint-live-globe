@@ -17,6 +17,8 @@ const DEFAULT_OPEN = { "grp-conflict": true };
 export default function ControlPanel({
   open, counts, zoomNotes, layerVisibility, onToggleLayer, health, owmConfigured, windStatus, infraFilterText, onInfraFilterChange, eventFilter, onEventFilterChange, historyAsOf,
   imageryKey, imageryDate, onImageryChange,
+  choropleth, onChoroplethChange,
+  districts, districtMonths, onDistrictMetricChange, onDistrictMonthChange,
 }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN);
 
@@ -40,6 +42,12 @@ export default function ControlPanel({
         zoomNotes={zoomNotes}
         layerVisibility={layerVisibility}
         onToggleLayer={onToggleLayer}
+        choropleth={choropleth}
+        onChoroplethChange={onChoroplethChange}
+        districts={districts}
+        districtMonths={districtMonths}
+        onDistrictMetricChange={onDistrictMetricChange}
+        onDistrictMonthChange={onDistrictMonthChange}
         isOpen={isOpen}
         setOpen={setOpen}
       />

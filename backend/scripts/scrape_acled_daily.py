@@ -16,7 +16,7 @@ import httpx
 from backend import config
 from backend.sources.acled import _get_token, _parse_acled_rows, _query_acled
 
-OUT_DIR = config.DATA_DIR / "acled_daily"
+OUT_DIR = config.DATA_DIR / "snapshots" / "acled"
 
 FIELDS = [
     "id", "date", "event_type", "sub_event_type", "actor1", "actor2",
@@ -51,7 +51,13 @@ async def scrape(days: int) -> Path:
     items = _parse_acled_rows(payload)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUT_DIR / f"{until.isoformat()}.csv"
+    # Named for the window the rows actually cover, not for the day of the run.
+    # Those are the same thing only on an unrestricted account: under the
+    # embargo shift above, a file written today can hold events from a year ago,
+    # and naming it after today says the opposite of the truth. One file in
+    # data/snapshots/acled did exactly that -- "2026-08-04.csv" holding
+    # 2025-06-30 to 2025-07-04 -- which is unreadable evidence a year from now.
+    out_path = OUT_DIR / f"acled_{since.isoformat()}_{until.isoformat()}.csv"
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
         writer.writeheader()

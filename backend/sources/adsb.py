@@ -7,7 +7,7 @@ import httpx
 
 from backend import config, storage
 from backend.cache import registry
-from backend.sources import airports, sanctions
+from backend.sources import airports, icao_blocks, sanctions
 from backend.sources.proximity import haversine_km
 
 log = logging.getLogger("osint-globe.adsb")
@@ -433,6 +433,44 @@ def _attach_nearest_airfield(item: dict) -> None:
     }
 
 
+def _attach_hex_allocation(item: dict) -> None:
+    """Whose Mode-S block this aircraft's address was allocated out of.
+
+    Deliberately *alongside* `origin_country` rather than into it. The two are
+    different claims about the same aircraft and are allowed to disagree in
+    public:
+
+      - `origin_country` is OpenSky's own assertion, and a country *name*
+        ("United Kingdom"). It is null for every airplanes.live aircraft --
+        the feed has no such field -- and OpenSky stops answering for an hour
+        on each 429, so on 2026-08-06 it was absent for 100% of the aircraft
+        the community feed contributed.
+      - `hex_country` is an ISO2 code derived from the ICAO allocation table
+        (backend/sources/icao_blocks.py), which is a permanent property of the
+        airframe and needs no credits. It resolved 563 of 563 aircraft in a
+        Europe point query and 393 of 393 in the military sweep.
+
+    Different names and different shapes, so nothing downstream can mistake one
+    for the other, and overwriting the feed's assertion with a derived one would
+    destroy the only evidence that they ever differed.
+    """
+    block = icao_blocks.lookup(item.get("icao24"))
+    if not block:
+        return
+    item["hex_country"] = block["country"]
+    # The second military signal, and the reason it is not folded into
+    # `military`. `military` is airplanes.live's dbFlags bit 1: a community
+    # database's judgement about this specific airframe. `hex_military` is the
+    # allocation table saying the *address* sits in a range a state reserved
+    # for military use. Of 393 aircraft dbFlags flagged on 2026-08-06, 378 also
+    # sat in a military block -- the 15 that did not are the informative cases,
+    # and reconciling them here would delete the disagreement rather than show
+    # it. It matters most in the point queries, where the response did not come
+    # from /mil and dbFlags may be absent from the aircraft object entirely.
+    item["hex_military"] = block["military"]
+    item["hex_block"] = block["block"]
+
+
 _last_counts = {"OpenSky": 0, "airplanes.live": 0}
 
 
@@ -487,11 +525,13 @@ async def _fetch() -> list[dict]:
             "updated": item.get("updated") or base.get("updated"),
         }
     for item in merged.values():
-        # Both no-op until their own source's first download lands, which is the
-        # point of them being lookups rather than dependencies: ADS-B never
-        # waits on either, and re-runs them from scratch on every poll so a list
-        # that arrives late still reaches aircraft already on the map.
+        # All three no-op until their own source's first download lands, which
+        # is the point of them being lookups rather than dependencies: ADS-B
+        # never waits on any of them, and re-runs them from scratch on every
+        # poll so a list that arrives late still reaches aircraft already on
+        # the map.
         _attach_nearest_airfield(item)
+        _attach_hex_allocation(item)
         listing = sanctions.for_aircraft(item.get("registration"))
         if listing:
             item["sanctions"] = listing

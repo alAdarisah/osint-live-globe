@@ -26,7 +26,14 @@ def _job(module_name):
 
 
 def test_scheduled_jobs_are_exactly_the_metered_pollers():
-    assert {job.module for job in ingest.jobs()} == {"acled", "firms", "adsb"}
+    assert {job.module for job in ingest.jobs()} == {
+        "acled", "firms", "adsb", "gfw_detections",
+        # Also GFW-tokened, and separate from gfw_detections because they are
+        # different products on different cadences -- vector tiles of satellite
+        # returns against a paged 30-day event window -- that fail
+        # independently. One state per Job is what lets /api/health say which.
+        "gfw_gaps",
+    }
 
 
 def test_self_paced_sources_are_not_on_an_interval():
