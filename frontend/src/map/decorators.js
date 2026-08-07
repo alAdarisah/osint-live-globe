@@ -11,6 +11,7 @@ import {
   severityBand, severityColor, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
   placementDoubtful, positionUncertain, VERDICT_NOTE,
   reliabilityBand, reliabilityColor, reliabilityWeak,
+  uncertaintyRadiusMetres,
   ageHoursFromDateAdded, newsAgeOpacity, newsAgeScale,
 } from "./severity";
 import { paletteColor, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
@@ -339,13 +340,38 @@ function editedNote(d) {
 // it on most pins would bury the two verdicts that actually matter.
 function placementLine(d) {
   const note = VERDICT_NOTE[d.geo_verdict];
-  if (!note) return "";
+  const spread = placementSpreadLine(d);
+  if (!note) return spread;
   const doubted = placementDoubtful(d);
   const reason = (d.geo_reason || "").trim();
   return `
     <div class="meta placement-note${doubted ? " placement-doubted" : ""}">
       ${esc(note)}${reason ? ` <span class="placement-reason">(${esc(reason)})</span>` : ""}
-    </div>`;
+    </div>${spread}`;
+}
+
+// The two numbers geoverify.py has always written and nobody could read:
+// how far out the coordinate may be, and how sure the pipeline is of it.
+//
+// Stated in the popup even when the circle is drawn, because the circle is only
+// on screen inside its legibility window (see uncertaintyOnScreen in
+// createMapController.js) -- zoomed into a street, the 400 km disc is gone and
+// this sentence is the only thing left saying the pin is a national centroid.
+function placementSpreadLine(d) {
+  const metres = uncertaintyRadiusMetres(d);
+  const score = Number(d.geo_confidence);
+  if (metres === null && !Number.isFinite(score)) return "";
+  const parts = [];
+  if (metres !== null) {
+    const km = metres / 1000;
+    // Sub-10 km values are geoverify's own computed ones and the decimal is
+    // the difference between "this street" and "this district"; the lookup
+    // values (15/120/400) are round and a decimal on them would imply a
+    // precision the lookup does not have.
+    parts.push(`could be up to ${km < 10 ? km.toFixed(1) : Math.round(km)} km away`);
+  }
+  if (Number.isFinite(score)) parts.push(`placement confidence ${score}/100`);
+  return `<div class="meta placement-spread">${esc(parts.join(" · "))}</div>`;
 }
 
 // "How much to trust this", answering the question the heading actually asks.
@@ -384,7 +410,13 @@ function reliabilityBlock(d, extra = "") {
     </div>`;
 }
 
-export function decorateEvent(d, { offset } = {}) {
+// How far a pin recedes when it falls below the reader's confidence floor.
+// Deep enough to sort the layer at a glance, shallow enough that the dimmed
+// pins stay clickable -- the control answers "which of these are weakly
+// placed", and a pin faded to nothing could not be interrogated for the answer.
+const CONFIDENCE_DIM = 0.35;
+
+export function decorateEvent(d, { offset, dimmed } = {}) {
   const sources = (d.corroborated_by && d.corroborated_by.length ? d.corroborated_by : [d.source]).filter(Boolean);
   const sourceLine = sources.map((s) => SOURCE_LABEL[s] || s).join(", ");
   const severity = Number.isFinite(d.severity) ? d.severity : 0;
@@ -472,7 +504,13 @@ export function decorateEvent(d, { offset } = {}) {
   const color = d.corroborated ? paletteColor("event.corroborated", CORROBORATED_COLOR) : severityColor(band);
   // Older events fade rather than disappear, so "what is happening now" is
   // legible without hiding context.
-  const opacity = ageOpacity(ageHours(d)) * layerOpacity("events");
+  //
+  // The confidence dim multiplies into the same number rather than adding a CSS
+  // class, so it composes with age instead of overriding it: an old, weakly
+  // placed pin should read as both. Multiplying by a constant keeps the result
+  // as stable across renders as ageOpacity's own quantisation makes it, which
+  // is what stops updateMarker rebuilding every icon on every pan.
+  const opacity = ageOpacity(ageHours(d)) * layerOpacity("events") * (dimmed ? CONFIDENCE_DIM : 1);
   return {
     // Two independent doubts, two independent marks, because they are answers
     // to different questions and a pin can carry either, both or neither:
@@ -1760,14 +1798,85 @@ export function airfieldStyle(d) {
   return themedStyle(base, "airports");
 }
 
-export function airportIconSize(d) {
-  return airfieldStyle(d).size;
+// How much bigger a field's glyph gets for the traffic we recorded at it.
+//
+// Log-scaled and capped: the busiest field in the window runs to ~780 aircraft
+// against a long tail in single digits, so a linear factor would leave every
+// field except a dozen hubs at its base size. Capped at +70% because this is a
+// reference layer -- an airfield that dwarfs the conflict pins on top of it has
+// stopped being context.
+export function airfieldActivityScale(activity) {
+  const count = activity?.aircraft;
+  if (!Number.isFinite(count) || count <= 0) return 1;
+  return 1 + Math.min(Math.log10(1 + count) / 4, 0.7);
 }
 
-export function decorateAirport(d, { offset } = {}) {
+export function airportIconSize(d, activity) {
+  return Math.round(airfieldStyle(d).size * airfieldActivityScale(activity));
+}
+
+// 24 hourly counts as an inline SVG bar chart, the same technique the country
+// card's fatality sparkline uses (see popups.js) and for the same reason: it is
+// a handful of rects in a string the popup builder already returns, with no
+// charting dependency and nothing to mount or tear down.
+//
+// Military movements are drawn as a second bar in front of the total rather
+// than beside it, so the eye reads one column per hour and the military share
+// as the filled part of it.
+function airfieldSparkline(activity) {
+  const hourly = activity?.hourly;
+  if (!Array.isArray(hourly) || !hourly.some((v) => v > 0)) return "";
+  const mil = Array.isArray(activity.hourly_military) ? activity.hourly_military : [];
+  const peak = Math.max(...hourly, 1);
+  const w = 6;
+  const h = 26;
+  const bars = hourly.map((v, i) => {
+    const bh = Math.max(1, Math.round((v / peak) * h));
+    const mh = Math.max(0, Math.round(((mil[i] || 0) / peak) * h));
+    const x = i * w;
+    return `<rect x="${x}" y="${h - bh}" width="${w - 1}" height="${bh}" fill="currentColor" opacity="0.45"/>`
+      + (mh > 0 ? `<rect x="${x}" y="${h - mh}" width="${w - 1}" height="${mh}" fill="#ff8c3a"/>` : "");
+  }).join("");
+  return `<svg class="cspark" viewBox="0 0 ${hourly.length * w} ${h}" width="${hourly.length * w}" height="${h}"
+    preserveAspectRatio="none" role="img" aria-label="Movements recorded per hour over the last 24 hours">${bars}</svg>`;
+}
+
+// What the numbers do and do not mean, stated wherever they are shown.
+//
+// These are movements *this system recorded*, which is not the same as
+// movements that happened: ADS-B coverage is wherever its feeders are, and the
+// collector itself has gaps (OpenSky rate-limits it). An empty hour is
+// therefore "nothing reached us", not "nothing flew", and a field with no entry
+// at all is one that did not rank rather than one that was quiet.
+function airfieldActivityBlock(activity) {
+  if (!activity) return "";
+  const share = activity.aircraft
+    ? Math.round((activity.military_aircraft / activity.aircraft) * 100)
+    : 0;
+  return `
+    <div class="airfield-activity">
+      <div class="sev-head">Recorded movements &middot; last ${activity.window_hours}h</div>
+      ${airfieldSparkline(activity)}
+      <div>${fmtNumber(activity.aircraft)} distinct aircraft${
+        activity.military_aircraft
+          ? ` &middot; <b>${fmtNumber(activity.military_aircraft)} military</b> (${share}%)`
+          : ""
+      }</div>
+      <div class="meta">Counted from this app's own ADS-B log, not from a schedule. An empty hour means
+        nothing reached us in it &mdash; coverage follows the receiver network, and the collector has
+        its own gaps.</div>
+    </div>`;
+}
+
+export function decorateAirport(d, { offset, activity } = {}) {
   const style = airfieldStyle(d);
   const code = d.icao || d.iata || d.id;
-  const tooltip = `<b>${esc(d.name)}</b>${code ? ` &middot; ${esc(code)}` : ""}<br/>${esc(style.label)}`;
+  const busy = activity?.aircraft
+    ? `<br/>${fmtNumber(activity.aircraft)} aircraft in ${activity.window_hours}h${
+        activity.military_aircraft ? ` &middot; ${fmtNumber(activity.military_aircraft)} military` : ""
+      }`
+    : "";
+  const tooltip = `<b>${esc(d.name)}</b>${code ? ` &middot; ${esc(code)}` : ""}<br/>${esc(style.label)}${busy}`;
   const detail = `
     <h3>${esc(d.name)}</h3>
     <div class="meta">${esc(style.label)}${d.municipality ? ` &middot; ${esc(d.municipality)}` : ""}${
@@ -1776,6 +1885,7 @@ export function decorateAirport(d, { offset } = {}) {
     ${d.icao ? `<div>ICAO: ${esc(d.icao)}</div>` : ""}
     ${d.iata ? `<div>IATA: ${esc(d.iata)}</div>` : ""}
     <div>Scheduled airline service: ${d.scheduled_service ? "yes" : "no"}</div>
+    ${airfieldActivityBlock(activity)}
     ${d.military_name
       ? '<p class="meta">Flagged military because its <b>name</b> says so (&ldquo;Air Base&rdquo;, &ldquo;RAF&rdquo;, ' +
         "&ldquo;AFB&rdquo; and similar). OurAirports has no military field, so this both misses civil-named " +
@@ -1783,7 +1893,10 @@ export function decorateAirport(d, { offset } = {}) {
       : ""}
     <div class="meta">Source: OurAirports (public domain)</div>`;
   return {
-    icon: icon(style.svg, style.color, style.size, 0, "airfield-marker", 0.8 * layerOpacity("airports"), "", offset),
+    icon: icon(
+      style.svg, style.color, airportIconSize(d, activity), 0, "airfield-marker",
+      0.8 * layerOpacity("airports"), "", offset
+    ),
     tooltip,
     detail,
   };

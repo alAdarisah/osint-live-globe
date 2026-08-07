@@ -13,6 +13,7 @@ here or a storage call there, and the exemption list has to say why.
 import ast
 import asyncio
 import pathlib
+from datetime import datetime, timezone
 
 import pytest
 
@@ -51,6 +52,15 @@ NOT_WARMED = {
     # see the docstring on adsb.ingest_once for why that became unavoidable and
     # what bounds it.)
     "satellites": "positions are recomputed from stored elements, never restored",
+    # The only source whose layer is served without going through its registry
+    # state at all: /api/district-boundaries reads storage.reference() per
+    # country on each cache miss (see app.py), because six countries of geometry
+    # is several megabytes and handing over all of it to a reader looking at one
+    # of them is the thing that endpoint exists to avoid. So the geometry is
+    # already warm from Postgres the moment the process starts, and state.data
+    # holds only the per-country feature counts /api/health reports. A warm here
+    # would restore a number, not a layer.
+    "admin2_boundaries": "the layer is read from Postgres per request, not from registry state",
 }
 
 _WRITE_CALLS = ("record_snapshot", "record_reference")
@@ -121,10 +131,22 @@ def test_every_source_reads_its_own_data_back_at_startup(module_name):
 
 
 def test_satellites_stores_elements_not_positions():
-    """The exemption above is only honest if the elements really are stored."""
+    """The exemption above is only honest if the elements really are stored.
+
+    And only *complete* if the positions are not stored alongside them. They
+    were, for a while: a record_snapshot call put 471k recomputed positions into
+    entity_history that no reader ever asked for -- /api/replay has no satellite
+    layer and this source warms from the elements. The rule was written down and
+    passed its test while the code did the opposite, so the second half is
+    asserted here rather than left to the docstring.
+    """
     text = (SOURCES / "satellites.py").read_text(encoding="utf-8")
     assert 'record_reference("satellite_elements"' in text
     assert 'reference("satellite_elements")' in text
+    assert "record_snapshot(" not in text, (
+        "satellites.py stores positions. They are arithmetic over the stored "
+        "elements -- recompute them at the moment asked for instead."
+    )
 
 
 # --- storage.warm_* semantics ---------------------------------------------
@@ -292,3 +314,71 @@ def test_history_at_is_empty_before_anything_was_recorded(monkeypatch):
     conn = _history_conn(monkeypatch, rows=[])
     assert _run(storage.history_at("ais", 1_700_000_000)) == []
     assert len(conn.calls) == 1, "no second, unwindowed query may run as a fallback"
+
+
+# --- storage.sweep_stale_entities ------------------------------------------
+#
+# Eviction that survives its producer. record_snapshot applies the same cutoff,
+# but it returns early on a poll with no items -- so when AIS stopped on
+# 2026-08-05, its 839 last-known ships stayed in entity_latest for 28 hours
+# against a 30-minute window, and the dark-vessel detector went on reading
+# gaps out of them. These tests are that case.
+
+
+class _SweepConn:
+    """Just enough asyncpg to drive sweep_stale_entities: kinds in, tags out."""
+
+    def __init__(self, kinds, deleted=None):
+        self.kinds = kinds
+        self.deleted = deleted or {}
+        self.deletes = []
+        self.notified = []
+
+    async def fetch(self, query, *args):
+        assert "DISTINCT kind" in query
+        return [{"kind": k} for k in self.kinds]
+
+    async def execute(self, query, *args):
+        if query.lstrip().startswith("SELECT pg_notify"):
+            self.notified.append(args[1])
+            return "SELECT 1"
+        self.deletes.append(args)
+        return f"DELETE {self.deleted.get(args[0], 0)}"
+
+
+def test_sweep_evicts_a_dead_sources_rows_with_no_poll_involved():
+    now = datetime(2026, 8, 6, 18, 0, tzinfo=timezone.utc)
+    conn = _SweepConn(["ais"], deleted={"ais": 839})
+
+    assert _run(storage.sweep_stale_entities(conn, now)) == {"ais": 839}
+    assert conn.notified == ["ais"], (
+        "an eviction has to announce itself like a write, or the mirror keeps "
+        "serving the rows it just dropped"
+    )
+
+
+def test_sweep_applies_each_kinds_own_window():
+    now = datetime(2026, 8, 6, 18, 0, tzinfo=timezone.utc)
+    conn = _SweepConn(["ais", "cities"])
+    _run(storage.sweep_stale_entities(conn, now))
+
+    cutoffs = {kind: cutoff for kind, cutoff in conn.deletes}
+    assert (now - cutoffs["ais"]).total_seconds() == config.ENTITY_STALE_AFTER["ais"]
+    assert (now - cutoffs["cities"]).total_seconds() == config.ENTITY_STALE_AFTER["cities"]
+
+
+def test_sweep_stays_quiet_when_nothing_has_expired():
+    conn = _SweepConn(["adsb"], deleted={"adsb": 0})
+    now = datetime(2026, 8, 6, 18, 0, tzinfo=timezone.utc)
+
+    assert _run(storage.sweep_stale_entities(conn, now)) == {}
+    assert conn.notified == [], "a no-op sweep must not invalidate every client's ETag"
+
+
+def test_sweep_reads_the_kinds_from_the_table():
+    """Not from a list. A kind stops being produced long before anyone edits a
+    list, and that is precisely when its rows need sweeping."""
+    conn = _SweepConn(["ais", "adsb", "some_retired_kind"])
+    _run(storage.sweep_stale_entities(conn, datetime.now(timezone.utc)))
+
+    assert [kind for kind, _ in conn.deletes] == ["ais", "adsb", "some_retired_kind"]

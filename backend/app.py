@@ -19,6 +19,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
+from backend.sources import admin2_boundaries, airfield_activity
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe")
@@ -58,9 +59,19 @@ _SOURCE_MODULES = (
     # early in the list because its download is the slowest here and everything
     # in the placement path degrades to "no opinion" until it lands.
     "gdelt", "countries", "cities", "gazetteer",
-    "jamming", "satellites", "hazards", "airports", "sanctions",
-    "cables", "outages", "launches",
-    "hdx_conflict_stats", "hapi_conflict", "humanitarian", "official_feeds", "officials",
+    "jamming", "satellites", "hazards", "floods", "airports", "sanctions",
+    # Two lookup tables that draw nothing of their own. icao_blocks turns an
+    # aircraft's hex into a country and a military flag; maritime_watchlists
+    # annotates ships the way sanctions does, and both are read cross-process
+    # by the ingest pollers, so they sit beside sanctions rather than anywhere
+    # more logical.
+    "icao_blocks", "maritime_watchlists",
+    "cables", "dams", "ports", "czib", "outages", "launches", "energy_flows",
+    "hdx_conflict_stats", "hapi_conflict", "humanitarian", "food_trade",
+    "official_feeds", "officials",
+    # Weekly, and only for the countries hapi_conflict covers in volume: the
+    # geometry its district counts are drawn on.
+    "admin2_boundaries",
 )
 
 # Everything this process serves but does not produce: the ingest process's
@@ -278,8 +289,50 @@ async def conflict_history(request: Request, region: str | None = None):
     return _cached_source_response(request, "conflict_history", region, regions.filter_points)
 
 
+# District geometry is stored per country (see sources/admin2_boundaries.py) and
+# served the same way. One country is roughly a megabyte of thinned polygons, so
+# handing over all six because a reader opened the layer would be several
+# megabytes for districts they are not looking at.
+_DISTRICT_BOUNDARY_CACHE = LruTtlCache(maxsize=8, ttl=3600)
+
+
+@app.get("/api/district-boundaries")
+async def district_boundaries(country: str):
+    """Admin-2 boundaries for one country, keyed by p-code.
+
+    Empty -- not an error -- for a country with no stored geometry: the layer
+    then simply has nothing to draw there, which is the truthful outcome and
+    the one the frontend already handles.
+    """
+    iso3 = (country or "").strip().upper()
+    if not iso3.isalpha() or len(iso3) != 3:
+        raise HTTPException(status_code=400, detail="country must be an ISO3 code")
+    cached = _DISTRICT_BOUNDARY_CACHE.get(iso3)
+    if cached is None:
+        cached = await storage.reference(f"{admin2_boundaries.SNAPSHOT_PREFIX}:{iso3}") or {
+            "type": "FeatureCollection", "features": [],
+        }
+        _DISTRICT_BOUNDARY_CACHE.set(iso3, cached)
+    return JSONResponse(cached, headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/conflict-district-months")
+async def conflict_district_months():
+    """Every month the district archive holds, newest first.
+
+    Its own endpoint because the alternative is asking for the archive to find
+    out what is in it: the months are two dozen strings, and the records they
+    describe are ~23 MB.
+    """
+    state = registry.get("hapi_conflict")
+    months = sorted({r["month"] for r in (state.data or []) if r.get("month")}, reverse=True)
+    return JSONResponse(months, headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/conflict-districts")
-async def conflict_districts(request: Request, country: str | None = None, months: int = 1):
+async def conflict_districts(
+    request: Request, country: str | None = None, months: int = 1, month: str | None = None
+):
     # ACLED at admin-2 resolution, monthly, keyless and un-embargoed (see
     # backend/sources/hapi_conflict.py). District-keyed rather than point data,
     # so the same no-region-filter treatment as /api/conflict-stats.
@@ -294,13 +347,20 @@ async def conflict_districts(request: Request, country: str | None = None, month
     if country:
         wanted = country.strip().upper()
         items = [r for r in items if (r.get("country_code") or "").upper() == wanted]
-    if months and items:
+    # `month` is exact and wins over the trailing-window `months`. The map's
+    # district layer scrubs one month at a time and asking for "the last N" to
+    # get the Nth is both wasteful and wrong the moment a new month lands: the
+    # window slides under the scrubber and the same request starts answering
+    # about a different month.
+    if month:
+        items = [r for r in items if r.get("month") == month]
+    elif months and items:
         keep = sorted({r["month"] for r in items}, reverse=True)[:months]
         cutoff = keep[-1]
         items = [r for r in items if r["month"] >= cutoff]
     if state.version == 0:
         return JSONResponse(items, headers={"Cache-Control": "no-store"})
-    etag = f'"{_PROCESS_TOKEN}:{state.version}:{country or ""}:{months}"'
+    etag = f'"{_PROCESS_TOKEN}:{state.version}:{country or ""}:{months}:{month or ""}"'
     headers = {"Cache-Control": "no-cache", "ETag": etag}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
@@ -384,6 +444,32 @@ async def humanitarian_endpoint(request: Request):
     return _cached_source_response(request, "humanitarian", None, lambda data, _bounds: data)
 
 
+@app.get("/api/energy-flows")
+async def energy_flows_endpoint(request: Request):
+    # Cross-border electricity exchange, keyed by country (see
+    # backend/sources/energy_flows.py). A flow is an edge between two countries
+    # and has no location, so there is nothing to draw and nothing for a region
+    # filter to narrow -- same treatment as /api/outages.
+    return _cached_source_response(request, "energy_flows", None, lambda data, _bounds: data)
+
+
+@app.get("/api/food-trade")
+async def food_trade_endpoint(request: Request):
+    # Marketing-year supply and trade estimates keyed by country (see
+    # backend/sources/food_trade.py), on the same footing as /api/humanitarian:
+    # an aggregate over a season, read by the country card and never drawn.
+    # Three publishers estimate each figure and the record keeps them apart --
+    # anything rendering this must not collapse them to one number.
+    return _cached_source_response(request, "food_trade", None, lambda data, _bounds: data)
+
+
+@app.get("/api/food-price-index")
+async def food_price_index_endpoint(request: Request):
+    # One global monthly series, not country-keyed at all -- served separately
+    # from /api/food-trade rather than folded into it for that reason.
+    return _cached_source_response(request, "food_price_index", None, lambda data, _bounds: data)
+
+
 @app.get("/api/launches")
 async def launches_endpoint(request: Request, region: str | None = None):
     # Placed at their pads (see backend/sources/launches.py), so this filters
@@ -416,12 +502,103 @@ async def dark_vessels_endpoint(request: Request, region: str | None = None):
     return _cached_source_response(request, "dark_vessels", region, regions.filter_points)
 
 
+# Which payload fields travel with a track, per kind.
+#
+# Named rather than serving the whole payload: entity_history rows are the full
+# source record, and a 900-point ADS-B track of complete payloads is about a
+# megabyte of JSON to draw one line. These are the fields the line is actually
+# drawn from -- altitude colours it, the rest answer "what was it doing here"
+# when a reader hovers a segment.
+TRACK_FIELDS = {
+    "adsb": ("altitude", "velocity", "heading", "on_ground", "callsign"),
+    "ais": ("speed", "course", "heading", "nav_status", "name"),
+    "satellites": ("alt_km", "name"),
+}
+
+
+@app.get("/api/track/{kind}/{entity_id}")
+async def track(kind: str, entity_id: str, points: int = 800):
+    """One entity's recorded path over the retained history window.
+
+    Deliberately not region-filtered and deliberately uncached: it is keyed by a
+    single entity the reader has just clicked, so there is nothing to scope and
+    no second caller to share a cache entry with.
+
+    `kind` is checked against TRACK_FIELDS rather than passed through, which is
+    what stops the URL naming an arbitrary table value -- gazetteer_places would
+    otherwise be a perfectly valid 272,000-entity thing to ask about.
+    """
+    fields = TRACK_FIELDS.get(kind)
+    if fields is None:
+        raise HTTPException(status_code=404, detail=f"no track history is kept for '{kind}'")
+
+    # The floor is the retention sweep's, not a preference: rows older than this
+    # have been deleted (see storage's retention loop), so asking for more would
+    # quietly return a track that starts wherever the sweep last ran.
+    window_start = time.time() - config.HISTORY_RETENTION_SECONDS
+    fixes = await storage.entity_track(
+        kind, entity_id, window_start, max_points=points, fields=fields
+    )
+    return {
+        "kind": kind,
+        "entity_id": entity_id,
+        "points": fixes,
+        # Stated so the client can say "recorded since" rather than implying the
+        # line is the whole flight. A track that begins at the window edge began
+        # there because the older fixes were swept, not because the aircraft
+        # took off there.
+        "window_start": window_start,
+        "retention_seconds": config.HISTORY_RETENTION_SECONDS,
+        # entity_history only receives a row when an entity moved, so a track is
+        # a record of movement. Worth saying once here rather than reasoning
+        # about it again on the client.
+        "truncated": len(fixes) >= min(points, storage.MAX_TRACK_POINTS),
+    }
+
+
 @app.get("/api/hazards")
 async def hazards_endpoint(request: Request, region: str | None = None):
     # Earthquakes (USGS, ~5min) and volcanic activity (Smithsonian GVP, weekly)
     # in one feed, each record carrying its own `kind` and publisher -- see
     # backend/sources/hazards.py for why they share a layer but never a label.
     return _cached_source_response(request, "hazards", region, regions.filter_points)
+
+
+@app.get("/api/floods")
+async def floods_endpoint(request: Request, region: str | None = None):
+    # GDACS flood alerts (see backend/sources/floods.py). A separate layer from
+    # /api/hazards rather than a third kind inside it: these points are modelled
+    # basin centroids, not the measured positions that module's docstring
+    # promises, and an event stays open for weeks where a quake is instantaneous.
+    return _cached_source_response(request, "floods", region, regions.filter_points)
+
+
+@app.get("/api/dams")
+async def dams_endpoint(request: Request, region: str | None = None):
+    # Global Dam Watch barriers, clipped to the conflict theatres (see
+    # backend/sources/dams.py). Filters like any other point source, but note
+    # 81% of these coordinates are snapped to a river network rather than
+    # published for the structure -- every record says which, via coord_source.
+    return _cached_source_response(request, "dams", region, regions.filter_points)
+
+
+@app.get("/api/ports")
+async def ports_endpoint(request: Request, region: str | None = None):
+    # NGA World Port Index, clipped to the theatres and the AIS watch boxes (see
+    # backend/sources/ports.py). Also read by dark_vessels.py, which excludes
+    # ship-to-ship candidates near a port -- that consumer reads Postgres
+    # directly rather than this endpoint.
+    return _cached_source_response(request, "ports", region, regions.filter_points)
+
+
+@app.get("/api/czib")
+async def czib_endpoint(request: Request, region: str | None = None):
+    # EASA conflict zone bulletins -- which airspace a regulator is telling
+    # airlines to avoid (see backend/sources/czib.py). Placed at country
+    # precision on purpose: a bulletin is about a national airspace, and EASA's
+    # own coordinates field geocodes the country *name* (Afghanistan's is
+    # Kabul), so it is deliberately not read.
+    return _cached_source_response(request, "czib", region, regions.filter_points)
 
 
 @app.get("/api/satellites")
@@ -515,6 +692,32 @@ async def escalation_endpoint():
     if cached is None:
         cached = await storage.reference(escalation.REFERENCE_NAME) or []
         _ESCALATION_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the escalation cache above: one stored
+# document written by the refine process every half hour, read by a frontend on
+# its own timer. The TTL is what stops those two cadences multiplying into a
+# database read per client per poll.
+_AIRFIELD_ACTIVITY_CACHE = LruTtlCache(maxsize=1, ttl=300)
+
+
+@app.get("/api/airfield-activity")
+async def airfield_activity_endpoint():
+    """Recent traffic per airfield, derived from our own ADS-B history.
+
+    Keyed by the airfield code the airports layer already carries (see
+    backend/sources/airfield_activity.py), so this attaches to existing pins
+    rather than being a layer of its own.
+
+    An empty object -- not an error -- when there is no database or the refine
+    process has not written a pass yet. "No movements recorded" and "not
+    computed yet" both correctly render as an unadorned airfield pin.
+    """
+    cached = _AIRFIELD_ACTIVITY_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(airfield_activity.SNAPSHOT_NAME) or {}
+        _AIRFIELD_ACTIVITY_CACHE.set("all", cached)
     return JSONResponse(cached, headers={"Cache-Control": "no-store"})
 
 

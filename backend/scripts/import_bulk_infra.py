@@ -34,6 +34,10 @@ Output is NOT merged into backend/infrastructure.py automatically -- it's
 written to a separate backend/infrastructure_imported.py so the diff is easy
 to skim, prune, and hand-tag with region_keys before folding into the main
 lists (see infrastructure.py's `serialize()` for how the two would combine).
+That file is generated, scratch, and not in the repo: this script writes it
+when it runs, and once its rows have been folded in it holds nothing but two
+empty lists, which is worse than absent -- it reads like a curated source that
+happens to be empty. Delete it after folding in.
 
 Run: python -m backend.scripts.import_bulk_infra --osm-military --wikidata \
          --gem-refineries path/to/gem_oil_gas.csv --wpi path/to/wpi.csv

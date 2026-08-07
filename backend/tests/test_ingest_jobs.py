@@ -26,7 +26,9 @@ def _job(module_name):
 
 
 def test_scheduled_jobs_are_exactly_the_metered_pollers():
-    assert {job.module for job in ingest.jobs()} == {"acled", "firms", "adsb"}
+    assert {job.module for job in ingest.jobs()} == {
+        "acled", "firms", "adsb", "gfw_detections",
+    }
 
 
 def test_self_paced_sources_are_not_on_an_interval():

@@ -19,7 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend import config, storage
 from backend.ingest import jobs, run_job, streams
-from backend.sources import airports, sanctions
+from backend.sources import airports, icao_blocks, sanctions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe.ingest")
@@ -31,18 +31,20 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def _refresh_reference_indexes() -> None:
-    """Keep the airports and sanctions lookups filled, from Postgres only.
+    """Keep the airports, sanctions and ICAO-block lookups filled, from Postgres only.
 
-    adsb annotates each aircraft with its nearest airfield and any OFAC listing;
-    ais does the same for vessels. Both read module-level indexes that are built
-    by the *backend's* pollers -- so in this process they start empty, and every
-    aircraft would quietly lose `nearest_airfield` and `sanctions` while looking
-    perfectly healthy otherwise.
+    adsb annotates each aircraft with its nearest airfield, any OFAC listing and
+    the country its Mode-S address was allocated to; ais does the first two for
+    vessels. All three read module-level indexes that are built by the
+    *backend's* pollers -- so in this process they start empty, and every
+    aircraft would quietly lose `nearest_airfield`, `sanctions` and
+    `hex_country` while looking perfectly healthy otherwise.
 
-    Both datasets are already in Postgres, so this fills them by reading rather
-    than by fetching: no OurAirports download, no OFAC download, no second
-    consumer of either. It runs on a slow loop because the backend refreshes
-    both roughly daily and there is nothing to gain from noticing sooner.
+    All three datasets are already in Postgres, so this fills them by reading
+    rather than by fetching: no OurAirports download, no OFAC download, no
+    GitHub download, no second consumer of any of them. It runs on a slow loop
+    because the backend refreshes all three roughly daily and there is nothing
+    to gain from noticing sooner.
 
     One known gap: the stored airfield rows are the *served* slice, so the index
     built here omits the heliports and seaplane bases the backend's full index
@@ -56,9 +58,14 @@ async def _refresh_reference_indexes() -> None:
             listings = await storage.reference("sanctions")
             if listings:
                 sanctions.install(listings)
+            blocks = await storage.reference("icao_blocks")
+            if blocks:
+                icao_blocks.install(blocks)
             log.info(
-                "Reference indexes: %d airfields, %s sanctions listings",
-                len(stored_airports), len(listings) if listings else 0,
+                "Reference indexes: %d airfields, %s sanctions listings, %s ICAO code blocks",
+                len(stored_airports),
+                len(listings) if listings else 0,
+                len(blocks) if blocks else 0,
             )
         except Exception as exc:  # noqa: BLE001 - annotation is enrichment, not the payload
             log.warning("Could not refresh reference indexes: %s", exc)

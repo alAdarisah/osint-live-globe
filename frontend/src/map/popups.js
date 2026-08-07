@@ -18,6 +18,12 @@ const COUNTRY_ALIASES = {
   "eswatini": "swaziland", "democratic republic of the congo": "democratic republic of congo",
   "congo, dem. rep.": "democratic republic of congo", "congo, dr": "democratic republic of congo",
   "republic of the congo": "congo", "viet nam": "vietnam", "lao pdr": "laos",
+  // Both sides of two joins that were silently missing each other: Natural
+  // Earth says "Republic of the Congo" and "Republic of Serbia" where HDX says
+  // "Republic of Congo" and "Serbia". Aliasing both ends onto one target is
+  // what makes the match symmetric -- mapping only the Natural Earth side left
+  // the HDX key normalising to something nothing else reached.
+  "republic of congo": "congo", "republic of serbia": "serbia",
   "syrian arab republic": "syria", "united republic of tanzania": "tanzania",
   "bolivia (plurinational state of)": "bolivia", "venezuela (bolivarian republic of)": "venezuela",
   "iran (islamic republic of)": "iran", "brunei darussalam": "brunei", "cabo verde": "cape verde",

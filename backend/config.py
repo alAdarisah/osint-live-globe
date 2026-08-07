@@ -13,6 +13,7 @@ OPENSKY_CLIENT_SECRET = os.getenv("OPENSKY_CLIENT_SECRET", "").strip()
 ACLED_EMAIL = os.getenv("ACLED_EMAIL", "").strip()
 ACLED_PASSWORD = os.getenv("ACLED_PASSWORD", "").strip()
 OWM_API_KEY = os.getenv("OWM_API_KEY", "").strip()
+GFW_API_TOKEN = os.getenv("GFW_API_TOKEN", "").strip()
 
 # Poll intervals, in seconds. Tuned to each source's data freshness and rate limits.
 FIRMS_POLL_INTERVAL = int(os.getenv("FIRMS_POLL_INTERVAL", "900"))       # FIRMS updates a few times/day
@@ -25,6 +26,21 @@ ADSB_POLL_INTERVAL_ANON = int(os.getenv("ADSB_POLL_INTERVAL_ANON", "900"))    # 
 ADSB_POLL_INTERVAL_AUTH = int(os.getenv("ADSB_POLL_INTERVAL_AUTH", "120"))
 ACLED_POLL_INTERVAL = int(os.getenv("ACLED_POLL_INTERVAL", "1800"))
 UCDP_POLL_INTERVAL = int(os.getenv("UCDP_POLL_INTERVAL", "21600"))  # UCDP's candidate file only updates monthly
+# Cross-border electricity exchange from Energy-Charts (see
+# backend/sources/energy_flows.py). Hourly, and there is nothing to gain from
+# faster: the physical-flow half advances in 15-minute steps and lags wall clock
+# by several hours -- that is ENTSO-E's own publication delay, not the API's --
+# so a tighter interval re-fetches a window that has not moved. Each sweep is 76
+# paced requests (38 countries x 2 endpoints) because `country=all` answers 404.
+ENERGY_FLOWS_POLL_INTERVAL = int(os.getenv("ENERGY_FLOWS_POLL_INTERVAL", "3600"))
+# Global Fishing Watch satellite vessel detections (see
+# backend/sources/gfw_detections.py). Six hours is already generous against the
+# product: GFW serves these tiles with Cache-Control: max-age=86400, and the
+# optical batch was four days behind wall clock when this was measured, so a
+# tighter interval re-downloads a window that has not moved. Quota is not the
+# constraint -- a 46-request sweep four times a day is 0.5% of the 50,000/day
+# the response headers report -- payload is, at roughly 5-8 MB per optical sweep.
+GFW_POLL_INTERVAL = int(os.getenv("GFW_POLL_INTERVAL", str(6 * 3600)))
 
 # event_fusion.py doesn't fetch anything itself -- it re-derives from
 # acled.py's (ACLED + UCDP rows) and gdelt.py's already-fetched state.data,
@@ -81,6 +97,17 @@ ENTITY_STALE_AFTER = {
     # window that log keeps -- matching HISTORY_RETENTION_SECONDS means a
     # finding is evicted exactly when the evidence behind it is.
     "dark_vessels": 3 * 86400,
+    # Satellite detections are the one kind here where every row is a distinct
+    # immutable entity -- a poll cannot update a detection, only add another --
+    # so this table would grow forever without an eviction that bites. The real
+    # retention control is the source's own 7-day request window: every sweep
+    # re-upserts every detection still inside it, so a row only starts ageing
+    # once it leaves. Two days is what governs after that, and it is the trailing
+    # edge of two things -- a detection that has aged out of the window, and an
+    # ingest container that has stopped. Short on purpose for the second case:
+    # the failure this layer risks is a weeks-old radar return rendering like a
+    # live position, so an empty layer is the safer way to be wrong.
+    "gfw_detections": 2 * 86400,
     # Earthquakes drop out of USGS's own 1-day feed after 24h, but the weekly
     # volcano report in the same payload stays current for a full week -- the
     # longer of the two governs, or every volcano pin would be evicted six days
@@ -110,6 +137,25 @@ ENTITY_STALE_AFTER = {
     # Swept once a day and only when Overpass cooperates, so a short window
     # would evict theatres between successful sweeps.
     "osm_infra": 30 * 86400,
+    # A GDACS event stays open for weeks and is revised across dozens of
+    # episodes, so the window has to outlive the event rather than the poll.
+    # The 30-minute poll rewrites every row it still sees, which means this
+    # only governs two cases: a flood that has dropped off the feed, and a
+    # poller that is down. The 1-day default was wrong for the second -- pause
+    # collection for a day and the layer evicts itself whole.
+    "floods": 14 * 86400,
+    # Refetched weekly at most, and then only when figshare says the file
+    # changed -- which it has not since 2024-08-28. Same reasoning as airports
+    # and cable_landings: reference data about structures that do not move, so
+    # the window has to clear the refresh interval by a wide margin.
+    "dams": 30 * 86400,
+    # Ports do not move and the file is refetched twice a day at most. Same
+    # reasoning as airports and cable_landings.
+    "ports": 30 * 86400,
+    # A conflict-zone bulletin runs for years -- the Ukraine one has been open
+    # since 2022 and is valid until 2027 -- and EASA revises rather than
+    # reissues. The window has to outlive the poll, not the bulletin.
+    "czib": 7 * 86400,
 }
 ENTITY_STALE_AFTER_DEFAULT = int(os.getenv("ENTITY_STALE_AFTER_DEFAULT", "86400"))
 

@@ -133,6 +133,65 @@ export const VERDICT_NOTE = {
   structured: "Position coded by a human analyst from the underlying reporting.",
 };
 
+// --- placement confidence and radius ----------------------------------
+//
+// geoverify.py scores every coordinate 0-100 and states, in kilometres, how far
+// out the real place could be. Both fields have been on the payload since the
+// module shipped and neither reached the map, so a pin geocoded to a national
+// centroid -- 400 km of slack, by the backend's own reckoning -- was drawn as a
+// dot exactly like one confirmed to a street.
+//
+// The radius is a lookup per precision (locality 15, region 120, country 400)
+// except where geoverify resolved a real place, in which case it is computed.
+// That is why it is read off the record rather than mapped from geo_precision
+// here: the computed values are the whole point of the confirmed/refined
+// verdicts, and a local lookup table would throw them away.
+
+/** The stated uncertainty radius in metres, or null when the record has none. */
+export function uncertaintyRadiusMetres(item) {
+  const km = Number(item?.geo_radius_km);
+  return Number.isFinite(km) && km > 0 ? km * 1000 : null;
+}
+
+// The scores actually in use are 15 (country), 35 (region), 65 (locality) and
+// 90 (confirmed), so a threshold anywhere in 40-64 separates "geocoded to a
+// country or province" from "geocoded to a place". 50 is the middle of that
+// gap and is not near any real value, which keeps the control from flickering
+// a whole band in and out on an off-by-one.
+export const CONFIDENCE_THRESHOLD = 50;
+
+/**
+ * Whether an event falls below the reader's confidence floor.
+ *
+ * Deliberately NOT part of passesEventFilter: this dims rather than hides. A
+ * reader raising the floor is saying "show me which of these are weakly
+ * placed", not "delete them" -- and most of the corpus scores below the
+ * "geocoded to a place" mark, so hiding on this would empty the layer and look
+ * like a broken feed rather than an answer. That is why this one is on by
+ * default while showImprecise is off: fading a majority is a legible statement
+ * about the layer, hiding a majority is indistinguishable from a dead feed.
+ *
+ * A record with no score is never dimmed. /api/replay serves snapshots written
+ * before geoverify shipped, and fading those would state a doubt the pipeline
+ * never actually expressed.
+ */
+export function confidenceDimmed(item, filter = DEFAULT_EVENT_FILTER) {
+  const floor = filter?.minConfidence || 0;
+  if (floor <= 0) return false;
+  const score = Number(item?.geo_confidence);
+  return Number.isFinite(score) && score < floor;
+}
+
+// The three answers the legend gives about placement, in the order a reader
+// cares about them. "Doubted" outranks "unverified" because it is a positive
+// finding rather than an absence: the pipeline looked and disagreed.
+export function verdictBucket(item) {
+  if (placementDoubtful(item)) return "eventsDoubted";
+  if (item?.geo_verdict === "confirmed" || item?.geo_verdict === "refined"
+    || item?.geo_verdict === "structured") return "eventsVerified";
+  return "eventsUnverified";
+}
+
 export const PRECISION_NOTE = {
   country:
     "Geocoded only to the country centroid — the true location within this country is unknown.",
@@ -226,7 +285,26 @@ export function ageHours(item, now = Date.now()) {
 // GDELT rows in particular can carry an event date weeks before the report
 // that surfaced them -- MAX_REPORT_LAG_DAYS is 30 -- so any finite default
 // would silently drop real, deliberately-served events.
-export const DEFAULT_EVENT_FILTER = { maxAgeDays: null, minSeverity: 0, showImprecise: true };
+//
+// minConfidence lives on this object even though passesEventFilter ignores it,
+// and that is the point: it is one more thing the reader has said about this
+// layer, and the map, the notable-events panel and the zone briefing all need
+// to agree about it. See confidenceDimmed above for why it dims rather than
+// filters.
+//
+// The two placement defaults below both start from the same position: the map
+// opens showing what it can actually vouch for, and the reader opts back in to
+// the rest. That is only affordable because the imprecise share is small --
+// IMPRECISE_PRECISIONS covers "country", "region" and "unknown", and a row with
+// no geo_precision at all is not in that set, so the default hides the pins the
+// backend explicitly placed at a centroid rather than everything it did not
+// verify. If a future source starts emitting "country" for the bulk of its
+// rows, revisit this: a default that hides most of the layer reads as a broken
+// feed, which is exactly why the confidence control fades instead of filtering.
+export const DEFAULT_EVENT_FILTER = {
+  maxAgeDays: null, minSeverity: 0, showImprecise: false,
+  minConfidence: CONFIDENCE_THRESHOLD,
+};
 
 export function passesEventFilter(item, filter = DEFAULT_EVENT_FILTER, now = Date.now()) {
   if (!filter.showImprecise && isImprecise(item)) return false;

@@ -116,6 +116,18 @@ _JOBS = (
         publishes=(Published("adsb", "adsb", "Aircraft"),),
         interval=_adsb_interval,
     ),
+    # Credentialed and metered, so it belongs here rather than in the backend --
+    # but note that quota is not what makes it metered enough to matter (a sweep
+    # is 0.5% of the daily allowance). Payload is: 46 vector tiles and several
+    # megabytes per pass, which no backend restart should be spending again.
+    Job(
+        module="gfw_detections",
+        entrypoint="ingest_once",
+        publishes=(
+            Published("gfw_detections", "gfw_detections", "Satellite vessel detections"),
+        ),
+        interval=lambda: config.GFW_POLL_INTERVAL,
+    ),
     # Both of these pace themselves and are run as long-lived tasks, not on an
     # interval. AIS is a persistent websocket subscription whose reconnect
     # backoff (BACKOFF_CAP=900, jittered) exists precisely to avoid hammering

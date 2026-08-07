@@ -17,6 +17,7 @@ import { applyBorderOverrides, staleBorderKeys } from "./settings/borderOverride
 import { DEFAULT_EVENT_FILTER } from "./map/severity";
 import { makeCountryScope } from "./map/countryScope";
 import { boundsContainsPoint } from "./utils/geo";
+import { fetchJson } from "./api";
 
 import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
@@ -68,6 +69,11 @@ const DEFAULT_LAYER_VISIBILITY = {
   // entirely and only fills in once a reader has zoomed into one place, where
   // its provenance is stated on every pin.
   osmInfra: true,
+  // Off: a reviewed monthly archive for six countries, which is something a
+  // reader goes looking for rather than something the map should assert
+  // alongside live pins -- and it is the one layer here whose newest data is
+  // weeks old by construction.
+  districts: false,
 };
 
 export default function App() {
@@ -315,6 +321,24 @@ export default function App() {
   useEffect(() => {
     mapApi.setEventFilter(eventFilter);
   }, [eventFilter, mapApi.setEventFilter]);
+
+  // Which months the district archive holds. Fetched once rather than polled:
+  // HAPI publishes a new month roughly monthly, and its own endpoint exists so
+  // that finding out what is in the archive does not mean downloading it (see
+  // /api/conflict-district-months). The newest month is selected on arrival so
+  // the layer has something to draw the first time it is switched on.
+  const [districtMonths, setDistrictMonths] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchJson("/api/conflict-district-months")
+      .then((months) => {
+        if (cancelled || !Array.isArray(months) || !months.length) return;
+        setDistrictMonths(months);
+        mapApi.setDistrictMonth(months[0]);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [mapApi.setDistrictMonth]);
   const onInfraFilterChange = useCallback(
     (text) => {
       setInfraFilterText(text);
@@ -487,6 +511,12 @@ export default function App() {
         imageryKey={imageryKey}
         imageryDate={imageryDate}
         onImageryChange={setImageryKey}
+        choropleth={mapApi.choropleth}
+        onChoroplethChange={mapApi.setChoroplethMetric}
+        districts={mapApi.districts}
+        districtMonths={districtMonths}
+        onDistrictMetricChange={mapApi.setDistrictMetric}
+        onDistrictMonthChange={mapApi.setDistrictMonth}
       />
 
       <TimelineBar

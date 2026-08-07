@@ -21,7 +21,8 @@ Both are *inferences*, and neither is safe to present as a detection:
   the whole feed was quiet over the same window -- but coverage is thin far
   from shore and no guard fixes that.
 - Two ships close together may be passing, rafted for a pilot transfer, or
-  sitting in an anchorage this module does not know about.
+  sitting in an anchorage. Ports are excluded (see `_port_index`); anchorages
+  are not a port index's business, and no list here holds them.
 
 So every record carries `inferred: True`, states its own evidence, and the
 layer renders with the dashed treatment the map already uses for anything whose
@@ -69,9 +70,20 @@ MAX_GAP_RECORDS = 120
 STS_MAX_SEPARATION_KM = 0.5
 STS_MAX_SPEED_KN = 1.0
 STS_MIN_DURATION_HOURS = 1.0
-# Anywhere within this of a known port is a port call, not a transfer at sea.
-# The curated port list is small (see backend/infrastructure.py), so this is a
-# partial exclusion and the popup says so.
+# Anywhere within this of a charted port is a port call, not a transfer at sea.
+#
+# Two lists feed it (see `_port_index`): the 40 curated harbours in
+# backend/infrastructure.py, and every port the NGA World Port Index places
+# inside this map's theatres or AIS watch boxes -- 393 of them, of which 263 sit
+# in watched water against the curated list's 12. That is the difference between
+# one excluded port in the whole Persian Gulf and fifty-two of them.
+#
+# It is still not a zero-false-positive exclusion, and the popup must not say it
+# is. WPI is an index of *ports*; a designated anchorage, a lightering area or a
+# stretch of sheltered water where tankers habitually wait appears in neither
+# list, and two hulls sitting in one will still surface here. Each record
+# carries `ports_checked` so the popup can state what was actually applied
+# rather than describing a list it cannot see.
 STS_PORT_EXCLUSION_KM = 25.0
 MAX_STS_RECORDS = 80
 
@@ -92,12 +104,25 @@ def _in_watched_waters(lat: float, lon: float) -> bool:
     )
 
 
-def _port_index() -> ProximityIndex:
-    """Curated ports and naval terminals, as an exclusion index."""
-    return ProximityIndex(
-        [s for s in infrastructure.INFRA_SITES if s.get("type") == "port"],
-        cell_deg=0.5,
-    )
+def _port_index(wpi_ports: list[dict] | None = None) -> ProximityIndex:
+    """Every port this map knows of, as one exclusion index.
+
+    Both lists, not one. The curated entries in backend/infrastructure.py are
+    hand-checked and carry notes a bulk file cannot ("de facto wartime
+    capital"), and several of them -- offshore loading platforms, naval
+    terminals -- are not ports in NGA's sense at all and appear nowhere in WPI.
+    The World Port Index supplies the coverage: 2,951 real harbours, of which
+    the ports source stores the 393 inside this map's theatres and AIS boxes.
+    Dropping either list would lose something the other does not have.
+
+    `wpi_ports` comes from entity_latest (see `_compute`). An empty list is a
+    working state, not an error -- it is what the first minutes after a fresh
+    deployment look like, before backend/sources/ports.py has landed its first
+    snapshot -- and it degrades to exactly the curated-only behaviour this
+    module had before.
+    """
+    curated = [s for s in infrastructure.INFRA_SITES if s.get("type") == "port"]
+    return ProximityIndex(curated + list(wpi_ports or []), cell_deg=0.5)
 
 
 def feed_health_baseline(series: list[tuple[float, int | None, bool]]) -> float | None:
@@ -248,6 +273,13 @@ def build_sts_records(ships: list[dict], ports: ProximityIndex, now: float | Non
                 ],
                 "separation_m": round(separation * 1000),
                 "together_hours": round(together_hours, 1),
+                # The exclusion this pair survived, in its own words. Carried on
+                # the record because the size of the port index is the whole
+                # difference between "away from any port" as a claim and as a
+                # check -- and because it is not constant: it is curated-only
+                # until the ports source has written its first snapshot.
+                "ports_checked": len(ports),
+                "port_exclusion_km": STS_PORT_EXCLUSION_KM,
                 "sanctions": designated[0] if designated else None,
                 "designated_count": len(designated),
                 "inferred": True,

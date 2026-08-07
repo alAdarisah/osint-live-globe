@@ -8,7 +8,7 @@ import websockets
 
 from backend import config, storage
 from backend.cache import registry
-from backend.sources import sanctions
+from backend.sources import maritime_watchlists, sanctions
 
 log = logging.getLogger("osint-globe.ais")
 
@@ -33,19 +33,50 @@ _last_message_at: float | None = None
 # record in _snapshot_loop below.
 _ship_types: dict[int, int] = {}
 
-# The rest of ShipStaticData worth keeping: the IMO number and the call sign.
-# Both are only broadcast in the static message -- which arrives every few
-# minutes at best, and for some vessels never -- so they are cached per MMSI
-# exactly like the type above rather than read off a position report.
+# The rest of ShipStaticData worth keeping. All of it is only broadcast in the
+# static message -- which arrives every few minutes at best, and for some
+# vessels never -- so it is cached per MMSI exactly like the type above rather
+# than read off a position report, which carries none of it.
 #
 # The IMO number is the reason this cache exists: it is the only permanent,
 # hull-specific identifier AIS carries, and it is what makes an OFAC match
 # something better than a guess (see backend/sources/sanctions.py).
 _ship_static: dict[int, dict] = {}
 
+# Everything learned from a static frame that has to outlive the next position
+# report, which rebuilds a ship's record from scratch. Named in one place
+# because it is read in two: the rebuild merges these in, and
+# _preload_from_storage restores them after a restart. A field added to one and
+# not the other is dropped on the first position report after a restart --
+# silently, and only for hulls that had already gone quiet.
+_STATIC_KEYS = ("imo", "callsign", "destination", "draught", "eta", "length_m", "beam_m")
+
+# AIS pads its fixed-width six-bit text fields with '@', so an unconfigured
+# destination or call sign arrives as "@@@@@@@@@@@@@@@@@@@@" rather than as an
+# empty string. Storing that puts a row of at-signs in the popup where "not
+# stated" belongs.
+_AIS_PAD = "@"
+
+# Maximum static draught is an 8-bit field in tenths of a metre, so 25.5 m is
+# the top of the scale and anything above it did not come off a transponder.
+# (25.5 itself is saturated, meaning "at least this deep".)
+MAX_DRAUGHT_M = 25.5
+
+
+def _static_text(value) -> str | None:
+    """A ShipStaticData string field, with AIS's own padding removed."""
+    if not isinstance(value, str):
+        return None
+    return value.replace(_AIS_PAD, "").strip() or None
+
 
 def _identity_from_static(static: dict) -> dict:
     """IMO number and call sign out of a ShipStaticData message.
+
+    Kept separate from _voyage_from_static below, and the split is the point:
+    these two fields are what a designation is matched on. An IMO is assigned to
+    a hull for life. Everything in the other function is a value somebody typed
+    into a transponder before sailing.
 
     Both are optional and both are routinely broadcast as zero or whitespace by
     vessels that have not configured their transponder -- an IMO of 0 is "not
@@ -56,26 +87,131 @@ def _identity_from_static(static: dict) -> dict:
     imo = static.get("ImoNumber")
     if isinstance(imo, int) and imo > 0:
         identity["imo"] = str(imo)
-    callsign = (static.get("CallSign") or "").strip()
+    callsign = _static_text(static.get("CallSign"))
     if callsign:
         identity["callsign"] = callsign
     return identity
 
 
-def _sanctions_for(mmsi: int, name: str | None) -> dict | None:
-    """Whether this hull is on the OFAC SDN list, and on what evidence.
+def _eta_from_static(eta) -> dict | None:
+    """The ETA fields, kept as the parts AIS actually sends.
 
-    Called on every position report, so it has to be a dict lookup and nothing
-    more -- see backend/sources/sanctions.py, which pre-indexes by identifier
-    for exactly this. Deliberately not matched on `name`: a vessel name is the
-    easiest field in AIS to change and the most duplicated.
+    Deliberately not converted to a timestamp. The AIS ETA carries month, day,
+    hour and minute and no year at all, so any absolute time is a guess -- and
+    the guess is wrong exactly where it would matter, on a voyage crossing new
+    year.
+
+    The ranges are written out rather than tested for truthiness because ITU-R
+    M.1371 spells its "not available" values differently per field: month 0 and
+    day 0 mean unset, but hour 0 is midnight and minute 0 is on the hour.
+    """
+    if not isinstance(eta, dict):
+        return None
+
+    def _part(value, low, high):
+        return value if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high else None
+
+    month = _part(eta.get("Month"), 1, 12)
+    day = _part(eta.get("Day"), 1, 31)
+    # A time of day with no date attached is a clock reading, not an ETA.
+    if month is None or day is None:
+        return None
+    parts = {"month": month, "day": day}
+    hour = _part(eta.get("Hour"), 0, 23)      # 24 is M.1371's "not available"
+    minute = _part(eta.get("Minute"), 0, 59)  # 60 is M.1371's "not available"
+    if hour is not None:
+        parts["hour"] = hour
+    if minute is not None:
+        parts["minute"] = minute
+    return parts
+
+
+def _span(near, far) -> int | None:
+    """One pair of the Dimension field, summed: A+B is length, C+D is beam.
+
+    Each half is a distance from the GPS antenna, so a single zero is ordinary
+    (an antenna right at the bow) but a zero sum is the field's "not available".
+    """
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in (near, far)):
+        return None
+    total = near + far
+    return total or None
+
+
+def _voyage_from_static(static: dict) -> dict:
+    """The crew-configured half of ShipStaticData: draught, destination, ETA, size.
+
+    None of this is measured. Draught is a number the crew sets before sailing,
+    destination is free text they type, and both are frequently wrong on exactly
+    the hulls worth watching -- which is the signal, not a defect: a declared
+    destination the track contradicts is a fact about the declaration.
+
+    So nothing here is ever matched on, and nothing here is turned into a
+    verdict. In particular no laden/ballast state is computed from draught. That
+    inference is *available* -- record_snapshot writes the whole payload into
+    entity_history on every movement (see backend/storage.py), so a per-hull
+    draught series already accumulates for free alongside the track -- but a
+    verdict drawn from a self-reported number is an inference of exactly
+    dark_vessels.py's tier, and would have to arrive on the map saying so rather
+    than as a fact attached to a ship pin.
+
+    The guards follow _identity_from_static's: that function refuses an IMO of 0
+    because "not set" is not a hull, and a draught of 0.0 is not a ship floating
+    on the surface.
+    """
+    voyage = {}
+    draught = static.get("MaximumStaticDraught")
+    if (
+        isinstance(draught, (int, float))
+        and not isinstance(draught, bool)
+        and 0 < draught <= MAX_DRAUGHT_M
+    ):
+        # Tenths of a metre is the field's own resolution; anything finer is
+        # float noise from the decode, not a more precise reading.
+        voyage["draught"] = round(float(draught), 1)
+    destination = _static_text(static.get("Destination"))
+    if destination:
+        voyage["destination"] = destination
+    eta = _eta_from_static(static.get("Eta"))
+    if eta:
+        voyage["eta"] = eta
+    dimension = static.get("Dimension")
+    if isinstance(dimension, dict):
+        length = _span(dimension.get("A"), dimension.get("B"))
+        beam = _span(dimension.get("C"), dimension.get("D"))
+        if length:
+            voyage["length_m"] = length
+        if beam:
+            voyage["beam_m"] = beam
+    return voyage
+
+
+def _annotations_for(mmsi: int) -> dict:
+    """What the reference lists say about this hull, as separate claims.
+
+    Two fields rather than one, and they are not merged. An OFAC designation and
+    a Tokyo MoU detention are both "flagged" only if you stop reading: one is a
+    legal listing by a government, the other is a port-state inspection that
+    found the lifeboats short, and a third of the maritime collection is an
+    allegation by a belligerent state's military intelligence service (see
+    backend/sources/maritime_watchlists.py). Collapsing them into one dot is the
+    failure dark_vessels.py's docstring exists to prevent.
+
+    Called on every position report, so both halves have to be a dict lookup and
+    nothing more -- each module pre-indexes by identifier for exactly this.
+    Deliberately not matched on `name`: a vessel name is the easiest field in
+    AIS to change and the most duplicated.
     """
     identity = _ship_static.get(mmsi) or {}
-    return sanctions.for_vessel(
-        imo=identity.get("imo"),
-        mmsi=str(mmsi),
-        callsign=identity.get("callsign"),
-    )
+    imo = identity.get("imo")
+    return {
+        "sanctions": sanctions.for_vessel(
+            imo=imo,
+            mmsi=str(mmsi),
+            callsign=identity.get("callsign"),
+        ),
+        "watchlist": maritime_watchlists.for_vessel(imo=imo, mmsi=str(mmsi)),
+    }
 
 
 def _bboxes_payload():
@@ -182,12 +318,16 @@ async def _consume(state):
                     _ship_types[mmsi] = ship_type
                     if mmsi in _ships:
                         _ships[mmsi]["ship_type"] = ship_type
-                identity = _identity_from_static(static)
-                if identity:
-                    _ship_static.setdefault(mmsi, {}).update(identity)
+                # Identity and voyage come out of the same frame and are cached
+                # together, but they are parsed apart on purpose: one half is
+                # what a designation is matched on, the other is what the crew
+                # typed. See both functions.
+                learned = {**_identity_from_static(static), **_voyage_from_static(static)}
+                if learned:
+                    _ship_static.setdefault(mmsi, {}).update(learned)
                     if mmsi in _ships:
-                        _ships[mmsi].update(identity)
-                        _ships[mmsi]["sanctions"] = _sanctions_for(mmsi, _ships[mmsi].get("name"))
+                        _ships[mmsi].update(learned)
+                        _ships[mmsi].update(_annotations_for(mmsi))
                         _dirty = True
                 continue
 
@@ -209,7 +349,7 @@ async def _consume(state):
                 "nav_status": report.get("NavigationalStatus"),
                 "ship_type": _ship_types.get(mmsi),
                 **(_ship_static.get(mmsi) or {}),
-                "sanctions": _sanctions_for(mmsi, (meta.get("ShipName") or "").strip() or None),
+                **_annotations_for(mmsi),
                 "updated": time.time(),
             }
             _dirty = True
@@ -253,21 +393,21 @@ def health_row(now: float) -> tuple[int, bool, str | None]:
 
 async def _snapshot_loop(state):
     global _dirty
-    # The OFAC list downloads on its own schedule and lands well after the AIS
-    # stream is already running, so every ship annotated before it arrived
-    # carries `sanctions: None` -- correct at the time and wrong afterwards.
-    # Re-annotating whenever the index changes size is what makes the first
+    # Both reference lists download on their own schedules and land well after
+    # the AIS stream is already running, so every ship annotated before they
+    # arrived carries nulls -- correct at the time and wrong afterwards.
+    # Re-annotating whenever either index changes size is what makes the first
     # successful download (and every later update) reach ships already on the
     # map, instead of only new arrivals.
-    last_sanctions_len = -1
+    last_reference_lens = (-1, -1)
     last_health_at = 0.0
     while True:
         await asyncio.sleep(5)
-        sanctions_len = len(sanctions.current())
-        if sanctions_len != last_sanctions_len:
-            last_sanctions_len = sanctions_len
+        reference_lens = (len(sanctions.current()), len(maritime_watchlists.current()))
+        if reference_lens != last_reference_lens:
+            last_reference_lens = reference_lens
             for mmsi, ship in _ships.items():
-                ship["sanctions"] = _sanctions_for(mmsi, ship.get("name"))
+                ship.update(_annotations_for(mmsi))
             if _ships:
                 _dirty = True
         cutoff = time.time() - STALE_AFTER
@@ -354,12 +494,15 @@ async def _preload_from_storage():
         if ship_type is not None:
             _ship_types[mmsi] = ship_type
         # ShipStaticData arrives minutes apart at best and for some vessels
-        # never, so an IMO number learned before the restart is worth keeping:
-        # without this the OFAC cross-reference silently drops back to the
-        # weaker MMSI/call-sign match for every preloaded hull.
-        identity = {k: ship[k] for k in ("imo", "callsign") if ship.get(k)}
-        if identity:
-            _ship_static[mmsi] = identity
+        # never, so anything learned from it before the restart is worth
+        # keeping: without this the OFAC cross-reference silently drops back to
+        # the weaker MMSI match for every preloaded hull, and the declared
+        # destination and draught are wiped by the hull's next position report
+        # -- which is the moment they become interesting, because that is when
+        # there is a track to compare them against.
+        static = {k: ship[k] for k in _STATIC_KEYS if ship.get(k) is not None}
+        if static:
+            _ship_static[mmsi] = static
     if _ships:
         _dirty = True
 

@@ -217,9 +217,10 @@ Most of the map. Keyless out of the box:
 News (GDELT) · Conflict events (UCDP + GDELT half of the fused layer) ·
 District-level ACLED via HDX · Aircraft (airplanes.live, unfiltered — includes
 military) · Satellites · Earthquakes & volcanoes · GPS jamming · Internet
-outages · Submarine cables · Airfields · OSM infrastructure · Orbital launches ·
-Sanctions cross-referencing · Countries · Cities · Displacement & food security
-(UNHCR half) · Precipitation radar · Wind arrows · NASA GIBS satellite imagery.
+outages · Cross-border electricity flows · Submarine cables · Airfields ·
+OSM infrastructure · Orbital launches · Sanctions cross-referencing · Countries ·
+Cities · Displacement & food security (UNHCR half) · Precipitation radar ·
+Wind arrows · NASA GIBS satellite imagery.
 
 Keys only add: NASA FIRMS fires, live AIS ship positions, faster/authenticated
 OpenSky ADS-B, event-level ACLED, and the OpenWeatherMap cloud/wind tile
@@ -353,6 +354,7 @@ import or poll leaves the rest untouched — a bad source logs and sits inert.
 | **NOAA HMS** | Analyst-QC'd fire detections fusing GOES-16/18 (5–15 min geostationary cadence), VIIRS and MODIS. | 15 min | none |
 | **gpsjam.org** | Daily GPS interference, aggregated into H3 resolution-4 hex cells from aircraft GPS-quality reports. Cells below a 25% affected ratio or 2 total reports are dropped as noise, and only the 100 worst-affected are served. | 6 h | none |
 | **IODA (Georgia Tech)** | Country-level internet outages from three independent signals: BGP withdrawals, active probing, and darknet traffic. Rendered as a country tint and a card line, never as a pin — the measurement has no location finer than the country. | 15 min | none |
+| **Fraunhofer ISE Energy-Charts** | Cross-border electricity exchange for 38 European countries plus the EU bloc, both metered *physical flows* (`cbpf`, 15-min, hours behind wall clock) and day-ahead *commercial schedules* (`cbet`, hourly, published ahead). The two are stored separately and never merged — a schedule is a contract, a flow is a reading. Nothing is drawn: a flow is an edge between two countries and has no location. | 1 h | none |
 | **TeleGeography** | 718 submarine cable routes and 1,922 landing points. Geometry is schematic (drawn for a map, not a chart) and the popup says so. | 24 h | none |
 | **OurAirports** | 80k+ airfields. Served as a filtered slice (large/medium/small airports; heliports, seaplane bases and closed fields excluded) and gated by zoom. | 24 h | none |
 | **OpenStreetMap / Overpass** | Military sites and airfields, power plants, border crossings — thousands of features, swept one conflict theatre at a time with long pauses, partial results published as they arrive. | 24 h | none |
@@ -795,6 +797,7 @@ All responses are JSON unless noted. Point endpoints accept `?region=<key>`
 | `GET /api/hazards` | Earthquakes and volcanic activity, each record carrying its own `kind` and publisher |
 | `GET /api/jamming` | GPS interference hex cells |
 | `GET /api/outages` | Country-keyed internet outage scores |
+| `GET /api/energy-flows` | Country-keyed cross-border electricity exchange, measured and scheduled halves kept apart |
 | `GET /api/cables` | Cable routes and landing points in one payload (no region filter — a cable is one object thousands of km long) |
 | `GET /api/infrastructure` | Curated sites + pipeline routes |
 | `GET /api/osm-infrastructure` | OpenStreetMap infrastructure |
@@ -828,7 +831,8 @@ Everything lives in `.env` at the project root. All values are optional.
 
 `FIRMS_POLL_INTERVAL` (900) · `GDELT_POLL_INTERVAL` (900) ·
 `ADSB_POLL_INTERVAL_ANON` (900) · `ADSB_POLL_INTERVAL_AUTH` (60) ·
-`ACLED_POLL_INTERVAL` (1800) · `UCDP_POLL_INTERVAL` (21600)
+`ACLED_POLL_INTERVAL` (1800) · `UCDP_POLL_INTERVAL` (21600) ·
+`ENERGY_FLOWS_POLL_INTERVAL` (3600)
 
 ### Retention and storage
 
@@ -861,7 +865,7 @@ live AIS stream would continuously evict a city index refetched once a day.
 
 ## Persistence
 
-Everything the app collects goes to Postgres, across five tables
+Everything the app collects goes to Postgres, across six tables
 (`backend/storage.py`):
 
 | Table | Contents |
@@ -871,6 +875,7 @@ Everything the app collects goes to Postgres, across five tables
 | `conflict_events` | The fused ACLED/UCDP/GDELT archive with its richer queryable columns |
 | `reference_snapshots` | Whole-document sources that aren't lat/lon rows — country GeoJSON, HDX series, cable routes, the OFAC list, the gazetteer index |
 | `source_health` | One row per poll outcome, per source |
+| `alerts` | Open and resolved problems the cache worker found — a producer gone quiet, a cached copy behind Postgres (`backend/cacheworker`) |
 
 Adding a source is one `record_snapshot()` call in its poll loop — no schema
 change. Writes are deliberately failure-tolerant: the live in-memory layer is
@@ -884,10 +889,19 @@ Two things are deliberately **not** read back at startup:
   not where they are. The sky is empty for one poll instead.
 - **Satellite positions** — recomputed from the stored orbital elements, which
   is the honest equivalent: the elements are what was collected, the positions
-  are arithmetic over them.
+  are arithmetic over them. They are not *written* either: a position this app
+  can recompute exactly is not evidence worth a row.
 
-The only application state outside the database is `data/admin_config.json`,
-bind-mounted so it survives container replacement.
+Rows expire on their kind's own window (`ENTITY_STALE_AFTER` in
+`backend/config.py`). That cutoff is applied twice — once by each write, and
+again every 10 minutes by `storage.retention_sweep_loop`, which is what clears
+a source that has stopped producing altogether. A poller cannot be relied on to
+evict its own last positions, because a dead one never runs again.
+
+The only *live* application state outside the database is
+`data/admin_config.json`, bind-mounted so it survives container replacement.
+`data/` also holds archives and re-fetchable snapshots that no code reads —
+see [`data/README.md`](data/README.md), which accounts for every file there.
 
 `backend/tests/test_persistence_coverage.py` enforces the contract: a source
 that collects something without storing it, or stores something without reading

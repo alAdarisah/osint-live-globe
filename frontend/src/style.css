@@ -1789,6 +1789,83 @@ html, body {
    reader can check, not a conclusion they have to take on trust. */
 .popup .placement-reason { opacity: 0.75; }
 
+/* How far out the coordinate may be, and how sure the pipeline is of it. Dim,
+   like the verdict note above it, because it qualifies the pin rather than
+   describing the event -- but always present, since the circle that says the
+   same thing on the map is only drawn inside its own legibility window. */
+.popup .meta.placement-spread { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+/* The uncertainty circles are stroked in the severity colours so each one
+   matches the pin it belongs to, and those colours are tuned for the dark
+   basemap. At the low end (#ffd11a) a 45%-opacity hairline over CARTO's
+   near-white light_all has essentially no contrast left.
+   Adjusting the whole pane is the only lever CSS has here: the stroke colour is
+   set per-circle in JS from severityColor(), and overriding it in CSS would let
+   a circle and its pin disagree about the same event -- the exact drift
+   severity.js exists to prevent. */
+:root[data-theme="light"] .leaflet-uncertainty-pane {
+  filter: saturate(1.4) brightness(0.7);
+}
+
+/* --- admin-2 district record -------------------------------------------- */
+
+/* All four counts, with the one currently shading the map marked. The popup
+   answers about the district; the selector only chooses what the map paints,
+   and a reader should not have to change the shading and click again to read
+   the other three numbers. */
+.popup .district-rows {
+  margin: 6px 0;
+  border-top: 1px solid var(--panel-border);
+}
+.popup .district-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--panel-border);
+  font-variant-numeric: tabular-nums;
+}
+.popup .district-row-active { color: var(--accent); font-weight: 600; }
+
+/* "Not in the archive this month" is not "zero this month", and the layer
+   rests on that difference -- so it is said in words rather than left to a
+   blank space to imply. */
+.popup .meta.district-nodata { color: var(--text-dim); }
+
+/* --- country fill (choropleth) ------------------------------------------ */
+
+/* Disabled along with the Countries layer it paints: offering a metric for
+   shapes that are not on the map is a control that does nothing. */
+.choropleth-picker select:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.choropleth-legend { flex-direction: column; align-items: flex-start; gap: 5px; }
+
+/* The ramp as five swatches rather than a gradient: the fill is drawn per
+   country at one of these steps, and a smooth bar would imply a continuum the
+   paint does not actually have. */
+.choropleth-ramp { display: inline-flex; align-items: center; gap: 3px; }
+.choropleth-ramp i {
+  width: 16px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+/* Stated plainly and always, not folded away: with four of the six metrics
+   covering only part of the world, this is the line that separates "nothing
+   happening there" from "nobody measured there". */
+.choropleth-coverage { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.choropleth-note { color: var(--text-dim); line-height: 1.45; }
+
+/* The layer's own composition, not a legend of colours -- so no swatch, and a
+   rule above it to separate it from the controls it follows. */
+.placement-tally {
+  border-top: 1px solid var(--panel-border);
+  margin-top: 4px;
+  padding-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* An officials pin published by the government itself rather than reported by
    a newsroom. A solid ring, deliberately unlike .imprecise's dashed one: that
    marks a location we are unsure of, this marks a source we are certain of. */

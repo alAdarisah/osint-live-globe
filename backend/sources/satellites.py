@@ -111,7 +111,14 @@ async def start():
             state.last_success = time.time()
             state.last_error = None
             log.info("Satellites: %d tracked (%d element sets)", len(state.data), len(elements))
-            await storage.record_snapshot("satellites", state.data, "norad_id")
+            # Deliberately no record_snapshot here. The elements above are what
+            # was collected; these positions are arithmetic over them, recomputed
+            # every 10s, and storing them wrote 471k history rows (77 MB inside
+            # the 3-day window) that nothing ever read -- /api/replay carries no
+            # satellite layer, and this source warms from the elements, never
+            # from stored positions. A replay of the sky, if it is ever wanted,
+            # propagates the stored elements to the scrubbed moment; it does not
+            # need a log of answers we can recompute exactly.
             await storage.record_source_health("satellites", len(state.data), True)
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
