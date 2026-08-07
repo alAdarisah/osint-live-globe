@@ -678,6 +678,95 @@ export function decorateHazard(d, { offset } = {}) {
   };
 }
 
+// ---------- GDACS floods (backend/sources/floods.py) ----------
+//
+// A separate layer key from hazards above, not a third `kind` inside it, and
+// backend/sources/floods.py:9-40 is the argument for why. The short version is
+// that a hazard pin promises a measured position -- a seismometer solution, a
+// volcano's summit -- and a GDACS point is a modelled centroid over an affected
+// river basin. Folding this in would weaken that promise for the whole layer.
+//
+// Deliberately no palette token, for the same reason hazards has none: the pin
+// is coloured by severity, and offering a colour control for something the
+// severity ramp paints would be a control that changes nothing.
+export const FLOOD_STYLE = { svg: SVG.flooding, label: "Flood (GDACS)" };
+
+// Same 13-31px ramp the conflict and earthquake layers use, from the same
+// field. GDACS's Green/Orange/Red alert level is mapped onto the shared 0-100
+// scale with the same numbers USGS PAGER alerts get (see floods.py), which is
+// what makes a red flood and a red quake mean the same weight to a reader
+// comparing them side by side.
+export function floodIconSize(d) {
+  const severity = Number.isFinite(d.severity) ? d.severity : 0;
+  return scaledSize(13 + (severity / 100) * 18, "floods");
+}
+
+export function decorateFlood(d, { offset } = {}) {
+  const name = d.name || "Flood event";
+  const alert = d.alert_level ? `GDACS ${d.alert_level} alert` : "Alert level not stated";
+  const from = d.from_time ? utcClockFromUnix(d.from_time).slice(0, 10) : "not stated";
+  const to = d.to_time ? utcClockFromUnix(d.to_time).slice(0, 10) : "";
+  const affected = Array.isArray(d.affected_iso3) ? d.affected_iso3 : [];
+  const tooltip = `<b>${esc(name)}</b><br/>${esc(alert)}` +
+    `${d.country ? ` &middot; ${esc(d.country)}` : ""}` +
+    `${d.is_current ? "" : "<br/>Closed by GDACS"}`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(d.country || "Location not stated")} &middot; ${esc(alert)}${
+      Number.isFinite(d.episode) ? ` &middot; episode ${esc(d.episode)}` : ""
+    }</div>
+    ${d.is_current
+      ? ""
+      : '<p class="meta"><b>GDACS has closed this event.</b> It is kept because it happened, ' +
+        "not because it is happening.</p>"}
+    ${d.is_temporary
+      ? '<p class="meta">Flagged <b>temporary</b> by GDACS &mdash; a provisional alert that may be ' +
+        "revised or withdrawn.</p>"
+      : ""}
+    <div>Onset ${esc(from)}${to ? ` &mdash; ${esc(to)}` : ""}</div>
+    ${d.updated ? `<div class="meta">GDACS last revised this ${esc(timeAgoFromUnix(d.updated))}.</div>` : ""}
+    ${d.description ? `<p>${esc(d.description)}</p>` : ""}
+    ${affected.length > 1 ? `<div class="meta">Countries affected: ${esc(affected.join(", "))}</div>` : ""}
+    ${d.glide ? `<div class="meta">GLIDE ${esc(d.glide)} &mdash; the cross-agency id for this disaster.</div>` : ""}
+    <p class="meta">Coloured by <b>GDACS's own Green/Orange/Red alert level</b>, mapped onto the same
+      0&ndash;100 scale this map's earthquakes use, so a red flood and a red quake mean the same
+      weight.${Number.isFinite(d.alert_score)
+        ? ` GDACS's finer alert score (${esc(d.alert_score)}) is a different quantity on a different` +
+          " scale and is shown, not used for colour."
+        : ""}</p>
+    <p class="meta"><b>This point is the middle of an affected river basin, not a place that
+      flooded.</b> GDACS labels it a centroid itself, and the bounding box it ships is identical to
+      the point, so nothing in the feed narrows it. The real extent is a polygon this map links
+      rather than draws.</p>
+    <div class="meta">Source: ${esc(d.publisher || "GDACS")} &mdash; a modelled alert from
+      ${esc(d.model_source || "GLOFAS")}, a curated hydrological model run rather than an observed
+      water level.${
+        d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">event report</a>` : ""
+      }${
+        d.footprint_url
+          ? ` &middot; <a href="${esc(d.footprint_url)}" target="_blank" rel="noopener noreferrer">affected-area polygon</a>`
+          : ""
+      }</div>`;
+  return {
+    icon: icon(
+      FLOOD_STYLE.svg,
+      severityColor(severityBand(d.severity)),
+      floodIconSize(d),
+      0,
+      "flood-marker",
+      // Closed events fade the way the historical conflict record does: still
+      // there, still counted, no longer competing with what is happening now.
+      (d.is_current ? 1 : 0.75) * layerOpacity("floods"),
+      // geo_precision is "region" on every row, so the dashed ring is not a
+      // judgement call -- it is true by construction.
+      d.is_current ? "imprecise" : "imprecise historical",
+      offset
+    ),
+    tooltip,
+    detail,
+  };
+}
+
 // ---------- GDELT news ----------
 
 // The backend (backend/app.py's /api/news) only ever serves items with a
@@ -1243,6 +1332,256 @@ export function decorateOsmInfra(d, { offset } = {}) {
   };
 }
 
+// ---------- EASA conflict-zone bulletins (backend/sources/czib.py) ----------
+//
+// The best-attributed evidence on this map: a named regulator's own document,
+// with a bulletin number a reader can look up and a stated review date. It is
+// also the least precisely placed -- a CZIB is about a national flight
+// information region, so every pin here is country precision and nothing finer.
+//
+// Coloured by status rather than severity, deliberately. czib.py assigns 70 to
+// a live bulletin and 0 to a withdrawn one, which is a status flag wearing a
+// number: put on the shared severity ramp it would paint every live advisory
+// the same orange and every withdrawn one yellow, and a rescinded document
+// would read as a mild live warning.
+export const CZIB_STYLE = {
+  active: {
+    svg: SVG.airspaceRestricted, color: "#ff4d6d", size: 19,
+    label: "Airspace warning, active (EASA)", token: "czib.active",
+  },
+  withdrawn: {
+    svg: SVG.airspaceRestricted, color: "#7f93a8", size: 15,
+    label: "Airspace warning, withdrawn", token: "czib.withdrawn",
+  },
+};
+export const CZIB_ORDER = ["active", "withdrawn"];
+
+export function czibStyle(d) {
+  return themedStyle(d?.active ? CZIB_STYLE.active : CZIB_STYLE.withdrawn, "czib");
+}
+
+export function czibIconSize(d) {
+  return czibStyle(d).size;
+}
+
+export function decorateCzib(d, { offset } = {}) {
+  const style = czibStyle(d);
+  const name = d.name || "Conflict zone bulletin";
+  const others = (Array.isArray(d.bulletin_countries) ? d.bulletin_countries : [])
+    .filter((c) => c && c !== d.country);
+  const count = Number(d.country_count) || 0;
+  const issued = d.issued ? utcClockFromUnix(d.issued).slice(0, 10) : "";
+  const expired = Number.isFinite(d.valid_until) && d.valid_until * 1000 < Date.now();
+  const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)}` +
+    `${d.reference ? `<br/>${esc(d.reference)}` : ""}`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${d.active ? "Active bulletin" : "Withdrawn"} &middot;
+      ${esc(d.publisher || "EASA")}${d.reference ? ` &middot; ${esc(d.reference)}` : ""}</div>
+    ${d.active
+      ? ""
+      : '<p class="meta"><b>This bulletin has been withdrawn.</b> It is shown because it happened ' +
+        "&mdash; this airspace was restricted, by this regulator, between these dates &mdash; not " +
+        "because anyone is being warned off it now.</p>"}
+    <div>Airspace: <b>${esc(d.country || d.country_code || "not stated")}</b></div>
+    ${count > 1
+      ? `<p class="meta"><b>One bulletin, ${esc(count)} countries.</b> This pin is
+          ${esc(d.country || "this country")}'s share of it; the same document also covers
+          ${esc(others.join(", "))}, and there is an identical pin on each. It is one regulator's
+          decision seen ${esc(count)} times, not ${esc(count)} findings.</p>`
+      : ""}
+    <div>Issued ${issued ? esc(issued) : "date not stated"}${
+      d.valid_until_text ? ` &middot; valid until ${esc(d.valid_until_text)}` : " &middot; no expiry stated"
+    }</div>
+    ${expired
+      ? '<div class="meta">The stated review date has passed. EASA revises rather than reissues, so ' +
+        "a bulletin can outlive its own date &mdash; this is what the document says, not a judgement " +
+        "about the airspace.</div>"
+      : ""}
+    ${d.valid_until_note ? `<p class="meta">${esc(d.valid_until_note)}</p>` : ""}
+    ${d.updated ? `<div class="meta">Last revised ${esc(timeAgoFromUnix(d.updated))}.</div>` : ""}
+    <p class="meta"><b>Measured for the whole country's airspace, not for this point.</b> A CZIB is
+      about a national flight information region. This pin sits at the population-weighted centre of
+      that country's towns so the layer has somewhere to draw, and says nothing about where inside
+      the airspace the risk lies. EASA does publish a coordinate with these bulletins; it is their
+      content system geocoding the country <i>name</i> &mdash; Afghanistan's is Kabul &mdash; so it
+      is deliberately not read.</p>
+    <div class="meta">Source: ${esc(d.publisher || "EASA")} Conflict Zone Information Bulletin
+      &mdash; a primary source, a named regulator's own document with a quotable reference.${
+        d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Read the bulletin</a>.` : ""
+      }</div>`;
+  return {
+    icon: icon(
+      style.svg,
+      style.color,
+      czibIconSize(d),
+      0,
+      `czib-marker czib-${d.active ? "active" : "withdrawn"}`,
+      (d.active ? 1 : 0.8) * layerOpacity("czib"),
+      // geo_precision is "country" on every row, so isImprecise() is true by
+      // construction and the dashed ring is mandatory rather than conditional.
+      d.active ? "imprecise" : "imprecise historical",
+      offset
+    ),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- NGA World Port Index (backend/sources/ports.py) ----------
+//
+// A gazetteer, not a feed: nothing in it is an event and nothing in it is
+// current. It is here mostly because the Dark Vessels layer's ship-to-ship
+// inference is only as good as its answer to "are these two simply in port",
+// and before this arrived that answer came from a few dozen hand-curated
+// harbours.
+//
+// Hollow anchor rather than the filled `port` glyph the curated infrastructure
+// layer uses: same argument osmInfra makes against infra, a published gazetteer
+// sitting underneath a hand-checked list.
+export const PORT_STYLE = {
+  svg: SVG.anchor, color: "#7fa8b8", size: 13, label: "Port (NGA World Port Index)", token: "port.wpi",
+};
+
+// The publisher's own coded harbour size, not a size this app invented.
+const PORT_SIZE_PX = { L: 15, M: 13, S: 11, V: 9 };
+
+export function portStyle() {
+  return themedStyle(PORT_STYLE, "ports");
+}
+
+export function portIconSize(d) {
+  const px = PORT_SIZE_PX[(d?.harbor_size || "").toUpperCase()] || PORT_STYLE.size;
+  return scaledSize(px, "ports", PORT_STYLE.token);
+}
+
+export function decoratePort(d, { offset } = {}) {
+  const style = portStyle();
+  const name = d.name || "Port";
+  const size = d.harbor_size_label || "Harbour size not coded";
+  const type = d.harbor_type_label || d.harbor_type || "type not coded";
+  const tooltip = `<b>${esc(name)}</b>${d.country ? ` &middot; ${esc(d.country)}` : ""}<br/>` +
+    `${esc(size)} &middot; ${esc(type)}${d.oil_terminal ? "<br/>Oil terminal" : ""}`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(d.country || "Country not stated")}${
+      d.unlo_code ? ` &middot; UN/LOCODE ${esc(d.unlo_code)}` : ""
+    }${d.port_number ? ` &middot; WPI ${esc(d.port_number)}` : ""}</div>
+    <div>${esc(size)} &middot; ${esc(type)}</div>
+    ${d.oil_terminal ? "<div><b>Has an oil terminal.</b></div>" : ""}
+    ${d.nav_area ? `<div class="meta">NGA navigational area ${esc(d.nav_area)}.</div>` : ""}
+    ${d.ais_watch
+      ? '<p class="meta">Inside the water this map receives AIS from. Two vessels sitting alongside ' +
+        "each other <i>here</i> are in a port, which is most of why this record exists: the Dark " +
+        "Vessels layer excludes ship-to-ship candidates near a listed port, and before this " +
+        "gazetteer arrived almost every real harbour on earth was open water to that detector.</p>"
+      : ""}
+    <p class="meta"><b>Reference data, not a feed. Nothing here is current.</b>${
+      d.vintage ? ` ${esc(d.vintage)}.` : ""
+    } For a port gazetteer that is acceptable &mdash; harbours are not built and demolished on a
+      news cycle. It would not be acceptable for anything time-sensitive, and this layer makes no
+      time-sensitive claim.</p>
+    <div class="meta">Source: ${esc(d.publisher || "NGA World Port Index")} &mdash; a curated
+      dataset${d.license ? `, ${esc(d.license)}` : ""}.</div>`;
+  return {
+    icon: icon(style.svg, style.color, portIconSize(d), 0, "port-marker", 0.85 * layerOpacity("ports"), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- Global Dam Watch (backend/sources/dams.py) ----------
+//
+// A dam is infrastructure whose failure is catastrophic downstream and whose
+// deliberate targeting is a war crime. The useful record is not "a dam is here"
+// but "a dam is here and it holds this much", so the pin is sized by reservoir
+// capacity rather than by generation.
+//
+// Two separate uncertainty fields have to reach a reader and they are not the
+// same thing: `coord_source` is how the *point* was arrived at, and `quality`
+// is the publisher's confidence in the *record*.
+export const DAM_STYLE = {
+  svg: SVG.dam, color: "#4a9fd8", size: 14, label: "Dam / reservoir (Global Dam Watch)", token: "dam.barrier",
+};
+
+export function damStyle() {
+  return themedStyle(DAM_STYLE, "dams");
+}
+
+// 12-22px over six orders of magnitude of stored water, so log rather than
+// linear -- a linear ramp here would draw one Kariba and forty thousand dots.
+export function damIconSize(d) {
+  const capacity = Number(d?.capacity_mcm);
+  const px = 12 + Math.min(Math.log10((Number.isFinite(capacity) ? capacity : 0) + 1), 4) * 2.5;
+  return scaledSize(px, "dams", DAM_STYLE.token);
+}
+
+export function decorateDam(d, { offset } = {}) {
+  const style = damStyle();
+  const name = d.name || "Barrier";
+  const snapped = d.coord_source === "river_snap";
+  const poor = Number(d.quality_rank) >= 4;
+  const capacity = Number.isFinite(Number(d.capacity_mcm)) ? Number(d.capacity_mcm) : null;
+  const tooltip = `<b>${esc(name)}</b>${d.river ? ` &middot; ${esc(d.river)}` : ""}<br/>` +
+    `${capacity !== null ? `${esc(fmtNumber(capacity))} million m&sup3;` : "Capacity not published"}`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(d.dam_type || "Barrier")}${d.river ? ` on the ${esc(d.river)}` : ""}${
+      d.country ? ` &middot; ${esc(d.country)}` : ""
+    }${d.year ? ` &middot; built ${esc(d.year)}` : ""}</div>
+    ${d.named
+      ? ""
+      : '<p class="meta">Unnamed in Global Dam Watch &mdash; the label above is its type and its ' +
+        "size, not its name.</p>"}
+    ${capacity !== null
+      ? `<div><b>${esc(fmtNumber(capacity))} million m&sup3;</b> standing behind it.</div>`
+      : '<div class="meta">No reservoir capacity published for this barrier.</div>'}
+    ${Number.isFinite(Number(d.height_m)) ? `<div>${esc(Math.round(Number(d.height_m)))} m high</div>` : ""}
+    ${Number.isFinite(Number(d.area_skm)) ? `<div>Reservoir ${esc(fmtNumber(Number(d.area_skm)))} km&sup2;</div>` : ""}
+    ${Number.isFinite(Number(d.catchment_skm))
+      ? `<div>Catchment ${esc(fmtNumber(Number(d.catchment_skm)))} km&sup2;</div>` : ""}
+    ${Number(d.power_mw) > 0 ? `<div>${esc(fmtNumber(Number(d.power_mw)))} MW installed</div>` : ""}
+    ${d.main_use ? `<div class="meta">Primary use: ${esc(d.main_use)}</div>` : ""}
+    ${snapped
+      ? '<p class="meta"><b>This position is a snap onto a river network, not a published location ' +
+        "for the structure.</b> Global Dam Watch publishes a dam coordinate for only about 15% of " +
+        "its rows; for the rest &mdash; this one included &mdash; the point is the river reach the " +
+        "barrier regulates. Across the rows carrying both, half agree exactly and nine in ten are " +
+        "within 350 m, but the tail is real and the worst case is 92 km. Read this as the right " +
+        "structure, not necessarily the right spot.</p>"
+      : '<p class="meta">Position is the location Global Dam Watch publishes for the structure ' +
+        "itself, not a river-network snap.</p>"}
+    ${d.quality
+      ? `<p class="meta">The publisher grades its own record <b>${esc(d.quality)}</b>${
+          poor ? " &mdash; the bottom of its own five-point scale." : "."
+        }</p>`
+      : ""}
+    <div class="meta">Source: ${esc(d.publisher || "Global Dam Watch")} &mdash; a curated dataset${
+      d.license ? `, ${esc(d.license)}` : ""
+    }.${d.orig_src ? ` Absorbed from ${esc(d.orig_src)}.` : ""}${
+      d.grand_id ? ` GRanD ${esc(d.grand_id)}.` : ""
+    }${d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Record</a>.` : ""}${
+      d.attribution ? `<br/>${esc(d.attribution)}` : ""
+    }</div>`;
+  return {
+    icon: icon(
+      style.svg,
+      style.color,
+      damIconSize(d),
+      0,
+      "dam-marker",
+      0.85 * layerOpacity("dams"),
+      // geo_precision is the constant "locality" on every row here, so
+      // isImprecise() never fires -- the ring has to key on coord_source
+      // explicitly or 85% of these pins would claim a precision they lack.
+      `${snapped ? "imprecise" : ""}${poor ? " weakly-sourced" : ""}`.trim(),
+      offset
+    ),
+    tooltip,
+    detail,
+  };
+}
+
 // ---------- orbital launches (backend/sources/launches.py) ----------
 
 export const LAUNCH_STYLE = {
@@ -1543,6 +1882,190 @@ export function decorateDarkVessel(d, { offset } = {}) {
       `dark-vessel-marker dark-${esc(d.kind || "unknown")}`,
       0.9 * layerOpacity("darkVessels"),
       "inferred",
+      offset
+    ),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- Global Fishing Watch: AIS disabling (backend/sources/gfw_gaps.py) --
+//
+// The independent second opinion on the layer above, and the reason both exist:
+// that one is derived from a single AIS upstream, so when the upstream stops it
+// does not degrade, it inverts -- no feed means no gaps means an empty layer
+// that looks like calm water. This one has no such coupling.
+//
+// Both claims in a record here are Global Fishing Watch's: that a transmission
+// stopped, measured against *their* satellite reception, and that the stop was
+// deliberate, inferred by their published methodology. This map asserts neither.
+// It reports that they assert them, and the popup has to keep saying so.
+export const GFW_GAP_STYLE = {
+  svg: SVG.aisDisabling, color: "#c084fc", size: 20,
+  label: "AIS disabling (Global Fishing Watch)", token: "gfw.gap",
+};
+
+export function gfwGapStyle() {
+  return themedStyle(GFW_GAP_STYLE, "gfwGaps");
+}
+
+export function gfwGapIconSize() {
+  return scaledSize(GFW_GAP_STYLE.size, "gfwGaps", GFW_GAP_STYLE.token);
+}
+
+export function decorateGfwGap(d, { offset } = {}) {
+  const style = gfwGapStyle();
+  const vessel = d.name || `MMSI ${d.mmsi}`;
+  const age = Number.isFinite(Number(d.age_days)) ? Math.round(Number(d.age_days)) : null;
+  const tooltip = `<b>${esc(vessel)}</b> &middot; AIS disabling (GFW)<br/>` +
+    `${esc(d.gap_hours)} h dark${age !== null ? ` &middot; ${esc(age)} days ago` : ""}`;
+  const detail = `
+    <h3>${esc(vessel)}</h3>
+    <div class="meta">MMSI ${esc(d.mmsi)}${d.flag ? ` &middot; flag ${esc(d.flag)}` : ""}${
+      d.vessel_type ? ` &middot; ${esc(d.vessel_type)}` : ""
+    }</div>
+    <div class="inferred-block">
+      <div><b>${esc(d.gap_hours)} hours</b> with no AIS position, as Global Fishing Watch heard it.</div>
+      <div>Went quiet ${esc(timeAgoFromUnix(d.went_dark_at))}${
+        d.resumed_at ? `, back ${esc(timeAgoFromUnix(d.resumed_at))}` : ""
+      }.</div>
+      ${Number.isFinite(Number(d.distance_km))
+        ? `<div>Reappeared ${esc(fmtNumber(Number(d.distance_km)))} km away, implying
+            ${esc(d.implied_speed_kn)} knots.</div>`
+        : ""}
+      ${Number.isFinite(Number(d.positions_per_day_sat))
+        ? `<div class="meta">GFW normally hears this hull about
+            ${esc(Math.round(Number(d.positions_per_day_sat)))} times a day by satellite.</div>`
+        : ""}
+      ${Number.isFinite(Number(d.distance_from_shore_km))
+        ? `<div class="meta">${esc(Math.round(Number(d.distance_from_shore_km)))} km from shore${
+            Number.isFinite(Number(d.distance_from_port_km))
+              ? `, ${esc(Math.round(Number(d.distance_from_port_km)))} km from the nearest port`
+              : ""
+          } when it stopped.</div>`
+        : ""}
+    </div>
+    <p class="meta"><b>Global Fishing Watch calls this a deliberate disabling. This map does not
+      &mdash; it reports that they do.</b> Their reception model, not ours, is what separates a
+      transponder switched off from a receiver that could not hear it; we have no such model.</p>
+    <p class="meta"><b>${age !== null ? `This is ${esc(age)} days old and cannot` : "This cannot"}
+      describe anything happening now.</b> GFW's gaps batch runs five or more days behind, and this
+      map's own AIS history is three days deep &mdash; the two windows do not overlap, so nothing on
+      the Dark Vessels layer is the same event as this, and neither confirms the other.</p>
+    <div class="meta">Source: ${esc(d.publisher || "Global Fishing Watch")} &mdash; AIS disabling
+      events${d.license ? ` (${esc(d.license)})` : ""}. A machine-derived finding by the publisher,
+      not a measurement by this app.${d.attribution ? `<br/>${esc(d.attribution)}` : ""}</div>`;
+  return {
+    icon: icon(
+      style.svg,
+      style.color,
+      gfwGapIconSize(d),
+      0,
+      "gfw-gap-marker",
+      0.9 * layerOpacity("gfwGaps"),
+      // Every record carries inferred: True from the backend, which states the
+      // renderer contract explicitly. This is the honouring of it.
+      "inferred",
+      offset
+    ),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- Global Fishing Watch: satellite detections (gfw_detections.py) ----
+//
+// The first thing in this map's maritime stack entitled to say *detected*.
+// Everything else at sea is either a broadcast a vessel chose to make or an
+// inference drawn from the shape of what it stopped broadcasting; a radar or
+// optical return is neither.
+//
+// Two claims are stacked in every record and must not merge. That a hull was at
+// this point at this time is a measurement. That it was not broadcasting AIS is
+// GFW's inference from correlating the return against AIS tracks. The glyph
+// carries the first (solid, no ring); the second lives in an inferred-block
+// inside the popup, where it is attributed.
+export const GFW_DETECTION_STYLE = {
+  unmatched: {
+    // The same dashed ring an aircraft whose operator asked not to be listed
+    // wears, and for the same reason: present, and not in the public
+    // transponder picture. Reused rather than reinvented so the two read as one
+    // idea across two domains.
+    svg: SVG.hullDetection + SVG.hiddenRing, color: "#ff3ea5", size: 17,
+    label: "Satellite detection, no AIS match", token: "gfw.unmatched",
+  },
+  matched: {
+    svg: SVG.hullDetection, color: "#8aa0ad", size: 13,
+    label: "Satellite detection, matched to AIS", token: "gfw.matched",
+  },
+};
+export const GFW_DETECTION_ORDER = ["unmatched", "matched"];
+
+export function gfwDetectionStyle(d) {
+  return themedStyle(
+    d?.matched ? GFW_DETECTION_STYLE.matched : GFW_DETECTION_STYLE.unmatched,
+    "gfwDetections"
+  );
+}
+
+export function gfwDetectionIconSize(d) {
+  return gfwDetectionStyle(d).size;
+}
+
+const GFW_SENSOR_LABEL = { sar: "Radar (SAR)", optical: "Optical (Sentinel-2)" };
+
+export function decorateGfwDetection(d, { offset } = {}) {
+  const style = gfwDetectionStyle(d);
+  const sensor = GFW_SENSOR_LABEL[(d.sensor || "").toLowerCase()] || d.sensor || "Sensor not stated";
+  const age = Number.isFinite(Number(d.age_days)) ? Math.round(Number(d.age_days)) : null;
+  const heading = d.matched ? "Vessel detected" : "Unmatched vessel detection";
+  const tooltip = `<b>${esc(heading)}</b><br/>${esc(sensor)}${
+    age !== null ? ` &middot; ${esc(age)} days ago` : ""
+  }`;
+  const detail = `
+    <h3>${esc(heading)}</h3>
+    <div class="meta">${esc(sensor)}${
+      d.time ? ` &middot; scene acquired ${esc(utcClockFromUnix(d.time))}` : ""
+    }${age !== null ? `, ${esc(age)} days ago` : ""}</div>
+    <div>A hull was at this point when the instrument looked. <b>That much is a measurement.</b></div>
+    ${d.matched
+      ? `<div>Global Fishing Watch matched it to a known AIS transmitter${
+          d.vessel_id ? ` (vessel ${esc(d.vessel_id)})` : ""
+        }.</div>`
+      : '<div class="inferred-block"><b>Not matched to any AIS transmitter</b> &mdash; Global ' +
+        "Fishing Watch's conclusion, not this map's. It does not mean the transponder was off: it " +
+        "means their correlation found nothing to pair this return with.</div>"}
+    ${d.match_basis ? `<div class="meta">Matching basis: ${esc(d.match_basis)}</div>` : ""}
+    <p class="meta"><b>Empty water on this layer is not evidence of empty water.</b> There is no
+      coverage or footprint dataset in the API, so this map cannot tell "imaged, nothing there" from
+      "not imaged at all". Never read a gap here the way you would read an AIS gap.</p>
+    <p class="meta">${age !== null ? `This scene is <b>${esc(age)} days old</b>` : "This scene is not live"}${
+      Number.isFinite(Number(d.dataset_lag_days))
+        ? ` and this product was running ${esc(Math.round(Number(d.dataset_lag_days)))} days behind when it was swept`
+        : ""
+    }. It is drawn beside live AIS and is not live.</p>
+    <div class="meta">Source: ${esc(d.publisher || "Global Fishing Watch")} &mdash; satellite vessel
+      presence${d.license ? ` (${esc(d.license)})` : ""}. Direct measurement (the detection);
+      the publisher's inference (the AIS match).${
+        d.attribution ? ` ${esc(d.attribution)}` : ""
+      }${
+        d.source_url
+          ? ` <a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Methodology</a>.`
+          : ""
+      }</div>`;
+  return {
+    icon: icon(
+      style.svg,
+      style.color,
+      gfwDetectionIconSize(d),
+      0,
+      `gfw-detection-marker gfw-detection-${d.matched ? "matched" : "unmatched"}`,
+      layerOpacity("gfwDetections"),
+      // No uncertainty class. The detection's coordinate is the most precise
+      // thing on the maritime map -- the doubt is entirely about the AIS match,
+      // and that belongs in the popup where it can be attributed, not on the
+      // icon where it would read as doubt about the position.
+      "",
       offset
     ),
     tooltip,

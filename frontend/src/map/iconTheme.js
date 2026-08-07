@@ -66,6 +66,18 @@ export const PALETTE_GROUPS = [
       { id: "sanctions.designated", label: "OFAC-designated", value: "#ff3b30" },
       { id: "dark.gap", label: "Went dark (AIS gap)", value: "#c9b6ff" },
       { id: "dark.sts", label: "Possible ship-to-ship transfer", value: "#7ee0c9" },
+      // Global Fishing Watch's own findings, kept next to the two above because
+      // they are the same subject seen by a different publisher -- and given a
+      // neighbouring violet on purpose, so the family reads as a family while
+      // still never being mistaken for this app's own inference.
+      { id: "gfw.gap", label: "AIS disabling (Global Fishing Watch)", value: "#c084fc" },
+      // The loudest colour in the maritime palette, deliberately: a hull an
+      // instrument saw with nothing in the transponder picture to pair it with
+      // is the finding this layer exists for.
+      { id: "gfw.unmatched", label: "Satellite detection, no AIS match", value: "#ff3ea5" },
+      // The palette's existing "already known, nothing to look at" grey. A
+      // matched detection is a ship the AIS layer is drawing anyway.
+      { id: "gfw.matched", label: "Satellite detection, matched to AIS", value: "#8aa0ad" },
     ],
   },
   {
@@ -94,6 +106,18 @@ export const PALETTE_GROUPS = [
       { id: "osm.military", label: "Military site (OpenStreetMap)", value: "#ff8c3a" },
       { id: "osm.power", label: "Power plant (OpenStreetMap)", value: "#9be15d" },
       { id: "osm.border", label: "Border crossing (OpenStreetMap)", value: "#c9b6ff" },
+      // EASA airspace bulletins, coloured by status rather than by severity.
+      // Their `severity` is two-valued -- 70 when live, 0 when withdrawn -- so
+      // putting it on the shared severity ramp would paint every live advisory
+      // the same orange and every withdrawn one yellow, which reads as a mild
+      // live warning rather than as a document that has been rescinded.
+      { id: "czib.active", label: "Airspace warning, active (EASA)", value: "#ff4d6d" },
+      { id: "czib.withdrawn", label: "Airspace warning, withdrawn", value: "#7f93a8" },
+      // Steel-teal, a sibling of airfield.civil above: the two are the same
+      // kind of thing -- a published gazetteer of places traffic goes -- in two
+      // domains, and they should read that way.
+      { id: "port.wpi", label: "Port (NGA World Port Index)", value: "#7fa8b8" },
+      { id: "dam.barrier", label: "Dam / reservoir (Global Dam Watch)", value: "#4a9fd8" },
     ],
   },
   {

@@ -2816,6 +2816,31 @@ html, body {
   color: var(--text-dim);
   margin-bottom: 3px;
 }
+/* The one new rule any of the eight backend layers needed. Three publishers'
+   estimates of the same quantity, side by side and never averaged -- which is
+   a table and cannot honestly be anything else, since the whole point is that
+   a reader compares the rows. Right-aligned numbers so the comparison is the
+   easy one to make. */
+.food-estimates {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: calc(11px * var(--ui-text-scale));
+  margin-bottom: 4px;
+}
+.food-estimates th,
+.food-estimates td {
+  padding: 1px 0 1px 6px;
+  text-align: right;
+  white-space: nowrap;
+}
+.food-estimates th {
+  font-weight: 600;
+  color: var(--text-dim);
+  font-size: calc(10px * var(--ui-text-scale));
+}
+.food-estimates th:first-child,
+.food-estimates td:first-child { text-align: left; padding-left: 0; }
+.food-estimates td:first-child { color: var(--text-secondary); }
 
 /* --- text size -------------------------------------------------------
    Admin Mode's text scale, applied to the HUD's own type.

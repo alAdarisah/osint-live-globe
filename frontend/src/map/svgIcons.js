@@ -330,6 +330,75 @@ export const SVG = {
     '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
     'd="M10.4 16h4.2l6-3.4a1.6 1.6 0 0 1 1.6 2.8l-6.4 4.4H6.4l-3.4-2"/>' +
     '<path fill="currentColor" d="M12 2.4c1.6 1.6 2.6 2.6 2.6 3.8a2.6 2.6 0 1 1-5.2 0c0-1.2 1-2.2 2.6-3.8Z"/>',
+
+  // ---- Global Fishing Watch (backend/sources/gfw_gaps.py, gfw_detections.py) --
+  //
+  // Two glyphs from one publisher that must never read as the same claim.
+  // The first is dashed like darkShip above, because it marks an inference
+  // about an absence. The second is the only solid hull on this map that is
+  // neither a live transponder nor an inference: an instrument saw it.
+  //
+  // A hull drawn broken, with the transmission arcs above it cut through: the
+  // vessel is still there, the broadcast is what stopped. Deliberately a
+  // relative of darkShip rather than a copy -- same subject, different hand.
+  aisDisabling: '<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-dasharray="3.2 2.2" ' +
+    'stroke-linejoin="round" d="M3.4 15.4h17.2l-2.8 5H6.2Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M12 15.4V9.6"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M8.8 8.4a4.6 4.6 0 0 1 6.4 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M6.4 5.6a8 8 0 0 1 11.2 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" d="M4.8 9.8 19.2 2.2"/>',
+  // A solid hull held in a reticle's corners. Solid on purpose: this is the one
+  // maritime record entitled to say *detected*, so nothing about it is drawn
+  // broken. Unmatched detections additionally wear hiddenRing above.
+  hullDetection: '<path fill="currentColor" d="M5.8 12.6h12.4l-2.3 4.6H8.1Z"/>' +
+    '<path fill="currentColor" d="M11 6.6v6l4.4-2.4Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" ' +
+    'd="M2.8 7.2V2.8h4.4M16.8 2.8h4.4v4.4M21.2 16.8v4.4h-4.4M7.2 21.2H2.8v-4.4"/>',
+
+  // ---- EASA conflict-zone bulletins (backend/sources/czib.py) ----
+  //
+  // A flight information region with an aircraft inside it, struck through: the
+  // claim is about a volume of airspace, not about any aircraft in it. Rounded
+  // rather than square so it does not read as borderCrossing above.
+  airspaceRestricted: '<rect x="2.6" y="4.6" width="18.8" height="14.8" rx="3.4" fill="none" stroke="currentColor" stroke-width="1.7"/>' +
+    '<path fill="currentColor" d="M12 7.8l2.9 8.2-2.9-1.9-2.9 1.9Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M5.4 19.4 18.6 4.6"/>',
+
+  // ---- GDACS floods (backend/sources/floods.py) ----
+  //
+  // A building standing in water rather than a raindrop: `desalination` above is
+  // already a droplet and this is not weather. The waterline crossing the walls
+  // is the whole glyph -- water where a structure is.
+  flooding: '<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" ' +
+    'd="M7.4 16.8V8.4L12 4.6l4.6 3.8v8.4"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" ' +
+    'd="M2.4 14.8c1.9 0 1.9 1.7 3.8 1.7s1.9-1.7 3.8-1.7 1.9 1.7 3.8 1.7 1.9-1.7 3.8-1.7 1.9 1.7 3.8 1.7"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" ' +
+    'd="M2.4 18.8c1.9 0 1.9 1.7 3.8 1.7s1.9-1.7 3.8-1.7 1.9 1.7 3.8 1.7 1.9-1.7 3.8-1.7 1.9 1.7 3.8 1.7"/>',
+
+  // ---- NGA World Port Index (backend/sources/ports.py) ----
+  //
+  // The bare chart symbol, hollow. Deliberately not `port` above, which is the
+  // curated-infrastructure glyph and is filled: hollow-versus-solid is the same
+  // argument osmInfra makes against infra -- a gazetteer sitting underneath a
+  // hand-checked list.
+  anchor: '<circle cx="12" cy="4.4" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" d="M12 6.8v13.6"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" d="M7.8 9.6h8.4"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" ' +
+    'd="M4.6 13.2c0 4.2 3.3 7.2 7.4 7.2s7.4-3 7.4-7.2"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M4.6 13.2l2.4 1.4M19.4 13.2 17 14.6"/>',
+
+  // ---- Global Dam Watch (backend/sources/dams.py) ----
+  //
+  // A wall bowed against the water it holds, the impounded surface behind it and
+  // the outflow past it. The curve is the point: a dam is a structure that is
+  // holding something back, and the pin is sized by how much.
+  dam: '<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" ' +
+    'd="M14.8 3.2c-4.8 3.6-4.8 14 0 17.6"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" ' +
+    'd="M2.8 8.2h8M2.8 11.8h7M2.8 15.4h8"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M15.4 11.8h5.8"/>',
 };
 
 // Which glyph an Officials & Diplomacy record gets, keyed on the `kind` the

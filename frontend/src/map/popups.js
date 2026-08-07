@@ -379,6 +379,43 @@ function outageFor(props, raw) {
   return Object.values(outages).find((o) => normalizeCountryName(o.country) === wanted) || null;
 }
 
+/*  Natural Earth's "-99" problem again, but with no name to fall back on.
+ *
+ *  Energy-Charts records carry a country_code and no country *name*
+ *  (energy_flows.py's merge), so the second step outageFor() takes above has
+ *  nothing to match against and France, Norway and Kosovo would come up
+ *  silently blank -- the record exists and nothing can reach it. Those shapes
+ *  do carry ADM0_A3 (props.iso_a3, see countries.py), so a small explicit map
+ *  is the way in. Only the three that actually have an energy record are
+ *  listed; the other two "-99" features are Northern Cyprus and Somaliland,
+ *  which have no bidding zone and never will.
+ *
+ *  outageFor above deliberately keeps its name path rather than sharing this:
+ *  IODA does publish entity names, so for that feed the name is real evidence
+ *  and this table would be a second, redundant answer.
+ */
+const ISO2_BY_ISO3 = { NOR: "NO", FRA: "FR", KOS: "XK" };
+
+export function energyRecordFor(props, raw) {
+  const code = props.iso_a2 && props.iso_a2 !== "-99"
+    ? props.iso_a2
+    : ISO2_BY_ISO3[props.iso_a3];
+  if (!code) return null;
+  const record = (raw.energyFlows || {})[code];
+  // `aggregate` is the EU row: the bloc's external interconnectors only, not a
+  // sum of the member states. It is not a country and must not paint one.
+  return record && !record.aggregate ? record : null;
+}
+
+// ISO3, the same key humanitarian uses -- so this one joins on props.iso_a3
+// directly, with no name matching and no "-99" problem at all.
+export function foodRecordFor(props, raw) {
+  const record = (raw.foodTrade || {})[props.iso_a3];
+  // `aggregate` is the EU row, which is not a sum of the member rows -- those
+  // are not in this feed at all -- and has no country shape to paint.
+  return record && !record.aggregate ? record : null;
+}
+
 // A country losing the internet is genuinely national in scope, so the card is
 // where the numbers live -- the map pin (see decorateOutage) is a way to find
 // the country, not a claim about where inside it anything happened. IODA's
@@ -401,6 +438,175 @@ function buildConnectivity(props, raw) {
       probing and darknet traffic. The score is a composite that is only meaningful <b>in comparison</b>
       &mdash; against this country's own normal and against others in the same window. It is not a
       percentage of the country offline, and it cannot distinguish a shutdown from a cable fault.</p>`;
+}
+
+// --- cross-border electricity (backend/sources/energy_flows.py) ---------
+//
+// Not on the map, and the module says why: a flow is an edge between two
+// countries, it has no location, and there is no honest pin for "0.4 GW from
+// Slovakia into Ukraine".
+//
+// The two halves are rendered as two labelled blocks and are never merged or
+// summed. One is what the interconnectors carried, measured; the other is what
+// the day-ahead market sold, scheduled. Those are different kinds of claim on
+// different clocks, and the distance between them is itself the signal.
+function energyHalf(half, heading, body) {
+  if (!half) return "";
+  return `<div class="csection-h">${heading}</div>${body(half)}`;
+}
+
+const ENERGY_COUNTERPART_CAP = 6;
+
+function buildEnergy(props, raw) {
+  const record = energyRecordFor(props, raw);
+  if (!record) return "";
+  const physical = record.physical;
+  const commercial = record.commercial;
+  if (!physical && !commercial) return "";
+  const signed = (v, unit) => `${v > 0 ? "+" : ""}${Number(v).toFixed(2)} ${esc(unit || "GW")}`;
+  const counterparts = (physical && physical.counterparts) || [];
+  const shown = counterparts.slice(0, ENERGY_COUNTERPART_CAP);
+  return `
+    <div class="cstats">
+      ${physical && physical.net != null
+        ? `<div class="cstat hot"><span class="cstat-v">${signed(physical.net, physical.unit)}</span>net, measured</div>`
+        : ""}
+      ${commercial && commercial.net != null
+        ? `<div class="cstat"><span class="cstat-v">${signed(commercial.net, commercial.unit)}</span>net, scheduled</div>`
+        : ""}
+    </div>
+    ${energyHalf(physical, "Measured &mdash; what the interconnectors carried", (h) => `
+      <div class="meta">${esc(h.resolution || "resolution not stated")} resolution${
+        h.latest_timestamp ? ` &middot; current to ${esc(h.latest_timestamp)}` : ""
+      }${h.timezone ? ` (${esc(h.timezone)})` : ""}${
+        h.bidding_zone ? ` &middot; bidding zone ${esc(h.bidding_zone)}` : ""
+      }</div>
+      ${h.sign_convention
+        // Printed verbatim rather than restated. The backend deliberately does
+        // not assert which sign means import -- it carries the publisher's own
+        // words, and there is a test enforcing that -- so neither does this.
+        ? `<div class="meta"><b>${esc(h.sign_convention)}</b> &mdash; the publisher's own words.</div>`
+        : ""}
+      ${shown.length
+        ? `<ul class="coverage-list">${shown.map((c) => `<li>${esc(c.name)}: ${
+            c.value != null ? signed(c.value, h.unit) : "not reported"
+          }${c.min != null && c.max != null
+            ? ` <span class="coverage-meta">over the window ${esc(Number(c.min).toFixed(2))} to ${esc(Number(c.max).toFixed(2))}</span>`
+            : ""}</li>`).join("")}</ul>`
+        : ""}
+      ${counterparts.length > ENERGY_COUNTERPART_CAP
+        ? `<div class="meta">+${esc(counterparts.length - ENERGY_COUNTERPART_CAP)} more borders &mdash; the
+            list is capped, the count is not.</div>`
+        : ""}`)}
+    ${commercial
+      ? energyHalf(commercial, "Scheduled &mdash; what the day-ahead market sold", (h) => `
+        <div class="meta">${esc(h.resolution || "resolution not stated")} resolution${
+          h.available_until ? ` &middot; published through ${esc(h.available_until)}` : ""
+        }</div>
+        <p class="meta"><b>Not a measurement, and never used as one.</b> This is the day-ahead market's
+          intent. The meters above run several hours behind wall clock &mdash; that is ENTSO-E's
+          publication lag, not a choice this app makes &mdash; so early in the day the schedule can be
+          the only figure there is. Where the two disagree, that disagreement is the interesting thing:
+          an interconnector that was sold and did not flow is a curtailment, an outage, or a border that
+          went down.</p>`)
+      : '<p class="meta">No day-ahead schedule published for this country in the current window.</p>'}
+    <p class="meta">A flow is an edge between two countries, not a place &mdash; there is no honest pin
+      for &ldquo;0.4 GW from Slovakia into Ukraine&rdquo;, which is why none of this is on the map.</p>
+    <div class="meta">Source: Energy-Charts (Fraunhofer ISE), republishing ENTSO-E &mdash; direct
+      measurement (physical) and a published market schedule (commercial).${
+        physical && physical.license ? ` ${esc(physical.license)}.` : ""
+      }</div>`;
+}
+
+// --- food balance sheets and the price index (food_trade.py) ------------
+//
+// Three independent bodies estimate every number here and this card never
+// averages them: the distance between them is itself the signal. The backend
+// keeps them apart all the way to this point and stamps its own spread figure
+// `inferred_by`, so the only thing left to do is not undo that.
+const FOOD_DB_ORDER = ["CBS", "IGC", "PSD"];
+const FOOD_COLUMNS = [
+  ["production", "Production"],
+  ["imports_nmy", "Imports"],
+  ["exports_nmy", "Exports"],
+  ["closing_stocks", "Closing stocks"],
+];
+
+// A blank AMIS field is "not published", which is not zero -- every IGC row
+// leaves other uses blank and every USDA row leaves food and feed use blank.
+function fmtOrDash(value) {
+  return value == null ? "&mdash;" : fmtNumber(value);
+}
+
+function foodCommodityBlock(commodity) {
+  const present = FOOD_DB_ORDER.filter((db) => commodity.estimates && commodity.estimates[db]);
+  if (!present.length) return "";
+  const spread = commodity.spread && commodity.spread.fields && commodity.spread.fields.production;
+  return `
+    <div class="csection-h">${esc(commodity.product || commodity.commodity)}${
+      commodity.season ? ` &middot; ${esc(commodity.season)} (marketing year)` : ""
+    }</div>
+    <table class="food-estimates">
+      <tr><th></th>${FOOD_COLUMNS.map(([, label]) => `<th>${label}</th>`).join("")}</tr>
+      ${present.map((db) => {
+        const e = commodity.estimates[db];
+        return `<tr><td>${esc(e.publisher || db)}</td>${
+          FOOD_COLUMNS.map(([field]) => `<td>${fmtOrDash(e[field])}</td>`).join("")
+        }</tr>`;
+      }).join("")}
+    </table>
+    ${commodity.units ? `<div class="meta">${esc(commodity.units)} &middot; trade counted on the national
+      marketing year, which is a different quantity from calendar-year trade.</div>` : ""}
+    ${spread
+      ? `<div class="inferred-block">
+          <div>The three bodies are <b>${fmtNumber(spread.spread)} ${esc(commodity.units || "")}</b> apart on
+            production &mdash; ${esc(spread.high_source)} highest, ${esc(spread.low_source)} lowest.</div>
+          <div class="meta">${esc(commodity.spread.basis || "")} Computed by
+            ${esc(commodity.spread.inferred_by || "this app")}.</div>
+        </div>`
+      : ""}`;
+}
+
+function buildFoodTrade(props, raw) {
+  const record = foodRecordFor(props, raw);
+  const price = raw.foodPriceIndex || null;
+  const commodities = record && record.commodities ? Object.values(record.commodities) : [];
+  const blocks = commodities.map(foodCommodityBlock).filter(Boolean);
+  const latest = price && price.latest;
+  // The global index is context for this country's balance sheets, not a
+  // section in its own right. A country AMIS does not cover gets no food fold
+  // at all rather than one whose only content says "this is not about you" --
+  // that would be 150-odd cards carrying a number none of them is about.
+  if (!blocks.length) return "";
+  const priceLabel = (key) => esc((price.labels && price.labels[key]) || key);
+  return `
+    ${blocks.join("")}
+    ${blocks.length ? `
+    <p class="meta"><b>Three independent bodies estimate every number here and this card never averages
+      them.</b> FAO, the International Grains Council and USDA all forecast the same quantity, and the
+      distance between them is itself the signal &mdash; a figure they agree on to within a percent is
+      settled, one they differ on by ten percent is a market nobody can see clearly. A dash is
+      &ldquo;not published&rdquo;, which is not zero.</p>
+    <p class="meta"><b>These are forecasts.</b> A marketing-year balance sheet is not an observation
+      &mdash; the year has not finished and most of it has not happened. This is a different kind of
+      claim from anything else on this map, and it is labelled as one.</p>` : ""}
+    ${latest ? `
+    <div class="csection-h">FAO Food Price Index &mdash; global, not this country</div>
+    <div>${priceLabel("food_price_index")}: <b>${fmtNumber(latest.food_price_index)}</b> in
+      ${esc(latest.month)}${price.base_period ? ` (${esc(price.base_period)})` : ""}</div>
+    <div class="meta">${["cereals", "oils", "dairy", "meat", "sugar"]
+      .filter((k) => latest[k] != null)
+      .map((k) => `${priceLabel(k)} ${fmtNumber(latest[k])}`)
+      .join(" &middot; ")}</div>
+    <p class="meta">One worldwide monthly series, shown in every country's card because it is the number
+      the balance sheets above should be read beside &mdash; a tightening balance and a rising cereal
+      price are one story told from the supply side and the demand side. It is <b>not a figure about this
+      country</b>, and it is an index of what happened rather than a forecast, which is the opposite
+      evidence footing to everything above it.</p>` : ""}
+    ${record && record.note ? `<p class="meta">${esc(record.note)}</p>` : ""}
+    <div class="meta">Sources: ${
+      [record && record.attribution, latest && price.attribution].filter(Boolean).map(esc).join(" &middot; ")
+    } &mdash; curated forecasts (AMIS) and an observed index (FPI).</div>`;
 }
 
 export function countryCardSections(props, raw, bounds) {
@@ -450,6 +656,11 @@ export function countryCardSections(props, raw, bounds) {
     { id: "connectivity", title: "Internet connectivity", defaultOpen: true,
       html: buildConnectivity(props, raw) },
     { id: "humanitarian", title: "Displacement & food security", html: buildHumanitarian(props, raw) },
+    // Two country-keyed feeds that draw nothing: a cross-border flow has no
+    // location and a marketing-year balance sheet is about a whole state. Both
+    // sit below the humanitarian fold because both are context for it.
+    { id: "power", title: "Cross-border electricity", html: buildEnergy(props, raw) },
+    { id: "food", title: "Food balance & prices", html: buildFoodTrade(props, raw) },
     { id: "verified", title: "Verified record", html: buildVerifiedRecord(wanted, raw) },
     { id: "trend", title: "Fatality trend", html: buildSparkline(trendSeries) },
     { id: "events", title: "Recent events", html: buildEventsSection(eventMatches, gdeltMatches, { heading: false }) },

@@ -15,7 +15,7 @@ it is what `kind` means once it leaves this file:
 
 1. The hazards layer is a *two-way* switch on `kind` everywhere downstream --
    frontend/src/map/decorators.js:660 sends anything that is not "volcano" to
-   decorateEarthquake, createMapController.js:1114 counts anything that is not
+   decorateEarthquake, createMapController.js:1310 counts anything that is not
    "volcano" as a quake, and LayersSection.jsx does the same for its legend. A
    third kind under that layer key does not render as a new thing; it renders
    as an earthquake with no magnitude and no depth, and inflates the quake
@@ -66,15 +66,17 @@ a layer that draws all of it unfiltered is mostly history -- but that is a
 thinning decision for the presentation, not a reason to drop rows the replay
 timeline and the dam adjacency both want.
 
---- left for whoever registers this ----------------------------------------
+--- where this is wired up, now that it is ----------------------------------
 
-- backend/app.py `_SOURCE_MODULES` -- nothing starts this otherwise.
-- backend/config.py `ENTITY_STALE_AFTER["floods"]`. Absent, it falls back to
-  the 86400s default, which is survivable only because every poll rewrites
-  every row: pause the poller for a day and the layer evicts itself whole.
-  A week or more is the right answer, since GDACS keeps events open that long.
-- A frontend layer, kind style and decorator. Until then this collects and
-  persists but nothing draws it.
+- backend/app.py `_SOURCE_MODULES` starts the poller; `/api/floods` serves it.
+- backend/config.py `ENTITY_STALE_AFTER["floods"]` is 14 days, well past the
+  86400s default: every poll rewrites every row, so at the default a poller
+  paused for a day would evict the layer whole, and GDACS keeps events open
+  for weeks anyway.
+- The frontend layer is its own key, `floods`, not a third kind inside
+  `hazards`. decorateFlood in frontend/src/map/decorators.js draws it, on the
+  shared severity ramp and with the dashed ring `geo_precision: "region"`
+  requires; it sits in the Natural Hazards panel group beside its sibling.
 """
 
 import asyncio

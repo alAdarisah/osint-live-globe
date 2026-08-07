@@ -18,7 +18,7 @@
 // severity bands live in severity.js: the map paints from it, the panel builds
 // its selector and legend from it, and a second copy is how those two drift.
 
-import { normalizeCountryName } from "./popups";
+import { normalizeCountryName, energyRecordFor, foodRecordFor } from "./popups";
 import { paletteColor } from "./iconTheme";
 
 // --- value extraction --------------------------------------------------
@@ -113,6 +113,77 @@ function outageScore(props, raw) {
   return record ? numberOrNull(record.score) : null;
 }
 
+// --- cross-border electricity (backend/sources/energy_flows.py) ---------
+//
+// energyRecordFor and foodRecordFor live in popups.js beside outageFor, which
+// answers the same question for IODA. This module already depends on that one
+// for normalizeCountryName, so keeping the accessors there means one direction
+// of dependency rather than a cycle -- and one join, so a country the fill
+// skips is the same country whose card stays silent.
+
+// Measured only. Deliberately never falls back to `commercial`: a scheduled
+// megawatt is a contract and a metered one is a reading, and painting a country
+// from its day-ahead schedule because the meters have not reported yet would be
+// inventing a measurement. A country with only the schedule stays unpainted.
+function netPowerImport(props, raw) {
+  const record = energyRecordFor(props, raw);
+  return record && record.physical ? numberOrNull(record.physical.net) : null;
+}
+
+// Computed here, by this app. Only where both halves exist -- a gap needs two
+// numbers -- and it is not a figure any publisher issues.
+function scheduleDeliveryGap(props, raw) {
+  const record = energyRecordFor(props, raw);
+  const measured = record && record.physical ? numberOrNull(record.physical.net) : null;
+  const scheduled = record && record.commercial ? numberOrNull(record.commercial.net) : null;
+  if (measured === null || scheduled === null) return null;
+  return Math.abs(scheduled - measured);
+}
+
+// --- food balance sheets (backend/sources/food_trade.py) ----------------
+//
+// Keyed on ISO3, the same key humanitarian uses, so props.iso_a3 joins directly
+// with no name matching and no "-99" problem.
+
+// The `commodity` slug food_trade._slug produces, and FAO's own balance-sheet
+// database code. Wheat because it is the commodity AMIS covers most completely
+// and the one a food-security reader asks about first.
+const WHEAT = "wheat";
+const FAO_DB = "CBS";
+
+function wheatCommodity(props, raw) {
+  const record = foodRecordFor(props, raw);
+  return record && record.commodities ? record.commodities[WHEAT] : null;
+}
+
+function wheatImportShare(props, raw) {
+  const commodity = wheatCommodity(props, raw);
+  const estimate = commodity && commodity.estimates ? commodity.estimates[FAO_DB] : null;
+  if (!estimate) return null;
+  const imports = numberOrNull(estimate.imports_nmy);
+  const supply = numberOrNull(estimate.total_supply);
+  // A blank AMIS field is "not published", which is not zero -- and a zero
+  // denominator is not a share.
+  if (imports === null || supply === null || supply <= 0) return null;
+  return imports / supply;
+}
+
+// How far apart the three bodies are on this country's wheat production, as a
+// share of the largest of them. The backend already computes the spread and
+// stamps it `inferred_by`; this only normalises it so countries of very
+// different sizes are comparable.
+function wheatEstimateSpread(props, raw) {
+  const commodity = wheatCommodity(props, raw);
+  const field = commodity && commodity.spread && commodity.spread.fields
+    ? commodity.spread.fields.production
+    : null;
+  if (!field) return null; // fewer than two bodies published a figure
+  const high = numberOrNull(field.high);
+  const spread = numberOrNull(field.spread);
+  if (high === null || high <= 0 || spread === null) return null;
+  return spread / high;
+}
+
 function featureNumber(key) {
   return (props) => numberOrNull(props[key]);
 }
@@ -182,6 +253,69 @@ export const CHOROPLETH_METRICS = [
     format: (v) => `${Math.round(v).toLocaleString()} people/km²`,
     note: "People per square kilometre. Context rather than distress — the one metric here"
       + " that is not a measure of harm.",
+  },
+  {
+    id: "power_import",
+    label: "Electricity imported (net, measured)",
+    // Gigawatts across physical interconnectors: bounded by copper, not a count
+    // spanning orders of magnitude, so linear rather than log.
+    scale: "linear",
+    valueOf: netPowerImport,
+    format: (v) => (v >= 0
+      ? `importing ${v.toFixed(2)} GW net`
+      : `exporting ${Math.abs(v).toFixed(2)} GW net`),
+    note: "Metered cross-border flow at this country's interconnectors (ENTSO-E via Fraunhofer"
+      + " ISE's Energy-Charts), at its most recent reading. More paint means more power coming"
+      + " in — a country leaning harder on somebody else's grid. The sign convention is the"
+      + " publisher's own and is quoted verbatim on each country's card. The day-ahead schedule"
+      + " is deliberately NOT used to fill a gap here: a contract is not a reading. European"
+      + " bidding zones only, so the rest of the map is unpainted for want of a meter rather"
+      + " than for want of a grid.",
+  },
+  {
+    id: "power_schedule_gap",
+    label: "Power: schedule vs delivery",
+    // An unbounded difference whose distribution is unknown and whose absolute
+    // size means nothing on its own. Same reasoning the outage score gets.
+    scale: "rank",
+    valueOf: scheduleDeliveryGap,
+    format: (v) => `${v.toFixed(2)} GW apart`,
+    note: "How far the day-ahead schedule and the metered flow disagree at each country's latest"
+      + " reading. Both figures are Energy-Charts'; the difference between them is computed by"
+      + " this app and no publisher issues it. An interconnector that was sold and did not flow"
+      + " is a curtailment, an outage, or a border that went down — but it is just as often"
+      + " publication lag, because the two halves are measured at different resolutions and"
+      + " reach different times of day. Ranked, not scaled: only the ordering means anything,"
+      + " and only countries publishing both halves are painted.",
+  },
+  {
+    id: "wheat_import_share",
+    label: "Wheat imported, share of supply (FAO)",
+    // A share, bounded 0..1 -- linear is the honest reading of it.
+    scale: "linear",
+    valueOf: wheatImportShare,
+    format: (v) => `${(v * 100).toFixed(0)}% of wheat supply imported`,
+    note: "FAO's own balance sheet for the current marketing year, and FAO's only — the IGC's and"
+      + " USDA-PSD's estimates of the same quantity sit beside it in the country card and are"
+      + " never averaged into this number. More paint means more of a country's wheat coming from"
+      + " somewhere else. These are FORECASTS, not observations: the marketing year has not"
+      + " finished and most of it has not happened. AMIS covers the regions that are between them"
+      + " most of world production and trade, so the rest of the map is unpainted because AMIS"
+      + " does not cover it, not because nobody there eats wheat.",
+  },
+  {
+    id: "wheat_estimate_spread",
+    label: "Wheat forecasts: how far apart",
+    scale: "rank",
+    valueOf: wheatEstimateSpread,
+    format: (v) => `${(v * 100).toFixed(1)}% apart on wheat production`,
+    note: "The gap between the highest and lowest of FAO, the IGC and USDA-PSD on this country's"
+      + " wheat production, as a share of the largest of the three. Computed by this app — no"
+      + " publisher issues this figure — and it measures how clearly the market can be seen,"
+      + " not how much wheat there is. A commodity the three agree on to within a percent is a"
+      + " settled fact; one they disagree on by ten percent is a market nobody can see clearly,"
+      + " which is exactly when a map of it is worth having. Ranked rather than scaled, and"
+      + " painted only where at least two of the three published a figure.",
   },
 ];
 

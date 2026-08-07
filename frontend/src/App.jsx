@@ -74,6 +74,28 @@ const DEFAULT_LAYER_VISIBILITY = {
   // alongside live pins -- and it is the one layer here whose newest data is
   // weeks old by construction.
   districts: false,
+  // Off on principle, the same principle darkVessels is off for: the record is
+  // an inference about intent. That the inference is Global Fishing Watch's
+  // rather than this app's does not change what kind of claim it is -- and
+  // every event on it is five or more days old, so it could never be a live
+  // layer even if it wanted to be.
+  gfwGaps: false,
+  // Off for a different reason: these are measurements, and good ones. But a
+  // radar return several weeks old drawn at world zoom beside live AIS is
+  // exactly the confusion this layer risks, so it appears because a reader
+  // asked for it. Also gated hard by zoom, on both the draw and the fetch.
+  gfwDetections: false,
+  // Off: a standing regulatory advisory is reference for a specific question,
+  // the same footing as the cable routes above, not something to watch.
+  czib: false,
+  // Off, matching its sibling hazards layer above for the same reason.
+  floods: false,
+  // Off: a harbour gazetteer is reference material, not a feed. Nothing in it
+  // is an event and nothing in it is current.
+  ports: false,
+  // Off: same, and the popup's whole content is structure-scale detail that
+  // means nothing until a reader is already looking at one place.
+  dams: false,
 };
 
 export default function App() {
