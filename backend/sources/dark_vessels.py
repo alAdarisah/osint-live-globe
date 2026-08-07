@@ -28,6 +28,15 @@ So every record carries `inferred: True`, states its own evidence, and the
 layer renders with the dashed treatment the map already uses for anything whose
 position or meaning is uncertain. This module is allowed to say "worth a look".
 It is not allowed to say "detected".
+
+**Someone else's record of the same hull.** Records also carry `gfw_prior`,
+which is what Global Fishing Watch has logged about that MMSI (see
+backend/sources/gfw_gaps.py). It is a prior and not a corroboration, and the
+distinction is forced by arithmetic rather than caution: GFW's batch runs five
+or more days behind and the history this module reads is three days deep, so
+the two cannot be describing the same event. A prior answers "has this hull
+gone dark deliberately before", which is worth knowing and is not evidence
+about tonight. Nothing here upgrades an inference on the strength of one.
 """
 
 import asyncio
@@ -170,9 +179,19 @@ def build_gap_records(
     gaps: list[dict],
     ships_by_mmsi: dict[str, dict],
     health: list[tuple[float, int | None, bool]],
+    priors: dict[str, dict] | None = None,
 ) -> list[dict]:
-    """Position gaps -> the ones worth showing, with their own evidence attached."""
+    """Position gaps -> the ones worth showing, with their own evidence attached.
+
+    `priors` is what Global Fishing Watch has recorded about each *hull* (see
+    backend/sources/gfw_gaps.py), keyed by MMSI. It is not corroboration of the
+    gap being built here and must never be rendered as such: GFW's batch runs
+    five or more days behind and our AIS history is three days deep, so the two
+    cannot describe the same event. What it answers is the prior question --
+    has this hull done this before, and did GFW call it deliberate.
+    """
     baseline = feed_health_baseline(health)
+    priors = priors or {}
     out: list[dict] = []
     for gap in gaps:
         hours = gap["gap_seconds"] / 3600.0
@@ -211,15 +230,53 @@ def build_gap_records(
             "gap_hours": round(hours, 1),
             "resumed_km_away": round(distance_km, 1),
             "implied_speed_kn": round(implied_speed_kn, 1),
+            # Someone else's record of this hull, or None. Named `prior` rather
+            # than anything resembling `corroborated` on purpose -- see the
+            # docstring above and gfw_gaps.py's.
+            "gfw_prior": priors.get(str(gap["entity_id"])),
             "inferred": True,
         })
-    out.sort(key=lambda r: (r.get("sanctions") is not None, r["gap_hours"]), reverse=True)
+    # This order decides what survives the cap below, and nothing else. It is
+    # explicitly *not* a reading order: the backend serves these from Postgres
+    # (see storage.entity_latest, ORDER BY entity_id) so by the time a reader
+    # sees them they are in MMSI order and this sort is gone. Measured, not
+    # assumed -- the served payload came back 207828770, 210888000, 219407000
+    # while this function had ordered them by duration.
+    #
+    # What it does do matters at the margin the cap creates: a pass with 123
+    # candidates and MAX_GAP_RECORDS at 120 discards three, and a hull carrying
+    # an OFAC designation or a GFW record of deliberate disabling should not be
+    # one of them. The gap itself is no better evidenced for either flag, and
+    # nothing downstream reads position in this list as confidence.
+    out.sort(
+        key=lambda r: (
+            r.get("sanctions") is not None,
+            bool((r.get("gfw_prior") or {}).get("intentional_events")),
+            r["gap_hours"],
+        ),
+        reverse=True,
+    )
     return out[:MAX_GAP_RECORDS]
 
 
-def build_sts_records(ships: list[dict], ports: ProximityIndex, now: float | None = None) -> list[dict]:
-    """Pairs of vessels sitting alongside each other, away from any port."""
+def build_sts_records(
+    ships: list[dict],
+    ports: ProximityIndex,
+    now: float | None = None,
+    priors: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Pairs of vessels sitting alongside each other, away from any port.
+
+    `priors` is the same per-hull GFW record `build_gap_records` takes, attached
+    per vessel rather than per pair -- a transfer is between two hulls and only
+    one of them may have the history. It is not corroboration of the transfer:
+    GFW's encounters product was measured against this inference and does not
+    cover it at all (see gfw_gaps.py), so nothing here has a second opinion on
+    the pairing itself. What a prior says is that one of these two has been
+    recorded going dark deliberately before.
+    """
     now = time.time() if now is None else now
+    priors = priors or {}
     candidates = []
     for ship in ships:
         lat, lon = ship.get("lat"), ship.get("lon")
@@ -268,7 +325,8 @@ def build_sts_records(ships: list[dict], ports: ProximityIndex, now: float | Non
                 "lon": (ship["lon"] + other["lon"]) / 2,
                 "vessels": [
                     {"mmsi": s.get("mmsi"), "name": s.get("name"), "imo": s.get("imo"),
-                     "ship_type": s.get("ship_type"), "sanctions": s.get("sanctions")}
+                     "ship_type": s.get("ship_type"), "sanctions": s.get("sanctions"),
+                     "gfw_prior": priors.get(str(s.get("mmsi")))}
                     for s in (ship, other)
                 ],
                 "separation_m": round(separation * 1000),
@@ -290,13 +348,23 @@ def build_sts_records(ships: list[dict], ports: ProximityIndex, now: float | Non
 
 async def _compute() -> list[dict]:
     since = time.time() - LOOKBACK_SECONDS
-    gaps, ships, health = await asyncio.gather(
+    gaps, ships, health, priors = await asyncio.gather(
         storage.position_gaps("ais", since, GAP_MIN_HOURS * 3600),
         storage.entity_latest_with_times("ais"),
         storage.source_health_series("ais", since),
+        # Written by the ingest process (see backend/sources/gfw_gaps.py) and
+        # read here rather than fetched, which is what keeps this module inside
+        # the refine tier's rule that nothing in it makes an outbound call.
+        # Absent -- no token, or a first run that has not landed yet -- is a
+        # normal state and degrades to no prior on any vessel, not an error.
+        storage.reference("gfw_vessel_priors"),
     )
     ships_by_mmsi = {str(s.get("mmsi")): s for s in ships if s.get("mmsi") is not None}
-    return build_gap_records(gaps, ships_by_mmsi, health) + build_sts_records(ships, _port_index())
+    priors = priors if isinstance(priors, dict) else {}
+    return (
+        build_gap_records(gaps, ships_by_mmsi, health, priors)
+        + build_sts_records(ships, _port_index(), priors=priors)
+    )
 
 
 async def derive_forever():

@@ -502,6 +502,20 @@ async def dark_vessels_endpoint(request: Request, region: str | None = None):
     return _cached_source_response(request, "dark_vessels", region, regions.filter_points)
 
 
+@app.get("/api/gfw-gaps")
+async def gfw_gaps_endpoint(request: Request, region: str | None = None):
+    """AIS disabling events as Global Fishing Watch records them.
+
+    The independent counterpart to /api/dark-vessels above, and the reason both
+    exist: that layer is derived from one upstream, so when aisstream stops it
+    goes quiet rather than red. This one has no such coupling. Global rather
+    than clipped to the AIS watch boxes -- those bound a websocket subscription,
+    not this -- and every record is GFW's claim rather than ours, carrying their
+    dated attribution (see backend/sources/gfw_gaps.py).
+    """
+    return _cached_source_response(request, "gfw_gaps", region, regions.filter_points)
+
+
 # Which payload fields travel with a track, per kind.
 #
 # Named rather than serving the whole payload: entity_history rows are the full

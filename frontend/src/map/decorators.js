@@ -1444,6 +1444,35 @@ export function darkVesselIconSize(d) {
   );
 }
 
+// What Global Fishing Watch has recorded about this *hull*, which is a
+// different claim from anything on the record it is attached to. Their gaps
+// batch runs five or more days behind and our AIS history is three days deep,
+// so the two can never describe the same event -- the wording below has to keep
+// saying so, because a reader who took it for confirmation would be reading a
+// five-day-old fact as a live one. See backend/sources/gfw_gaps.py.
+function gfwPriorDetail(prior) {
+  if (!prior || !prior.events) return "";
+  const intentional = Number(prior.intentional_events) || 0;
+  const events = Number(prior.events) || 0;
+  const when = prior.last_gap_at ? ` Most recent ${esc(timeAgoFromUnix(prior.last_gap_at))}.` : "";
+  const call = intentional
+    ? `<b>${intentional} of ${events}</b> judged deliberate by Global Fishing Watch.`
+    : `None of the ${events} judged deliberate by Global Fishing Watch.`;
+  return `
+    <div class="prior-block">
+      <div>This hull has ${events === 1 ? "one earlier" : `${events} earlier`} AIS
+        ${events === 1 ? "disappearance" : "disappearances"} on record. ${call}${when}</div>
+      <div class="meta">A separate organisation's record of this vessel &mdash; <b>not</b> a second
+        sighting of the event above. Their data runs about five days behind, so it cannot describe
+        the same gap.</div>
+    </div>`;
+}
+
+function gfwPriorCredit(prior) {
+  if (!prior || !prior.events) return "";
+  return `<div class="meta">Prior from: Global Fishing Watch AIS disabling events (CC BY-NC 4.0)</div>`;
+}
+
 function decorateAisGap(d) {
   const vessel = d.name || `MMSI ${d.mmsi}`;
   const tooltip = `<b>${esc(vessel)}</b> &middot; went dark<br/>` +
@@ -1462,10 +1491,12 @@ function decorateAisGap(d) {
       }.</div>
       <div class="meta">Last heard ${esc(timeAgoFromUnix(d.went_dark_at))}, back ${esc(timeAgoFromUnix(d.resumed_at))}.</div>
     </div>
+    ${gfwPriorDetail(d.gfw_prior)}
     <p class="meta"><b>This is an inference from our own AIS history, not a detection.</b> A receiver or
       upstream outage produces the identical signature; gaps spanning a measured drop in our own feed are
       suppressed, but thin coverage offshore is not something that check can fix.</p>
-    <div class="meta">Derived from: aisstream.io position history recorded by this backend</div>`;
+    <div class="meta">Derived from: aisstream.io position history recorded by this backend</div>
+    ${gfwPriorCredit(d.gfw_prior)}`;
   return { tooltip, detail };
 }
 
@@ -1482,13 +1513,20 @@ function decorateStsPair(d) {
       <ul class="coverage-list">
         ${vessels.map((v) => `<li>${esc(v.name || "Unknown vessel")} &middot; MMSI ${esc(v.mmsi)}${
           v.imo ? ` &middot; IMO ${esc(v.imo)}` : ""
-        }${v.sanctions ? ' <span class="sanction-flag">OFAC-designated</span>' : ""}</li>`).join("")}
+        }${v.sanctions ? ' <span class="sanction-flag">OFAC-designated</span>' : ""}${
+          // Per vessel, not per pair: a transfer is between two hulls and only
+          // one of them may carry a history.
+          v.gfw_prior && v.gfw_prior.intentional_events
+            ? ` <span class="prior-flag">${esc(v.gfw_prior.intentional_events)}&times; GFW disabling</span>`
+            : ""
+        }</li>`).join("")}
       </ul>
     </div>
     <p class="meta"><b>This is an inference, not a detection.</b> Two vessels close together may be rafted for
       a pilot transfer, waiting out weather, or sitting in an anchorage this map does not know about &mdash;
       only a small curated list of ports is excluded, so an unlisted anchorage will appear here.</p>
-    <div class="meta">Derived from: aisstream.io position history recorded by this backend</div>`;
+    <div class="meta">Derived from: aisstream.io position history recorded by this backend</div>
+    ${gfwPriorCredit(vessels.map((v) => v.gfw_prior).find((p) => p && p.events))}`;
   return { tooltip, detail };
 }
 

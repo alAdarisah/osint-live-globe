@@ -1758,6 +1758,25 @@ html, body {
   font-weight: 600;
 }
 
+/* Someone else's record of the same hull (decorators.js's gfwPriorDetail).
+   Deliberately not styled like .inferred-block above: that dashed rule means
+   "this map inferred it", and the whole value of a prior is that a different
+   organisation recorded it. A solid rule in a different colour is the visual
+   half of that distinction -- the text carries the rest, including the warning
+   that it cannot be describing the same event. */
+.prior-block {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-left: 3px solid var(--accent);
+  border-radius: 3px;
+}
+
+.prior-flag {
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* Airfields are reference, not a feed -- they sit behind everything else and
    must never compete with a contact for the eye. */
 .entity-icon-wrap .airfield-marker,

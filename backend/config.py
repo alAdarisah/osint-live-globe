@@ -41,6 +41,13 @@ ENERGY_FLOWS_POLL_INTERVAL = int(os.getenv("ENERGY_FLOWS_POLL_INTERVAL", "3600")
 # constraint -- a 46-request sweep four times a day is 0.5% of the 50,000/day
 # the response headers report -- payload is, at roughly 5-8 MB per optical sweep.
 GFW_POLL_INTERVAL = int(os.getenv("GFW_POLL_INTERVAL", str(6 * 3600)))
+# GFW's AIS-disabling events (see backend/sources/gfw_gaps.py). Same six hours
+# as the detections above and for a stronger version of the same reason: this
+# batch was measured five days behind wall clock -- a four-day window returned
+# zero events -- so nothing is gained by asking oftener than the data moves. The
+# sweep is ~20 paged requests for a 30-day window, which is small enough that
+# the interval is about courtesy rather than quota.
+GFW_GAPS_POLL_INTERVAL = int(os.getenv("GFW_GAPS_POLL_INTERVAL", str(6 * 3600)))
 
 # event_fusion.py doesn't fetch anything itself -- it re-derives from
 # acled.py's (ACLED + UCDP rows) and gdelt.py's already-fetched state.data,
@@ -108,6 +115,17 @@ ENTITY_STALE_AFTER = {
     # the failure this layer risks is a weeks-old radar return rendering like a
     # live position, so an empty layer is the safer way to be wrong.
     "gfw_detections": 2 * 86400,
+    # Same shape of problem as gfw_detections above, and the same answer. Every
+    # row is a distinct immutable event that a poll can only add to, so the real
+    # retention control is the source's own 30-day request window: each sweep
+    # re-upserts every event still inside it, and a row only starts ageing once
+    # it leaves. Two days is what governs after that, and it is aimed at the
+    # second case rather than the first -- an ingest container that has stopped.
+    # These records are already five days old when they arrive, so an eviction
+    # measured from event time would make no sense; this is measured from when
+    # we last wrote the row, which is what "the collector is still running"
+    # means.
+    "gfw_gaps": 2 * 86400,
     # Earthquakes drop out of USGS's own 1-day feed after 24h, but the weekly
     # volcano report in the same payload stays current for a full week -- the
     # longer of the two governs, or every volcano pin would be evicted six days

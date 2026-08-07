@@ -128,6 +128,17 @@ _JOBS = (
         ),
         interval=lambda: config.GFW_POLL_INTERVAL,
     ),
+    # The second opinion on dark_vessels' central inference, and the reason it
+    # is credentialed rather than derived: unlike that module, this one fetches.
+    # It is here rather than in refine for the ordinary reason -- a token -- and
+    # it matters more than usual that only one process holds it, because the
+    # sweep pages a 30-day window and a backend restart would re-page all of it.
+    Job(
+        module="gfw_gaps",
+        entrypoint="ingest_once",
+        publishes=(Published("gfw_gaps", "gfw_gaps", "AIS disabling (GFW)"),),
+        interval=lambda: config.GFW_GAPS_POLL_INTERVAL,
+    ),
     # Both of these pace themselves and are run as long-lived tasks, not on an
     # interval. AIS is a persistent websocket subscription whose reconnect
     # backoff (BACKOFF_CAP=900, jittered) exists precisely to avoid hammering
