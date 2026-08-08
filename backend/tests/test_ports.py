@@ -177,7 +177,7 @@ def test_a_port_outside_every_theatre_and_watch_box_is_clipped_away():
 def test_clipping_keeps_a_port_that_is_only_in_watched_water():
     """The clause dark_vessels.py depends on: watched water, no theatre."""
     watched = None
-    for south, west, north, east in config.AIS_BBOXES:
+    for south, west, north, east in config.WATCHED_WATERS:
         lat, lon = (south + north) / 2, (west + east) / 2
         if ports.region_for(lat, lon) is None:
             watched = {**ABADAN, "ycoord": lat, "xcoord": lon}

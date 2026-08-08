@@ -1,3 +1,34 @@
+"""Country outlines, from Natural Earth's 1:50m admin-0 set.
+
+The 1:50m cut rather than 1:110m, which this served until now. 1:110m is a
+world-at-a-glance generalisation -- 177 features, 10,654 vertices, a median
+country drawn with 37 points -- and the map it is drawn on is CARTO's basemap,
+which is accurate at every zoom. The two disagree visibly the moment anyone
+zooms in: a hover highlight cuts across the coastline it is supposed to trace, a
+choropleth fill spills into the sea, and a click on a coastal city lands outside
+the country it is in. 1:50m carries 242 features and 99,613 vertices, a median
+country drawn with 180 points, and closes most of that gap.
+
+It also stops dropping places. 1:110m has no feature at all for 65 of the
+territories 1:50m carries, and 29 of those are sovereign states in their own
+right -- Malta, Bahrain, Mauritius, Singapore, Andorra, most of the Caribbean
+and most of the Pacific. Clicking one of them returned nothing, because on this
+map they did not exist.
+
+Not 1:10m, which would be the next step up. That file is ~24 MB of GeoJSON for a
+payload every client downloads whole, against 2.1 MB here -- and unlike the
+admin-1 layer (sources/admin1_boundaries.py), which is served one country at a
+time, this collection is the world in one response because the hit-test index,
+the choropleth and the region filter all read across every country at once.
+
+Coordinates are rounded to five decimals on the way in, which is both about a
+metre and exactly the lattice the frontend's border editor quantizes to (see
+settings/borderOverrides.js). Storing anything finer would mean the editor's
+shared-vertex lookup and the stored geometry disagree in the last digits, which
+is what keeps a dragged border from tearing a gap between two countries. It
+halves the payload as a side effect: Natural Earth publishes these with up to
+fifteen decimals, or a picometre of false precision.
+"""
 import asyncio
 import csv
 import io
@@ -8,10 +39,18 @@ import httpx
 
 from backend import storage
 from backend.cache import registry
+from backend.sources.admin2_boundaries import thin_geometry
 
 log = logging.getLogger("osint-globe.countries")
 
-GEOJSON_URL = "https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector/geojson/ne_110m_admin_0_countries.geojson"
+GEOJSON_URL = "https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector/geojson/ne_50m_admin_0_countries.geojson"
+
+# Decimal places kept. Five is ~1.1 m, and is the same constant as
+# BORDER_PRECISION in the frontend's settings/borderOverrides.js -- see the
+# module docstring for why the two have to agree. Measured over this file:
+# rounding to 5dp leaves all 78,539 distinct coordinates distinct, where 4dp
+# merges 3 pairs and 3dp merges 23.
+COORD_PRECISION = 5
 # Note: World Bank's "mrnev=1" (most-recent-non-empty-value) param throws a
 # server error for some country codes (e.g. RUS) -- so instead we pull the
 # last few years ourselves (without mrnev) and pick the first non-null value.
@@ -78,7 +117,7 @@ async def _fetch_hdi_by_code(client: httpx.AsyncClient) -> dict:
         return {}
 
 
-async def _enrich(client: httpx.AsyncClient, feature: dict, hdi_by_code: dict) -> dict:
+async def _enrich(client: httpx.AsyncClient, feature: dict, geometry: dict, hdi_by_code: dict) -> dict:
     props = feature["properties"]
     code = props.get("ADM0_A3") or props.get("ISO_A3")
     population = pop_year = density = None
@@ -87,7 +126,7 @@ async def _enrich(client: httpx.AsyncClient, feature: dict, hdi_by_code: dict) -
         density, _ = await _fetch_wb_value(client, code, WB_DENSITY_URL)
     return {
         "type": "Feature",
-        "geometry": feature["geometry"],
+        "geometry": geometry,
         "properties": {
             "name": props.get("ADMIN") or props.get("NAME"),
             "iso_a3": code,
@@ -100,13 +139,35 @@ async def _enrich(client: httpx.AsyncClient, feature: dict, hdi_by_code: dict) -
     }
 
 
+def shape_features(raw_features: list[dict]) -> list[tuple[dict, dict]]:
+    """Each published feature paired with its rounded geometry.
+
+    A feature whose geometry survives rounding as nothing at all is dropped
+    rather than emitted with a null geometry: L.geoJSON would skip it silently,
+    but countryHitTest and the region bbox index both walk `geometry.coordinates`
+    unconditionally. Nothing in the 1:50m set is that small -- at five decimals a
+    ring has to be under a metre across to collapse -- so this is a guard against
+    a future release, not a filter that currently removes anything.
+    """
+    shaped = []
+    for feature in raw_features or []:
+        geometry = thin_geometry(feature.get("geometry"), COORD_PRECISION)
+        if geometry:
+            shaped.append((feature, geometry))
+    return shaped
+
+
 async def _fetch() -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.get(GEOJSON_URL)
         resp.raise_for_status()
         raw = resp.json()
+        shaped = shape_features(raw.get("features") or [])
+        dropped = len(raw.get("features") or []) - len(shaped)
+        if dropped:
+            log.warning("Countries: %d feature(s) had no geometry left after rounding", dropped)
         hdi_by_code = await _fetch_hdi_by_code(client)
-        features = await asyncio.gather(*(_enrich(client, f, hdi_by_code) for f in raw["features"]))
+        features = await asyncio.gather(*(_enrich(client, f, g, hdi_by_code) for f, g in shaped))
     return {"type": "FeatureCollection", "features": list(features)}
 
 

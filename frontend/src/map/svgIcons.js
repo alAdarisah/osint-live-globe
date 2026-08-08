@@ -8,10 +8,45 @@ export const SVG = {
   // Wider hull + a row of cargo/tank domes -- distinct silhouette from the
   // plain wedge-hulled `ship` glyph so tankers stand out at a glance.
   tanker: '<path fill="currentColor" d="M2 14 L22 14 L19 20 L5 20 Z"/><circle cx="7" cy="11" r="2" fill="currentColor"/><circle cx="12" cy="10.5" r="2.3" fill="currentColor"/><circle cx="17" cy="11" r="2" fill="currentColor"/>',
+  // A warship from above, bow at the top -- the only hull glyph drawn in plan
+  // view, and the reason is that ship markers are rotated to their heading:
+  // spinning `ship`'s side elevation round its centre produces a shape facing
+  // nowhere, and a navy contact is the one hull where the direction it is
+  // pointing is the point. Fine bow, parallel sides, transom stern, with the
+  // three things that make a hull a warship rather than a freighter: a forward
+  // gun mount, a blockish superstructure amidships, and a flight deck circle
+  // aft. Hollow hull so all three stay legible inside it at 26px.
+  warship: '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" ' +
+    'd="M12 1.2c2.4 3 3.6 6.4 3.6 10v8.2c0 1.3-1.6 2.2-3.6 2.2s-3.6-.9-3.6-2.2v-8.2c0-3.6 1.2-7 3.6-10Z"/>' +
+    '<circle cx="12" cy="8.6" r="1.6" fill="currentColor"/>' +
+    '<path fill="currentColor" d="M9.7 11.4h4.6v4.6H9.7z"/>' +
+    '<circle cx="12" cy="18.2" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/>',
   planeCommercial: '<path fill="currentColor" d="M12 1 L16 20 L12 16.5 L8 20 Z"/>',
-  planeMilitary: '<path fill="currentColor" d="M12 1 L22 19.5 L12 14.5 L2 19.5 Z"/>',
+  // "Military, role not established" -- the fallback every military aircraft
+  // lands on when adsb.py's role heuristic has nothing to read (OpenSky-only
+  // records carry no type description at all, and a callsign-prefix hit says
+  // nothing about the airframe). It used to be a bare arrowhead, which is why
+  // so much of the military layer looked like unlabelled triangles: an
+  // aircraft with no known role got a shape that was not even an aircraft.
+  // Now a plain swept-wing jet -- deliberately the least distinctive airframe
+  // in the set, since the honest claim is "an aircraft, type unknown", but an
+  // aircraft nonetheless.
+  planeMilitary: '<path fill="currentColor" d="M12 1.4c1 1.9 1.5 4.2 1.5 6.9v9.4c0 1.8-.5 3.3-1.5 4.5-1-1.2-1.5-2.7-1.5-4.5V8.3c0-2.7.5-5 1.5-6.9Z"/>' +
+    '<path fill="currentColor" d="M13.5 9.4 22 13.4v1.7l-8.5-2.1Z"/>' +
+    '<path fill="currentColor" d="M10.5 9.4 2 13.4v1.7l8.5-2.1Z"/>' +
+    '<path fill="currentColor" d="M13.5 18.2 17.4 20v1.2l-3.9-1.4Z"/>' +
+    '<path fill="currentColor" d="M10.5 18.2 6.6 20v1.2l3.9-1.4Z"/>',
   planeOther: '<path fill="currentColor" d="M12 3 L15 19 L12 16.2 L9 19 Z"/>',
-  helicopter: '<circle cx="12" cy="13" r="2" fill="currentColor"/><rect x="2" y="12" width="20" height="2" fill="currentColor"/><rect x="11" y="2" width="2" height="8" fill="currentColor"/><rect x="9" y="18" width="6" height="2" fill="currentColor"/>',
+  // Plan view, because the marker is rotated to the aircraft's heading and a
+  // side elevation spun round its centre reads as nothing at all. Rotor disc,
+  // two blades through the hub, a slim pod and a tail boom carrying an offset
+  // tail rotor -- the boom is what separates a helicopter from a compass rose
+  // at 16px, so it runs well past the disc.
+  helicopter: '<circle cx="12" cy="10.6" r="8.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-opacity="0.55"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6.1 4.5 17.9 16.7M17.9 4.5 6.1 16.7"/>' +
+    '<path fill="currentColor" d="M12 5.4c1.8 0 3.2 1.5 3.2 3.4v4.4c0 1.9-1.4 3.4-3.2 3.4s-3.2-1.5-3.2-3.4V8.8c0-1.9 1.4-3.4 3.2-3.4Z"/>' +
+    '<path fill="currentColor" d="M11.1 15.6h1.8v6h-1.8z"/>' +
+    '<path fill="currentColor" d="M9.1 19.6h1.9v3.4H9.1z"/>',
 
   // ---- military aircraft, by role (decorators.js's MILITARY_ROLE_STYLE) --
   // distinct silhouettes so e.g. a bomber and an AEW aircraft don't read as
@@ -26,13 +61,66 @@ export const SVG = {
     '<path fill="currentColor" d="M10.6 9.2 L2.4 17.4 L2.4 19 L10.6 15.4 Z"/>' +
     '<path fill="currentColor" d="M13.4 17.6 L17.6 21 L17.6 22.2 L13.4 20.4 Z"/>' +
     '<path fill="currentColor" d="M10.6 17.6 L6.4 21 L6.4 22.2 L10.6 20.4 Z"/>',
-  planeBomber: '<path fill="currentColor" d="M12 2 L20 17 L12 13.5 L4 17 Z"/><path fill="currentColor" d="M9 13 L9 20 L12 18.5 L15 20 L15 13 Z"/>',
-  planeTanker: '<path fill="currentColor" d="M12 1 L20 17 L12 13.5 L4 17 Z"/><line x1="12" y1="13.5" x2="12" y2="23" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="23" r="1.4" fill="currentColor"/>',
-  planeAwacs: '<path fill="currentColor" d="M12 6 L18 19 L12 16 L6 19 Z"/><ellipse cx="12" cy="6" rx="5" ry="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/>',
-  planeRecon: '<path fill="currentColor" d="M12 1 L13.2 18 L12 21 L10.8 18 Z"/><path fill="currentColor" d="M8 14 L16 14 L12 16.5 Z"/>',
-  planePatrol: '<path fill="currentColor" d="M12 2 L19 17 L12 14 L5 17 Z"/><path fill="none" stroke="currentColor" stroke-width="1.4" d="M6 20 Q9 18.5 12 20 T18 20"/>',
-  planeDrone: '<path fill="currentColor" d="M12 5 L18 15 L12 12.5 L6 15 Z"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/>',
-  planeTransport: '<rect x="10" y="4" width="4" height="16" rx="1.5" fill="currentColor"/><rect x="3" y="12" width="18" height="3" rx="1" fill="currentColor"/>',
+  // Every glyph below is a plan view with the nose at the top, because the
+  // marker is rotated to the aircraft's track. They used to be the same
+  // arrowhead wedge with one detail added on top -- a boom, a dish, a dot --
+  // which at 15-21px meant the military layer read as a field of triangles.
+  // Each is now an airframe first and a role second: the silhouette carries
+  // the class, the added detail only names which one.
+  //
+  // A flying wing: nose forward, the whole body sweeping back into the tips.
+  // The biggest and most distinctive shape in the set, which is right -- a
+  // bomber is the one contact here a reader should never have to look twice at.
+  planeBomber: '<path fill="currentColor" d="M12 1.6c1.2 2.4 1.8 5.2 1.8 8.4v6.6l8.4 4.6v1.4L13.8 20v1.8L12 23l-1.8-1.2V20l-8.4 2.6v-1.4l8.4-4.6V10c0-3.2.6-6 1.8-8.4Z"/>',
+  // Swept-wing jet trailing a refuelling boom with its ruddevators spread --
+  // the boom is the one thing only a tanker has, so it stays, but it now hangs
+  // off an aircraft instead of off a triangle.
+  planeTanker: '<path fill="currentColor" d="M12 2.2c1 1.8 1.5 4 1.5 6.6v8.4c0 1.5-.5 2.8-1.5 3.8-1-1-1.5-2.3-1.5-3.8V8.8c0-2.6.5-4.8 1.5-6.6Z"/>' +
+    '<path fill="currentColor" d="M13.5 9.8 22.2 12.8v1.6l-8.7-1.8Z"/>' +
+    '<path fill="currentColor" d="M10.5 9.8 1.8 12.8v1.6l8.7-1.8Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M12 20.2v2.4"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M9.9 21.4 12 23.2l2.1-1.8"/>',
+  // The rotodome sits over the rear fuselage as a ring rather than perched
+  // above the nose: on a plan view the dish is a disc, and drawing it anywhere
+  // but where it really rides made the aircraft look like it was towing a hoop.
+  planeAwacs: '<path fill="currentColor" d="M12 2.6c1 1.8 1.5 3.9 1.5 6.4v8.6c0 1.5-.5 2.8-1.5 3.8-1-1-1.5-2.3-1.5-3.8V9c0-2.5.5-4.6 1.5-6.4Z"/>' +
+    '<path fill="currentColor" d="M13.5 10.2 22 13v1.6l-8.5-1.6Z"/>' +
+    '<path fill="currentColor" d="M10.5 10.2 2 13v1.6l8.5-1.6Z"/>' +
+    '<circle cx="12" cy="15.4" r="3.8" fill="none" stroke="currentColor" stroke-width="1.7"/>' +
+    '<path fill="currentColor" d="M13.5 19.8 16.8 21.2v1.1l-3.3-1.1Z"/>' +
+    '<path fill="currentColor" d="M10.5 19.8 7.2 21.2v1.1l3.3-1.1Z"/>',
+  // Cheek fairings on the forward fuselage -- the Rivet Joint silhouette. A
+  // shape nothing else in the set has, and specifically not an arc or a bar:
+  // patrol already owns the arc under the hull and three types own a straight
+  // wing, so recon needed a marking on the body itself.
+  planeRecon: '<path fill="currentColor" d="M12 1.8c1 1.9 1.4 4.1 1.4 6.7v9.2c0 1.5-.5 2.8-1.4 3.7-.9-.9-1.4-2.2-1.4-3.7V8.5c0-2.6.4-4.8 1.4-6.7Z"/>' +
+    '<path fill="currentColor" d="M13.4 5.2 16.4 6.4v3.4l-3-1Z"/>' +
+    '<path fill="currentColor" d="M10.6 5.2 7.6 6.4v3.4l3-1Z"/>' +
+    '<path fill="currentColor" d="M13.4 10.4 21.6 13.4V15l-8.2-1.8Z"/>' +
+    '<path fill="currentColor" d="M10.6 10.4 2.4 13.4V15l8.2-1.8Z"/>' +
+    '<path fill="currentColor" d="M13.4 18.4 16.8 20v1.1l-3.4-1.2Z"/>' +
+    '<path fill="currentColor" d="M10.6 18.4 7.2 20v1.1l3.4-1.2Z"/>',
+  // Wave train beneath the aircraft: a maritime patrol is a search pattern
+  // flown over water, and the water is the whole distinction from a transport.
+  planePatrol: '<path fill="currentColor" d="M12 2.4c1 1.8 1.5 3.9 1.5 6.5v8c0 1.5-.5 2.8-1.5 3.7-1-.9-1.5-2.2-1.5-3.7v-8c0-2.6.5-4.7 1.5-6.5Z"/>' +
+    '<path fill="currentColor" d="M13.5 9.8 21.8 12.6v1.6l-8.3-1.6Z"/>' +
+    '<path fill="currentColor" d="M10.5 9.8 2.2 12.6v1.6l8.3-1.6Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ' +
+    'd="M3.4 21.6c1.7 0 1.7-1.5 3.4-1.5s1.7 1.5 3.4 1.5 1.7-1.5 3.4-1.5 1.7 1.5 3.4 1.5 1.7-1.5 3.4-1.5"/>',
+  // MQ-9: long thin wing set well forward, and a V-tail. The splayed tail is
+  // the giveaway -- no crewed type in this set has one, so a drone stays
+  // readable even at the 15px it is drawn at.
+  planeDrone: '<path fill="currentColor" d="M12 2.4c1.1 1.7 1.6 3.8 1.6 6.2v9.2c0 1.4-.5 2.6-1.6 3.4-1.1-.8-1.6-2-1.6-3.4V8.6c0-2.4.5-4.5 1.6-6.2Z"/>' +
+    '<rect x="1.4" y="9.2" width="21.2" height="2.2" rx="1.1" fill="currentColor"/>' +
+    '<path fill="currentColor" d="M13.4 17.4 18.4 21.4l-1.2 1.4-3.8-3.2Z"/>' +
+    '<path fill="currentColor" d="M10.6 17.4 5.6 21.4l1.2 1.4 3.8-3.2Z"/>',
+  // Heavy lifter: a fat fuselage under a wide straight wing, with a tailplane
+  // nearly as broad. Told apart from the trainer -- the other straight-winged
+  // glyph -- by bulk rather than by any added mark: that is exactly how the two
+  // differ in the air.
+  planeTransport: '<path fill="currentColor" d="M12 2c1.4 2.1 2.1 4.6 2.1 7.4v8.2c0 1.7-.7 3.2-2.1 4.4-1.4-1.2-2.1-2.7-2.1-4.4V9.4C9.9 6.6 10.6 4.1 12 2Z"/>' +
+    '<rect x="1.4" y="9.8" width="21.2" height="2.4" rx="1" fill="currentColor"/>' +
+    '<rect x="4.6" y="19.4" width="14.8" height="2.2" rx="1" fill="currentColor"/>',
   // Trainer: a small straight-winged aircraft. It is the largest single group
   // in the live military feed (96 of 310 -- T-6 Texans, T-38 Talons, T-45
   // Goshawks), and every one of them used to draw as the generic red wedge, so
@@ -62,7 +150,23 @@ export const SVG = {
     '<line x1="18.5" y1="7.2" x2="18.5" y2="11.8" stroke="currentColor" stroke-width="1"/>' +
     '<path fill="currentColor" d="M10.4 13 L13.6 13 L15.4 17 L8.6 17 Z"/>' +
     '<path fill="none" stroke="currentColor" stroke-width="1.3" d="M7 19 Q12 22.4 17 19"/>',
-  // ---- military bases (subtype icons; air/naval reuse planeMilitary/ship) ----
+  // ---- military bases (subtype icons) ----
+  //
+  // A naval base is a place, and it used to be drawn with `ship` -- the same
+  // glyph, in the same yellow, as a US Navy vessel underway. A fixed shore
+  // installation and a moving hull are not the same claim, and on this map they
+  // were indistinguishable. It now wears the shield the other base subtypes use
+  // (armyBase below, airfieldMilitary further down), with an anchor inside it:
+  // the shield says "military site", the anchor says which service. Distinct
+  // from the bare `anchor` glyph too, which is the NGA port gazetteer's mark
+  // and carries no shield.
+  navalBase: '<path fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="1.6" ' +
+    'd="M12 2 L21 7 L21 13 C21 18 17 21.5 12 22 C7 21.5 3 18 3 13 L3 7 Z"/>' +
+    '<circle cx="12" cy="7.4" r="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M12 8.9v8.6"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M9.2 10.8h5.6"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ' +
+    'd="M7.9 13.4c0 2.8 1.8 4.7 4.1 4.7s4.1-1.9 4.1-4.7"/>',
   armyBase: '<path fill="currentColor" d="M12 2 L21 7 L21 13 C21 18 17 21.5 12 22 C7 21.5 3 18 3 13 L3 7 Z" fill-opacity="0.18" stroke="currentColor" stroke-width="1.6"/><path fill="currentColor" d="M12 6 L17 9 L12 12 L7 9 Z"/>',
   missileBase: '<path fill="currentColor" d="M12 2 C15 6 15.5 11 14.5 15 L9.5 15 C8.5 11 9 6 12 2 Z"/><path fill="currentColor" d="M9.5 15 L7 20 L10 18.5 Z"/><path fill="currentColor" d="M14.5 15 L17 20 L14 18.5 Z"/><rect x="10.5" y="15" width="3" height="5" fill="currentColor"/>',
   jointBase: '<path fill="currentColor" d="M12 2 L14.2 9.2 L21.5 9.2 L15.6 13.6 L17.8 20.8 L12 16.4 L6.2 20.8 L8.4 13.6 L2.5 9.2 L9.8 9.2 Z" fill-opacity="0.85"/>',
@@ -399,6 +503,30 @@ export const SVG = {
     '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" ' +
     'd="M2.8 8.2h8M2.8 11.8h7M2.8 15.4h8"/>' +
     '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M15.4 11.8h5.8"/>',
+
+  // ---- DeFlock ALPR cameras (backend/sources/deflock.py) ----
+  //
+  // A wall/pole-mounted surveillance camera: hollow housing with a filled lens
+  // and a tapered sensor block at the front, on a bracket. Deliberately quiet --
+  // this is crowd-sourced location metadata sitting under the curated layers, the
+  // same second-tier reading osmInfra's flatter glyphs get.
+  alprCamera: '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" ' +
+    'd="M3.4 6.8h10.8v5.6H3.4z"/>' +
+    '<circle cx="6" cy="9.6" r="1.5" fill="currentColor"/>' +
+    '<path fill="currentColor" d="M14.6 7.8l4.8-2v8l-4.8-2z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+    'd="M8.8 12.6v3.4M6 15.9h5.6"/>',
+
+  // ---- railway points (OpenStreetMap, via backend/sources/osm_infra.py) ----
+  //
+  // A small train car -- rounded body, a window band and two wheels on a rail --
+  // for the station/halt/yard/border nodes the osm_infra sweep now also carries.
+  // Flatter and quieter than the curated infrastructure glyphs, matching the rest
+  // of the OSM layer it rides inside.
+  railway: '<rect x="6" y="3.6" width="12" height="12.2" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>' +
+    '<rect x="8.2" y="6" width="7.6" height="4" rx="0.8" fill="currentColor"/>' +
+    '<circle cx="9" cy="18" r="1.4" fill="currentColor"/><circle cx="15" cy="18" r="1.4" fill="currentColor"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M6.2 20.8h11.6"/>',
 };
 
 // Which glyph an Officials & Diplomacy record gets, keyed on the `kind` the
@@ -472,4 +600,160 @@ export function buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass, op
   // nudged icon left a second, invisible target sitting at its true point.
   const outerClass = extraClass ? `entity-marker ${extraClass}` : "entity-marker";
   return L.divIcon({ html, className: outerClass, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+}
+
+/**
+ * Which glyphs an operator may choose from, per pin type.
+ *
+ * Curated rather than "every glyph for every token", and that is the whole
+ * point of the table. A picker offering all ninety would let a refinery be drawn
+ * as a raindrop, and the rule this map is built on -- every pin states what kind
+ * of evidence it is -- survives only as long as the alternatives on offer are
+ * all honest readings of the same thing. Each list is a set of glyphs that could
+ * legitimately stand for that pin type; the first entry is the shipped default.
+ *
+ * The working rule for what may join a list: a glyph belongs if it comes from
+ * the same *family* as the pin -- vessels for a hull, silhouettes for an
+ * airframe, runway layouts for an airfield, industrial plant for industrial
+ * plant, base types for a military site, the ring vocabulary for the pins that
+ * are about something being absent. Within a family the choice is a matter of
+ * how an operator wants their own map to read; across families it becomes a
+ * claim about what the thing *is*, which is not the picker's to make. Hence
+ * `navalBase` is offered for an OpenStreetMap military area and deliberately
+ * not for either port token: both port layers are civil gazetteers, and drawing
+ * one as a naval base would assert a military use no source here supports.
+ *
+ * Three groups are deliberately absent:
+ *
+ *   severity.*      colours the conflict pin but does not choose its glyph --
+ *                   that comes from the event's own text (see EVENT_GLYPHS in
+ *                   decorators.js). A token-keyed override would flatten
+ *                   thirteen distinct claims into one.
+ *   hazards         earthquake/volcano/flood carry no palette token at all, so
+ *                   there is nothing here to key on.
+ *   colour-only     event.corroborated, sanctions.designated and cable.route
+ *                   name a recolour, a ring and a polyline -- none of them is a
+ *                   pin with a glyph to swap. They are excluded from the size
+ *                   and zoom dials for the same reason.
+ */
+export const GLYPH_CHOICES = Object.freeze({
+  // ---- maritime ----
+  //
+  // The hull silhouettes are interchangeable between the three traffic classes:
+  // which one a reader wants a navy hull drawn as is a question about their own
+  // map, and the class is already carried by the colour. The four "something is
+  // missing" pins additionally get the ring vocabulary, which is the shape
+  // language this map uses for an absence rather than an object.
+  "ship.navy": ["warship", "ship", "tanker", "darkShip", "anchor"],
+  "ship.tanker": ["tanker", "ship", "warship", "stsTransfer", "darkShip", "anchor"],
+  "ship.other": ["ship", "tanker", "warship", "darkShip", "anchor"],
+  "dark.gap": ["darkShip", "hiddenRing", "connectivityLoss", "aisDisabling", "alertRing", "ship"],
+  "dark.sts": ["stsTransfer", "tanker", "darkShip", "ship", "hiddenRing"],
+  "gfw.gap": ["aisDisabling", "darkShip", "hiddenRing", "connectivityLoss", "alertRing"],
+  "gfw.unmatched": ["hullDetection", "darkShip", "ship", "warship", "alertRing"],
+  "gfw.matched": ["hullDetection", "ship", "tanker", "warship", "anchor"],
+  // Anchor first, because that is what PORT_STYLE actually draws -- a hollow
+  // anchor rather than the filled `port` glyph the curated infrastructure layer
+  // uses, deliberately (see PORT_STYLE in decorators.js). The list led with
+  // `port`, so the picker showed the wrong swatch as the shipped one and
+  // "reset" moved the shape.
+  "port.wpi": ["anchor", "port", "cableLanding", "lng"],
+  "cable.landing": ["cableLanding", "port", "anchor", "connectivityLoss"],
+  // A planned landing is a place that does not exist yet, so the hollow ring
+  // belongs on it in a way it does not on the built one.
+  "cable.planned": ["cableLanding", "hiddenRing", "port", "anchor"],
+  // ---- air ----
+  // Every airframe silhouette the dict draws, for the token that means "military,
+  // role unknown" -- an operator who knows their theatre may well want the
+  // unidentified ones drawn as whatever that theatre mostly flies.
+  "aircraft.military": [
+    "planeMilitary", "planeFighter", "planeBomber", "planeAwacs",
+    "planeRecon", "planePatrol", "planeTanker", "planeTransport", "planeDrone",
+    "planeTrainer", "helicopter",
+  ],
+  "aircraft.helicopter": ["helicopter", "planeOther", "planeMilitary", "planeTransport"],
+  "aircraft.commercial": ["planeCommercial", "planeTransport", "planeOther", "planeTanker"],
+  "aircraft.other": ["planeOther", "planeCommercial", "planeTrainer", "planeDrone", "helicopter"],
+  // One list per tier, each led by the runway layout that tier ships with.
+  // They used to share a single "airfield.civil" list, which meant picking a
+  // shape for one tier picked it for all three -- so the only thing the control
+  // could do was erase the size-and-shape gradient it was offering to tune.
+  "airfield.large": ["airfieldLarge", "airfield", "airfieldSmall", "airfieldMilitary", "airBase", "planeCommercial"],
+  "airfield.medium": ["airfield", "airfieldLarge", "airfieldSmall", "airfieldMilitary", "airBase", "planeCommercial"],
+  "airfield.small": ["airfieldSmall", "airfield", "airfieldLarge", "airfieldMilitary", "airBase", "planeOther"],
+  "airfield.military": [
+    "airfieldMilitary", "airBase", "airfield", "airfieldLarge", "airfieldSmall",
+    "planeMilitary", "radarBase",
+  ],
+  "czib.active": ["airspaceRestricted", "alertRing", "jammingSignal", "hiddenRing", "connectivityLoss"],
+  // A withdrawn bulletin is a document that has been rescinded, so the two ways
+  // of saying "this is no longer in force" -- the hollow ring and the record
+  // mark -- are the alternatives worth having.
+  "czib.withdrawn": ["airspaceRestricted", "hiddenRing", "recordMark", "alertRing"],
+  // ---- infrastructure ----
+  // The plant glyphs are interchangeable across the industrial tokens: which of
+  // them reads as "heavy industry" at 14px is a matter of taste, and the kind is
+  // named in the popup and carried by the colour either way.
+  "infra.refinery": ["refinery", "powerPlant", "fab", "pipeline", "lng"],
+  "infra.lng_terminal": ["lng", "refinery", "port", "pipeline", "anchor"],
+  "infra.port": ["port", "anchor", "cableLanding", "lng"],
+  "infra.desalination": ["desalination", "raindrop", "powerPlant", "dam", "fab"],
+  "infra.nuclear": ["nuclear", "powerPlant", "refinery", "fab"],
+  "infra.fab": ["fab", "powerPlant", "refinery", "nuclear"],
+  "infra.pipeline": ["pipeline", "refinery", "lng", "powerPlant"],
+  "osm.power": ["powerPlant", "nuclear", "refinery", "fab", "dam"],
+  // Had exactly one entry, so the picker was suppressed entirely (see
+  // GlyphPicker, which needs two shapes before it draws anything) -- a pin type
+  // with a shape control that never appeared.
+  "osm.border": ["borderCrossing", "railway", "recordMark", "alertRing"],
+  // The four railway node kinds ship on one shape -- they are one family, and
+  // four near-identical station glyphs would be a distinction nobody could read
+  // at 12px. They get four *lists* anyway, because sharing one meant an
+  // operator who wanted yards told apart from halts had no way to say so.
+  //
+  // Their alternatives are the settlement glyphs, sized the way the nodes
+  // themselves are: a station is a place people arrive at, a halt is a smaller
+  // one, and drawing them as a town and a hamlet is an honest reading of that.
+  "osm.railway_station": ["railway", "borderCrossing", "city", "cityLarge", "logisticsBase"],
+  "osm.railway_halt": ["railway", "borderCrossing", "cityTown", "cityMedium"],
+  "osm.railway_yard": ["railway", "logisticsBase", "borderCrossing", "cityMedium"],
+  "osm.railway_border": ["railway", "borderCrossing", "cityTown", "recordMark"],
+  "railway.line": ["railway", "borderCrossing", "pipeline"],
+  "dam.barrier": ["dam", "powerPlant", "raindrop", "desalination"],
+  "deflock.camera": ["alprCamera", "radarBase", "jammingSignal", "hiddenRing"],
+  "osm.military_airfield": [
+    "airfieldMilitary", "airBase", "airfieldLarge", "airfield", "armyBase",
+    "radarBase", "planeMilitary",
+  ],
+  // Every base type the dict draws, which is the point of this row: OSM says
+  // "landuse=military" and nothing more, so what kind of installation it is, is
+  // exactly the judgement an operator is entitled to make on their own map.
+  "osm.military_area": [
+    "armyBase", "jointBase", "missileBase", "radarBase", "logisticsBase",
+    "airBase", "navalBase", "airfieldMilitary",
+  ],
+  // ---- space, news, diplomacy, places ----
+  "satellite.stations": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.military": ["satelliteMilitary", "satellite", "radarBase", "globe"],
+  // An upcoming launch is a thing that has not happened; a flown one is a
+  // record of one that has. The last entry on each says so.
+  "launch.upcoming": ["launchPad", "missileBase", "satellite", "alertRing"],
+  "launch.flown": ["launchPad", "missileBase", "satellite", "recordMark"],
+  "news.pin": ["news", "recordMark", "podium", "globe", "alertRing"],
+  "officials.cooperative": ["handshake", "treaty", "aidHand", "podium", "recordMark"],
+  "officials.hostile": ["threatFist", "demandHand", "severedTies", "mobilize", "alertRing", "podium"],
+  "officials.neutral": ["podium", "recordMark", "handshake", "treaty", "news"],
+  // One list per band, each led by the shape that band ships with. Sharing one
+  // list was what let a single choice collapse the whole graduated-symbol
+  // scheme onto one glyph.
+  "city.capital": ["capital", "city", "cityLarge", "cityMedium", "cityTown", "globe"],
+  "city.mega": ["city", "cityLarge", "cityMedium", "cityTown", "capital"],
+  "city.large": ["cityLarge", "city", "cityMedium", "cityTown", "capital"],
+  "city.medium": ["cityMedium", "cityLarge", "cityTown", "city", "capital"],
+  "city.town": ["cityTown", "cityMedium", "cityLarge", "city", "capital"],
+});
+
+/** The glyph a token ships with -- the first entry in its list, or null. */
+export function shippedGlyph(token) {
+  return GLYPH_CHOICES[token]?.[0] ?? null;
 }

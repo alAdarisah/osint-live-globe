@@ -14,7 +14,7 @@ import {
   uncertaintyRadiusMetres,
   ageHoursFromDateAdded, newsAgeOpacity, newsAgeScale,
 } from "./severity";
-import { paletteColor, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
+import { paletteColor, paletteGlyph, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
 
 // --- level of detail -------------------------------------------------------
 //
@@ -89,7 +89,13 @@ export function detailSize(size) {
 // every zoom, and it is the one piece of information a dot cannot encode by
 // being a dot. Rotation is dropped -- a circle has no heading to show, and
 // keeping the transform would only churn the diffed string as vehicles turn.
-function icon(svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset, badge) {
+// `glyph` is either the markup itself or a style object carrying `{svg, token}`.
+// The object form is what lets Admin Mode swap a pin's shape: the token is the
+// key the choice is stored under (see GLYPH_CHOICES in svgIcons.js), and this is
+// the one place every DOM marker passes through, so resolving it here covers all
+// of them the way the detail swap below already does.
+function icon(glyph, color, size, rotateDeg, extraClass, opacity, wrapClass, offset, badge) {
+  const svgInner = typeof glyph === "string" ? glyph : paletteGlyph(glyph?.token, glyph?.svg);
   if (iconDetail === "dot") {
     return buildDivIcon(L, DOT_SVG, color, detailSize(size), 0, extraClass, opacity, wrapClass, offset, badge);
   }
@@ -248,11 +254,15 @@ function infraBaseStyle(d) {
 // precisely because the small end is now also faint: a 7px dot at 0.45 takes far
 // less of the eye than an 8px dot at full strength did.
 export const CITY_COLOR = "#ff6fb5";
+// A token per band, not one for the layer. Each band draws its own glyph, so
+// each is a pin type in the sense the panel means: something that can be
+// recoloured, resized, held back to a zoom of its own and re-shaped without
+// dragging the other four with it.
 export const CITY_TIERS = [
-  { key: "mega", min: 5_000_000, label: "Megacity (5M+)", svg: SVG.city, size: 24, opacity: 1 },
-  { key: "large", min: 1_000_000, label: "Large city (1M-5M)", svg: SVG.cityLarge, size: 17, opacity: 0.82 },
-  { key: "medium", min: 250_000, label: "City (250k-1M)", svg: SVG.cityMedium, size: 11, opacity: 0.62 },
-  { key: "town", min: 0, label: "Town (100k-250k)", svg: SVG.cityTown, size: 7, opacity: 0.45 },
+  { key: "mega", min: 5_000_000, label: "Megacity (5M+)", svg: SVG.city, size: 24, opacity: 1, token: "city.mega" },
+  { key: "large", min: 1_000_000, label: "Large city (1M-5M)", svg: SVG.cityLarge, size: 17, opacity: 0.82, token: "city.large" },
+  { key: "medium", min: 250_000, label: "City (250k-1M)", svg: SVG.cityMedium, size: 11, opacity: 0.62, token: "city.medium" },
+  { key: "town", min: 0, label: "Town (100k-250k)", svg: SVG.cityTown, size: 7, opacity: 0.45, token: "city.town" },
 ];
 
 // Capital status is orthogonal to population, so it is not another row in
@@ -268,6 +278,7 @@ export const CAPITAL_TIER = {
   label: "Capital city",
   svg: SVG.capital,
   size: 18,
+  token: "city.capital",
   // Never faded, whatever its population. A capital is the point the Officials
   // & Diplomacy layer draws on, so a reader has to be able to find it -- and a
   // 120k-population capital receding into the basemap like the town it is by
@@ -289,6 +300,18 @@ export function cityTier(population) {
   return CITY_TIERS.find((t) => pop >= t.min) || CITY_TIERS[CITY_TIERS.length - 1];
 }
 
+/**
+ * The band one city is drawn as -- capital first, then population.
+ *
+ * The same choice decorateCity makes, in one place both it and the gate can
+ * read: a city held back by its band's zoom has to be held back as the band it
+ * would have been *drawn* as, or a capital would be gated as the town its
+ * population makes it.
+ */
+export function cityDrawTier(city) {
+  return city?.is_capital ? CAPITAL_TIER : cityTier(city?.population);
+}
+
 export function decorateCity(city, { offset } = {}) {
   const populationTier = cityTier(city.population);
   const tier = city.is_capital ? CAPITAL_TIER : populationTier;
@@ -296,8 +319,8 @@ export function decorateCity(city, { offset } = {}) {
   // it happens to be a capital would invert the one thing the graduated
   // symbols exist to show.
   const base = city.is_capital ? Math.max(CAPITAL_TIER.size, populationTier.size) : tier.size;
-  const size = scaledSize(base, "cities", "city.marker");
-  const color = paletteColor("city.marker", CITY_COLOR);
+  const size = scaledSize(base, "cities", tier.token);
+  const color = paletteColor(tier.token, CITY_COLOR);
   // The tier's own fade, under whatever Admin Mode has set for the layer. Same
   // shape as every other multiplier here: the shipped judgement is the number,
   // the setting is the dial on top of it.
@@ -308,7 +331,7 @@ export function decorateCity(city, { offset } = {}) {
     // renderCities reserves the right amount of room for it in the placement
     // pass. icon() applies the same transform internally.
     size: detailSize(size),
-    icon: icon(tier.svg, color, size, 0, "city-marker", opacity, "", offset),
+    icon: icon({ svg: tier.svg, token: tier.token }, color, size, 0, "city-marker", opacity, "", offset),
   };
 }
 
@@ -815,7 +838,7 @@ export function decorateHazard(d, { offset } = {}) {
   const band = severityBand(d.severity);
   return {
     icon: icon(
-      style.svg,
+      style,
       severityColor(band),
       hazardIconSize(d),
       0,
@@ -1012,7 +1035,7 @@ export function decorateGdelt(d, { offset } = {}) {
   // ago and the map stops saying anything about what is happening now.
   const hours = ageHoursFromDateAdded(d.date_added);
   return {
-    icon: icon(SVG.news, color, gdeltIconSize(d), 0, "", newsAgeOpacity(hours) * layerOpacity("gdelt"), "", offset, d.collapsedCount),
+    icon: icon({ svg: SVG.news, token: "news.pin" }, color, gdeltIconSize(d), 0, "", newsAgeOpacity(hours) * layerOpacity("gdelt"), "", offset, d.collapsedCount),
     tooltip,
     detail,
   };
@@ -1186,7 +1209,7 @@ export function decorateOfficials(d, { offset } = {}) {
 
   return {
     icon: icon(
-      OFFICIALS_KIND_ICON[d.kind] || SVG.podium,
+      { svg: OFFICIALS_KIND_ICON[d.kind] || SVG.podium, token: officialsToken(d) },
       officialsColor(d),
       officialsIconSize(d),
       0,
@@ -1238,7 +1261,7 @@ function decorateOfficialsHub(d, members, { offset } = {}) {
 
   return {
     icon: icon(
-      SVG.capital,
+      { svg: SVG.capital, token: "city.capital" },
       color,
       officialsIconSize(d),
       0,
@@ -1289,7 +1312,10 @@ export function isSanctioned(d) {
 export function withSanctionRing(style) {
   return {
     ...style,
-    svg: `${style.svg}${SVG.sanctionRing}`,
+    // paletteGlyph applied here rather than left to themedStyle: that runs after
+    // this and replaces `svg` wholesale, so it would swap the composite for a
+    // bare glyph and take the designation ring off with it.
+    svg: `${paletteGlyph(style.token, style.svg)}${SVG.sanctionRing}`,
     color: paletteColor("sanctions.designated", SANCTION_COLOR),
     size: (style.size || 16) + 6,
     name: `${style.name || "marker"}-sanctioned`,
@@ -1313,6 +1339,66 @@ export function sanctionDetail(d) {
       <p class="meta">Source: US Treasury OFAC Specially Designated Nationals list, refreshed daily. A match
         is against the list as published; it is not legal advice and not a claim about what this
         ${esc(listing.sdn_type === "aircraft" ? "aircraft" : "vessel")} is doing now.</p>
+    </div>`;
+}
+
+// ---------- maritime watchlists (backend/sources/maritime_watchlists.py) ----
+//
+// A different question from OFAC's, which is why it is a second block and not
+// more rows in sanctionDetail above. This source answers "has anyone said
+// anything about this hull, who were they, and what kind of thing did they say"
+// -- and the kinds are not degrees of one thing. A legal designation, a
+// port-state detention, and an allegation by an interested party (the shadow-
+// fleet entries come from Ukrainian military intelligence) are three different
+// strengths of claim, so this never renders one generic "flagged" badge: it
+// names the class and names who is behind each listing.
+const WATCHLIST_CLASS_LABEL = {
+  designation: "Sanctions designation",
+  state_action: "Port-state action (detention or ban)",
+  allegation: "Allegation",
+  unclassified: "Listed under an unrecognised risk tag",
+};
+
+const WATCHLIST_LISTINGS_SHOWN = 4;
+
+/** The maritime-watchlist block for a listed hull, or "". */
+function watchlistDetail(d) {
+  const w = d?.watchlist;
+  if (!w) return "";
+  const headline = WATCHLIST_CLASS_LABEL[w.evidence] || WATCHLIST_CLASS_LABEL.unclassified;
+  const aliases = (w.aliases || []).slice(0, 4);
+  const listings = (w.listings || []).slice(0, WATCHLIST_LISTINGS_SHOWN);
+  const more = Math.max((w.listing_count || 0) - listings.length, 0);
+  // Each listing keeps its own class and its own author, so a hull detained by a
+  // port state and separately accused by a belligerent's intelligence service
+  // reads as two claims from two bodies rather than one bag of tokens.
+  const rows = listings.map((l) => {
+    const cls = WATCHLIST_CLASS_LABEL[l.evidence] || WATCHLIST_CLASS_LABEL.unclassified;
+    const who = (l.publishers || []).filter(Boolean);
+    const link = l.url ? ` <a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">source</a>` : "";
+    return `<li><b>${esc(cls)}</b>${who.length ? ` &mdash; ${esc(who.join("; "))}` : ""}${link}</li>`;
+  }).join("");
+  return `
+    <div class="sanction-block watchlist-block watchlist-${esc(w.evidence || "unclassified")}">
+      <div class="sanction-head">Maritime watchlist &mdash; ${esc(headline)}</div>
+      ${w.evidence_note ? `<div class="meta">${esc(w.evidence_note)}</div>` : ""}
+      ${w.listed_as ? `<div>Listed as: ${esc(w.listed_as)}</div>` : ""}
+      ${aliases.length ? `<div>Also listed as: ${aliases.map((a) => esc(a)).join(", ")}</div>` : ""}
+      ${w.flag ? `<div>Listed flag: ${esc(w.flag)}</div>` : ""}
+      ${rows ? `<div class="meta">Listings:</div><ul class="coverage-list">${rows}</ul>` : ""}
+      ${more ? `<div class="meta">+${more} more listing${more === 1 ? "" : "s"} not shown</div>` : ""}
+      <div class="meta">Matched on: ${esc(SANCTION_MATCH_LABEL[w.matched_on] || w.matched_on || "identifier")}</div>
+      ${w.matched_on ? `<p class="meta">${SANCTION_MATCH_NOTE[w.matched_on] || ""}</p>` : ""}
+      <p class="meta"><b>This list carries no dates.</b> A ban from years ago and a designation made
+        this week are indistinguishable rows in it &mdash; read a listing as "has been listed", not
+        "is active now".</p>
+      <div class="meta">Source: ${esc(w.source || "OpenSanctions maritime collection")}${
+        w.licence ? ` (${esc(w.licence)})` : ""
+      }${
+        w.source_url
+          ? ` &middot; <a href="${esc(w.source_url)}" target="_blank" rel="noopener noreferrer">dataset</a>`
+          : ""
+      }</div>
     </div>`;
 }
 
@@ -1399,7 +1485,7 @@ export function classifyShip(d) {
 // documentation (the control panel's legend explains what ships look like by
 // default) and wrong for painting.
 export const SHIP_STYLE = {
-  navy: { svg: SVG.ship, color: "#ffd60a", size: 26, name: "ship-navy", token: "ship.navy" },
+  navy: { svg: SVG.warship, color: "#ffd60a", size: 26, name: "ship-navy", token: "ship.navy" },
   tanker: { svg: SVG.tanker, color: "#ffb347", size: 20, name: "ship-tanker", token: "ship.tanker" },
   other: { svg: SVG.ship, color: "#35c2ff", size: 16, name: "ship-other", token: "ship.other" },
 };
@@ -1413,8 +1499,12 @@ export function decorateAis(d, { selectedMmsi } = {}) {
   const tanker = type === "tanker";
   const typeLabel = navy ? " &middot; US Navy / MSC" : tanker ? " &middot; Oil/chemical tanker" : "";
   const designated = isSanctioned(d);
+  const watchlisted = d.watchlist || null;
   const tooltip = `<b>${esc(d.name || "Unknown vessel")}</b>${typeLabel}` +
     `${designated ? `<br/><span class="sanction-flag">OFAC-designated &middot; ${esc(d.sanctions.program || "")}</span>` : ""}` +
+    // Names the class, never a generic "flagged": a designation, a detention and
+    // an allegation are three different claims (see watchlistDetail).
+    `${watchlisted ? `<br/><span class="watchlist-flag">Watchlist: ${esc(WATCHLIST_CLASS_LABEL[watchlisted.evidence] || "listed")}</span>` : ""}` +
     `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn` +
     lastPingTooltip(d.updated);
   const detail = `
@@ -1423,8 +1513,17 @@ export function decorateAis(d, { selectedMmsi } = {}) {
       d.callsign ? ` &middot; call sign ${esc(d.callsign)}` : ""
     }</div>
     ${sanctionDetail(d)}
+    ${watchlistDetail(d)}
     <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg;</div>
     <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
+    ${d.destination
+      ? `<div class="meta">Declared destination: <b>${esc(d.destination)}</b> &mdash; crew-typed free
+        text in AIS, and frequently inaccurate. A declaration, not an observation.</div>`
+      : ""}
+    ${Number.isFinite(Number(d.draught)) && Number(d.draught) > 0
+      ? `<div>Reported draught: ${esc(d.draught)} m <span class="meta">&mdash; crew-set in AIS static
+        data, not a measurement</span></div>`
+      : ""}
     ${lastPingDetail(d.updated)}
     ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS ship-type code (or USS/USNS naming when static data hasn\'t arrived yet). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
     ${tanker ? '<p class="meta">Identified as an oil/chemical tanker from its AIS ship-type code.</p>' : ""}
@@ -1440,7 +1539,7 @@ export function decorateAis(d, { selectedMmsi } = {}) {
   // colour would have reached the sprites and not this icon.
   const base = themedStyle(SHIP_STYLE[type], SHIP_LAYER_KEY[type]);
   const style = designated ? withSanctionRing(base) : base;
-  return { icon: icon(style.svg, style.color, style.size, heading, cls, style.opacity), tooltip, detail };
+  return { icon: icon(style, style.color, style.size, heading, cls, style.opacity), tooltip, detail };
 }
 
 // ---------- OpenStreetMap infrastructure (backend/sources/osm_infra.py) ----
@@ -1450,13 +1549,25 @@ export function decorateAis(d, { selectedMmsi } = {}) {
 // promises human-checked coordinates and this does not, so the two must never
 // be mistaken for each other.
 export const OSM_INFRA_STYLE = {
-  military_airfield: { svg: SVG.airfieldMilitary, color: "#ff8c3a", size: 16, label: "Military airfield", token: "osm.military" },
-  military_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 14, label: "Military area", token: "osm.military" },
+  military_airfield: { svg: SVG.airfieldMilitary, color: "#ff8c3a", size: 16, label: "Military airfield", token: "osm.military_airfield" },
+  military_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 14, label: "Military area", token: "osm.military_area" },
   power_plant: { svg: SVG.powerPlant, color: "#9be15d", size: 14, label: "Power plant", token: "osm.power" },
   border_control: { svg: SVG.borderCrossing, color: "#c9b6ff", size: 13, label: "Border crossing", token: "osm.border" },
+  // Railway nodes the osm_infra sweep now also carries (see osm_infra.py's
+  // _RAILWAY_KINDS). One shared *glyph*, because four near-identical station
+  // shapes would be a distinction nobody can read at 12px -- but a token each,
+  // because a halt and a marshalling yard are different enough to want
+  // different zooms, and one token made that unsayable.
+  railway_station: { svg: SVG.railway, color: "#8aa0c4", size: 14, label: "Railway station", token: "osm.railway_station" },
+  railway_halt: { svg: SVG.railway, color: "#8aa0c4", size: 12, label: "Railway halt", token: "osm.railway_halt" },
+  railway_yard: { svg: SVG.railway, color: "#8aa0c4", size: 13, label: "Railway yard", token: "osm.railway_yard" },
+  railway_border: { svg: SVG.railway, color: "#8aa0c4", size: 13, label: "Railway border crossing", token: "osm.railway_border" },
 };
 const OSM_INFRA_FALLBACK = OSM_INFRA_STYLE.military_area;
-export const OSM_INFRA_ORDER = ["military_airfield", "military_area", "power_plant", "border_control"];
+export const OSM_INFRA_ORDER = [
+  "military_airfield", "military_area", "power_plant", "border_control",
+  "railway_station", "railway_halt", "railway_yard", "railway_border",
+];
 
 export function osmInfraStyle(kind) {
   return themedStyle(OSM_INFRA_STYLE[kind] || OSM_INFRA_FALLBACK, "osmInfra");
@@ -1464,6 +1575,38 @@ export function osmInfraStyle(kind) {
 
 export function osmInfraIconSize(d) {
   return osmInfraStyle(d?.kind).size;
+}
+
+/**
+ * The OpenStreetMap record this pin absorbed, said out loud.
+ *
+ * The whole justification for drawing one marker where two feeds have an entry
+ * (see map/crossSource.js) is that the second one is not lost, only un-pinned.
+ * That promise is kept here or nowhere: if this block is missing, suppressing
+ * the OSM pin is a deletion with extra steps.
+ *
+ * The distance is stated because it is the interesting part. Two independent
+ * sources putting one airbase 400 m apart is a fact about how well either of
+ * them knows where it is, and it is exactly the thing a merged pin would
+ * otherwise hide.
+ */
+function osmTwinBlock(twin, { what }) {
+  if (!twin?.record) return "";
+  const osm = twin.record;
+  const metres = Math.round((twin.distanceKm || 0) * 1000);
+  const named = osm.named !== false && osm.name;
+  return `
+    <p class="meta"><b>OpenStreetMap has this ${esc(what)} too</b>${
+      named ? `, as &ldquo;${esc(osm.name)}&rdquo;` : ""
+    }, ${metres < 50 ? "at the same point" : `${esc(metres)} m from this one`}. Drawn once rather
+      than twice; the two sources are independent, so agreeing is worth something.${
+        // Strictly greater than zero. OSM carries output_mw on every feature it
+        // sweeps, including airfields, where it is 0 -- and "OSM also records
+        // 0 MW of generation here" is a sentence this printed on an airbase.
+        Number(osm.output_mw) > 0
+          ? ` OSM also records <b>${esc(Math.round(Number(osm.output_mw)))} MW</b> of generation here.`
+          : ""
+      }${osm.operator ? ` Operator, per OSM: ${esc(osm.operator)}.` : ""}</p>`;
 }
 
 export function decorateOsmInfra(d, { offset } = {}) {
@@ -1482,7 +1625,7 @@ export function decorateOsmInfra(d, { offset } = {}) {
     <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass &middot;
       <a href="https://www.openstreetmap.org/${esc(d.osm_type)}/${esc(d.osm_id)}" target="_blank" rel="noopener noreferrer">view the raw feature</a></div>`;
   return {
-    icon: icon(style.svg, style.color, style.size, 0, "osm-infra-marker", 0.75 * layerOpacity("osmInfra"), "", offset),
+    icon: icon(style, style.color, style.size, 0, "osm-infra-marker", 0.75 * layerOpacity("osmInfra"), "", offset),
     tooltip,
     detail,
   };
@@ -1568,7 +1711,7 @@ export function decorateCzib(d, { offset } = {}) {
       }</div>`;
   return {
     icon: icon(
-      style.svg,
+      style,
       style.color,
       czibIconSize(d),
       0,
@@ -1646,7 +1789,7 @@ export function decoratePort(d, { offset } = {}) {
     <div class="meta">Source: ${esc(d.publisher || "NGA World Port Index")} &mdash; a curated
       dataset${d.license ? `, ${esc(d.license)}` : ""}.</div>`;
   return {
-    icon: icon(style.svg, style.color, portIconSize(d), 0, "port-marker", 0.85 * layerOpacity("ports"), "", offset),
+    icon: icon(style, style.color, portIconSize(d), 0, "port-marker", 0.85 * layerOpacity("ports"), "", offset),
     tooltip,
     detail,
   };
@@ -1678,7 +1821,7 @@ export function damIconSize(d) {
   return scaledSize(px, "dams", DAM_STYLE.token);
 }
 
-export function decorateDam(d, { offset } = {}) {
+export function decorateDam(d, { offset, twin } = {}) {
   const style = damStyle();
   const name = d.name || "Barrier";
   const snapped = d.coord_source === "river_snap";
@@ -1718,6 +1861,7 @@ export function decorateDam(d, { offset } = {}) {
           poor ? " &mdash; the bottom of its own five-point scale." : "."
         }</p>`
       : ""}
+    ${osmTwinBlock(twin, { what: "barrier" })}
     <div class="meta">Source: ${esc(d.publisher || "Global Dam Watch")} &mdash; a curated dataset${
       d.license ? `, ${esc(d.license)}` : ""
     }.${d.orig_src ? ` Absorbed from ${esc(d.orig_src)}.` : ""}${
@@ -1727,7 +1871,7 @@ export function decorateDam(d, { offset } = {}) {
     }</div>`;
   return {
     icon: icon(
-      style.svg,
+      style,
       style.color,
       damIconSize(d),
       0,
@@ -1739,6 +1883,76 @@ export function decorateDam(d, { offset } = {}) {
       `${snapped ? "imprecise" : ""}${poor ? " weakly-sourced" : ""}`.trim(),
       offset
     ),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- DeFlock ALPR cameras (backend/sources/deflock.py) ----------
+//
+// Where automated licence-plate readers stand -- Flock Safety, Motorola and the
+// rest -- as OpenStreetMap has them, mirrored daily by DeFlock. Location
+// metadata only: it says where a camera is, not what it sees, and there is
+// nothing to view but the pin.
+//
+// The one field that must never be misread is osm_edited_at. It is when the OSM
+// object was last *edited*, not when the camera was seen or installed -- the
+// same honesty a GVP weekly report gets ("a report about a week, not a live
+// reading"). The popup labels it an edit time and never a sighting.
+export const DEFLOCK_STYLE = {
+  svg: SVG.alprCamera, color: "#a78bba", size: 13, label: "ALPR camera (DeFlock)", token: "deflock.camera",
+};
+
+export function deflockStyle() {
+  return themedStyle(DEFLOCK_STYLE, "deflock");
+}
+
+export function deflockIconSize() {
+  return scaledSize(DEFLOCK_STYLE.size, "deflock", DEFLOCK_STYLE.token);
+}
+
+// A bearing OSM sometimes carries (direction_deg), turned into a compass point
+// purely for the popup -- absent when the tag was unparseable, never guessed.
+const COMPASS_POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+function bearingText(deg) {
+  const value = Number(deg);
+  if (!Number.isFinite(value)) return null;
+  const norm = ((value % 360) + 360) % 360;
+  return `${Math.round(norm)}° (${COMPASS_POINTS[Math.round(norm / 45) % 8]})`;
+}
+
+export function decorateDeflock(d, { offset } = {}) {
+  const style = deflockStyle();
+  const brand = d.brand || null;
+  const operator = d.operator || null;
+  const bearing = bearingText(d.direction_deg);
+  // osm_edited_at is an ISO timestamp; the date alone is the honest resolution.
+  const edited = d.osm_edited_at ? String(d.osm_edited_at).slice(0, 10) : null;
+  const tooltip = `<b>${esc(brand || "ALPR camera")}</b>${operator ? ` &middot; ${esc(operator)}` : ""}` +
+    "<br/>Automated licence-plate reader";
+  const detail = `
+    <h3>${esc(brand || "ALPR camera")}</h3>
+    <div class="meta">Automated licence-plate reader${operator ? ` &middot; ${esc(operator)}` : ""}</div>
+    ${bearing ? `<div>Facing: ${esc(bearing)}</div>` : ""}
+    ${d.zone ? `<div>Surveillance zone: ${esc(d.zone)}</div>` : ""}
+    ${d.mount ? `<div>Mount: ${esc(d.mount)}</div>` : ""}
+    <p class="meta"><b>Location metadata only.</b> This marks where a camera stands, not what it
+      records &mdash; there is no camera access here and nothing to view but the pin.</p>
+    ${edited
+      ? `<div class="meta"><b>OpenStreetMap last edited this ${esc(edited)}</b>${
+          d.osm_version ? ` (v${esc(d.osm_version)})` : ""
+        } &mdash; that is when the map object was last changed, not when the camera was seen or
+        installed. It is not an observation time.</div>`
+      : ""}
+    <div class="meta">Source: ${esc(d.source || "OpenStreetMap contributors (via DeFlock)")}${
+      d.licence ? ` (${esc(d.licence)})` : ""
+    }${
+      d.source_url
+        ? ` &middot; <a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">view the raw feature</a>`
+        : ""
+    }</div>`;
+  return {
+    icon: icon(style, style.color, deflockIconSize(), 0, "deflock-marker", 0.8 * layerOpacity("deflock"), "", offset),
     tooltip,
     detail,
   };
@@ -1812,7 +2026,7 @@ export function decorateLaunch(d, { offset } = {}) {
       : ""}
     <div class="meta">Source: Launch Library 2 (The Space Devs)</div>`;
   return {
-    icon: icon(style.svg, style.color, style.size, 0, "launch-marker", layerOpacity("launches"), "", offset),
+    icon: icon(style, style.color, style.size, 0, "launch-marker", layerOpacity("launches"), "", offset),
     tooltip,
     detail,
   };
@@ -1830,6 +2044,22 @@ export const CABLE_PLANNED_STYLE = {
 
 export function cableRouteColor() {
   return paletteColor("cable.route", CABLE_ROUTE_COLOR);
+}
+
+// ---------- railway linework (backend/sources/railways.py) ----------
+//
+// Coarse basemap context under the OSM railway *points* (which ride the
+// osm-infrastructure layer). Natural Earth 1:10m, 2021, unnamed and static --
+// it will NOT sit exactly on the station pins, and the legend and popup say so.
+// A muted grey and a hairline weight, deliberately subordinate to real data.
+// A colour-only token, like cable.route above: this is a polyline, not a pin.
+export const RAILWAY_ROUTE_COLOR = "#6f7d92";
+export const RAILWAY_STYLE = {
+  svg: SVG.railway, color: RAILWAY_ROUTE_COLOR, label: "Railway (Natural Earth, 2021)", token: "railway.line",
+};
+
+export function railwayRouteColor() {
+  return paletteColor("railway.line", RAILWAY_ROUTE_COLOR);
 }
 
 export function cableLandingStyle(d) {
@@ -1853,7 +2083,7 @@ export function decorateCableLanding(d, { offset } = {}) {
       a cable runs, not its surveyed position on the seabed.</p>
     <div class="meta">Source: TeleGeography submarine cable map</div>`;
   return {
-    icon: icon(style.svg, style.color, style.size, 0, "cable-landing-marker", 0.85 * layerOpacity("cables"), "", offset),
+    icon: icon(style, style.color, style.size, 0, "cable-landing-marker", 0.85 * layerOpacity("cables"), "", offset),
     tooltip,
     detail,
   };
@@ -1912,7 +2142,7 @@ export function decorateOutage(d, { offset } = {}) {
       offline.</p>
     <div class="meta">Source: IODA (Internet Outage Detection and Analysis, Georgia Tech)</div>`;
   return {
-    icon: icon(style.svg, style.color, style.size, 0, "outage-marker", layerOpacity("outagePoints"), "", offset),
+    icon: icon(style, style.color, style.size, 0, "outage-marker", layerOpacity("outagePoints"), "", offset),
     tooltip,
     detail,
   };
@@ -2042,7 +2272,7 @@ export function decorateDarkVessel(d, { offset } = {}) {
   const color = d.sanctions ? paletteColor("sanctions.designated", SANCTION_COLOR) : style.color;
   return {
     icon: icon(
-      style.svg,
+      style,
       color,
       darkVesselIconSize(d),
       0,
@@ -2124,7 +2354,7 @@ export function decorateGfwGap(d, { offset } = {}) {
       not a measurement by this app.${d.attribution ? `<br/>${esc(d.attribution)}` : ""}</div>`;
   return {
     icon: icon(
-      style.svg,
+      style,
       style.color,
       gfwGapIconSize(d),
       0,
@@ -2222,7 +2452,7 @@ export function decorateGfwDetection(d, { offset } = {}) {
       }</div>`;
   return {
     icon: icon(
-      style.svg,
+      style,
       style.color,
       gfwDetectionIconSize(d),
       0,
@@ -2417,7 +2647,7 @@ export function withAircraftFlag(style, d) {
   const { ring, color, suffix } = AIRCRAFT_FLAG_STYLE[flag];
   return {
     ...style,
-    svg: `${style.svg}${ring}`,
+    svg: `${paletteGlyph(style.token, style.svg)}${ring}`,
     // An emergency recolours the whole glyph -- it is the one status worth
     // taking the colour channel for. A display-limited aircraft keeps its own
     // colour and only gains the dashed outline, because "quietly listed" is
@@ -2426,6 +2656,51 @@ export function withAircraftFlag(style, d) {
     size: (style.size || 16) + 5, // room for the ring, or it clips the wingtips
     name: `${style.name || "plane"}${suffix}`,
   };
+}
+
+// What the aircraft's Mode-S address says about it, kept strictly apart from
+// what the feed asserts (see _attach_hex_allocation in backend/sources/adsb.py).
+//
+// Two independent claims live here and neither is allowed to overwrite the
+// other:
+//   - origin_country is OpenSky's own field, a country *name* ("United Kingdom").
+//   - hex_country is an ISO2 code derived from the permanent ICAO 24-bit address
+//     block. The two can disagree, and both are shown when both exist.
+//   - hex_military is the allocation table saying the address sits in a
+//     military-reserved range. That is a different signal from any military flag
+//     in the feed; where they disagree it is informative, so it is not reconciled.
+function icaoHexDetail(d) {
+  const hasCountry = !!d.hex_country;
+  const isMilitaryBlock = d.hex_military === true;
+  const block = d.hex_block || null;
+  if (!hasCountry && !isMilitaryBlock && !block) return "";
+  const parts = [
+    `<div class="meta">ICAO address allocation: ${
+      hasCountry ? `<b>${esc(d.hex_country)}</b>` : "country not resolved"
+    }${block ? ` &middot; block ${esc(block)}` : ""}${
+      isMilitaryBlock ? " &middot; military-reserved range" : ""
+    }</div>`,
+  ];
+  if (hasCountry && d.origin_country) {
+    parts.push(
+      `<p class="meta">Origin is claimed two ways: <b>${esc(d.origin_country)}</b> is OpenSky's own ` +
+        `assertion, and <b>${esc(d.hex_country)}</b> is the country of the aircraft's permanent ICAO ` +
+        "24-bit address block. They can disagree, and neither is corrected to match the other.</p>"
+    );
+  } else if (hasCountry) {
+    parts.push(
+      '<p class="meta">Country here is derived from the aircraft\'s permanent ICAO 24-bit address ' +
+        "block, not asserted by the feed.</p>"
+    );
+  }
+  if (isMilitaryBlock) {
+    parts.push(
+      '<p class="meta">The ICAO address sits in a block a state reserves for military use. This is ' +
+        "independent of any military flag in the feed &mdash; where the two disagree, that is itself " +
+        "informative and is not reconciled here.</p>"
+    );
+  }
+  return parts.join("");
 }
 
 const AIRCRAFT_FLAG_NOTE = {
@@ -2470,6 +2745,7 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
     ${sanctionDetail(d)}
     ${aircraftLine ? `<div class="meta">Aircraft: ${esc(aircraftLine)}</div>` : ""}
     <div class="meta">Type: ${esc(label)} &middot; ${esc(d.origin_country || "")} &middot; ICAO24 ${esc(d.icao24)}</div>
+    ${icaoHexDetail(d)}
     ${d.registration ? `<div>Registration: ${esc(d.registration)}</div>` : ""}
     ${d.operator ? `<div>Operator: ${esc(d.operator)}</div>` : ""}
     <div>Altitude: ${esc(Math.round(d.altitude || 0))} m</div>
@@ -2496,7 +2772,7 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
   if (flag) cls += ` aircraft-flagged aircraft-${flag === "emergency" ? "emergency" : "hidden"}`;
   if (isSanctioned(d)) cls += " aircraft-flagged sanctioned-marker";
   if (d.icao24 === selectedIcao) cls += " selected";
-  return { icon: icon(style.svg, style.color, style.size, d.heading, cls, style.opacity), tooltip, detail };
+  return { icon: icon(style, style.color, style.size, d.heading, cls, style.opacity), tooltip, detail };
 }
 
 // ---------- airfields (backend/sources/airports.py) ----------
@@ -2508,11 +2784,11 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
 // each now draws its own runway layout (see svgIcons.js). Exported for the
 // control panel's legend.
 export const AIRFIELD_STYLE = {
-  large_airport: { svg: SVG.airfieldLarge, size: 17, label: "Large airport", token: "airfield.civil", color: "#7f93a8" },
-  medium_airport: { svg: SVG.airfield, size: 14, label: "Medium airport", token: "airfield.civil", color: "#7f93a8" },
+  large_airport: { svg: SVG.airfieldLarge, size: 17, label: "Large airport", token: "airfield.large", color: "#7f93a8" },
+  medium_airport: { svg: SVG.airfield, size: 14, label: "Medium airport", token: "airfield.medium", color: "#7f93a8" },
   // A point bigger than the old 11: the strip carries no surrounding circle,
   // so it needs the extra length to stay a runway rather than a tick mark.
-  small_airport: { svg: SVG.airfieldSmall, size: 12, label: "Small airfield", token: "airfield.civil", color: "#7f93a8" },
+  small_airport: { svg: SVG.airfieldSmall, size: 12, label: "Small airfield", token: "airfield.small", color: "#7f93a8" },
 };
 const AIRFIELD_FALLBACK = AIRFIELD_STYLE.small_airport;
 // Its own colour, because "which of these is military" is the whole reason an
@@ -2597,7 +2873,7 @@ function airfieldActivityBlock(activity) {
     </div>`;
 }
 
-export function decorateAirport(d, { offset, activity } = {}) {
+export function decorateAirport(d, { offset, activity, twin } = {}) {
   const style = airfieldStyle(d);
   const code = d.icao || d.iata || d.id;
   const busy = activity?.aircraft
@@ -2620,10 +2896,11 @@ export function decorateAirport(d, { offset, activity } = {}) {
         "&ldquo;AFB&rdquo; and similar). OurAirports has no military field, so this both misses civil-named " +
         "military fields and can over-reach &mdash; it is a reading of the name, nothing more.</p>"
       : ""}
+    ${osmTwinBlock(twin, { what: "airfield" })}
     <div class="meta">Source: OurAirports (public domain)</div>`;
   return {
     icon: icon(
-      style.svg, style.color, airportIconSize(d, activity), 0, "airfield-marker",
+      style, style.color, airportIconSize(d, activity), 0, "airfield-marker",
       0.8 * layerOpacity("airports"), "", offset
     ),
     tooltip,
@@ -2663,7 +2940,7 @@ export function pipelineRouteColor() {
 // `type` -- see backend/infrastructure.py's MILITARY_BASES.
 export const MILITARY_SUBTYPE_STYLE = {
   air: { svg: SVG.airBase, color: "#ff4d4d", label: "Air base" },
-  naval: { svg: SVG.ship, color: "#ffd60a", label: "Naval base" },
+  naval: { svg: SVG.navalBase, color: "#ffd60a", label: "Naval base" },
   army: { svg: SVG.armyBase, color: "#9be15d", label: "Army base" },
   missile: { svg: SVG.missileBase, color: "#ff8c3a", label: "Missile / space base" },
   joint: { svg: SVG.jointBase, color: "#d8b9ff", label: "Joint base" },
@@ -2688,7 +2965,7 @@ export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
     <p class="meta">Source: publicly documented location (open-source reference), approximate.</p>`;
   const cls = `infra-marker${hot ? " infra-hot" : ""}`;
   return {
-    icon: icon(style.svg, style.color, infraIconSize(d), 0, cls, layerOpacity("infra"), "", offset),
+    icon: icon(style, style.color, infraIconSize(d), 0, cls, layerOpacity("infra"), "", offset),
     tooltip,
     detail,
   };
@@ -2730,7 +3007,7 @@ export function decorateSatellite(d, { offset } = {}) {
     <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
   const cls = `satellite-marker${military ? " satellite-military-marker" : ""}`;
   return {
-    icon: icon(style.svg, style.color, style.size, 0, cls, layerOpacity("satellites"), "", offset),
+    icon: icon(style, style.color, style.size, 0, cls, layerOpacity("satellites"), "", offset),
     tooltip,
     detail,
   };
@@ -2772,7 +3049,7 @@ export const TOKEN_FOR = {
   conflictHistory: () => "event.history",
   gdelt: () => "news.pin",
   officials: officialsToken,
-  cities: () => "city.marker",
+  cities: (d) => cityDrawTier(d).token,
   infra: (d) => infraBaseStyle(d)?.token ?? null,
   satellites: (d) => (isMilitarySatellite(d) ? "satellite.military" : "satellite.stations"),
   aisNavy: () => "ship.navy",
@@ -2781,13 +3058,20 @@ export const TOKEN_FOR = {
   adsbMilitary: aircraftToken,
   adsbCivilian: aircraftToken,
   adsbFlagged: aircraftToken,
-  airports: (d) => (d?.military_name ? "airfield.military" : "airfield.civil"),
+  // Defers to airfieldStyle's own pick rather than restating it, so a field can
+  // never be gated as one tier and drawn as another.
+  airports: (d) => (
+    d?.military_name
+      ? AIRFIELD_MILITARY_STYLE.token
+      : (AIRFIELD_STYLE[d?.type] || AIRFIELD_FALLBACK).token
+  ),
   darkVessels: (d) => (DARK_VESSEL_STYLE[d?.kind] || DARK_VESSEL_FALLBACK).token,
   gfwGaps: () => "gfw.gap",
   gfwDetections: (d) => (d?.matched ? "gfw.matched" : "gfw.unmatched"),
   czib: (d) => (d?.active ? "czib.active" : "czib.withdrawn"),
   ports: () => "port.wpi",
   dams: () => "dam.barrier",
+  deflock: () => "deflock.camera",
   launches: (d) => (d?.upcoming ? "launch.upcoming" : "launch.flown"),
   cableLandings: (d) => (d?.planned ? "cable.planned" : "cable.landing"),
   osmInfra: (d) => OSM_INFRA_STYLE[d?.kind]?.token ?? null,

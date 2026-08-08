@@ -7,10 +7,12 @@
 // gives for its own single key.
 
 import {
-  DEFAULT_COLORS, DEFAULT_SIZES, DEFAULT_ZOOMS,
+  DEFAULT_COLORS, DEFAULT_SIZES, DEFAULT_ZOOMS, SPLIT_TOKENS,
   PIN_STACK, WASH_STACK, DEFAULT_STACK_FADE_FLOOR,
 } from "../map/iconTheme";
 import { shippedDrawZoom, SCENE_APPLY_KEYS, TRAIL_PARENT } from "../map/scene";
+import { CURSOR_STYLES } from "../map/cursor";
+import { glyphChoicesFor } from "../map/iconTheme";
 import { sanitizeBorders } from "./borderOverrides";
 
 // Bumped only when a saved config could no longer be merged onto the defaults
@@ -58,6 +60,8 @@ export const SETTINGS_LAYERS = [
   { key: "floods", label: "Floods (GDACS)" },
   { key: "ports", label: "Ports (NGA WPI)" },
   { key: "dams", label: "Dams & reservoirs (GDW)" },
+  { key: "deflock", label: "ALPR cameras (DeFlock)" },
+  { key: "railways", label: "Railways (Natural Earth)" },
   { key: "firms", label: "Fires / thermal anomalies (FIRMS)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
 ].map((layer) => ({ ...layer, zoomGate: shippedDrawZoom(layer.key) }));
@@ -117,7 +121,7 @@ const SUPERSEDED_PIN_STACKS = [
   ],
 ];
 
-const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null };
+const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null };
 
 /**
  * Every key a checkbox in the control drawer can address.
@@ -369,6 +373,18 @@ export function defaultSettings() {
       // later than the layer's own gate -- see tokenZoom in map/iconTheme.js
       // for why a pin type may not undercut it.
       zooms: { ...DEFAULT_ZOOMS },
+      // The ceiling to `zooms`, null meaning "no ceiling". Nothing in
+      // LAYER_MANIFEST ships one, so unlike the floor this dial has no shipped
+      // value to move -- it only ever adds a limit that did not exist. That is
+      // what makes "satellites, but not once I am looking at a street" sayable:
+      // the satellites layer is deliberately ungated, and ungated has only ever
+      // meant "no floor".
+      zoomMaxes: { ...DEFAULT_ZOOMS },
+      // Per-kind glyph, null meaning "the shipped shape". Stored as a glyph
+      // *name* (see GLYPH_CHOICES in map/svgIcons.js), never as markup: a name
+      // survives a build that redraws the shape, markup would freeze the pin at
+      // whatever it looked like the day it was picked.
+      glyphs: {},
     },
     layers: Object.fromEntries(SETTINGS_LAYERS.map((l) => [l.key, { ...DEFAULT_LAYER_STYLE }])),
     // Which layers Admin Mode has pinned on or off, as { [key]: boolean }.
@@ -399,6 +415,14 @@ export function defaultSettings() {
       // the setting for anyone who wants the order to change only what covers
       // what.
       stackFadeFloor: DEFAULT_STACK_FADE_FLOOR,
+      // The map's own pointer (see map/cursor.js). Off means the system cursor,
+      // which is the escape hatch: a drawn cursor is the one piece of chrome
+      // that can make the map unusable if it misbehaves, so switching it off
+      // must never depend on it working.
+      cursorEnabled: true,
+      cursorStyle: "reticle", // see CURSOR_STYLES
+      cursorScale: 1,
+      cursorColor: null, // null == follow the UI accent
     },
     // { [sourceKey]: { edits: { [id]: {field: value, __hidden?: true} }, added: [record] } }
     data: Object.fromEntries(EDITABLE_SOURCES.map((s) => [s.key, { edits: {}, added: [] }])),
@@ -423,6 +447,32 @@ function pickNumber(value, fallback, min, max) {
 }
 
 /**
+ * A stored token map with the retired shared tokens fanned out.
+ *
+ * Four tokens each used to stand for a whole family of pins -- every city band,
+ * every civil airfield tier, both OSM military kinds, all four railway node
+ * kinds (see SPLIT_TOKENS in map/iconTheme.js). Every configuration written
+ * before the split holds those keys, and the validators below drop any key the
+ * current build does not know, so without this an operator's colours, sizes and
+ * zooms on those families would silently revert to shipped.
+ *
+ * The old value is copied to each replacement, which is what the single dial
+ * used to do -- one colour on all of them, one zoom on all of them. A key the
+ * stored file already carries under its new name wins: that file was written by
+ * a build that had the split, and its per-type value is the more specific
+ * statement.
+ */
+function expandSplitTokens(stored) {
+  if (!isPlainObject(stored)) return {};
+  const out = {};
+  for (const [legacy, replacements] of Object.entries(SPLIT_TOKENS)) {
+    if (!(legacy in stored)) continue;
+    for (const token of replacements) out[token] = stored[legacy];
+  }
+  return { ...out, ...stored };
+}
+
+/**
  * A stored (or imported, or hand-edited) config merged onto the shipped
  * defaults, field by field.
  *
@@ -438,7 +488,7 @@ export function mergeSettings(stored) {
   if (isPlainObject(stored.icons)) {
     base.icons.scale = pickNumber(stored.icons.scale, 1, 0.4, 3);
     if (isPlainObject(stored.icons.colors)) {
-      for (const [token, value] of Object.entries(stored.icons.colors)) {
+      for (const [token, value] of Object.entries(expandSplitTokens(stored.icons.colors))) {
         // Unknown tokens are dropped rather than kept: they are either a typo
         // or a colour from a build that had a layer this one does not.
         if (!(token in base.icons.colors) || !/^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(value)) continue;
@@ -451,7 +501,7 @@ export function mergeSettings(stored) {
       }
     }
     if (isPlainObject(stored.icons.sizes)) {
-      for (const [token, value] of Object.entries(stored.icons.sizes)) {
+      for (const [token, value] of Object.entries(expandSplitTokens(stored.icons.sizes))) {
         // Same rule as the colours: an unknown token is a typo or a leftover
         // from a build with a layer this one does not have, and either way the
         // shipped multiplier is the right answer.
@@ -459,10 +509,24 @@ export function mergeSettings(stored) {
       }
     }
     if (isPlainObject(stored.icons.zooms)) {
-      for (const [token, value] of Object.entries(stored.icons.zooms)) {
+      for (const [token, value] of Object.entries(expandSplitTokens(stored.icons.zooms))) {
         // A null here is the shipped state written back out, not a malformed
         // entry -- pickNumber's own fallback is null for exactly that reason.
         if (token in base.icons.zooms) base.icons.zooms[token] = pickNumber(value, null, 0, 18);
+      }
+    }
+    if (isPlainObject(stored.icons.glyphs)) {
+      for (const [token, name] of Object.entries(stored.icons.glyphs)) {
+        // Validated against the curated list rather than against the glyph dict:
+        // a name that exists but was never offered for this token is a
+        // hand-edited file asking for a refinery drawn as a raindrop, and the
+        // list is the whole reason that is not on the menu.
+        if (glyphChoicesFor(token).includes(name)) base.icons.glyphs[token] = name;
+      }
+    }
+    if (isPlainObject(stored.icons.zoomMaxes)) {
+      for (const [token, value] of Object.entries(expandSplitTokens(stored.icons.zoomMaxes))) {
+        if (token in base.icons.zoomMaxes) base.icons.zoomMaxes[token] = pickNumber(value, null, 0, 18);
       }
     }
   }
@@ -474,6 +538,7 @@ export function mergeSettings(stored) {
         scale: pickNumber(value.scale, 1, 0.3, 3),
         opacity: pickNumber(value.opacity, 1, 0.1, 1),
         minZoom: Number.isFinite(value.minZoom) ? pickNumber(value.minZoom, null, 0, 18) : null,
+        maxZoom: Number.isFinite(value.maxZoom) ? pickNumber(value.maxZoom, null, 0, 18) : null,
       };
     }
   }
@@ -504,6 +569,20 @@ export function mergeSettings(stored) {
     base.ui.showLeaderLines = stored.ui.showLeaderLines !== false;
     base.ui.reduceMotion = stored.ui.reduceMotion === true;
     base.ui.stackFadeFloor = pickNumber(stored.ui.stackFadeFloor, DEFAULT_STACK_FADE_FLOOR, 0.1, 1);
+    // Default-on, so anything but an explicit `false` leaves it on -- the same
+    // rule showLeaderLines above uses, and for the same reason: a missing key in
+    // an older configuration must not switch a feature off.
+    base.ui.cursorEnabled = stored.ui.cursorEnabled !== false;
+    // An unknown style falls back rather than being stored, so a hand-edited
+    // file naming a treatment this build does not have gets a cursor instead of
+    // no cursor at all.
+    base.ui.cursorStyle = CURSOR_STYLES.includes(stored.ui.cursorStyle)
+      ? stored.ui.cursorStyle
+      : "reticle";
+    base.ui.cursorScale = pickNumber(stored.ui.cursorScale, 1, 0.5, 2.5);
+    base.ui.cursorColor = typeof stored.ui.cursorColor === "string" && /^#[0-9a-f]{6}$/i.test(stored.ui.cursorColor)
+      ? stored.ui.cursorColor
+      : null;
   }
 
   // Repaired rather than validated: an order that has lost a layer is worse than

@@ -18,7 +18,6 @@ import { applyBorderOverrides, staleBorderKeys } from "./settings/borderOverride
 import { DEFAULT_EVENT_FILTER } from "./map/severity";
 import { makeCountryScope } from "./map/countryScope";
 import { boundsContainsPoint } from "./utils/geo";
-import { fetchJson } from "./api";
 
 import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
@@ -124,6 +123,17 @@ export default function App() {
       if (Number.isFinite(layer.minZoom)) overrides[key] = layer.minZoom;
     }
     return overrides;
+  }, [settings.layers]);
+
+  // The ceilings, kept apart from the floors above because they are not the
+  // resolver's business and no fetch gate agrees with them -- see
+  // setLayerZoomMaxOverrides in map/createMapController.js.
+  const layerZoomMaxOverrides = useMemo(() => {
+    const ceilings = {};
+    for (const [key, layer] of Object.entries(settings.layers)) {
+      if (Number.isFinite(layer.maxZoom)) ceilings[key] = layer.maxZoom;
+    }
+    return ceilings;
   }, [settings.layers]);
 
   const dataApi = useOsintData({
@@ -232,6 +242,10 @@ export default function App() {
   useEffect(() => {
     mapApi.setLayerZoomOverrides(layerZoomOverrides);
   }, [layerZoomOverrides, mapApi.setLayerZoomOverrides]);
+
+  useEffect(() => {
+    mapApi.setLayerZoomMaxOverrides(layerZoomMaxOverrides);
+  }, [layerZoomMaxOverrides, mapApi.setLayerZoomMaxOverrides]);
 
   // The saved layer states, replayed whenever the configuration itself is
   // replaced rather than only at mount: the backend's copy landing on top of the
@@ -427,23 +441,6 @@ export default function App() {
     mapApi.setEventFilter(eventFilter);
   }, [eventFilter, mapApi.setEventFilter]);
 
-  // Which months the district archive holds. Fetched once rather than polled:
-  // HAPI publishes a new month roughly monthly, and its own endpoint exists so
-  // that finding out what is in the archive does not mean downloading it (see
-  // /api/conflict-district-months). The newest month is selected on arrival so
-  // the layer has something to draw the first time it is switched on.
-  const [districtMonths, setDistrictMonths] = useState([]);
-  useEffect(() => {
-    let cancelled = false;
-    fetchJson("/api/conflict-district-months")
-      .then((months) => {
-        if (cancelled || !Array.isArray(months) || !months.length) return;
-        setDistrictMonths(months);
-        mapApi.setDistrictMonth(months[0]);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [mapApi.setDistrictMonth]);
   const onInfraFilterChange = useCallback(
     (text) => {
       setInfraFilterText(text);
@@ -568,12 +565,10 @@ export default function App() {
         onToggleAdminMode={toggleAdminMode}
       />
 
-      {/* Outside Admin Mode, deliberately, and the only thing that is.
-          Picking a theatre is not an operator's adjustment to how the map
-          behaves -- it is the reader saying which part of the world they came
-          here for, and it is the one control that answers a question about the
-          world rather than about the map. Everything else on screen belongs to
-          Admin Mode; this is the reader's way in. */}
+      {/* The reader's way in. Picking a theatre is not an operator's adjustment
+          to how the map behaves -- it is the reader saying which part of the
+          world they came here for, and it is the one *control* on this screen
+          that answers a question about the world rather than about the map. */}
       <RegionBar
         regions={dataApi.regions}
         currentRegionKey={dataApi.currentRegionKey}
@@ -581,54 +576,58 @@ export default function App() {
         regionActivity={regionActivity}
       />
 
-      {/* Everything from here down is Admin Mode's.
-          
-          The line is the same one the control drawer was already drawn on: a
-          reader gets the map, and what the map shows is decided by how far in
-          they are, what the camera is over and what they click (see
-          map/scene.js). These panels are the operator's instruments -- a ticker
-          of every headline in view, a ranked board of what is worst right now, a
-          replay scrubber over recorded history. Each is a second reading of data
-          the map is already drawing, which is exactly what an operator wants and
-          exactly what makes a first look cluttered.
+      {/* The two reading panels, and they are the reader's rather than the
+          operator's.
 
-          The three cards below this block are not gated with them, on purpose:
-          a country card, a record's detail and the boundary-editing bar all open
-          in *response to a click*. Nothing appears unasked, so there is nothing
-          to gate. */}
-      {adminMode && (
-        <>
-          <NewsBroadcastPanel
-            gdeltRaw={dataApi.gdeltRaw}
-            mapBounds={mapApi.mapBounds}
-            regionLabel={dataApi.currentRegionLabel}
-            countryScope={countryScope}
-            onLocate={onLocateNewsItem}
-          />
+          They were gated with the instruments for a while, on the argument that
+          each is a second reading of data the map is already drawing and so
+          costs a first look its clarity. That argument was wrong about which
+          question they answer. The control drawer, the replay scrubber and the
+          configuration panel are all about *the map* -- what is drawn, from what
+          zoom, out of which recorded moment. These two are about the world: what
+          is happening in view right now, and which of it matters most. A reader
+          who has come to a conflict map wants exactly that, and the map alone
+          cannot say "this is the worst thing on screen" -- it can only draw the
+          pin brighter and hope the eye lands on it.
 
-          {briefingZone && (
-            <ConflictBriefingCard
-              zone={briefingZone}
-              eventsRaw={dataApi.eventsRaw}
-              eventFilter={eventFilter}
-              gdeltRaw={dataApi.gdeltRaw}
-              onClose={() => setBriefingZone(null)}
-              onLocate={onLocateNewsItem}
-            />
-          )}
+          Both stay honest without a control around them. The ticker names its
+          outlet and its age on every line, and the board ranks the same
+          /api/events data through the same filter the map draws, so the two
+          cannot disagree. Both collapse to their header, and the board renders
+          nothing at all when no event clears its severity floor -- so on a quiet
+          day they take no room rather than asserting significance that is not
+          there. */}
+      <NewsBroadcastPanel
+        gdeltRaw={dataApi.gdeltRaw}
+        mapBounds={mapApi.mapBounds}
+        regionLabel={dataApi.currentRegionLabel}
+        countryScope={countryScope}
+        onLocate={onLocateNewsItem}
+      />
 
-          {/* Ranks the same /api/events data the map draws, through the same
-              filter, so the two can't disagree. Renders nothing when no event
-              clears its severity floor. */}
-          <NotableEventsPanel
-            eventsRaw={dataApi.eventsRaw}
-            eventFilter={eventFilter}
-            escalation={dataApi.escalation}
-            countryScope={countryScope}
-            onLocate={onLocateNewsItem}
-            isMobile={isMobileViewport}
-          />
-        </>
+      <NotableEventsPanel
+        eventsRaw={dataApi.eventsRaw}
+        eventFilter={eventFilter}
+        escalation={dataApi.escalation}
+        countryScope={countryScope}
+        onLocate={onLocateNewsItem}
+        isMobile={isMobileViewport}
+      />
+
+      {/* Opened by picking a theatre in the RegionBar above, which is a public
+          control -- so gating this behind Admin Mode meant a reader could make
+          the gesture and get nothing back. It follows the two panels out for
+          that reason rather than as a separate decision: it is the same
+          "what is happening here" question, asked of one zone. */}
+      {briefingZone && (
+        <ConflictBriefingCard
+          zone={briefingZone}
+          eventsRaw={dataApi.eventsRaw}
+          eventFilter={eventFilter}
+          gdeltRaw={dataApi.gdeltRaw}
+          onClose={() => setBriefingZone(null)}
+          onLocate={onLocateNewsItem}
+        />
       )}
 
       {/* The drawer and its handle are the operator's instrument panel: layer
@@ -671,10 +670,6 @@ export default function App() {
             onImageryChange={setImageryKey}
             choropleth={mapApi.choropleth}
             onChoroplethChange={mapApi.setChoroplethMetric}
-            districts={mapApi.districts}
-            districtMonths={districtMonths}
-            onDistrictMetricChange={mapApi.setDistrictMetric}
-            onDistrictMonthChange={mapApi.setDistrictMonth}
           />
         </>
       )}

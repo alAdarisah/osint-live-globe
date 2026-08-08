@@ -148,6 +148,46 @@ function polygonsOf(geometry) {
 }
 
 /**
+ * A flat hit-test index over any FeatureCollection.
+ *
+ * The country index below is the same thing plus an area, and the district and
+ * subdivision layers each need one too -- three layers whose only real
+ * difference is which properties they carry through. The bounding box is the
+ * part worth sharing: every one of them is scanned point-by-point on click and
+ * on hover, and it is the box that keeps that from being a ray-cast per shape.
+ *
+ * @param {Array} features   GeoJSON features
+ * @param {Function} propsOf (properties, feature) => extra fields on the entry
+ * @returns {Array} entries of {...extra, polygons, bbox}, in input order --
+ *   fine for shapes that partition their parent (districts, states), which
+ *   cannot both contain the same point. Nesting needs the ordering
+ *   buildCountryIndex applies; see findCountryAt.
+ */
+export function buildShapeIndex(features, propsOf = () => ({})) {
+  const entries = [];
+  for (const feature of features || []) {
+    const polygons = polygonsOf(feature.geometry);
+    if (!polygons.length) continue;
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    for (const rings of polygons) {
+      for (const [lon, lat] of rings[0] || []) {
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+      }
+    }
+    if (!Number.isFinite(minLat)) continue;
+    entries.push({
+      ...propsOf(feature.properties || {}, feature),
+      polygons,
+      bbox: { minLat, maxLat, minLon, maxLon },
+    });
+  }
+  return entries;
+}
+
+/**
  * @param {object} geojson  the countries FeatureCollection
  * @returns {Array} entries of {key, iso, name, props, polygons, bbox, area},
  *   sorted smallest-area-first so findCountryAt can return the first match

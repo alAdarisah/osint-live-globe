@@ -99,6 +99,121 @@ html, body {
   font-family: "Segoe UI", Consolas, monospace;
 }
 
+/* The reticle (see map/cursor.js). `cursor: none` is scoped to the map and
+   nothing else on purpose: everywhere the reticle is not drawn -- the control
+   panel, the admin panel, every input and its text caret -- keeps the native
+   cursor and the accessibility settings that come with it.
+
+   Scoped to a pointer that can hover, matching the same test cursor.js uses to
+   decide whether to attach at all. Without this a touch device would get a map
+   with no cursor and no reticle to replace it, which costs nothing there but
+   would hide a mouse plugged in later. */
+@media (pointer: fine) {
+  /* The descendants matter as much as the container. `cursor` is inherited, but
+     an explicit declaration on a child beats the inherited value -- and both
+     this app (.aircraft-marker and friends below) and Leaflet's own stylesheet
+     (.leaflet-grab, .leaflet-interactive) set one. Hiding it only on the
+     container left the native hand painting on top of the reticle over every
+     pin, which is the bug this rule fixes.
+
+     Keyed on the treatment cursor.js records on <html>, because only two of the
+     three replace the pointer. "halo" draws a ring around the native cursor and
+     "native" is the reticle switched off outright, and both need the real one
+     left alone. */
+  :root[data-map-cursor="reticle"] .leaflet-container,
+  :root[data-map-cursor="reticle"] .leaflet-container *,
+  :root[data-map-cursor="dot"] .leaflet-container,
+  :root[data-map-cursor="dot"] .leaflet-container * { cursor: none !important; }
+}
+
+/* Which means the reticle can no longer read `cursor` to learn what it is over
+   -- the rule above has just flattened every value to `none`. So the meaning
+   moves to a property nothing paints, and the painted cursor becomes purely
+   decorative. cursor.js reads this instead.
+
+   Custom properties inherit, so the container's value is the default for
+   everything inside it and only the exceptions below need stating. The two
+   Leaflet classes are what keep this from rotting: every marker Leaflet builds
+   carries .leaflet-marker-icon and every vector path carries .leaflet-interactive,
+   so a layer added later is covered without touching this list. */
+.leaflet-container { --map-cursor: default; }
+.leaflet-container .leaflet-marker-icon,
+.leaflet-container .leaflet-interactive,
+.leaflet-container .leaflet-popup a,
+.leaflet-container .leaflet-control a,
+.aircraft-marker,
+.ship-marker,
+.infra-marker,
+.city-marker { --map-cursor: pointer; }
+.leaflet-grab { --map-cursor: grab; }
+.leaflet-dragging .leaflet-grab { --map-cursor: grabbing; }
+.border-handle { --map-cursor: grab; }
+.border-handle:active { --map-cursor: grabbing; }
+
+.map-reticle {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1200; /* over Leaflet's panes and controls, under the app's own panels */
+  pointer-events: none; /* it must never be what elementFromPoint finds */
+  opacity: 0;
+  /* Follows the accent by default, so the admin accent picker already themes it.
+     A cursor colour set in Admin Mode overrides this as an inline style. */
+  color: var(--accent);
+}
+.map-reticle.visible { opacity: 1; }
+/* There is no danger token in this stylesheet, so this states its own colour.
+   Rarely reached: the controls that carry `not-allowed` live in the panels,
+   which keep their native cursor and are not under the reticle. Kept because it
+   costs nothing and a disabled control drawn over the map later would otherwise
+   be the one place the reticle lied about what a click would do. */
+.map-reticle.danger { color: #ff6b6b; }
+
+.map-reticle-ring {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  /* r and opacity are written per frame by cursor.js; the transition is what
+     turns those discrete writes into the tighten/release the reader sees. */
+  transition: r 120ms ease-out, opacity 120ms ease-out;
+}
+.map-reticle-ticks {
+  stroke: currentColor;
+  stroke-width: 1.25;
+  transition: opacity 120ms ease-out;
+}
+.map-reticle-dot { fill: currentColor; }
+
+/* Matches the label/control rhythm SliderField and ColorField already use, so
+   the cursor rows do not read as a different kind of control from the ones
+   above them in the Interface group. */
+.admin-select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 7px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.admin-select-row select {
+  flex: 0 0 55%;
+  background: var(--control-bg);
+  color: var(--text-primary);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+/* Motion off: the reticle still tracks and still changes state, it just does it
+   instantly. The state is information -- "this is clickable" -- and withholding
+   it would be a different feature, not a calmer one. */
+:root.reduce-motion .map-reticle-ring,
+:root.reduce-motion .map-reticle-ticks {
+  transition: none;
+}
+
 .leaflet-control-attribution {
   background: var(--control-bg) !important;
   color: var(--text-dim) !important;
@@ -847,6 +962,59 @@ html, body {
   stroke: var(--accent);
   stroke-width: 1.8;
   stroke-dasharray: 5 4;
+}
+
+/* States and provinces, drawn only inside a selected country (see
+   map/subdivisions.js). Fainter and thinner than any country outline on
+   purpose: these lines are internal to something the reader has already picked
+   out, and drawn at the same weight they would compete with the border that
+   actually bounds the selection. Paint only, for the same reason .country-shape
+   is -- both are hit-tested from the map's own handlers. */
+.subdivision-shape {
+  fill: transparent;
+  stroke: rgba(var(--accent-rgb), 0.38);
+  stroke-width: 0.8;
+  pointer-events: none !important;
+}
+/* Toggled by updateSubdivisionHighlights in createMapController.js, not by
+   :hover -- the shapes are not event targets, so the browser never matches it. */
+.subdivision-shape.hovered {
+  stroke: #aef0ff;
+  stroke-width: 1.6;
+}
+/* The one state singled out by a click. Filled, unlike hover: a fill is what
+   makes a state readable as "this is the one" from across the map, and it is
+   the same language .country-selected already speaks one level up. */
+.subdivision-shape.subdivision-selected {
+  fill: rgba(var(--accent-rgb), 0.18);
+  stroke: var(--accent);
+  stroke-width: 1.8;
+}
+
+/* Districts of the one selected state (see the drill-down in
+   createMapController.js). Dashed and dimmer than the state lines above them:
+   they sit inside a shape that is already filled by its own selection, and a
+   solid line at that weight would read as another state border. */
+.district-outline {
+  fill: transparent;
+  stroke: rgba(var(--accent-rgb), 0.5);
+  stroke-width: 0.7;
+  stroke-dasharray: 3 2;
+  pointer-events: none !important;
+}
+/* Toggled from the controller, not by :hover -- same reason as the states. */
+.district-outline.hovered {
+  stroke: #aef0ff;
+  stroke-width: 1.4;
+  stroke-dasharray: none;
+}
+/* The district whose conflict record is open. Solid and filled, so the popup
+   and the map agree about which shape is being described. */
+.district-outline.district-selected {
+  fill: rgba(var(--accent-rgb), 0.22);
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-dasharray: none;
 }
 
 /* --- boundary editing handles ------------------------------------------- */
@@ -1920,10 +2088,28 @@ html, body {
 
 /* --- admin-2 district record -------------------------------------------- */
 
-/* All four counts, with the one currently shading the map marked. The popup
-   answers about the district; the selector only chooses what the map paints,
-   and a reader should not have to change the shading and click again to read
-   the other three numbers. */
+/* The whole archive control, now that this card is the only place the record is
+   read: which month, with all four counts shown under it at once. */
+.popup .district-month {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.popup .district-month select {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+}
+
+/* All four counts, every time -- see districtPopupHtml. */
 .popup .district-rows {
   margin: 6px 0;
   border-top: 1px solid var(--panel-border);
@@ -1936,12 +2122,12 @@ html, body {
   border-bottom: 1px solid var(--panel-border);
   font-variant-numeric: tabular-nums;
 }
-.popup .district-row-active { color: var(--accent); font-weight: 600; }
-
-/* "Not in the archive this month" is not "zero this month", and the layer
+/* "Not in the archive this month" is not "zero this month", and the record
    rests on that difference -- so it is said in words rather than left to a
-   blank space to imply. */
-.popup .meta.district-nodata { color: var(--text-dim); }
+   blank space to imply. A month still loading is a third state and must not be
+   drawn as either. */
+.popup .meta.district-nodata,
+.popup .meta.district-loading { color: var(--text-dim); }
 
 /* --- country fill (choropleth) ------------------------------------------ */
 
@@ -2511,10 +2697,35 @@ html, body {
 }
 .admin-close:hover { color: var(--text-bright); }
 
+/* `flex: 1` and `min-height: 0` are what make the body -- not the panel -- take
+   up the slack once the panel is given an explicit height by the resize grip.
+   Without them a dragged-taller panel grows a tall empty box under a body that
+   is still scrolling at its content height. */
 .admin-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 6px 10px 10px;
 }
+
+/* The resize grip: two hatch lines in the bottom-right corner, the same idiom
+   every OS window uses, so it needs no label. Sized generously enough to hit
+   with a trackpad without stealing clicks from the last row of the body. */
+.panel-resize-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background:
+    linear-gradient(315deg, transparent 0 3px, #ff8c3a 3px 4.5px, transparent 4.5px 7px,
+      #ff8c3a 7px 8.5px, transparent 8.5px);
+  opacity: 0.55;
+  border-bottom-right-radius: 8px;
+}
+.panel-resize-grip:hover { opacity: 1; }
 
 .admin-subhead {
   margin: 10px 0 4px;
@@ -2620,8 +2831,14 @@ html, body {
 /* One pin per row: swatch, name, size slider, percentage. The name is the only
    part allowed to shrink -- a slider narrower than about 70px cannot be aimed,
    and a percentage that reflows to two lines breaks the row rhythm. */
+/* Wraps rather than overflows. Only the name may shrink (see .admin-icon-label),
+   so at a narrow panel width a row carrying a colour well, a slider and three
+   selects ran past the panel's own edge and the last select was cut in half.
+   Wrapping keeps that row readable at any width; widening the panel by its
+   corner grip puts it back on one line. */
 .admin-icon-field {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 2px 0;
@@ -2670,6 +2887,41 @@ html, body {
 }
 .admin-icon-zoom.modified { color: var(--accent); border-color: var(--accent); }
 .admin-icon-zoom option { background: var(--panel-bg); color: var(--text-primary); }
+
+/* The glyph picker: the shapes themselves rather than their names (see
+   GlyphPicker in admin/fields.jsx). Allowed to shrink and to wrap, because a
+   pin type with nine airframes to choose between is wider than the zoom picker
+   beside it and the panel is resizable now. */
+.admin-glyph-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  flex: 0 1 auto;
+}
+.admin-glyph-swatch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+/* currentColor is what every glyph in map/svgIcons.js paints with, and the
+   button's inline colour is this pin type's own -- so a swatch is not a
+   generic preview but this pin, as it will be drawn. */
+.admin-glyph-swatch svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.admin-glyph-swatch:hover { border-color: var(--panel-border); background: rgba(255, 255, 255, 0.07); }
+.admin-glyph-swatch.selected { border-color: var(--accent); background: rgba(255, 140, 58, 0.14); }
 
 /* One layer per row in the stack lists: rank, name, the fade its position
    produces, and the two moves. Same "only the name may shrink" discipline as

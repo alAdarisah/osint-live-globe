@@ -122,11 +122,14 @@ if errorlevel 1 (
     REM batch parses a whole parenthesised block before running it, that error
     REM killed the script even on the branch where no tunnel needed starting.
     start "cloudflared-tunnel" /min "%CLOUDFLARED%" tunnel --no-autoupdate --url http://localhost:8080 --logfile "%TUNNEL_LOG%"
+    set STARTED_TUNNEL=1
     REM Quick tunnels take a few seconds to be issued a hostname; poll rather
-    REM than guess a sleep long enough for the worst case.
+    REM than guess a sleep long enough for the worst case. Note that the
+    REM hostname appearing in the log is not the same as it being resolvable --
+    REM that is what the longer probe budget further down is for.
     for /L %%t in (1,1,20) do (
         if "!URL!"=="" (
-            timeout /t 2 /nobreak >nul
+            call :wait2
             call :read_url URL
         )
     )
@@ -149,7 +152,26 @@ if "!URL!"=="" (
 )
 
 REM ---- proof it actually works ------------------------------------------
-for /f "usebackq delims=" %%c in (`curl.exe -s -o NUL -w "%%{http_code}" --max-time 25 "!URL!"`) do set CODE_ROOT=%%c
+REM Retried, not probed once. `compose up` returns when the container has been
+REM *started*, and nginx binds a moment after that -- so a single immediate
+REM request races the thing it is testing and reports 502 on a rebuild that
+REM worked perfectly. Three runs in a row cried wolf that way. A real failure
+REM still shows up: it just takes longer to say so.
+REM
+REM Two different races, two different budgets. A rebuilt container is listening
+REM within a couple of seconds. A tunnel issued seconds ago is a brand new DNS
+REM name, and until it propagates the request fails to connect outright -- curl
+REM reports 000, not 502, and 12 seconds was not close to enough. So when this
+REM run started the tunnel, wait considerably longer before calling it broken.
+set CODE_ROOT=
+set PROBES=6
+if "!STARTED_TUNNEL!"=="1" set PROBES=30
+for /L %%t in (1,1,!PROBES!) do (
+    if not "!CODE_ROOT!"=="200" (
+        for /f "usebackq delims=" %%c in (`curl.exe -s -o NUL -w "%%{http_code}" --max-time 25 "!URL!"`) do set CODE_ROOT=%%c
+        if not "!CODE_ROOT!"=="200" call :wait2
+    )
+)
 for /f "usebackq delims=" %%c in (`curl.exe -s -o NUL -w "%%{http_code}" --max-time 25 "!URL!/api/health"`) do set CODE_API=%%c
 REM Read the bundle name out of the running container rather than off the page:
 REM it is the one thing that proves the *new* build is what is being served.
@@ -167,6 +189,16 @@ echo Anyone opening the link already has it cached; tell them Ctrl+Shift+R.
 echo.
 endlocal
 exit /b 0
+
+REM Roughly two seconds. `timeout /t` would be the obvious call and is what was
+REM here first, but it reads the console directly and aborts with "Input
+REM redirection is not supported" the moment the script is run with its output
+REM piped or captured -- which is exactly how it gets run from a terminal that
+REM is logging. ping has no such opinion: three packets to loopback, one second
+REM apart, is two seconds of waiting anywhere.
+:wait2
+ping -n 3 127.0.0.1 >nul 2>&1
+goto :eof
 
 REM Sets %3 to STALE or FRESH by comparing an image's build time against the
 REM mtime of the paths in %2. A missing image reports as built at the epoch, so

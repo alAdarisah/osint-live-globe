@@ -94,7 +94,11 @@ def _thin_ring(ring: list, precision: int) -> list | None:
     return out
 
 
-def _thin_geometry(geometry: dict, precision: int) -> dict | None:
+def thin_geometry(geometry: dict, precision: int) -> dict | None:
+    """Public because admin1_boundaries.py thins the same way against a
+    different source -- rounding-plus-dedup is the one part of both modules
+    that has to behave identically, and a second copy is how they would
+    stop."""
     kind = (geometry or {}).get("type")
     if kind == "Polygon":
         rings = [r for r in (_thin_ring(r, precision) for r in geometry["coordinates"]) if r]
@@ -121,7 +125,7 @@ def build_collection(features: list[dict], iso3: str) -> dict:
     for feature in features:
         props = feature.get("properties") or {}
         pcode = _first(props, "adm2_pcode")
-        geometry = _thin_geometry(feature.get("geometry"), COORD_PRECISION)
+        geometry = thin_geometry(feature.get("geometry"), COORD_PRECISION)
         if not pcode or not geometry:
             continue
         out.append({

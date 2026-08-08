@@ -19,7 +19,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.sources import admin2_boundaries, airfield_activity
+from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe")
@@ -80,6 +80,9 @@ _SOURCE_MODULES = (
     # Weekly, and only for the countries hapi_conflict covers in volume: the
     # geometry its district counts are drawn on.
     "admin2_boundaries",
+    # Also weekly: states and provinces, drawn when a country that has them is
+    # selected. Nine federations, one 2.3 MB file.
+    "admin1_boundaries",
 )
 
 # Everything this process serves but does not produce: the ingest process's
@@ -429,6 +432,38 @@ async def district_boundaries(country: str):
             "type": "FeatureCollection", "features": [],
         }
         _DISTRICT_BOUNDARY_CACHE.set(iso3, cached)
+    return JSONResponse(cached, headers={"Cache-Control": "public, max-age=86400"})
+
+
+# States and provinces, stored and served the same way as the districts above
+# (see sources/admin1_boundaries.py). Split per country because the whole layer
+# is 21.9 MB across 251 countries and a reader selects one or two: the largest
+# single answer is Russia at 2.2 MB, the median country is under 60 KB.
+#
+# Sixteen entries, so the cache holds a session's worth of selections without
+# being able to pin more than a few tens of megabytes of geometry in memory.
+_ADMIN1_BOUNDARY_CACHE = LruTtlCache(maxsize=16, ttl=3600)
+metrics.track_local_cache("admin1_boundaries", _ADMIN1_BOUNDARY_CACHE)
+
+
+@app.get("/api/admin1-boundaries")
+async def admin1_boundaries_endpoint(country: str):
+    """Admin-1 subdivisions for one country, keyed by ISO 3166-2 code.
+
+    Empty -- not an error -- for a country with no admin-1 level at all (city
+    states, and the microstates Natural Earth cuts as a single shape). The
+    frontend asks once per country and remembers the empty answer, so a country
+    with no subdivisions costs one request per session rather than one a click.
+    """
+    iso3 = (country or "").strip().upper()
+    if not iso3.isalpha() or len(iso3) != 3:
+        raise HTTPException(status_code=400, detail="country must be an ISO3 code")
+    cached = _ADMIN1_BOUNDARY_CACHE.get(iso3)
+    if cached is None:
+        cached = await storage.reference(f"{admin1_boundaries.SNAPSHOT_PREFIX}:{iso3}") or {
+            "type": "FeatureCollection", "features": [],
+        }
+        _ADMIN1_BOUNDARY_CACHE.set(iso3, cached)
     return JSONResponse(cached, headers={"Cache-Control": "public, max-age=86400"})
 
 

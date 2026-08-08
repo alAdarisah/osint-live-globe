@@ -5,11 +5,26 @@
 
 import { L } from "./leafletGlobal";
 
+// The single world every tile layer is clipped to.
+//
+// `noWrap` alone stops Leaflet *wrapping* tile coordinates; it does not stop it
+// asking for the ones outside the world. Measured on a 2240px pane that was 10
+// requests per pan that can only ever 404 -- the tiles either side of x=0..2^z-1.
+// `bounds` is what makes Leaflet not ask.
+export const WORLD_TILE_BOUNDS = L.latLngBounds([-85.051129, -180], [85.051129, 180]);
+
 export function createBaseLayer(map, theme) {
   const layer = L.tileLayer(basemapUrlFor(theme), {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
     maxZoom: 19,
     subdomains: "abcd",
+    // One world, not an endless east-west ribbon of them. Leaflet repeats tile
+    // layers horizontally by default, which is why panning sideways used to show
+    // more ocean while every data layer stopped at the edge of the first copy.
+    // The camera is fenced to match (see maxBounds in createMapController.js) --
+    // the two have to agree, or the reader can pan into blank space.
+    noWrap: true,
+    bounds: WORLD_TILE_BOUNDS,
   }).addTo(map);
   return layer;
 }
@@ -102,6 +117,8 @@ export function createImageryLayer(map) {
     // the weather rasters at 5, so imagery never covers precipitation or cloud.
     zIndex: 3,
     maxNativeZoom: 9,
+    noWrap: true, // see createBaseLayer above
+    bounds: WORLD_TILE_BOUNDS,
     attribution:
       'Imagery: <a href="https://worldview.earthdata.nasa.gov" target="_blank" rel="noopener noreferrer">NASA EOSDIS GIBS</a>',
   });
@@ -116,6 +133,8 @@ export function createWeatherLayers(map) {
   const precipLayer = L.tileLayer("", {
     opacity: 0.55,
     zIndex: 5,
+    noWrap: true, // see createBaseLayer above
+    bounds: WORLD_TILE_BOUNDS,
     maxNativeZoom: 7, // RainViewer's radar tiles don't exist past z7 -- beyond that
                        // their server returns a "Zoom Level Not Supported" image
                        // instead of a 404, so Leaflet must be told not to ask.
@@ -125,6 +144,8 @@ export function createWeatherLayers(map) {
   const cloudsLayer = L.tileLayer("/api/weather/tile/clouds_new/{z}/{x}/{y}.png", {
     opacity: 0.45,
     zIndex: 5,
+    noWrap: true, // see createBaseLayer above
+    bounds: WORLD_TILE_BOUNDS,
     // OWM's clouds_new tiles are only meaningfully distinct up to about z9 --
     // past that it's the same low-res data upscaled. Without this cap, every
     // zoom-in past z9 requested a brand new set of unique {z}/{x}/{y} tiles
@@ -309,6 +330,10 @@ export function createEntityClusterGroups(map) {
     ports: L.layerGroup(),
     // Global Dam Watch (dams.py). Reference material a reader goes looking for.
     dams: L.layerGroup(),
+    // DeFlock ALPR camera locations (deflock.py). Off by default and gated deep
+    // by zoom -- ~125k points worldwide, almost all US, only meaningfully
+    // visible on the unfiltered World view, so a reader reaches it deliberately.
+    deflock: L.layerGroup(),
   };
   return { groups };
 }
@@ -457,6 +482,14 @@ export function createJammingPingGroup() {
 // Not added to the map directly: combined with the landing-point markers under
 // the single "cables" layer key in createMapController.js.
 export function createCablesGroup() {
+  return L.layerGroup();
+}
+
+// Coarse Natural Earth railway linework (backend/sources/railways.py) -- whole
+// polylines, theatre-clipped, given the same "lines, small set, drawn once"
+// treatment as the cable routes above. Not added to the map here: off by default
+// (see its MANUAL disposition in map/scene.js).
+export function createRailwaysGroup() {
   return L.layerGroup();
 }
 

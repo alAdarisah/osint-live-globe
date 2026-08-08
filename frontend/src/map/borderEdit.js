@@ -21,7 +21,7 @@
 // can never offer one -- which is why midpoint handles are not merely the
 // familiar idiom here but the only route to inserting a vertex at all.
 //
-// Why a shared vertex moves both countries at once: Natural Earth's 1:110m
+// Why a shared vertex moves both countries at once: Natural Earth's 1:50m
 // admin-0 set preserves the topology it was generated from, so neighbours hold
 // byte-identical coordinates along a common boundary. Editing one side alone
 // would tear a visible gap the length of the drag. See buildColocationIndex in
@@ -44,15 +44,20 @@ const EDIT_PANE = "borderEditPane";
 // L.canvas click targets, where stacking would come down to DOM order.
 const EDIT_PANE_Z = 660;
 
-// A legibility floor, not a performance one. The whole planet is only 10,654
-// vertices and the median country is 37; the reason not to draw handles at
-// world zoom is that Russia's 625 points sit a pixel or two apart there and
-// cannot be hit with a mouse.
-const MIN_EDIT_ZOOM = 4;
+// A legibility floor, not a performance one: the reason not to draw handles far
+// out is that adjacent vertices sit a pixel or two apart there and cannot be hit
+// with a mouse. Raised from 4 when the boundaries moved from 1:110m to 1:50m,
+// which put roughly nine times as many vertices on the same coastline (99,613
+// on the planet against 10,654, a median country of 180 points against 37) --
+// the spacing that was just about clickable at zoom 4 is now what zoom 5 shows.
+const MIN_EDIT_ZOOM = 5;
 
-// Vertex plus midpoint handles. Unreachable for 173 of the 177 countries --
-// only Canada (794 vertices), Antarctica (661), Russia (625) and the USA (447)
-// can approach it, and only with the whole country on screen.
+// Vertex plus midpoint handles. At 1:50m this is a limit countries genuinely
+// reach rather than a theoretical ceiling -- Canada alone has 11,573 vertices,
+// Russia 7,450, the USA 5,753 -- so the budget is spent on whatever is in the
+// padded viewport and the bar says how many of the total are shown. Zooming in
+// is what gets you the rest; it is also the only zoom at which they are
+// separately draggable.
 const MAX_HANDLES = 1200;
 
 // Handles are built for a viewport this much larger than the visible one, so a

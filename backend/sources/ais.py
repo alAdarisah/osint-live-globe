@@ -251,6 +251,34 @@ class StreamRefused(Exception):
     """Closed on before a single frame -- the subscription was never accepted."""
 
 
+# The live socket, so shutdown can close it politely -- see aclose(). Held
+# because the alternative is what this process used to do: get its tasks
+# cancelled, drop the TCP connection without a close frame, and leave aisstream
+# holding a session it only discards when its own keepalive ping times out.
+# Restart inside that window and the new connection is a *second* concurrent
+# session as far as they are concerned, from an account that is allowed few.
+_connection = None
+
+
+async def aclose() -> None:
+    """Close the AIS socket, before this process's tasks are cancelled.
+
+    Idempotent and never raises: it runs on the shutdown path, where the useful
+    behaviour is to try and then get out of the way. Nothing reconnects after
+    it -- the stream task is cancelled immediately afterwards -- so a closed
+    connection here stays closed.
+    """
+    global _connection
+    connection, _connection = _connection, None
+    if connection is None:
+        return
+    try:
+        await connection.close()
+        log.info("AIS socket closed cleanly on shutdown")
+    except Exception as exc:  # noqa: BLE001 - shutdown is not a place to raise
+        log.warning("AIS socket did not close cleanly: %s", exc)
+
+
 class EgressUnusable(Exception):
     """A proxy never got us as far as aisstream.
 
@@ -263,7 +291,7 @@ class EgressUnusable(Exception):
 
 
 async def _consume(state, proxy: str | None = None):
-    global _dirty, _last_message_at
+    global _dirty, _last_message_at, _connection
     subscribe_msg = {
         "APIKey": config.AISSTREAM_API_KEY,
         "BoundingBoxes": _bboxes_payload(),
@@ -284,6 +312,7 @@ async def _consume(state, proxy: str | None = None):
     try:
         async with websockets.connect(WS_URL, **connect_kwargs) as ws:
             connected = True
+            _connection = ws
             await ws.send(json.dumps(subscribe_msg))
             # Deliberately *not* clearing state.last_error here. Connecting is not
             # succeeding: aisstream accepts the socket and stays silent when the key
@@ -399,6 +428,11 @@ async def _consume(state, proxy: str | None = None):
                 f"{proxy} did not get us to aisstream: {type(exc).__name__}: {exc}"
             ) from exc
         raise
+    finally:
+        # Whichever way this connection ended, it is no longer the one shutdown
+        # should be closing. Left set, aclose() would await a dead object on the
+        # way out and log a failure that means nothing.
+        _connection = None
 
 
 # How often the snapshot loop writes a source_health row. The loop itself runs
@@ -508,6 +542,58 @@ BACKOFF_JITTER = 0.25
 
 def _next_backoff(backoff: float) -> float:
     return min(backoff * 2, BACKOFF_CAP)
+
+
+# How far back a starting process looks to decide whether it is really starting
+# fresh. An hour: long enough to cover a rebuild, a crash loop and a compose
+# restart, short enough that yesterday's outage does not slow down today.
+RESUME_WINDOW = 3600
+
+
+def resume_backoff(series: list[tuple[float, int | None, bool]], now: float) -> tuple[float, float]:
+    """(backoff, seconds to wait before the first attempt) for a fresh process.
+
+    The backoff above is per-process state, and this process restarts -- a
+    rebuild, a crash, `restart: unless-stopped`, a compose up. Every one of those
+    put the schedule back to 5 seconds, so a stack that was correctly waiting a
+    quarter of an hour went straight back to hammering. Four rebuilds in an hour
+    is four bursts of 5s, 10s, 20s, 40s aimed at a service that has already
+    answered 429, and aisstream rate-limits by IP -- which is how a client earns
+    a block that outlives the outage that provoked it. Someone has already had to
+    open an issue apologising for exactly this pattern (aisstream/issues#256).
+    On 2026-08-08 this backend did it four times in one morning and was answered
+    with 429 for the rest of it.
+
+    Postgres already knows: source_health carries a row per outcome from every
+    previous life of this process. A trailing run of failures means the schedule
+    was already climbing, so it is resumed where it left off instead of reset --
+    and if the last failure is more recent than the resumed delay, the remainder
+    of that delay is served before the first attempt rather than skipped.
+
+    The rows counted are every failing row, the once-a-minute heartbeat from
+    _snapshot_loop included, not only reconnect failures. That is deliberate: an
+    hour of continuous failing heartbeats is an hour of outage, and resuming at
+    the cap is exactly the right response to it. One or two is a blip, and
+    resumes at five or ten seconds.
+    """
+    failures = 0
+    newest_failure = None
+    for ts, _count, ok in reversed(series):
+        if ok:
+            break
+        if newest_failure is None:
+            newest_failure = ts
+        failures += 1
+
+    if not failures or newest_failure is None:
+        return BACKOFF_START, 0.0
+
+    # Closed form of _next_backoff applied `failures - 1` times. The exponent is
+    # clamped before it is used: an outage measured in days puts thousands of
+    # rows in this window and 2**thousands is not a number worth building to
+    # then take the minimum of.
+    backoff = min(BACKOFF_START * 2 ** min(failures - 1, 20), BACKOFF_CAP)
+    return backoff, max(0.0, backoff - (now - newest_failure))
 
 
 def _reconnect_delay(backoff: float) -> float:
@@ -639,7 +725,20 @@ async def stream_forever():
     global _snapshot_task
     _snapshot_task = asyncio.create_task(_snapshot_loop(state))
 
-    backoff = BACKOFF_START
+    # Where the previous life of this process left off, rather than 5 seconds
+    # flat. See resume_backoff: a restart used to wipe the schedule and start
+    # hammering a service that had already asked us to stop.
+    backoff, first_wait = resume_backoff(
+        await storage.source_health_series("ais", time.time() - RESUME_WINDOW), time.time()
+    )
+    if first_wait > 0:
+        log.info(
+            "AIS was already backing off when this process last ran; resuming at "
+            "%ds and waiting %ds before the first attempt",
+            int(backoff), int(first_wait),
+        )
+        await asyncio.sleep(first_wait)
+
     # Consecutive failures of the *direct* connection, which is what decides
     # whether a proxy is worth reaching for. Counted apart from the backoff
     # because the two answer different questions: the backoff is how hard we are

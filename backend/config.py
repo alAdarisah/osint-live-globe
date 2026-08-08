@@ -302,11 +302,25 @@ SOURCE_HEALTH_RETENTION_DAYS = int(os.getenv("SOURCE_HEALTH_RETENTION_DAYS", "14
 # replay range can't use anyway.
 HISTORY_RETENTION_SECONDS = int(os.getenv("HISTORY_RETENTION_SECONDS", str(3 * 24 * 3600)))
 
-# High-interest maritime chokepoints/conflict waters for the AIS layer, as
-# "lat_min,lon_min,lat_max,lon_max" boxes separated by ";". Kept narrow (rather
-# than the whole planet) to stay within aisstream.io's practical volume and to
-# match the "high-risk waters" framing of the AIS layer.
-_DEFAULT_AIS_BBOXES = (
+# The waters this map *claims* as watched, as "lat_min,lon_min,lat_max,lon_max"
+# boxes separated by ";". High-interest maritime chokepoints and conflict water.
+#
+# This used to double as the AIS subscription extent and the two were split on
+# 2026-08-08, when the subscription went global (see AIS_BBOXES below). They were
+# never the same statement, and conflating them made the second one expensive:
+#
+#   dark_vessels.py    only infers a vessel went dark inside here, because a gap
+#                      means nothing where coverage is thin -- and coverage being
+#                      global does not make it uniform.
+#   gfw_detections.py  spends its satellite tile budget on here. At zoom 5 these
+#                      eight boxes are 23 tiles; the whole planet is 1,024, for a
+#                      record cap that would discard nearly all of it.
+#   ports.py           clips the World Port Index to here (263 of 393 ports),
+#                      which is what the ship-to-ship detector excludes against.
+#
+# Widen this and those three widen with it, satellite quota and inference
+# confidence included. Widen AIS_BBOXES and only the collection does.
+_DEFAULT_WATCHED_WATERS = (
     "40,27,47,42;"    # Black Sea
     "12,32,30,43;"    # Red Sea
     "10,43,15,52;"    # Gulf of Aden / Bab-el-Mandeb approach
@@ -332,6 +346,31 @@ def _parse_bboxes(raw: str) -> list[tuple[float, float, float, float]]:
     return boxes
 
 
+WATCHED_WATERS = _parse_bboxes(os.getenv("WATCHED_WATERS", _DEFAULT_WATCHED_WATERS))
+
+# What the AIS stream subscribes to, which is now the whole planet. Same format
+# as WATCHED_WATERS above and deliberately a separate setting: this one is about
+# what we collect, that one is about what we are prepared to draw a conclusion
+# from, and only the first is free to be enormous.
+#
+# What a global subscription costs, measured against the eight boxes on the last
+# day the feed worked (2026-08-05: ~950 distinct hulls an hour, ~5,900 movement
+# rows an hour, 249 bytes a record):
+#
+#   * _ships holds every hull seen in the last 30 minutes rather than ~1,000, so
+#     /api/ships grows with it -- tens of MB rather than a fraction of one. The
+#     Redis cache refuses anything over CACHE_MAX_PAYLOAD_BYTES (64 MB) and
+#     serves it from Postgres instead, so the failure mode there is slower, not
+#     broken.
+#   * entity_history takes a row per hull per movement. At 3-day retention that
+#     is the table that grows, and it is already 11 GB.
+#   * _snapshot_loop reserialises the whole dict every 5 seconds.
+#
+# None of those numbers can be pinned down until aisstream is delivering again --
+# the multiplier depends entirely on how much of the world their free tier
+# actually carries, which is not something their docs state and not something a
+# dead feed can be asked. Watch /api/health's item_count on the first day back.
+_DEFAULT_AIS_BBOXES = "-90,-180,90,180"
 AIS_BBOXES = _parse_bboxes(os.getenv("AIS_BBOXES", _DEFAULT_AIS_BBOXES))
 
 # airplanes.live has no world/bbox endpoint, only point+radius (max 250nm) --

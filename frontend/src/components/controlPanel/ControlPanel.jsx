@@ -19,7 +19,6 @@ export default function ControlPanel({
   onToggleLayer, health, owmConfigured, windStatus, infraFilterText, onInfraFilterChange, eventFilter, onEventFilterChange, historyAsOf,
   imageryKey, imageryDate, onImageryChange,
   choropleth, onChoroplethChange,
-  districts, districtMonths, onDistrictMetricChange, onDistrictMonthChange,
 }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN);
 
@@ -73,10 +72,6 @@ export default function ControlPanel({
         onToggleLayer={onToggleLayer}
         choropleth={choropleth}
         onChoroplethChange={onChoroplethChange}
-        districts={districts}
-        districtMonths={districtMonths}
-        onDistrictMetricChange={onDistrictMetricChange}
-        onDistrictMonthChange={onDistrictMonthChange}
         isOpen={isOpen}
         setOpen={setOpen}
       />

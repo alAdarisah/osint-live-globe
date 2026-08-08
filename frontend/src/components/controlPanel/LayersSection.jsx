@@ -6,7 +6,7 @@ import {
   SANCTION_COLOR, DARK_VESSEL_STYLE, DARK_VESSEL_ORDER, CABLE_LANDING_STYLE, CABLE_PLANNED_STYLE,
   LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
   GFW_GAP_STYLE, GFW_DETECTION_STYLE, GFW_DETECTION_ORDER,
-  CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE,
+  CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR, CONFIDENCE_THRESHOLD } from "../../map/severity";
 import LayerIcon from "./LayerIcon";
@@ -95,7 +95,7 @@ const GROUP_LAYERS = {
   // Airfields sit with infrastructure rather than with the aircraft layers:
   // it is a place layer, and the aircraft that need it already get their
   // nearest field named inside their own popup.
-  ground: ["infra", "osmInfra", "airports", "ports", "dams", "cables", "firms", "jamming"],
+  ground: ["infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "cables", "firms", "jamming"],
   // Its own group rather than a ninth row under traffic: a regulator's ruling
   // about a volume of airspace is neither traffic nor infrastructure, and
   // traffic already carries nine layers.
@@ -393,7 +393,7 @@ export default function LayersSection({
             wish={layerWish?.aisNavy}
             onToggle={onToggleLayer}
           />
-          <LayerIcon svg={SVG.ship} color="#ffd60a" token="ship.navy" /> Navy &amp; MSC Ships
+          <LayerIcon svg={SVG.warship} color="#ffd60a" token="ship.navy" /> Navy &amp; MSC Ships
           <span className="count">{counts.aisNavy} ({counts.aisNavyTotal})</span>
         </label>
         <LayerDetails id="det-aisNavy" open={isOpen("det-aisNavy")} onToggle={setOpen}>
@@ -791,6 +791,11 @@ export default function LayersSection({
             Border crossings
             <span className="count">{counts.osmBorder} ({counts.osmBorderTotal})</span>
           </div>
+          <div className="subticker-row">
+            <LayerIcon svg={OSM_INFRA_STYLE.railway_station.svg} color={OSM_INFRA_STYLE.railway_station.color} token={OSM_INFRA_STYLE.railway_station.token} />
+            Railways (stations, halts, yards, crossings)
+            <span className="count">{counts.osmRailway} ({counts.osmRailwayTotal})</span>
+          </div>
         </div>
         <div id="osmInfraZoomNote" className={`sublegend${zoomNotes.osmInfra ? " visible" : ""}`}>
           Zoom in to show OpenStreetMap infrastructure
@@ -810,6 +815,13 @@ export default function LayersSection({
             rather than any particular building. Unnamed military polygons are excluded &mdash; they are
             mostly perimeter fragments and were drowning everything else.
           </div>
+          <div className="sublegend">
+            <b>A feature the Airfields or Dams layer already draws is drawn once, there.</b> OpenStreetMap
+            maps military airfields OurAirports lists and hydro plants sitting on Global Dam Watch dams;
+            three quarters of the OSM military airfields here are one of those. Nothing is discarded
+            &mdash; the surviving pin names the OSM record, its own name for the place and how far apart
+            the two sources put it. Switch the other layer off and these pins come back.
+          </div>
         </LayerDetails>
 
         <label className="layer-row" data-layer="airports">
@@ -819,7 +831,7 @@ export default function LayersSection({
             wish={layerWish?.airports}
             onToggle={onToggleLayer}
           />
-          <LayerIcon svg={SVG.airfield} color="#7f93a8" token="airfield.civil" /> Airfields (OurAirports)
+          <LayerIcon svg={SVG.airfield} color="#7f93a8" token="airfield.medium" /> Airfields (OurAirports)
           <span className="count">{counts.airports} ({counts.airportsTotal})</span>
         </label>
         <div id="airportsZoomNote" className={`sublegend${zoomNotes.airports ? " visible" : ""}`}>
@@ -938,6 +950,64 @@ export default function LayersSection({
             Reservoir outlines &mdash; &ldquo;what floods if this fails&rdquo; &mdash; are the natural next
             question and are deliberately not drawn: the answer is tens of megabytes of polygon geometry
             needing a shapefile reader this project does not have.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="deflock">
+          <LayerCheck
+            layerKey="deflock"
+            on={layerVisibility.deflock}
+            wish={layerWish?.deflock}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={DEFLOCK_STYLE.svg} color={DEFLOCK_STYLE.color} token={DEFLOCK_STYLE.token} />
+          {" "}ALPR Cameras (DeFlock)
+          <span className="count">{counts.deflock} ({counts.deflockTotal})</span>
+        </label>
+        <div id="deflockZoomNote" className={`sublegend${zoomNotes.deflock ? " visible" : ""}`}>
+          Zoom in to show ALPR cameras &mdash; a worldwide layer held back until you are over a town,
+          so the total reads zero until you zoom in.
+        </div>
+        <LayerDetails id="det-deflock" open={isOpen("det-deflock")} onToggle={setOpen}>
+          <div className="sublegend">
+            Automated licence-plate reader locations &mdash; Flock Safety, Motorola and the rest &mdash;
+            as OpenStreetMap has them, mirrored daily by DeFlock. <b>Location metadata only:</b> a pin
+            says where a camera stands, not what it sees, and there is nothing to view.
+          </div>
+          <div className="sublegend">
+            <b>Off by default, and only drawn once you are zoomed into a town.</b> The set is ~125,000
+            points and 99.78% of them are in the United States, which has no theatre on this map &mdash;
+            so it is only meaningfully visible on the unfiltered World view, and never dumped across a
+            wide one.
+          </div>
+          <div className="sublegend">
+            <b>The date on a pin is an OpenStreetMap edit time, not a sighting.</b> It is when the map
+            object was last changed, not when the camera was seen or installed. Source: OpenStreetMap
+            contributors (via DeFlock), ODbL.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="railways">
+          <LayerCheck
+            layerKey="railways"
+            on={layerVisibility.railways}
+            wish={layerWish?.railways}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={RAILWAY_STYLE.svg} color={RAILWAY_STYLE.color} token={RAILWAY_STYLE.token} />
+          {" "}Railways (Natural Earth)
+          <span className="count">{counts.railways} ({counts.railwaysTotal})</span>
+        </label>
+        <LayerDetails id="det-railways" open={isOpen("det-railways")} onToggle={setOpen}>
+          <div className="sublegend">
+            <b>Coarse basemap linework, 2021.</b> Natural Earth 1:10m railroads &mdash; public domain,
+            unchanged since 2021, with no names, no operator and no gauge. It is drawn as a muted,
+            dashed hairline because it is context, not survey data.
+          </div>
+          <div className="sublegend">
+            <b>It will not sit exactly on the railway station points.</b> Those come from OpenStreetMap
+            (the Infrastructure layer above); this linework is a different, coarser source and the two
+            are not aligned. Clipped to this map&apos;s conflict theatres rather than drawn worldwide.
           </div>
         </LayerDetails>
 

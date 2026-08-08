@@ -148,6 +148,12 @@ const POLL_CONFIG = [
   // tab left open across a release picks it up.
   { key: "ports", url: "/api/ports", intervalMs: 6 * 60 * 60000 },
   { key: "dams", url: "/api/dams", intervalMs: 6 * 60 * 60000 },
+  // DeFlock ALPR camera locations. Refreshed once a day server-side (a mirror of
+  // one Overpass query, see backend/sources/deflock.py), so a daily poll is all
+  // it warrants. Its LOCAL fetch gate (map/scene.js) keeps this ~125k-point,
+  // unscoped body off cold world/theatre paints: it is only fetched once the
+  // reader is zoomed to a town, which is also the only zoom it draws at.
+  { key: "deflock", url: "/api/deflock", intervalMs: 24 * 60 * 60000 },
   // Cross-border electricity. Swept hourly server-side; the underlying 15-minute
   // metering resolution is invisible to a client sitting behind that sweep.
   { key: "energyFlows", url: "/api/energy-flows", intervalMs: 20 * 60000 },
@@ -531,6 +537,18 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
         onDataRef.current("cableLandings", data?.landings || []);
       })
       .catch((err) => console.warn("Failed to load submarine cables:", err));
+
+    // Coarse railway linework -- a whole document ({lines, attribution,
+    // provenance}, see backend/sources/railways.py), hard-cached for a day and
+    // fetched once at boot rather than polled, exactly like the cables routes
+    // above. The whole document is handed on so the popup can state its own
+    // provenance rather than having it restated in the renderer.
+    fetchJson("/api/railways")
+      .then((data) => {
+        if (cancelled) return;
+        onDataRef.current("railways", data || { lines: [] });
+      })
+      .catch((err) => console.warn("Failed to load railway linework:", err));
 
     fetchJson("/api/infrastructure")
       .then((data) => {

@@ -10,7 +10,7 @@ from backend.sources import dark_vessels as dv
 from backend.sources.proximity import ProximityIndex
 
 HOUR = 3600.0
-# Inside config.AIS_BBOXES' Strait of Hormuz box (24,48 -> 30,57).
+# Inside config.WATCHED_WATERS' Strait of Hormuz box (24,48 -> 30,57).
 HORMUZ = (26.0, 56.0)
 # Mid-Atlantic: no watched-waters box anywhere near it.
 ATLANTIC = (30.0, -40.0)
@@ -83,7 +83,7 @@ def test_the_implied_speed_across_the_gap_is_the_tell():
 
 
 def test_a_gap_outside_watched_waters_is_ignored():
-    """Our AIS coverage only exists inside config.AIS_BBOXES, so absence
+    """Our AIS coverage only exists inside config.WATCHED_WATERS, so absence
     anywhere else is absence of a receiver, not of a ship."""
     assert dv.build_gap_records([gap(frm=ATLANTIC, to=(30.1, -40.1))], {}, healthy()) == []
 

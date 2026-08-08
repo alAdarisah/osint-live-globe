@@ -18,7 +18,7 @@
 // from, and gets full control over hit-testing as a side benefit (needed
 // for click-to-select/hover anyway).
 import { L } from "./leafletGlobal";
-import { nearestLon } from "../utils/geo";
+import { nearestLon, worldCopyOffsets, worldCopyKey } from "../utils/geo";
 
 // Pixi is loaded on demand rather than bundled into the main chunk: it is by
 // far the heaviest dependency here (~13 MB installed, and the dominant share
@@ -445,10 +445,31 @@ const EntityWebglLayer = L.Layer.extend({
   // primary copy only, so panning east past the antimeridian left the ships and
   // aircraft behind on the previous world while the basemap carried on -- the
   // "empty map" either side. See nearestLon in utils/geo.js.
-  _project(lat, lon) {
+  // `copy` (a multiple of 360, see _copyOffsets) then moves it on again to a
+  // neighbouring copy, which is how one entity becomes one sprite per copy of the
+  // world on screen instead of stopping dead at the edge of the primary one.
+  _project(lat, lon, copy = 0) {
     const refLon = this._map.getCenter().lng;
-    const p = this._map.latLngToLayerPoint([lat, nearestLon(lon, refLon)]);
+    const p = this._map.latLngToLayerPoint([lat, nearestLon(lon, refLon) + copy]);
     return { x: p.x - this._topLeft.x, y: p.y - this._topLeft.y };
+  },
+
+  /**
+   * Which copies of the world are on screen. See worldCopyOffsets in utils/geo.js.
+   *
+   * Read once per updateEntities/_repositionAll pass rather than per entity:
+   * getBounds and getCenter are both live reads off the map and these loops run
+   * over every ship and aircraft in view.
+   */
+  _copyOffsets() {
+    const bounds = this._map.getBounds();
+    return worldCopyOffsets(bounds.getWest(), bounds.getEast(), this._map.getCenter().lng);
+  },
+
+  // One key format for the whole map, shared with the Leaflet marker layers --
+  // see worldCopyKey in utils/geo.js.
+  _entryKey(id, copy) {
+    return worldCopyKey(id, copy);
   },
 
   // Declutter offsets come from createMapController's single cross-layer
@@ -459,19 +480,29 @@ const EntityWebglLayer = L.Layer.extend({
     return this._offsetsByBucket?.get(bucketKey)?.get(this._idOf(bucketKey, item));
   },
 
-  _placeEntry(entry, bucketKey, item) {
-    const p = this._project(item.lat, item.lon);
+  // The declutter nudge is looked up on the bare id, so every copy of an entity
+  // gets the same one and the copies stay identical to each other rather than
+  // drifting apart under a per-copy placement pass.
+  _placeEntry(entry, bucketKey, item, copy = 0) {
+    const p = this._project(item.lat, item.lon, copy);
     const off = this._offsetFor(bucketKey, item);
     entry.container.position.set(p.x + (off?.dx || 0), p.y + (off?.dy || 0));
   },
 
   _repositionAll() {
+    const offsets = this._copyOffsets();
     for (const [bucketKey, entries] of this._buckets) {
       const items = this._lastItems?.get(bucketKey);
       if (!items) continue;
       for (const item of items) {
-        const entry = entries.get(this._idOf(bucketKey, item));
-        if (entry) this._placeEntry(entry, bucketKey, item);
+        const id = this._idOf(bucketKey, item);
+        for (const copy of offsets) {
+          const entry = entries.get(this._entryKey(id, copy));
+          // A copy can be missing here: this runs on every pan, and a pan that
+          // brings a new copy into view has not reached updateEntities yet. The
+          // moveend that follows creates it.
+          if (entry) this._placeEntry(entry, bucketKey, item, copy);
+        }
       }
     }
   },
@@ -552,56 +583,74 @@ const EntityWebglLayer = L.Layer.extend({
     }
     const visible = this._visibleBuckets.has(bucketKey);
 
+    // One sprite per entity per copy of the world in view. `seen` therefore holds
+    // composite keys, which is also what makes zooming back in safe: the copies
+    // that just left the screen are no longer in it, so the sweep at the bottom
+    // destroys their sprites instead of leaking them.
+    const offsets = this._copyOffsets();
     const seen = new Set();
     for (let idx = 0; idx < items.length; idx++) {
       const item = items[idx];
       const id = opts.idField(item);
-      seen.add(id);
-      let entry = entries.get(id);
-      if (!entry) {
-        entry = createEntry(this._app);
-        entry.container.visible = visible;
-        entries.set(id, entry);
-      }
-
+      // Asked once per entity, not once per drawn copy: every copy of a ship is
+      // the same ship, so it has the same glyph, heading and selection state, and
+      // these are the callbacks that actually cost something.
       const style = opts.style(item);
-      this._applyStyle(entry, style);
-      // Per-layer opacity from Admin Mode (see map/iconTheme.js's themedStyle).
-      // Set on the container rather than baked into the texture, so turning a
-      // layer down does not mint a second texture for every glyph in it.
-      //
-      // Multiplied by the bucket's emphasis alpha rather than replacing it:
-      // these answer different questions ("how solid should this layer be" and
-      // "is the reader looking at something else right now") and whichever
-      // wrote the property last would otherwise silently win. Kept on the entry
-      // so setBucketAlpha can recombine them without re-reading the style.
-      entry.themeAlpha = Number.isFinite(style.opacity) ? style.opacity : 1;
-      entry.container.alpha = entry.themeAlpha * (this._bucketAlpha.get(bucketKey) ?? 1);
       const heading = opts.heading(item);
-      entry.sprite.rotation = Number.isFinite(heading) ? (heading * Math.PI) / 180 : entry.sprite.rotation;
-
       const selected = opts.isSelected(item);
-      entry.highlight.visible = selected;
-      if (selected) drawHighlight(entry, style.size, 0xffffff);
+      for (const copy of offsets) {
+        const entryKey = this._entryKey(id, copy);
+        seen.add(entryKey);
+        let entry = entries.get(entryKey);
+        if (!entry) {
+          entry = createEntry(this._app);
+          entry.container.visible = visible;
+          entries.set(entryKey, entry);
+        }
 
-      this._placeEntry(entry, bucketKey, item);
-      // A smaller sprite draws in front of a bigger one, so a 13px "other"
-      // aircraft can't end up completely buried under a 30px bomber with no
-      // way to tap it. Mirrors applyStacking on the Leaflet-marker side.
-      entry.container.zIndex = -Math.round(style.size || 16);
+        this._applyStyle(entry, style);
+        // Per-layer opacity from Admin Mode (see map/iconTheme.js's themedStyle).
+        // Set on the container rather than baked into the texture, so turning a
+        // layer down does not mint a second texture for every glyph in it.
+        //
+        // Multiplied by the bucket's emphasis alpha rather than replacing it:
+        // these answer different questions ("how solid should this layer be" and
+        // "is the reader looking at something else right now") and whichever
+        // wrote the property last would otherwise silently win. Kept on the entry
+        // so setBucketAlpha can recombine them without re-reading the style.
+        entry.themeAlpha = Number.isFinite(style.opacity) ? style.opacity : 1;
+        entry.container.alpha = entry.themeAlpha * (this._bucketAlpha.get(bucketKey) ?? 1);
+        entry.sprite.rotation = Number.isFinite(heading) ? (heading * Math.PI) / 180 : entry.sprite.rotation;
 
-      entry.item = item;
+        // Selecting a ship highlights it on every copy, because the reader
+        // selected the ship, not one of its pictures.
+        entry.highlight.visible = selected;
+        if (selected) drawHighlight(entry, style.size, 0xffffff);
+
+        this._placeEntry(entry, bucketKey, item, copy);
+        // A smaller sprite draws in front of a bigger one, so a 13px "other"
+        // aircraft can't end up completely buried under a 30px bomber with no
+        // way to tap it. Mirrors applyStacking on the Leaflet-marker side.
+        entry.container.zIndex = -Math.round(style.size || 16);
+
+        // The real record, on every copy -- so a tap or hover on any of them
+        // reports the entity itself and _hitTestAt needs no copy awareness at all.
+        entry.item = item;
+      }
     }
 
-    for (const [id, entry] of entries) {
-      if (!seen.has(id)) {
+    // Over entry keys, not record ids -- an entity that is still present but whose
+    // outer copies have just left the screen has to lose those sprites here, which
+    // is the only thing standing between a zoom-out/zoom-in cycle and a sprite leak.
+    for (const [entryKey, entry] of entries) {
+      if (!seen.has(entryKey)) {
         this._app.stage.removeChild(entry.container);
         // Drop it from any texture-ready queue before destroying it, so the
         // callback isn't left holding a dead sprite (see _applyStyle's guard,
         // which is the belt to this braces).
         for (const waiting of this._pendingSprites.values()) waiting.delete(entry);
         entry.container.destroy({ children: true });
-        entries.delete(id);
+        entries.delete(entryKey);
       }
     }
 

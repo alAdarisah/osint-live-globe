@@ -156,8 +156,11 @@ DATASETS = (
 # layer renders beside live AIS.
 LOOKBACK_DAYS = 7
 
-# 23 tiles over the eight boxes in config.AIS_BBOXES, computed rather than
-# listed so coverage follows the watch boxes if they change. Zoom is a pure
+# 23 tiles over the eight boxes in config.WATCHED_WATERS, computed rather than
+# listed so coverage follows the watch boxes if they change. Deliberately not
+# config.AIS_BBOXES, which is the whole planet since 2026-08-08: that would be
+# 1,024 tiles a sweep against a record cap that keeps 12,000, so ~98% of a
+# 40-fold payload increase would be downloaded and thrown away. Zoom is a pure
 # request-count-versus-payload trade here (position comes from the feature id,
 # not the geometry): z5 tiles are ~11 degrees wide, so a good deal of each tile
 # is water this map does not watch and is discarded by the clip below -- z6
@@ -358,7 +361,7 @@ def tiles_for(boxes, zoom: int) -> list[tuple[int, int, int]]:
 
 
 def in_watched_waters(lat: float, lon: float) -> bool:
-    """The same boxes the AIS layer subscribes to (config.AIS_BBOXES).
+    """The theatres this map claims as watched (config.WATCHED_WATERS).
 
     A z5 tile is ~11 degrees wide, so most of what a sweep downloads is water
     this map does not watch. Clipping is what keeps the layer's coverage a
@@ -367,7 +370,7 @@ def in_watched_waters(lat: float, lon: float) -> bool:
     """
     return any(
         lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
-        for lat_min, lon_min, lat_max, lon_max in config.AIS_BBOXES
+        for lat_min, lon_min, lat_max, lon_max in config.WATCHED_WATERS
     )
 
 
@@ -692,7 +695,7 @@ async def ingest_once():
     now = time.time()
     today = datetime.fromtimestamp(now, tz=timezone.utc).date()
     start = today - timedelta(days=LOOKBACK_DAYS)
-    tiles = tiles_for(config.AIS_BBOXES, TILE_ZOOM)
+    tiles = tiles_for(config.WATCHED_WATERS, TILE_ZOOM)
     headers = {"Authorization": f"Bearer {config.GFW_API_TOKEN}"}
 
     try:

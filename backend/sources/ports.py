@@ -49,7 +49,7 @@ to the union of two areas, not just the theatres:
 
   - the eleven theatre boxes in regions.py (303 ports), which is what the map
     itself navigates by, and
-  - the AIS watch boxes in config.AIS_BBOXES (263 ports), which is the only
+  - the watched theatres in config.WATCHED_WATERS (263 ports), which is the only
     water where a ship-to-ship candidate can arise at all.
 
 The second half is not redundant: 90 ports sit in watched water and in no
@@ -210,8 +210,14 @@ def region_for(lat: float, lon: float) -> str | None:
 
 
 def in_ais_watch(lat: float, lon: float) -> bool:
-    """Inside the water this map actually receives AIS from (config.AIS_BBOXES)."""
-    return any(_in_box(lat, lon, box) for box in config.AIS_BBOXES)
+    """Inside the watched theatres (config.WATCHED_WATERS).
+
+    Not config.AIS_BBOXES, which is the whole planet since 2026-08-08. What this
+    clip is for is the ship-to-ship exclusion list, and that detector only ever
+    runs inside the watched waters -- so a global port list would be 2,951 rows
+    carried to exclude candidates that cannot arise.
+    """
+    return any(_in_box(lat, lon, box) for box in config.WATCHED_WATERS)
 
 
 def parse_ports(payload: dict) -> list[dict]:
