@@ -30,6 +30,8 @@ import { borderStats, sanitizeRing, MAX_TOTAL_POINTS } from "../settings/borderO
 import { setIconTheme } from "../map/iconTheme";
 
 const STORAGE_KEY = "osint-admin-settings";
+// When STORAGE_KEY was last written, in ms. See localIsNewerThan below.
+const STAMP_KEY = "osint-admin-settings-at";
 const ADMIN_KEY = "osint-admin-mode";
 const CONFIG_URL = "/api/admin-config";
 
@@ -51,10 +53,39 @@ function loadSettings() {
 function saveSettings(settings) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    // Written every time the cache is, and read once at startup to decide
+    // whether the server's copy is actually newer than this one. See
+    // localIsNewerThan below for what goes wrong without it.
+    localStorage.setItem(STAMP_KEY, String(Date.now()));
   } catch {
     // Private mode or a full quota: the settings still apply for this session,
     // they just will not be remembered.
   }
+}
+
+/**
+ * Is the local cache newer than the copy the server is offering?
+ *
+ * "Whatever the server holds wins" was too strong, and the way it failed was
+ * silent and infuriating: untick a layer, refresh inside the save debounce, and
+ * the change is not merely lost -- the stale server copy replaces the good local
+ * one *and* overwrites the cache with it, so the layer ticks itself back on and
+ * stays on. The setting was written correctly and then actively undone.
+ *
+ * The rule is now "whatever is newer wins", which is what the original intent
+ * ("open the map on another browser and it comes up configured") actually needs.
+ * A server copy saved after this browser last wrote still wins; one saved before
+ * it does not, and the local copy is pushed up instead.
+ *
+ * `saved_at` is unix seconds, the stamp is milliseconds, and the comparison is
+ * given a second of slack so the rounding cannot make an equal pair look like a
+ * local win and start a pointless write on every cold start.
+ */
+function localIsNewerThan(serverSavedAt) {
+  if (!Number.isFinite(serverSavedAt)) return false;
+  const stamp = Number(localStorage.getItem(STAMP_KEY));
+  if (!Number.isFinite(stamp) || stamp <= 0) return false;
+  return stamp > (serverSavedAt + 1) * 1000;
 }
 
 export function useAppSettings() {
@@ -129,10 +160,20 @@ export function useAppSettings() {
         // not a reason to throw away a local configuration made offline -- the
         // next change saves it up to the server anyway.
         const hasStored = body.config && Object.keys(body.config).length > 0;
-        if (hasStored && !dirtyRef.current) {
+        // The third condition is the one that was missing. A change made just
+        // before a refresh is written to localStorage immediately but reaches
+        // the server on a 700ms debounce, so a quick reload finds the server
+        // holding the *previous* configuration -- and without this it wins,
+        // replaces the good local copy and overwrites the cache with itself.
+        // That is what made an unticked layer tick itself back on.
+        if (hasStored && !dirtyRef.current && !localIsNewerThan(body.saved_at)) {
           const merged = mergeSettings(body.config);
           setSettings(merged);
           saveSettings(merged); // keep the local cache in step for the next cold start
+        } else if (hasStored && localIsNewerThan(body.saved_at)) {
+          // This browser has the newer copy, so it owes the server one. Marking
+          // it dirty is what makes the save effect below fire on loadTick.
+          dirtyRef.current = true;
         }
         setSync({ state: "saved", savedAt: body.saved_at ?? null, detail: null });
         setLoadTick((n) => n + 1);
@@ -174,9 +215,24 @@ export function useAppSettings() {
         if (!cancelled) setSync({ state: "error", savedAt: null, detail: err.message });
       }
     }, SAVE_DEBOUNCE_MS);
+    // A refresh inside the debounce window would otherwise drop this write
+    // entirely. `pagehide` is the last event that reliably fires on a navigation
+    // away (including a phone backgrounding the tab, where `beforeunload` does
+    // not), and sendBeacon is the one way to get a request out of a document
+    // that is being torn down -- a normal fetch is cancelled with the page.
+    //
+    // Fire-and-forget by construction: there is no response to read and nothing
+    // left to update if there were. The reconciliation above is what covers the
+    // case where even this does not make it out.
+    const flush = () => {
+      if (!navigator.sendBeacon) return;
+      navigator.sendBeacon(CONFIG_URL, new Blob([JSON.stringify(settings)], { type: "application/json" }));
+    };
+    window.addEventListener("pagehide", flush);
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      window.removeEventListener("pagehide", flush);
     };
   }, [settings, loadTick]);
 
@@ -191,9 +247,12 @@ export function useAppSettings() {
       scale: settings.icons.scale,
       colors: settings.icons.colors,
       sizes: settings.icons.sizes,
+      zooms: settings.icons.zooms,
       layers: settings.layers,
+      stack: settings.layerStack,
+      stackFadeFloor: settings.ui.stackFadeFloor,
     });
-  }, [settings.icons, settings.layers]);
+  }, [settings.icons, settings.layers, settings.layerStack, settings.ui.stackFadeFloor]);
 
   // UI settings reach the stylesheet as custom properties on <html>, which is
   // the only way a CSS file can be driven from JS state without restating every
@@ -255,6 +314,21 @@ export function useAppSettings() {
     [update]
   );
 
+  /** One kind of pin's own minimum zoom. Null hands it back to its layer's gate. */
+  const setTokenZoom = useCallback(
+    (token, value) =>
+      update((prev) => ({
+        ...prev,
+        icons: { ...prev.icons, zooms: { ...prev.icons.zooms, [token]: value } },
+      })),
+    [update]
+  );
+
+  const resetZooms = useCallback(
+    () => update((prev) => ({ ...prev, icons: { ...prev.icons, zooms: defaultSettings().icons.zooms } })),
+    [update]
+  );
+
   const setLayerStyle = useCallback(
     (key, patch) =>
       update((prev) => ({
@@ -264,8 +338,64 @@ export function useAppSettings() {
     [update]
   );
 
+  /**
+   * A layer checkbox in the control drawer, remembered.
+   *
+   * The drawer only exists in Admin Mode, so every toggle that reaches here is
+   * an operator's standing decision rather than a reader's glance -- which is
+   * what makes storing it in the shared configuration the right thing rather
+   * than an overreach. `visible === null` forgets the decision and hands the
+   * layer back to the scene resolver.
+   */
+  const setLayerWish = useCallback(
+    (key, visible) =>
+      update((prev) => {
+        const next = { ...prev.layerWish };
+        if (visible === null || visible === undefined) delete next[key];
+        else next[key] = visible;
+        return { ...prev, layerWish: next };
+      }),
+    [update]
+  );
+
+  /**
+   * Move one layer up or down its group in the stack.
+   *
+   * `delta` rather than a target index: the panel offers two arrows per row, and
+   * an index would make the caller responsible for a bounds check it is in no
+   * position to do -- the group's length lives here.
+   */
+  const moveLayerInStack = useCallback(
+    (group, key, delta) =>
+      update((prev) => {
+        const order = prev.layerStack[group];
+        const from = order.indexOf(key);
+        const to = from + delta;
+        if (from < 0 || to < 0 || to >= order.length) return prev;
+        const next = [...order];
+        next.splice(to, 0, next.splice(from, 1)[0]);
+        return { ...prev, layerStack: { ...prev.layerStack, [group]: next } };
+      }),
+    [update]
+  );
+
+  const resetLayerStack = useCallback(
+    () => update((prev) => ({ ...prev, layerStack: defaultSettings().layerStack })),
+    [update]
+  );
+
+  const clearLayerWishes = useCallback(
+    () => update((prev) => (Object.keys(prev.layerWish).length ? { ...prev, layerWish: {} } : prev)),
+    [update]
+  );
+
   const setUi = useCallback(
     (patch) => update((prev) => ({ ...prev, ui: { ...prev.ui, ...patch } })),
+    [update]
+  );
+
+  const setCityZones = useCallback(
+    (patch) => update((prev) => ({ ...prev, cityZones: { ...prev.cityZones, ...patch } })),
     [update]
   );
 
@@ -443,13 +573,17 @@ export function useAppSettings() {
 
   const actions = useMemo(
     () => ({
-      setIconScale, setColor, resetColors, setTokenSize, resetSizes, setLayerStyle, setUi,
+      setIconScale, setColor, resetColors, setTokenSize, resetSizes,
+      setTokenZoom, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
+      moveLayerInStack, resetLayerStack, setUi, setCityZones,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,
     }),
     [
-      setIconScale, setColor, resetColors, setTokenSize, resetSizes, setLayerStyle, setUi,
+      setIconScale, setColor, resetColors, setTokenSize, resetSizes,
+      setTokenZoom, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
+      moveLayerInStack, resetLayerStack, setUi, setCityZones,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,

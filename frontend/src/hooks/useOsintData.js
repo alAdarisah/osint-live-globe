@@ -9,9 +9,11 @@
 // -- the news broadcast panel and the "Choose Conflict Zone" activity
 // ranking need them reactively, and both payloads are small, bounded
 // (days-wide) windows, not the FIRMS/cities scale this comment warns about.
-import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchJson, urlForRegion } from "../api";
-import { OSM_INFRA_MIN_ZOOM, GFW_DETECTIONS_MIN_ZOOM } from "../map/createMapController";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { fetchJson, urlForRegion, urlWithBbox, urlWithQuery } from "../api";
+import {
+  resolveScene, fetchZoomFor, isScoped, sourceQueryFor, bboxSnapDegrees, bandFor,
+} from "../map/scene";
 
 const BOOT_SOURCES = [
   { key: "countries", label: "Country boundaries" },
@@ -40,7 +42,38 @@ const POLL_CONFIG = [
   { key: "countries", url: "/api/countries", intervalMs: 5 * 60000 },
   { key: "cities", url: "/api/cities", intervalMs: 5 * 60000 },
   { key: "ais", url: "/api/ships", intervalMs: 10000 },
-  { key: "adsb", url: "/api/aircraft", intervalMs: 20000 },
+  // Aircraft, and the biggest single payload the frontend takes: ~6.6 MB of
+  // roughly seventeen thousand airframes.
+  //
+  // Be careful about what this interval does and does not cost, because the
+  // obvious arithmetic is wrong. Twenty seconds against 6.6 MB looks like
+  // ~1.2 GB an hour, and it is not: backend/config.py refreshes ADS-B every
+  // 120s (ADSB_POLL_INTERVAL_AUTH; 900s unauthenticated), and fetchJson sends
+  // If-None-Match, so every poll between two refreshes 304s at zero bytes.
+  // Measured against the running backend: four consecutive 304s, then one
+  // 6,582,858-byte 200. The bytes are set by the server's refresh rate, and a
+  // client polling slower than that rate cannot save any of them -- it can only
+  // arrive later. So this pacing buys round-trips, not megabytes: 180 requests
+  // an hour down to 60 while the reader is zoomed out. Real, and small.
+  //
+  // Worth having anyway, because above COUNTRY band almost none of the payload
+  // can be drawn: civilian traffic is gated at zoom 9, leaving the military,
+  // flagged and emergency buckets, which are hundreds of aircraft moving
+  // imperceptibly at that scale. Checking three times a minute for a change
+  // nobody could see is work with no reader behind it.
+  //
+  // What would actually cut the megabytes is making each body smaller rather
+  // than asking for it less often -- a class filter or a viewport bbox on the
+  // endpoint. Neither exists yet; the feed cannot simply be gated off, because
+  // the country card counts military aircraft inside a country bbox (see
+  // FETCH_ALWAYS_BECAUSE in map/scene.js).
+  //
+  // One cost, stated rather than hidden: trails accumulate one point per poll,
+  // and military aircraft *are* drawn at world zoom. At 60 seconds a cruising
+  // airframe lays a point every ~15 km -- sub-pixel where it is recorded, but a
+  // visibly coarser segment if the reader later zooms in on that track, and a
+  // hole in a track can never be refilled.
+  { key: "adsb", url: "/api/aircraft", intervalMs: 20000, intervalByBand: { WORLD: 60000, THEATRE: 60000 } },
   { key: "jamming", url: "/api/jamming", intervalMs: 30 * 60000 }, // gpsjam.org itself only updates once/day
   // Earthquakes and volcanic activity. Paced to the faster of its two inputs:
   // USGS refreshes every ~5 minutes and a felt earthquake is the kind of thing
@@ -69,12 +102,12 @@ const POLL_CONFIG = [
   // theatres and browser-cached for an hour, so the interval is only about
   // picking up a new sweep, not about freshness.
   //
-  // `minZoom` defers the fetch itself, not just the drawing: this layer is on by
-  // default but never drawn above OSM_INFRA_MIN_ZOOM, so on a session that stays
-  // at world zoom the megabytes were being fetched, parsed and handed to the map
-  // purely to be filtered back out. Nothing else here is gated -- every other
-  // source is either small or feeds a panel that reads it at any zoom.
-  { key: "osmInfra", url: "/api/osm-infrastructure", intervalMs: 30 * 60000, minZoom: OSM_INFRA_MIN_ZOOM },
+  // The fetch gate that used to be declared here now lives in map/scene.js,
+  // together with the drawing gate it has to agree with -- and it is no longer
+  // the exception it was. Every source below is gated by the same table, so a
+  // world-zoom session no longer fetches megabytes of geometry purely to filter
+  // them back out.
+  { key: "osmInfra", url: "/api/osm-infrastructure", intervalMs: 30 * 60000 },
   { key: "satellites", url: "/api/satellites", intervalMs: 10000 }, // position, not elements -- see backend/sources/satellites.py
   { key: "conflictStats", url: "/api/conflict-stats", intervalMs: 60 * 60000 }, // HDX file itself only changes weekly -- see backend/sources/hdx_conflict_stats.py
   // Server-side aggregate over a week of history (backend/escalation.py),
@@ -99,12 +132,10 @@ const POLL_CONFIG = [
   // is only about a long-lived tab noticing a new batch. Most of these return
   // 304 on the ETag.
   { key: "gfwGaps", url: "/api/gfw-gaps", intervalMs: 60 * 60000 },
-  // Radar and optical vessel detections, same six-hour server cadence -- but the
-  // only one of these eight large enough to earn osmInfra's fetch gate above.
+  // Radar and optical vessel detections, same six-hour server cadence.
   // Detections cluster inside the AIS watch boxes, so the payload is far denser
-  // than its row count suggests, and below GFW_DETECTIONS_MIN_ZOOM it would be
-  // fetched and parsed purely to be filtered back out.
-  { key: "gfwDetections", url: "/api/gfw-detections", intervalMs: 60 * 60000, minZoom: GFW_DETECTIONS_MIN_ZOOM },
+  // than its row count suggests -- see its scene.js entry for the gate.
+  { key: "gfwDetections", url: "/api/gfw-detections", intervalMs: 60 * 60000 },
   // EASA conflict-zone bulletins. Refetched twice a day server-side; an hour is
   // the finest resolution the server can honestly offer, and a newly issued
   // bulletin is the kind of thing worth arriving inside the hour.
@@ -135,14 +166,17 @@ const POLL_CONFIG = [
  *   the panels can never be looking at differently-edited copies of one feed
  *   (see settings/applyOverrides.js).
  * @param zoom        the map's current zoom, or null before the map reports one.
- *   Read only by the POLL_CONFIG `minZoom` gate below -- this hook still knows
- *   nothing about Leaflet, just about how deep the reader has gone.
+ *   Read only by the fetch gate below -- this hook still knows nothing about
+ *   Leaflet, just about how deep the reader has gone.
  * @param zoomOverrides Admin Mode's per-layer zoom gates, the same object the
  *   map controller is given (see setLayerZoomOverrides in App.jsx). Honoured
  *   here too, so lowering a gate in the admin panel actually fetches the layer
  *   at the zoom it now claims to draw at.
+ * @param focus       what the reader has clicked, or null. A focused country is
+ *   a request for that country's whole picture, so map/scene.js lifts the fetch
+ *   gate on its feeds however far out the camera happens to be.
  */
-export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoomOverrides }) {
+export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoomOverrides, focus = null, mapBounds = null }) {
   const [regions, setRegions] = useState({});
   const [currentRegionKey, setCurrentRegionKey] = useState(null); // null == world/unscoped
   const [currentRegionLabel, setCurrentRegionLabel] = useState("World");
@@ -207,13 +241,95 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
   const zoomOverridesRef = useRef(zoomOverrides);
   zoomOverridesRef.current = zoomOverrides;
 
-  // The zoom a gated source starts fetching at: Admin Mode's override for that
-  // layer when it has one, the shipped gate otherwise. Mirrors minZoomFor in
-  // createMapController.js, which decides the same thing for the drawing.
-  const gateFor = useCallback((key, shipped) => {
-    const override = zoomOverridesRef.current?.[key];
-    return Number.isFinite(override) ? override : shipped;
-  }, []);
+  // What the reader has clicked, read inside tick() for the same reason zoom is.
+  // A focused country is a request for that country's whole picture, so the
+  // resolver lifts the fetch gate on its feeds however far out the camera is.
+  const focusRef = useRef(focus);
+  focusRef.current = focus;
+
+  /**
+   * The zoom a source starts fetching at: null for "always", Infinity for
+   * "never without an explicit request", a number otherwise.
+   *
+   * Resolved by map/scene.js, which is the same table minZoomFor in
+   * createMapController.js reads for the *drawing*. That is the whole point of
+   * the table: a source whose drawing is gated on a zoom has its fetch gated on
+   * the same number, and the two used to be separate constants that had to be
+   * kept in step by hand.
+   */
+  const sceneNow = useCallback(
+    () =>
+      resolveScene({
+        zoom: zoomRef.current ?? 3,
+        focus: focusRef.current,
+        overrides: zoomOverridesRef.current || {},
+      }),
+    []
+  );
+
+  const gateFor = useCallback((key) => fetchZoomFor(sceneNow(), key), [sceneNow]);
+
+  /**
+   * The extra query a source asks for at this zoom, or null.
+   *
+   * Resolved from the same table as the gates (see sourceQueryFor in
+   * map/scene.js), and read in two places that have to agree: the URL a poller
+   * fetches, and the scope signature below that decides whether a held payload
+   * is still the right one. If only the first knew about it, a reader zooming
+   * out would keep serving the payload they fetched on the way in.
+   */
+  const sourceQuery = useCallback(
+    (key) => sourceQueryFor(key, sceneNow(), zoomRef.current ?? 3),
+    [sceneNow]
+  );
+
+  /**
+   * The viewport as a snapped "south,west,north,east" string, or null.
+   *
+   * Snapped, and that is the whole design. An exact viewport would mint a new
+   * URL -- and so a new ETag and a full download -- on every pixel of pan,
+   * which would be strictly worse than shipping the payload whole. Rounded to a
+   * grid, ordinary panning stays inside one cell and re-requests nothing; the
+   * grid shrinks with the band because the question gets more local. This is
+   * the same trade /api/wind has always made with _WIND_CACHE_GRID_DEG.
+   *
+   * Padded by 25% first, matching the margin every renderer already filters
+   * against (`map.getBounds().pad(0.25)`), so a pin just off-screen is in hand
+   * before the reader pans onto it.
+   *
+   * Under a country focus the box is that country's bounds rather than the
+   * camera's: focusing a country is a request for its whole picture, and
+   * clipping to the viewport would leave the parts they have not scrolled to
+   * missing from a card that claims to describe the country.
+   */
+  const bboxCell = useMemo(() => {
+    if (focus?.kind === "country" && focus.bounds) {
+      const [s, w, n, e] = focus.bounds;
+      return `${s.toFixed(2)},${w.toFixed(2)},${n.toFixed(2)},${e.toFixed(2)}`;
+    }
+    const b = mapBounds;
+    if (!b) return null;
+    const snap = bboxSnapDegrees(bandFor(zoom ?? 3));
+    const padLat = (b.north - b.south) * 0.25;
+    const padLon = (b.east - b.west) * 0.25;
+    const south = Math.max(-90, Math.floor((b.south - padLat) / snap) * snap);
+    const north = Math.min(90, Math.ceil((b.north + padLat) / snap) * snap);
+    const west = Math.max(-180, Math.floor((b.west - padLon) / snap) * snap);
+    const east = Math.min(180, Math.ceil((b.east + padLon) / snap) * snap);
+    // A box covering essentially everything is not worth sending: it clips
+    // nothing, and every distinct bbox string is its own cache entry on both
+    // sides. Better one shared unscoped URL than a private full-world one.
+    if (south <= -90 && north >= 90 && west <= -180 && east >= 180) return null;
+    // west > east would be a box across the antimeridian, which the backend
+    // refuses (see regions.parse_bbox) -- so it is not sent at all.
+    if (west > east || south > north) return null;
+    return `${south},${west},${north},${east}`;
+  }, [mapBounds, zoom, focus]);
+
+  // The pollers are registered once and read this through a ref, the same way
+  // they read the region and the zoom.
+  const bboxCellRef = useRef(bboxCell);
+  bboxCellRef.current = bboxCell;
 
   // The last payload each source delivered, exactly as the server sent it.
   // Holding it costs nothing extra -- the map controller keeps the same objects
@@ -226,33 +342,91 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
   const reapplyTransformRef = useRef(() => {});
   const reapplyTransform = useCallback((keys) => reapplyTransformRef.current(keys), []);
 
+  /**
+   * What scope each source's held payload was fetched under.
+   *
+   * The URL a poller asks for is a function of more than the endpoint: the
+   * region key becomes a query parameter, and a country focus will scope it
+   * further still. So "have we fetched this" is the wrong question and always
+   * was -- "have we fetched this for the scope we are now in" is the right one,
+   * and it is the difference between showing Ukraine's infrastructure and
+   * showing Sudan's under Ukraine's camera.
+   */
+  const fetchedScopeRef = useRef({});
+  const scopeSignatureRef = useRef(() => "");
+  // Per-source, because the last term is: two sources can be under the same
+  // region, focus and viewport and still be asking for different things (see
+  // sourceQuery above). Generic rather than special-cased on "adsb", so a
+  // future per-source parameter joins the signature by existing rather than by
+  // someone remembering to add it here.
+  scopeSignatureRef.current = (key) =>
+    `${currentRegionKey ?? "world"}|${focus?.kind === "country" ? focus.key : ""}` +
+    `|${bboxCell ?? ""}|${sourceQuery(key) ?? ""}`;
+
   useEffect(() => {
     let cancelled = false;
     const timeouts = [];
 
+    // "deferred" is terminal for the boot screen but not for the source: a
+    // deferred source that later gets deep enough to fetch upgrades to ok/warn,
+    // which is why both statuses are accepted here as a starting point.
+    const UNRESOLVED = new Set(["pending", "deferred"]);
+
     function markSourceLoaded(key, ok) {
       setBootSources((prev) =>
-        prev.map((s) => (s.key === key && s.status === "pending" ? { ...s, status: ok ? "ok" : "warn" } : s))
+        prev.map((s) => (s.key === key && UNRESOLVED.has(s.status) ? { ...s, status: ok ? "ok" : "warn" } : s))
       );
     }
 
-    function registerPoller(key, url, intervalMs, minZoom, onSuccess) {
+    function markSourceDeferred(key) {
+      setBootSources((prev) =>
+        prev.map((s) => (s.key === key && s.status === "pending" ? { ...s, status: "deferred" } : s))
+      );
+    }
+
+    function registerPoller(key, url, intervalMs, intervalByBand, onSuccess) {
       let timer = null;
-      let firstLoadReported = false;
+      // Read at schedule time rather than closed over at registration, which is
+      // what makes the cadence follow the camera: a source whose table names
+      // the band the reader has just left is at most one interval behind, and
+      // the band-change effect below closes even that gap on the way in.
+      const intervalNow = () =>
+        (intervalByBand && intervalByBand[bandFor(zoomRef.current ?? 3)]) || intervalMs;
+      // Two flags, because they answer two different questions. `bootReported`
+      // is whether the boot screen has been told anything about this source at
+      // all, and a deferral counts. `firstFetchDone` is whether a real network
+      // attempt has ever completed, which is what the backgrounded-tab guard
+      // below needs -- a source that was only ever deferred has still never
+      // fetched, and must not be treated as though it had.
+      let bootReported = false;
+      let firstFetchDone = false;
       async function tick() {
         if (timer) clearTimeout(timer);
-        if (minZoom != null) {
+        const gate = gateFor(key);
+        if (gate != null) {
           const zoomNow = zoomRef.current;
-          if (zoomNow == null || zoomNow < gateFor(key, minZoom)) {
-            // Above the gate this source is not drawn at all, so fetching it
+          if (zoomNow == null || zoomNow < gate) {
+            // Below the gate this source is not drawn at all, so fetching it
             // would be work nobody can see. Kept on the interval rather than
-            // dropped: the zoom effect below fires the moment the reader gets
+            // dropped: the scope effect below fires the moment the reader gets
             // deep enough, so this timer is only the fallback.
-            timer = setTimeout(tick, intervalMs);
+            //
+            // A boot source that is deferred has to say so rather than stay
+            // pending. LoadingScreen waits for every one of its sources to
+            // resolve, and the "first load always goes through" guard below
+            // covers a backgrounded tab, not a zoom gate -- so without this a
+            // gated boot source (cities is one, and the map opens at zoom 3)
+            // would leave the boot screen waiting forever for a fetch that is
+            // correctly not happening.
+            if (!bootReported) {
+              bootReported = true;
+              markSourceDeferred(key);
+            }
+            timer = setTimeout(tick, intervalNow());
             return;
           }
         }
-        if (document.hidden && firstLoadReported) {
+        if (document.hidden && firstFetchDone) {
           // Nobody's looking at a backgrounded tab -- skip the network
           // round-trip and just re-check next interval. The visibilitychange
           // listener below calls refetchAllNow() the instant the tab comes
@@ -260,28 +434,41 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
           // it can't be seen. The very first load always goes through even
           // if the tab happens to start backgrounded, so the boot screen
           // can't hang waiting for data that never arrives.
-          timer = setTimeout(tick, intervalMs);
+          timer = setTimeout(tick, intervalNow());
           return;
         }
         try {
-          const fetched = await fetchJson(urlForRegion(url, currentRegionKeyRef.current));
+          // Captured before the await, so the signature recorded below is the
+          // one this request was actually made under rather than whatever the
+          // reader has moved to while it was in flight.
+          const signature = scopeSignatureRef.current(key);
+          const regionUrl = urlForRegion(url, currentRegionKeyRef.current);
+          const scopedUrl = urlWithQuery(
+            isScoped(key) ? urlWithBbox(regionUrl, bboxCellRef.current) : regionUrl,
+            sourceQuery(key)
+          );
+          const fetched = await fetchJson(scopedUrl);
           if (cancelled) return;
           fetchedRef.current[key] = fetched;
+          fetchedScopeRef.current[key] = signature;
           const data = transformRef.current ? transformRef.current(key, fetched) : fetched;
           onSuccess?.(data);
           onDataRef.current(key, data);
-          if (!firstLoadReported) {
-            firstLoadReported = true;
-            markSourceLoaded(key, true);
-          }
+          firstFetchDone = true;
+          bootReported = true;
+          // Unconditional: markSourceLoaded only touches rows still pending or
+          // deferred, so this upgrades a deferred source once it really loads
+          // and is a no-op on every poll after that.
+          markSourceLoaded(key, true);
         } catch (err) {
           console.warn(`Failed to fetch ${key}:`, err);
-          if (!firstLoadReported) {
-            firstLoadReported = true;
+          firstFetchDone = true;
+          if (!bootReported) {
+            bootReported = true;
             markSourceLoaded(key, false);
           }
         } finally {
-          if (!cancelled) timer = setTimeout(tick, intervalMs);
+          if (!cancelled) timer = setTimeout(tick, intervalNow());
         }
       }
       timeouts.push(() => clearTimeout(timer));
@@ -298,7 +485,7 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
         setConflictHistoryAsOf((rows && rows.length && rows[0].as_of) || null),
     };
     for (const src of POLL_CONFIG) {
-      registerPoller(src.key, src.url, src.intervalMs, src.minZoom ?? null, REACTIVE_SETTERS[src.key]);
+      registerPoller(src.key, src.url, src.intervalMs, src.intervalByBand, REACTIVE_SETTERS[src.key]);
     }
 
     // Defined inside the effect so it can see REACTIVE_SETTERS, and reached
@@ -371,20 +558,58 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // A gated source's first fetch, the moment the reader is deep enough for it
-  // to be drawn -- without this it would wait out the rest of its interval
-  // (half an hour, for osmInfra) staring at data it is now allowed to have.
-  // Only the first: once fetched, the source is back on its normal cadence and
-  // re-fetching on every zoom step past the gate would be pointless traffic.
+  // A gated source's fetch, the moment the reader is deep enough for it to be
+  // drawn -- without this it would wait out the rest of its interval (half an
+  // hour, for osmInfra) staring at data it is now allowed to have.
+  //
+  // The guard used to be "has this source ever fetched", which was wrong in a
+  // way nothing surfaced: a source fetched once over Sudan and then viewed over
+  // Ukraine kept serving Sudan's payload forever, because its region-scoped URL
+  // had changed but the guard only asked whether *something* had arrived. It
+  // now compares a signature of everything that changes what the answer should
+  // be, so a scope change re-ticks and a mere zoom step inside the same scope
+  // does not.
+  //
+  // Debounced by the same 500ms the wind fetch uses: a scroll-wheel zoom
+  // crosses several gates in one gesture, and each crossing would otherwise
+  // fire its own round of catch-up fetches mid-flick.
+  //
+  // The same pass also re-ticks the band-paced sources on a band change, which
+  // is the other half of intervalByBand: a reader zooming in from world band
+  // would otherwise wait out the remainder of a sixty-second timer before the
+  // aircraft they came to look at refreshed. Re-invoking the ticker is safe
+  // because tick() clears its own pending timer first, so this replaces the
+  // slow timer rather than racing it.
+  const lastPollBandRef = useRef(null);
   useEffect(() => {
-    if (zoom == null) return;
-    for (const src of POLL_CONFIG) {
-      if (src.minZoom == null) continue;
-      if (zoom < gateFor(src.key, src.minZoom)) continue;
-      if (fetchedRef.current[src.key] !== undefined) continue;
-      tickersRef.current.get(src.key)?.();
-    }
-  }, [zoom, zoomOverrides, gateFor]);
+    if (zoom == null) return undefined;
+    const timer = setTimeout(() => {
+      const band = bandFor(zoom);
+      // Null on the very first pass, when the pollers have only just started
+      // and re-ticking every one of them would double the boot round-trips.
+      const bandChanged = lastPollBandRef.current != null && lastPollBandRef.current !== band;
+      lastPollBandRef.current = band;
+      for (const src of POLL_CONFIG) {
+        const gate = gateFor(src.key);
+        // Infinity is "never without an explicit request"; null is "always
+        // allowed", which is emphatically not a reason to skip -- focusing a
+        // country is what turns a gate into null, and a source on a six-hour
+        // interval would otherwise sit on another country's payload until
+        // tomorrow.
+        if (gate === Infinity) continue;
+        if (gate != null && zoom < gate) continue;
+        // Before the signature check, not after: the cadence changed even if
+        // nothing about the URL did, and that is the whole point of the branch.
+        if (src.intervalByBand && bandChanged) {
+          tickersRef.current.get(src.key)?.();
+          continue;
+        }
+        if (fetchedScopeRef.current[src.key] === scopeSignatureRef.current(src.key)) continue;
+        tickersRef.current.get(src.key)?.();
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [zoom, zoomOverrides, focus, bboxCell, gateFor]);
 
   const selectRegion = useCallback(
     (key) => {

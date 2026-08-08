@@ -4,9 +4,20 @@ asyncpg==0.31.0
 apscheduler==3.11.0
 redis==5.2.1
 httpx==0.27.2
-websockets==13.1
+# 15.x for connect(proxy=...) -- 13.1 had no proxy support at all, and the AIS
+# stream needs a named egress per attempt (see backend/proxypool.py). The 14.0
+# switch to the new asyncio client comes with it; ais.py uses only connect/
+# send/recv/ConnectionClosed, which are the same on both.
+websockets==15.0.1
+# What websockets calls for socks5:// and socks4:// proxy URLs. Not needed for
+# http:// ones, which it tunnels with CONNECT itself.
+python-socks==2.8.2
 python-dotenv==1.0.1
 h3==4.5.0
 skyfield==1.49
 openpyxl==3.1.5
+# Prometheus exposition for /metrics (see backend/metrics.py). No transitive
+# dependencies, and nothing outside metrics.py and the two counter call sites
+# in cachestore.py imports it.
+prometheus-client==0.21.1
 pytest==8.3.3

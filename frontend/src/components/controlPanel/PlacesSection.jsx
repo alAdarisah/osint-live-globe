@@ -3,10 +3,11 @@ import { CAPITAL_TIER, CITY_COLOR, CITY_TIERS } from "../../map/decorators";
 import { CHOROPLETH_METRICS, metricById, rampSwatches } from "../../map/choropleth";
 import { DISTRICT_METRICS, DISTRICT_COUNTRIES } from "../../map/districts";
 import LayerIcon from "./LayerIcon";
+import LayerCheck from "./LayerCheck";
 import { LayerDetails } from "./Collapsible";
 
 export default function PlacesSection({
-  counts, zoomNotes, layerVisibility, onToggleLayer,
+  counts, zoomNotes, layerVisibility, layerWish, onToggleLayer,
   choropleth = { metricId: null, covered: 0, total: 0 }, onChoroplethChange,
   districts = { metricId: "fatalities", month: null, districts: 0 },
   districtMonths = [], onDistrictMetricChange, onDistrictMonthChange,
@@ -18,11 +19,12 @@ export default function PlacesSection({
     <>
       <h2>Places</h2>
       <label className="layer-row" data-layer="countries">
-        <input
-          type="checkbox"
-          checked={layerVisibility.countries}
-          onChange={(e) => onToggleLayer("countries", e.target.checked)}
-        />
+        <LayerCheck
+            layerKey="countries"
+            on={layerVisibility.countries}
+            wish={layerWish?.countries}
+            onToggle={onToggleLayer}
+          />
         <LayerIcon svg={SVG.globe} color="#6fe3ff" /> Countries
         <span className="count">{counts.countries} ({counts.countriesTotal})</span>
       </label>
@@ -73,10 +75,11 @@ export default function PlacesSection({
           24-month monthly archive. One control with two incompatible clocks
           would be a mode flag pretending to be a timeline. */}
       <label className="layer-row" data-layer="districts">
-        <input
-          type="checkbox"
-          checked={!!layerVisibility.districts}
-          onChange={(e) => onToggleLayer("districts", e.target.checked)}
+        <LayerCheck
+          layerKey="districts"
+          on={!!layerVisibility.districts}
+          wish={layerWish?.districts}
+          onToggle={onToggleLayer}
         />
         <LayerIcon svg={SVG.globe} color="#c026d3" token="choropleth.high" /> Districts &mdash; conflict record
         <span className="count">{districts.districts}</span>
@@ -132,11 +135,12 @@ export default function PlacesSection({
       )}
 
       <label className="layer-row" data-layer="cities">
-        <input
-          type="checkbox"
-          checked={layerVisibility.cities}
-          onChange={(e) => onToggleLayer("cities", e.target.checked)}
-        />
+        <LayerCheck
+            layerKey="cities"
+            on={layerVisibility.cities}
+            wish={layerWish?.cities}
+            onToggle={onToggleLayer}
+          />
         <LayerIcon svg={SVG.city} color={CITY_COLOR} /> Cities (100k+)
         <span className="count">{counts.cities} ({counts.citiesTotal})</span>
       </label>

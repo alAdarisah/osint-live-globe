@@ -1,0 +1,23 @@
+# Grafana reads this at startup, so the Prometheus datasource exists before
+# anyone logs in and no one has to click through "Add data source".
+#
+# The uid is pinned rather than generated: the provisioned dashboard refers to
+# the datasource by uid, and a generated one would differ on every fresh volume.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: osint-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    # Must match (or exceed) the scrape_interval in
+    # monitoring/prometheus/prometheus.yml. Grafana derives $__rate_interval
+    # from it, and a value below the real scrape interval produces rate()
+    # windows with too few samples, which draw as gaps.
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+    editable: false

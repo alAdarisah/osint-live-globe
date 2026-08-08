@@ -16,11 +16,29 @@ import { paletteColor } from "./iconTheme";
 // severityColor() below rather than off `.color` -- reading the field directly
 // is what would put the map's pins and a panel's chips back out of step, which
 // is the exact drift this module was created to end.
+// One hue, four lightnesses. This ramp used to run red -> orange -> yellow, and
+// that was a real cost paid for a real gain: four bands are easier to tell apart
+// across a hue sweep than down a single hue. What it bought was not worth what
+// it spent, because the two colours it borrowed both mean something else on this
+// map -- orange is what a regulator's airspace warning is drawn in, and yellow
+// is a navy hull. A reader glancing at an amber pin had no way to know whether
+// they were looking at a moderate incident, a warning or a warship.
+//
+// So violence is red, always, and severity is carried by how bright the red is.
+// The distinction survives because colour was never carrying it alone: the pin
+// is also sized 13-31px from the same score (see eventIconSize), and the band
+// cap at world zoom already keeps the most severe first. Colour now answers
+// "what kind of thing is this" before it answers "how bad", which is the order a
+// reader actually asks them in.
+//
+// Not a darkening ramp into black: #7f1d1d is the floor because anything below
+// it stops being separable from the dark basemap, and a low-severity event that
+// cannot be seen at all is a different editorial act from one drawn quietly.
 export const SEVERITY_BANDS = [
   { min: 75, key: "critical", label: "Critical", color: "#ff1a1a", token: "severity.critical" },
-  { min: 55, key: "high", label: "High", color: "#ff5c2a", token: "severity.high" },
-  { min: 40, key: "moderate", label: "Moderate", color: "#ff9500", token: "severity.moderate" },
-  { min: 0, key: "low", label: "Low", color: "#ffd11a", token: "severity.low" },
+  { min: 55, key: "high", label: "High", color: "#e03131", token: "severity.high" },
+  { min: 40, key: "moderate", label: "Moderate", color: "#b02525", token: "severity.moderate" },
+  { min: 0, key: "low", label: "Low", color: "#7f1d1d", token: "severity.low" },
 ];
 
 // Corroboration keeps its own colour: "independently confirmed" is a different

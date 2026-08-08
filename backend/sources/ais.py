@@ -6,7 +6,7 @@ import time
 
 import websockets
 
-from backend import config, storage
+from backend import config, proxypool, storage
 from backend.cache import registry
 from backend.sources import maritime_watchlists, sanctions
 
@@ -251,7 +251,18 @@ class StreamRefused(Exception):
     """Closed on before a single frame -- the subscription was never accepted."""
 
 
-async def _consume(state):
+class EgressUnusable(Exception):
+    """A proxy never got us as far as aisstream.
+
+    Kept apart from every other failure here because it is not a fact about
+    aisstream and must not be recorded as one: most entries in a free proxy list
+    are dead, and finding that out is the cost of using one, not an outage. An
+    attempt that raises this never reached the service, so it does not touch the
+    backoff, the health row or the status panel.
+    """
+
+
+async def _consume(state, proxy: str | None = None):
     global _dirty, _last_message_at
     subscribe_msg = {
         "APIKey": config.AISSTREAM_API_KEY,
@@ -259,100 +270,135 @@ async def _consume(state):
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
     }
     received = 0
-    async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
-        await ws.send(json.dumps(subscribe_msg))
-        # Deliberately *not* clearing state.last_error here. Connecting is not
-        # succeeding: aisstream accepts the socket and stays silent when the key
-        # is recognised but the account isn't streaming, so clearing on connect
-        # meant a dead feed reported itself on /api/health as configured,
-        # error-free and simply holding no ships -- indistinguishable from an
-        # empty ocean, and it stayed that way for as long as nobody read the
-        # logs. The error now survives until a frame actually arrives.
-        log.info("AIS stream connected, subscribed to %d bounding boxes", len(config.AIS_BBOXES))
-        while True:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=SILENCE_IS_A_FAULT_AFTER)
-            except asyncio.TimeoutError:
-                raise StreamSilent(
-                    SILENT_STREAM_DIAGNOSIS.format(seconds=SILENCE_IS_A_FAULT_AFTER)
-                ) from None
-            except websockets.ConnectionClosed as exc:
-                if received:
-                    return  # ordinary disconnect, reconnect on the caller's terms
-                # Nothing at all before the close, which is what a refused key
-                # looks like (~1s, usually without even a close frame). Named,
-                # because websockets' own text for it is "no close frame
-                # received or sent" -- true, and no help at all in the one place
-                # this ends up, which is the source-status panel.
-                raise StreamRefused(
-                    f"aisstream closed the connection before sending anything "
-                    f"({exc}) -- the key in AISSTREAM_API_KEY was refused, or "
-                    f"the endpoint is rejecting connections outright"
-                ) from None
-            received += 1
-            _last_message_at = time.time()
-            if received == 1:
-                state.last_error = None
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            # aisstream reports a rejected subscription as a plain error frame
-            # rather than by closing, and every frame that isn't a position
-            # report used to be dropped on the floor here -- so the one message
-            # explaining the silence was the one message guaranteed to be
-            # ignored.
-            error = msg.get("error") or msg.get("Error")
-            if error:
-                raise RuntimeError(f"aisstream rejected the subscription: {error}")
-            msg_type = msg.get("MessageType")
-            meta = msg.get("MetaData", {})
-            mmsi = meta.get("MMSI")
-            if mmsi is None:
-                continue
+    connected = False
+    # proxy=None is passed explicitly rather than left to default: websockets
+    # picks up HTTPS_PROXY/ALL_PROXY from the environment on its own, and an
+    # egress chosen by an ambient environment variable is exactly what this
+    # source must never have -- the whole point of the plan below is that the
+    # path each attempt took is known and can be named in a log line.
+    connect_kwargs = {"ping_interval": 20, "ping_timeout": 20, "proxy": proxy}
+    if proxy is not None:
+        # Most free proxies are dead and the plan tries them in series inside a
+        # reconnect cycle, so the wait for one has to be short.
+        connect_kwargs["open_timeout"] = config.PROXY_CONNECT_TIMEOUT
+    try:
+        async with websockets.connect(WS_URL, **connect_kwargs) as ws:
+            connected = True
+            await ws.send(json.dumps(subscribe_msg))
+            # Deliberately *not* clearing state.last_error here. Connecting is not
+            # succeeding: aisstream accepts the socket and stays silent when the key
+            # is recognised but the account isn't streaming, so clearing on connect
+            # meant a dead feed reported itself on /api/health as configured,
+            # error-free and simply holding no ships -- indistinguishable from an
+            # empty ocean, and it stayed that way for as long as nobody read the
+            # logs. The error now survives until a frame actually arrives.
+            log.info(
+                "AIS stream connected via %s, subscribed to %d bounding boxes",
+                proxy or "a direct connection", len(config.AIS_BBOXES),
+            )
+            while True:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=SILENCE_IS_A_FAULT_AFTER)
+                except asyncio.TimeoutError:
+                    raise StreamSilent(
+                        SILENT_STREAM_DIAGNOSIS.format(seconds=SILENCE_IS_A_FAULT_AFTER)
+                    ) from None
+                except websockets.ConnectionClosed as exc:
+                    if received:
+                        return  # ordinary disconnect, reconnect on the caller's terms
+                    # Nothing at all before the close. Named, because websockets'
+                    # own text for it is "no close frame received or sent" --
+                    # true, and no help at all in the one place this ends up,
+                    # which is the source-status panel.
+                    #
+                    # It does not say the key was refused. It did for a while,
+                    # and on 2026-08-07 that was wrong: a known-good key and a
+                    # fresh one were both closed on within seconds of each
+                    # other, which is aisstream closing on everyone rather than
+                    # anything about either key.
+                    raise StreamRefused(
+                        f"aisstream closed the connection before sending anything "
+                        f"({exc}) -- either the key in AISSTREAM_API_KEY was refused, "
+                        f"or the endpoint is closing on connections outright "
+                        f"(check github.com/aisstream/issues before changing the key)"
+                    ) from None
+                received += 1
+                _last_message_at = time.time()
+                if received == 1:
+                    state.last_error = None
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                # aisstream reports a rejected subscription as a plain error frame
+                # rather than by closing, and every frame that isn't a position
+                # report used to be dropped on the floor here -- so the one message
+                # explaining the silence was the one message guaranteed to be
+                # ignored.
+                error = msg.get("error") or msg.get("Error")
+                if error:
+                    raise RuntimeError(f"aisstream rejected the subscription: {error}")
+                msg_type = msg.get("MessageType")
+                meta = msg.get("MetaData", {})
+                mmsi = meta.get("MMSI")
+                if mmsi is None:
+                    continue
 
-            if msg_type == "ShipStaticData":
-                static = msg.get("Message", {}).get("ShipStaticData", {})
-                ship_type = static.get("Type")
-                if ship_type is not None:
-                    _ship_types[mmsi] = ship_type
-                    if mmsi in _ships:
-                        _ships[mmsi]["ship_type"] = ship_type
-                # Identity and voyage come out of the same frame and are cached
-                # together, but they are parsed apart on purpose: one half is
-                # what a designation is matched on, the other is what the crew
-                # typed. See both functions.
-                learned = {**_identity_from_static(static), **_voyage_from_static(static)}
-                if learned:
-                    _ship_static.setdefault(mmsi, {}).update(learned)
-                    if mmsi in _ships:
-                        _ships[mmsi].update(learned)
-                        _ships[mmsi].update(_annotations_for(mmsi))
-                        _dirty = True
-                continue
+                if msg_type == "ShipStaticData":
+                    static = msg.get("Message", {}).get("ShipStaticData", {})
+                    ship_type = static.get("Type")
+                    if ship_type is not None:
+                        _ship_types[mmsi] = ship_type
+                        if mmsi in _ships:
+                            _ships[mmsi]["ship_type"] = ship_type
+                    # Identity and voyage come out of the same frame and are cached
+                    # together, but they are parsed apart on purpose: one half is
+                    # what a designation is matched on, the other is what the crew
+                    # typed. See both functions.
+                    learned = {**_identity_from_static(static), **_voyage_from_static(static)}
+                    if learned:
+                        _ship_static.setdefault(mmsi, {}).update(learned)
+                        if mmsi in _ships:
+                            _ships[mmsi].update(learned)
+                            _ships[mmsi].update(_annotations_for(mmsi))
+                            _dirty = True
+                    continue
 
-            if msg_type != "PositionReport":
-                continue
-            report = msg.get("Message", {}).get("PositionReport", {})
-            lat = meta.get("latitude", report.get("Latitude"))
-            lon = meta.get("longitude", report.get("Longitude"))
-            if lat is None or lon is None:
-                continue
-            _ships[mmsi] = {
-                "mmsi": mmsi,
-                "name": (meta.get("ShipName") or "").strip() or None,
-                "lat": lat,
-                "lon": lon,
-                "speed": report.get("Sog"),
-                "course": report.get("Cog"),
-                "heading": report.get("TrueHeading"),
-                "nav_status": report.get("NavigationalStatus"),
-                "ship_type": _ship_types.get(mmsi),
-                **(_ship_static.get(mmsi) or {}),
-                **_annotations_for(mmsi),
-                "updated": time.time(),
-            }
-            _dirty = True
+                if msg_type != "PositionReport":
+                    continue
+                report = msg.get("Message", {}).get("PositionReport", {})
+                lat = meta.get("latitude", report.get("Latitude"))
+                lon = meta.get("longitude", report.get("Longitude"))
+                if lat is None or lon is None:
+                    continue
+                _ships[mmsi] = {
+                    "mmsi": mmsi,
+                    "name": (meta.get("ShipName") or "").strip() or None,
+                    "lat": lat,
+                    "lon": lon,
+                    "speed": report.get("Sog"),
+                    "course": report.get("Cog"),
+                    "heading": report.get("TrueHeading"),
+                    "nav_status": report.get("NavigationalStatus"),
+                    "ship_type": _ship_types.get(mmsi),
+                    **(_ship_static.get(mmsi) or {}),
+                    **_annotations_for(mmsi),
+                    "updated": time.time(),
+                }
+                _dirty = True
+    except Exception as exc:
+        # A failure before the handshake completed, on an attempt that went
+        # through a proxy, is attributed to the proxy. It cannot be told apart
+        # from here -- a dead node, a node aisstream itself blocks and a genuine
+        # aisstream refusal all surface as a connect error -- and "the proxy is
+        # dead" is both the common case and the safe way to be wrong: it costs
+        # one node a cooldown, where the other reading would write a fault
+        # against aisstream that nothing on their side did.
+        if proxy is not None and not connected:
+            raise EgressUnusable(
+                f"{proxy} did not get us to aisstream: {type(exc).__name__}: {exc}"
+            ) from exc
+        raise
 
 
 # How often the snapshot loop writes a source_health row. The loop itself runs
@@ -468,6 +514,53 @@ def _reconnect_delay(backoff: float) -> float:
     return backoff * (1 + random.uniform(-BACKOFF_JITTER, BACKOFF_JITTER))
 
 
+def _egress_plan(direct_failures: int, proxy_urls: list[str]) -> list[str | None]:
+    """Which egresses this cycle may try, in order. None is a direct connection.
+
+    Three properties, and each one is load-bearing:
+
+    * A direct attempt always leads, even deep into an outage. It is the honest
+      path -- the one aisstream can attribute to this account and rate limit on
+      purpose -- and it is the one that starts working again the moment the
+      service does, with nothing to switch back.
+    * Proxies appear only after AIS_PROXY_AFTER_FAILURES consecutive direct
+      failures, so an ordinary blip is never routed around.
+    * The list is capped at AIS_PROXY_ATTEMPTS. What that bounds is how many
+      *dead* nodes a cycle walks past, which costs aisstream nothing -- the
+      cycle stops at the first proxy that actually reaches them, so no plan
+      length makes more than two aisstream-facing attempts per cycle. That is
+      what keeps proxying from quietly undoing the backoff above.
+
+    Note what this does *not* do: it never drops the direct attempt in favour of
+    a proxy that is working. A proxy is for the case where our IP is the
+    problem, and that is a claim to keep re-testing rather than settle into.
+    """
+    if not config.PROXY_ENABLED or direct_failures < config.AIS_PROXY_AFTER_FAILURES:
+        return [None]
+    return [None, *proxy_urls[: config.AIS_PROXY_ATTEMPTS]]
+
+
+async def _egresses(direct_failures: int) -> list[str | None]:
+    """_egress_plan, with the proxy list fetched if the plan can use one.
+
+    The fetch is behind the same condition as the plan so that a healthy stack
+    never downloads a proxy list at all -- see backend/proxypool.py.
+    """
+    if not config.PROXY_ENABLED or direct_failures < config.AIS_PROXY_AFTER_FAILURES:
+        return [None]
+    try:
+        proxies = await proxypool.candidates(limit=config.AIS_PROXY_ATTEMPTS)
+    except Exception as exc:  # noqa: BLE001 - no proxies is a worse day, not a crash
+        log.warning("proxy pool unavailable, staying on the direct connection: %s", exc)
+        return [None]
+    if proxies:
+        log.info(
+            "AIS direct connection has failed %d times; trying %s after it (%s)",
+            direct_failures, ", ".join(str(p) for p in proxies), proxypool.stats(),
+        )
+    return _egress_plan(direct_failures, [p.url for p in proxies])
+
+
 async def _preload_from_storage():
     """Seed _ships/_ship_types from the last known position per MMSI so a
     backend restart doesn't blank out sparse-traffic boxes (Red Sea, Hormuz)
@@ -547,19 +640,69 @@ async def stream_forever():
     _snapshot_task = asyncio.create_task(_snapshot_loop(state))
 
     backoff = BACKOFF_START
+    # Consecutive failures of the *direct* connection, which is what decides
+    # whether a proxy is worth reaching for. Counted apart from the backoff
+    # because the two answer different questions: the backoff is how hard we are
+    # allowed to lean on aisstream, this is whether the path we are leaning on
+    # is the problem.
+    direct_failures = 0
     while True:
-        try:
-            await _consume(state)
-            # Only a connection that actually delivered something returns
-            # normally (see _consume), so this really does mean "that one
-            # worked". Resetting the backoff on any return at all turned a
-            # stream that connects and immediately ends into a silent hot
-            # reconnect loop -- no error, no log, nothing on /api/health.
+        delivered = False
+        fault: str | None = None
+        for proxy in await _egresses(direct_failures):
+            try:
+                await _consume(state, proxy=proxy)
+            except EgressUnusable as exc:
+                # Never reached aisstream, so it is not an aisstream fault and
+                # is not recorded as one. One dead node out of a list of
+                # mostly-dead nodes is what a free proxy list is.
+                proxypool.record(proxy, ok=False)
+                log.debug("AIS egress unusable: %s", exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 - keep reconnecting
+                if proxy is None:
+                    direct_failures += 1
+                    fault = str(exc)
+                    # Set as we go, not at the end of the cycle: the direct
+                    # verdict is the one the source-status panel exists to
+                    # show, and a cycle can run for a minute before it ends.
+                    state.last_error = fault
+                    continue
+                # A proxy that got us to aisstream and was then refused or
+                # starved has answered the only question it was asked: our IP is
+                # not what is wrong. Trying three more would be three more
+                # connections to a service that just said no through a different
+                # address, so the cycle ends here and the backoff takes over.
+                # This is what holds aisstream-facing attempts to two per cycle
+                # however many proxies the plan holds -- the rest of the list is
+                # only ever walked past dead nodes, which cost aisstream nothing.
+                #
+                # Recorded as a success for the proxy, because it was one: what
+                # this pool ranks on is whether a node carries a connection to
+                # the origin, not whether the origin was pleased to get it.
+                proxypool.record(proxy, ok=True)
+                fault = f"via {proxy}: {exc}"
+                break
+            # Returned normally, which only a connection that delivered frames
+            # does (see _consume). Resetting the backoff on any return at all
+            # turned a stream that connects and immediately ends into a silent
+            # hot reconnect loop -- no error, no log, nothing on /api/health.
+            delivered = True
+            if proxy is None:
+                direct_failures = 0
+            else:
+                proxypool.record(proxy, ok=True)
+                log.info("AIS stream is being served through %s", proxy)
+            break
+
+        if delivered:
             backoff = BACKOFF_START
-        except Exception as exc:  # noqa: BLE001 - keep reconnecting
-            state.last_error = str(exc)
-            delay = _reconnect_delay(backoff)
-            log.warning("AIS stream error, reconnecting in %ds: %s", delay, exc)
-            await storage.record_source_health("ais", None, False, str(exc))
-            await asyncio.sleep(delay)
-            backoff = _next_backoff(backoff)
+            continue
+
+        if fault:
+            state.last_error = fault
+        delay = _reconnect_delay(backoff)
+        log.warning("AIS stream error, reconnecting in %ds: %s", delay, state.last_error)
+        await storage.record_source_health("ais", None, False, state.last_error)
+        await asyncio.sleep(delay)
+        backoff = _next_backoff(backoff)

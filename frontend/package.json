@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test",
+    "test:watch": "node --test --watch"
   },
   "dependencies": {
     "pixi.js": "^7.4.3",

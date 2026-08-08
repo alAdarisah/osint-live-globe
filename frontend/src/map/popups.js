@@ -37,6 +37,22 @@ export function normalizeCountryName(name) {
   return COUNTRY_ALIASES[n] || n;
 }
 
+/**
+ * The attributes that make a row openable, or "" for a row that is not.
+ *
+ * The country card renders these sections as raw HTML (see CountryInfoCard.jsx),
+ * so a row cannot carry a React handler -- it carries the two things a delegated
+ * listener needs to find the record again, and the card resolves them against
+ * the live feed rather than against whatever was true when the string was built.
+ * A row with no id is left inert rather than made to look clickable: the popup
+ * it would open is keyed on that id.
+ */
+function openableRow(kind, id) {
+  if (id == null || id === "") return "";
+  return ` class="event-row event-row-open" role="button" tabindex="0"`
+    + ` data-event-kind="${esc(kind)}" data-event-id="${esc(String(id))}"`;
+}
+
 function formatEventRow(type, item) {
   if (type === "events") {
     const label = item.event_type || "Conflict event";
@@ -44,7 +60,8 @@ function formatEventRow(type, item) {
       .filter(Boolean)
       .join("/")
       .toUpperCase();
-    return `<div class="event-row"><b>${esc(label)}</b>${item.fatalities ? ` (${item.fatalities} fatalities)` : ""}
+    const open = openableRow("events", item.id);
+    return `<div${open || ' class="event-row"'}><b>${esc(label)}</b>${item.fatalities ? ` (${item.fatalities} fatalities)` : ""}
       <div class="event-meta">${esc(item.country || "")} &middot; ${esc(item.date || "")} &middot; ${esc(sourceLabel)}</div></div>`;
   }
   const headline = (item.real_title || "").trim();
@@ -55,7 +72,12 @@ function formatEventRow(type, item) {
   const sourceLabel = item.source_name || "GDELT";
   const when = timeAgoFromDateAdded(item.date_added);
   const corroborated = item.corroborated ? " &middot; corroborated" : "";
-  return `<div class="event-row">${link}<div class="event-meta">${esc(sourceLabel)} &middot; ${esc(when)}${corroborated}</div></div>`;
+  // The headline keeps its own link to the article -- that is the citation, and
+  // it must stay a plain link a reader can middle-click. The row around it opens
+  // the detail card; the delegated handler ignores clicks that landed on the
+  // anchor so the two never fight over one gesture.
+  const open = openableRow("gdelt", item.event_id);
+  return `<div${open || ' class="event-row"'}>${link}<div class="event-meta">${esc(sourceLabel)} &middot; ${esc(when)}${corroborated}</div></div>`;
 }
 
 const MONTH_ABBR = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -164,7 +186,20 @@ function buildLivePicture(bounds, raw) {
   // countryCardSections), and a section that restates its own title inside
   // itself just costs a line in a 320px column.
   if (!cells) return "";
-  return `<div class="cstats">${cells}</div>`;
+
+  // Two of the six feeds behind these numbers are now clipped to a snapped
+  // viewport box (fires and jamming -- see `scoped` in map/scene.js), so for a
+  // country the reader is not looking at, this counts what has been loaded
+  // rather than what exists. CountrySelectionBar can open a card for exactly
+  // that case: a country still selected but off-screen.
+  //
+  // Said rather than fixed, and deliberately. Un-scoping the two feeds would
+  // put a quarter of a million FIRMS points back on every poll to make one
+  // stat row complete. Under-reporting silently is the failure; under-reporting
+  // with a label is a fact, and it is the same register as the choropleth's
+  // coverage note and the conflict layer's cap note.
+  return `<div class="cstats">${cells}</div>
+    <div class="cstat-note">Counted within the area currently loaded.</div>`;
 }
 
 // 72h rather than the full 3-day feed window so "recent" means recent --
@@ -428,7 +463,7 @@ function buildConnectivity(props, raw) {
   const signals = Object.keys(outage.signals || {});
   return `
     <div class="outage-block">
-      <div class="outage-head">Connectivity disruption detected</div>
+      <div class="outage-head">Internet disruption detected</div>
       <div>IODA composite score: ${fmtNumber(Math.round(outage.score))}${
         outage.event_count ? ` &middot; ${esc(outage.event_count)} event(s)` : ""
       }</div>

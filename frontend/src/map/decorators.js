@@ -16,11 +16,134 @@ import {
 } from "./severity";
 import { paletteColor, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
 
+// --- level of detail -------------------------------------------------------
+//
+// Two levels, and the boundary is the COUNTRY band floor -- which is also
+// DECLUTTER_MIN_ZOOM. That coincidence is deliberate and it is what makes this
+// safe: below the boundary the placement pass produces no offsets at all, so
+// buildDivIcon's shift and leader-line terms are constant-empty there and a
+// change of detail cannot interact with the rounded offsets that keep the
+// diffed icon string stable. Above it there is exactly one level, so crossing
+// zoom 9 or 12 changes nothing. Precisely one repaint of every visible marker
+// happens, on crossing the boundary itself.
+//
+// Module-level rather than threaded through every decorator's signature, for
+// the reason iconTheme.js gives for its own palette: these are plain functions
+// called hundreds of times from deep inside an imperative render pass, and the
+// controller sets this once per pass before any of them run. It also removes a
+// whole class of bug -- buildMarker and updateMarker cannot disagree about the
+// detail, because there is only one value for both to read.
+//
+// It must never depend on anything but the zoom band. The viewport profile and
+// the reader's focus change on every pan and click; if either reached the icon
+// string, updateMarker's diff would rebuild every marker's DOM continuously.
+let iconDetail = "glyph";
+
+/** A single filled circle. Colour still carries severity or type -- that is all
+ *  a mark this size can honestly hold. ~90 characters of HTML against ~900 for
+ *  a fighter silhouette, and that string is what gets diffed on every pan. */
+const DOT_SVG = '<circle cx="12" cy="12" r="9" fill="currentColor"/>';
+
+// Sizes are compressed toward a dot rather than flattened to one number.
+// Flattening would throw away the severity hierarchy at exactly the zoom where
+// the events cap makes it matter most -- a critical event should still read as
+// larger than a minor one at world zoom, even when both are dots.
+const DOT_SCALE = 0.55;
+const DOT_MIN = 6;
+const DOT_MAX = 13;
+
+export function setIconDetail(next) {
+  iconDetail = next === "dot" ? "dot" : "glyph";
+}
+
+export function currentIconDetail() {
+  return iconDetail;
+}
+
+/**
+ * The size a glyph is drawn at once the current detail level is applied.
+ *
+ * Exported because the placement pass has to reserve exactly what gets drawn:
+ * reserving an 18px hole for a 7px dot is the mismatch the note at the top of
+ * this file warns about. Harmless while the detail boundary sits on
+ * DECLUTTER_MIN_ZOOM (placement is off on the dot side), and a silent
+ * degradation of every collision decision the moment anyone moves it -- so the
+ * controller wraps ICON_SIZE_FOR with this rather than relying on the
+ * coincidence holding.
+ *
+ * Rounded, because the number lands in the icon's HTML string and a fractional
+ * value would differ on every render (see scaledSize's own note).
+ */
+export function detailSize(size) {
+  if (iconDetail !== "dot") return size;
+  return Math.max(DOT_MIN, Math.min(DOT_MAX, Math.round(size * DOT_SCALE)));
+}
+
 // `badge` was missing from this forwarder, so decorateGdelt's collapsed-pin
 // count was passed in and silently dropped: buildDivIcon has supported the
 // chip all along, and a pin standing for nine stories drew as a plain pin.
+//
+// Every decorator in this file routes through here, which is why the detail
+// swap lives here rather than in seventeen separate call sites. The badge
+// survives at dot detail: a pin standing for nine stories has to say so at
+// every zoom, and it is the one piece of information a dot cannot encode by
+// being a dot. Rotation is dropped -- a circle has no heading to show, and
+// keeping the transform would only churn the diffed string as vehicles turn.
 function icon(svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset, badge) {
+  if (iconDetail === "dot") {
+    return buildDivIcon(L, DOT_SVG, color, detailSize(size), 0, extraClass, opacity, wrapClass, offset, badge);
+  }
   return buildDivIcon(L, svgInner, color, size, rotateDeg, extraClass, opacity, wrapClass, offset, badge);
+}
+
+/**
+ * Make a collapsed group say so, for the layers whose decorator does not.
+ *
+ * News and diplomacy have handled grouping since before it was general: both
+ * render a count badge and list their members. When collapsing became a
+ * property any layer can declare, the other seven inherited the grouping
+ * without the telling -- and a head drawn as an ordinary pin with thirty-nine
+ * members silently absent is exactly the kind of quiet subtraction this map
+ * does not do.
+ *
+ * Applied centrally rather than by teaching seven more decorators, because the
+ * thing to say is identical in all seven cases: how many are here, and how to
+ * separate them. The count goes into the icon's HTML string rather than onto a
+ * class, for the reason buildDivIcon states -- a badge expressed as a class
+ * would never trigger the repaint that shows the number changing.
+ */
+export function applyCollapsedFallback(d, item) {
+  const count = item?.collapsedCount || 0;
+  if (count < 2 || !d?.icon?.options?.html) return d;
+  const html = d.icon.options.html;
+  if (html.includes("pin-badge")) return d; // the decorator already says it
+
+  const chip = `<span class="pin-badge">${count > 99 ? "99+" : count}</span>`;
+  const at = html.lastIndexOf("</div>");
+  d.icon.options.html = at < 0 ? html + chip : html.slice(0, at) + chip + html.slice(at);
+
+  // event_id before id, matching expandOpened in createMapController.js and
+  // decorateGdelt's own button. The two have to agree or the button would ask
+  // to open a group nothing is keyed under.
+  const id = esc(String(item.event_id ?? item.id ?? ""));
+  // `collapsedLabel` is set by whatever did the grouping when it can name the
+  // basis for it -- a city zone can, pixel proximity cannot. Pre-escaped by its
+  // producer, which is why it is interpolated rather than run through esc()
+  // again: it carries an &mdash; on purpose (see collapseFor in
+  // createMapController.js).
+  const where = item.collapsedLabel || "at this location";
+  d.detail =
+    `<div class="coverage-head">${count} ${where}</div>` +
+    (d.detail || "") +
+    (item.collapsedLabel
+      ? '<p class="meta">Grouped by city rather than by how close the pins landed. The radius is a '
+        + "nominal urban footprint from the city's population band, not a boundary &mdash; every "
+        + "report below keeps its own coordinate and its own record.</p>"
+      : "") +
+    `<div class="meta"><button type="button" class="cluster-expand" data-cluster-id="${id}">` +
+    `Separate these pins</button></div>`;
+  d.tooltip = `${count} ${where} &mdash; ${d.tooltip || ""}`;
+  return d;
 }
 
 // Icon sizes are needed twice: here, to draw the glyph, and in
@@ -112,12 +235,24 @@ function infraBaseStyle(d) {
 // cities we carry into usefully unequal bands (roughly 60 / 500 / 1,200 /
 // 3,800 at the time of writing) -- the rarest tier is the one that should
 // stand out. Ordered largest-first; cityTier() takes the first match.
+// `opacity` is the second graduated dimension, and it is doing a different job
+// from `size`. Size says how big a place is; opacity says how much of the
+// reader's attention it is entitled to. Cities are reference context -- they
+// exist so that everything else on this map has somewhere to be -- and at 6,200
+// of them a uniform pink dot field competes with the layers it is supposed to be
+// backing. A town at 0.45 recedes into the basemap and is still perfectly
+// legible when looked for; a megacity at full strength stays an anchor.
+//
+// The two ramps are deliberately steeper than they were. 7->24px against the old
+// 8->18 widens the gap the graduated symbols exist to show, and it is affordable
+// precisely because the small end is now also faint: a 7px dot at 0.45 takes far
+// less of the eye than an 8px dot at full strength did.
 export const CITY_COLOR = "#ff6fb5";
 export const CITY_TIERS = [
-  { key: "mega", min: 5_000_000, label: "Megacity (5M+)", svg: SVG.city, size: 18 },
-  { key: "large", min: 1_000_000, label: "Large city (1M-5M)", svg: SVG.cityLarge, size: 14 },
-  { key: "medium", min: 250_000, label: "City (250k-1M)", svg: SVG.cityMedium, size: 11 },
-  { key: "town", min: 0, label: "Town (100k-250k)", svg: SVG.cityTown, size: 8 },
+  { key: "mega", min: 5_000_000, label: "Megacity (5M+)", svg: SVG.city, size: 24, opacity: 1 },
+  { key: "large", min: 1_000_000, label: "Large city (1M-5M)", svg: SVG.cityLarge, size: 17, opacity: 0.82 },
+  { key: "medium", min: 250_000, label: "City (250k-1M)", svg: SVG.cityMedium, size: 11, opacity: 0.62 },
+  { key: "town", min: 0, label: "Town (100k-250k)", svg: SVG.cityTown, size: 7, opacity: 0.45 },
 ];
 
 // Capital status is orthogonal to population, so it is not another row in
@@ -132,7 +267,12 @@ export const CAPITAL_TIER = {
   key: "capital",
   label: "Capital city",
   svg: SVG.capital,
-  size: 15,
+  size: 18,
+  // Never faded, whatever its population. A capital is the point the Officials
+  // & Diplomacy layer draws on, so a reader has to be able to find it -- and a
+  // 120k-population capital receding into the basemap like the town it is by
+  // size would take the diplomatic record with it.
+  opacity: 1,
 };
 
 // Highest for the largest tier. Used as a placement priority, so a megacity
@@ -158,7 +298,18 @@ export function decorateCity(city, { offset } = {}) {
   const base = city.is_capital ? Math.max(CAPITAL_TIER.size, populationTier.size) : tier.size;
   const size = scaledSize(base, "cities", "city.marker");
   const color = paletteColor("city.marker", CITY_COLOR);
-  return { tier, size, icon: icon(tier.svg, color, size, 0, "city-marker", layerOpacity("cities"), "", offset) };
+  // The tier's own fade, under whatever Admin Mode has set for the layer. Same
+  // shape as every other multiplier here: the shipped judgement is the number,
+  // the setting is the dial on top of it.
+  const opacity = tier.opacity * layerOpacity("cities");
+  return {
+    tier,
+    // The size the caller gets back is the size that is actually drawn, so
+    // renderCities reserves the right amount of room for it in the placement
+    // pass. icon() applies the same transform internally.
+    size: detailSize(size),
+    icon: icon(tier.svg, color, size, 0, "city-marker", opacity, "", offset),
+  };
 }
 
 // ---------- ACLED / UCDP conflict events ----------
@@ -838,8 +989,13 @@ export function decorateGdelt(d, { offset } = {}) {
     <div class="coverage-head">${collapsed.length} stories at this location</div>
     <ul class="coverage-list">${collapsed.slice(0, COLLAPSED_SHOWN).map(newsLine).join("")}</ul>
     ${collapsed.length > COLLAPSED_SHOWN
-        ? `<div class="meta">+${collapsed.length - COLLAPSED_SHOWN} more &mdash; zoom in to separate them</div>`
-        : '<div class="meta">Zoom in to see these as separate pins.</div>'}`
+        ? `<div class="meta">+${collapsed.length - COLLAPSED_SHOWN} more</div>`
+        : ""}
+    <div class="meta">
+      <button type="button" class="cluster-expand" data-cluster-id="${esc(String(d.event_id ?? d.id ?? ""))}">
+        Separate these pins
+      </button>
+    </div>`
     : `
     <h3>${esc(headline)}</h3>
     ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
@@ -1416,7 +1572,13 @@ export function decorateCzib(d, { offset } = {}) {
       style.color,
       czibIconSize(d),
       0,
-      `czib-marker czib-${d.active ? "active" : "withdrawn"}`,
+      // czib-live is the flash, and it is deliberately narrower than
+      // czib-active: `active` means the bulletin has not been withdrawn, which a
+      // document whose own review date passed years ago still satisfies. Motion
+      // on this map means "happening now", so a bulletin that has outlived its
+      // stated date draws in the warning colour without pulsing -- see the
+      // `expired` test above, which the popup already explains in words.
+      `czib-marker czib-${d.active ? "active" : "withdrawn"}${d.active && !expired ? " czib-live" : ""}`,
       (d.active ? 1 : 0.8) * layerOpacity("czib"),
       // geo_precision is "country" on every row, so isImprecise() is true by
       // construction and the dashed ring is mandatory rather than conditional.
@@ -1712,7 +1874,12 @@ export function decorateCableLanding(d, { offset } = {}) {
 
 export const OUTAGE_STYLE = {
   svg: SVG.connectivityLoss, color: "#4fd1c5", size: 20,
-  label: "Connectivity disruption", token: "outage.country",
+  // "Internet" spelled out, not "connectivity". This layer is IODA measuring
+  // whether a country can be reached over the internet, and with an electricity
+  // outage layer alongside it a bare "connectivity disruption" is a phrase a
+  // reader can reasonably take either way -- power and network are exactly the
+  // two things "the utilities are down" means.
+  label: "Internet disruption (IODA)", token: "outage.country",
 };
 
 export function outageStyle() {
@@ -2078,22 +2245,23 @@ export function decorateGfwDetection(d, { offset } = {}) {
 // Best-effort only: OpenSky has no "military" field. This flags common
 // military/government callsign prefixes and otherwise falls back to the
 // ADS-B emitter category. Never treat this as confirmed identification.
-const MILITARY_CALLSIGN_PREFIXES = [
-  "RCH", "CNV", "NATO", "HKY", "ASCOT", "IAM", "GAF", "DUKE", "TARTAN",
-  "FORTE", "VIVI", "REACH", "KNIFE", "VADER", "POLAR", "FALCON", "VULCAN",
-  "SLAM", "SPAR", "COBRA", "TITAN", "USAF", "NAVY", "MARINE", "ARMY",
-];
-
 export function classifyAircraft(d) {
-  // d.military is a real flag (airplanes.live's dbFlags) when present --
-  // trust it over the callsign heuristic below, which only exists because
-  // OpenSky alone has no such field.
-  if (d.military === true) return "military";
-  const cs = (d.callsign || "").trim().toUpperCase();
-  if (cs && MILITARY_CALLSIGN_PREFIXES.some((p) => cs.startsWith(p))) return "military";
+  // Two independent claims, both answered by the record rather than worked out
+  // here. `military` is a real flag (airplanes.live's dbFlags) about the
+  // airframe; `callsign_military` is what the aircraft is calling itself on
+  // this flight, which is the only signal OpenSky-only records carry.
+  //
+  // The callsign prefix list used to live in this file. It moved to
+  // backend/sources/adsb.py when /api/aircraft gained ?civilian=0: the server
+  // now decides which aircraft a zoomed-out reader is sent, and a client
+  // holding a *wider* idea of "military" than the server would classify
+  // aircraft the server had already dropped -- they would be missing from the
+  // map with nothing to indicate it. One list, on the side that filters.
+  if (d.military === true || d.callsign_military === true) return "military";
   if (d.category === 8) return "helicopter";
   if ([2, 3, 9, 10, 12].includes(d.category)) return "other";
   if ([4, 5, 6, 7].includes(d.category)) return "commercial";
+  const cs = (d.callsign || "").trim().toUpperCase();
   if (/^[A-Z]{2,3}\d{2,4}[A-Z]?$/.test(cs)) return "commercial"; // airline-style callsign
   return "other";
 }
@@ -2567,3 +2735,60 @@ export function decorateSatellite(d, { offset } = {}) {
     detail,
   };
 }
+
+// ---------- which kind of pin is this? ----------
+
+/**
+ * The palette token one item resolves to, per layer.
+ *
+ * This is the same question the decorators above already answer on their way to
+ * a colour and a size; it is asked separately here because Admin Mode's
+ * per-pin-type zoom gate has to be answered *before* a marker is built, in the
+ * loop that decides which items are drawn at all (see pinZoomGate in
+ * createMapController.js). Every entry defers to the style picker the drawing
+ * side uses rather than restating its test, so a pin cannot be gated as one
+ * kind and drawn as another.
+ *
+ * Null means "this item has no configurable pin type", and it is a real answer
+ * rather than a gap: a military base picks its glyph from MILITARY_SUBTYPE_STYLE
+ * and a role-identified military aircraft from MILITARY_ROLE_STYLE, and neither
+ * table carries a palette token, so neither appears in the panel and neither can
+ * be given a gate. Hazards and floods have no token at all.
+ */
+export function aircraftToken(d) {
+  const klass = classifyAircraft(d);
+  if (klass !== "military") return AIRCRAFT_STYLE[klass]?.token ?? null;
+  // A role picks its own silhouette and its own colour, so it is not the
+  // "role unknown" swatch the panel offers -- see MILITARY_ROLE_STYLE.
+  if (d?.military_role && MILITARY_ROLE_STYLE[d.military_role]) return null;
+  return AIRCRAFT_STYLE.military.token;
+}
+
+export const TOKEN_FOR = {
+  // A corroborated event is recoloured, not reclassified: event.corroborated
+  // has no size and no gate of its own, so the severity band it would have
+  // drawn as stays the pin type it is gated by.
+  events: (d) => severityBand(d?.severity)?.token ?? null,
+  conflictHistory: () => "event.history",
+  gdelt: () => "news.pin",
+  officials: officialsToken,
+  cities: () => "city.marker",
+  infra: (d) => infraBaseStyle(d)?.token ?? null,
+  satellites: (d) => (isMilitarySatellite(d) ? "satellite.military" : "satellite.stations"),
+  aisNavy: () => "ship.navy",
+  aisTanker: () => "ship.tanker",
+  aisCivilian: () => "ship.other",
+  adsbMilitary: aircraftToken,
+  adsbCivilian: aircraftToken,
+  adsbFlagged: aircraftToken,
+  airports: (d) => (d?.military_name ? "airfield.military" : "airfield.civil"),
+  darkVessels: (d) => (DARK_VESSEL_STYLE[d?.kind] || DARK_VESSEL_FALLBACK).token,
+  gfwGaps: () => "gfw.gap",
+  gfwDetections: (d) => (d?.matched ? "gfw.matched" : "gfw.unmatched"),
+  czib: (d) => (d?.active ? "czib.active" : "czib.withdrawn"),
+  ports: () => "port.wpi",
+  dams: () => "dam.barrier",
+  launches: (d) => (d?.upcoming ? "launch.upcoming" : "launch.flown"),
+  cableLandings: (d) => (d?.planned ? "cable.planned" : "cable.landing"),
+  osmInfra: (d) => OSM_INFRA_STYLE[d?.kind]?.token ?? null,
+};

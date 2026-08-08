@@ -10,6 +10,7 @@ import {
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR, CONFIDENCE_THRESHOLD } from "../../map/severity";
 import LayerIcon from "./LayerIcon";
+import LayerCheck from "./LayerCheck";
 import { PanelGroup, LayerDetails } from "./Collapsible";
 
 // What each conflict glyph means. Drawn from the same SVG table the map pins
@@ -113,8 +114,20 @@ const HAZARD_ROWS = HAZARD_KIND_ORDER.map((kind) => ({
   ...HAZARD_STYLE[kind],
 }));
 
+// Short names for the cap note above. Only the layers that declare a cap in
+// map/scene.js need one; anything else falls back to its key, which is ugly but
+// never wrong, and is the signal that a layer gained a cap without gaining a
+// name here.
+const LAYER_LABEL = {
+  gdelt: "News", officials: "Officials", conflictHistory: "UCDP record",
+  hazards: "Earthquakes & volcanoes", floods: "Floods", airports: "Airfields",
+  cities: "Cities", dams: "Dams", ports: "Ports", osmInfra: "OSM infrastructure",
+  gfwGaps: "AIS disabling", gfwDetections: "Vessel detections",
+  aisCivilian: "Civilian ships", adsbCivilian: "Civilian aircraft",
+};
+
 export default function LayersSection({
-  counts, zoomNotes, layerVisibility, onToggleLayer, infraFilterText, onInfraFilterChange,
+  counts, zoomNotes, layerVisibility, layerWish, onToggleLayer, infraFilterText, onInfraFilterChange,
   eventFilter, onEventFilterChange, historyAsOf,
   // See Collapsible.jsx: defaulted so a half-applied hot reload cannot take the
   // whole panel down through the error boundary.
@@ -122,17 +135,36 @@ export default function LayersSection({
 }) {
   const groupCount = (id) => `${activeCount(layerVisibility, GROUP_LAYERS[id])}/${GROUP_LAYERS[id].length}`;
 
+  // Every layer the band cap is currently thinning, other than events -- that
+  // one keeps its own note beside its own row, where it has always been.
+  //
+  // The cap used to apply to events alone, so one note covered it. Now that any
+  // layer can declare one, a layer quietly showing a fraction of its own count
+  // would be back to reading as broken -- which is the exact failure the events
+  // note was written to prevent. Listed rather than repeated per row: an
+  // operator wants to know *that* something is thinned and which, and the
+  // per-layer count is already in the ticker next to it.
+  const cappedElsewhere = Object.entries(zoomNotes.capped || {})
+    .filter(([key, n]) => key !== "events" && n && layerVisibility[key])
+    .map(([key, n]) => `${LAYER_LABEL[key] || key} (${n})`);
+
   return (
     <>
       <h2>Layers</h2>
 
+      <div className={`sublegend${cappedElsewhere.length ? " visible" : ""}`}>
+        Thinned to the most significant at this zoom: {cappedElsewhere.join(", ")}.
+        Zoom in for the rest.
+      </div>
+
       <PanelGroup id="grp-conflict" title="Conflict & Events" count={groupCount("conflict")}
         open={isOpen("grp-conflict")} onToggle={setOpen}>
         <label className="layer-row" data-layer="events">
-          <input
-            type="checkbox"
-            checked={layerVisibility.events}
-            onChange={(e) => onToggleLayer("events", e.target.checked)}
+          <LayerCheck
+            layerKey="events"
+            on={layerVisibility.events}
+            wish={layerWish?.events}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.clash} color="#ff3b30" token="severity.critical" /> Conflict &amp; Violence (ACLED + UCDP + GDELT)
           <span className="count">{counts.events} ({counts.eventsTotal})</span>
@@ -144,10 +176,11 @@ export default function LayersSection({
             Switching Conflict & Violence off takes the news with it (see
             setLayerVisible in createMapController.js). */}
         <label className="layer-row sub-row" data-layer="gdelt">
-          <input
-            type="checkbox"
-            checked={layerVisibility.gdelt}
-            onChange={(e) => onToggleLayer("gdelt", e.target.checked)}
+          <LayerCheck
+            layerKey="gdelt"
+            on={layerVisibility.gdelt}
+            wish={layerWish?.gdelt}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.news} color="#ffd60a" token="news.pin" /> Show news reports (GDELT)
           <span className="count">{counts.gdelt} ({counts.gdeltTotal})</span>
@@ -292,10 +325,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="conflictHistory">
-          <input
-            type="checkbox"
-            checked={layerVisibility.conflictHistory}
-            onChange={(e) => onToggleLayer("conflictHistory", e.target.checked)}
+          <LayerCheck
+            layerKey="conflictHistory"
+            on={layerVisibility.conflictHistory}
+            wish={layerWish?.conflictHistory}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.recordMark} color="#8f9bb3" token="event.history" /> Verified record (UCDP)
           <span className="count">{counts.conflictHistory} ({counts.conflictHistoryTotal})</span>
@@ -312,10 +346,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="officials">
-          <input
-            type="checkbox"
-            checked={layerVisibility.officials}
-            onChange={(e) => onToggleLayer("officials", e.target.checked)}
+          <LayerCheck
+            layerKey="officials"
+            on={layerVisibility.officials}
+            wish={layerWish?.officials}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.handshake} color="#7ee0c9" token="officials.cooperative" /> Officials &amp; Diplomacy
           <span className="count">{counts.officials} ({counts.officialsTotal})</span>
@@ -352,10 +387,11 @@ export default function LayersSection({
       <PanelGroup id="grp-traffic" title="Air & Sea Traffic" count={groupCount("traffic")}
         open={isOpen("grp-traffic")} onToggle={setOpen}>
         <label className="layer-row" data-layer="aisNavy">
-          <input
-            type="checkbox"
-            checked={layerVisibility.aisNavy}
-            onChange={(e) => onToggleLayer("aisNavy", e.target.checked)}
+          <LayerCheck
+            layerKey="aisNavy"
+            on={layerVisibility.aisNavy}
+            wish={layerWish?.aisNavy}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.ship} color="#ffd60a" token="ship.navy" /> Navy &amp; MSC Ships
           <span className="count">{counts.aisNavy} ({counts.aisNavyTotal})</span>
@@ -365,19 +401,21 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="aisTanker">
-          <input
-            type="checkbox"
-            checked={layerVisibility.aisTanker}
-            onChange={(e) => onToggleLayer("aisTanker", e.target.checked)}
+          <LayerCheck
+            layerKey="aisTanker"
+            on={layerVisibility.aisTanker}
+            wish={layerWish?.aisTanker}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.tanker} color="#ffb347" token="ship.tanker" /> Oil Tankers
           <span className="count">{counts.aisTanker} ({counts.aisTankerTotal})</span>
         </label>
         <label className="layer-row sub-row" data-layer="aisTankerTrails">
-          <input
-            type="checkbox"
-            checked={layerVisibility.aisTankerTrails}
-            onChange={(e) => onToggleLayer("aisTankerTrails", e.target.checked)}
+          <LayerCheck
+            layerKey="aisTankerTrails"
+            on={layerVisibility.aisTankerTrails}
+            wish={layerWish?.aisTankerTrails}
+            onToggle={onToggleLayer}
           />
           Show tanker trails
         </label>
@@ -386,10 +424,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="aisCivilian">
-          <input
-            type="checkbox"
-            checked={layerVisibility.aisCivilian}
-            onChange={(e) => onToggleLayer("aisCivilian", e.target.checked)}
+          <LayerCheck
+            layerKey="aisCivilian"
+            on={layerVisibility.aisCivilian}
+            wish={layerWish?.aisCivilian}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.ship} color="#35c2ff" token="ship.other" /> Civilian Ships (AIS)
           <span className="count">{counts.aisCivilian} ({counts.aisCivilianTotal})</span>
@@ -424,10 +463,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="darkVessels">
-          <input
-            type="checkbox"
-            checked={layerVisibility.darkVessels}
-            onChange={(e) => onToggleLayer("darkVessels", e.target.checked)}
+          <LayerCheck
+            layerKey="darkVessels"
+            on={layerVisibility.darkVessels}
+            wish={layerWish?.darkVessels}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.darkShip} color={DARK_VESSEL_STYLE.ais_gap.color} token={DARK_VESSEL_STYLE.ais_gap.token} />
           {" "}Dark Vessels &amp; Transfers <span className="inferred-tag">inferred</span>
@@ -468,10 +508,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="gfwGaps">
-          <input
-            type="checkbox"
-            checked={layerVisibility.gfwGaps}
-            onChange={(e) => onToggleLayer("gfwGaps", e.target.checked)}
+          <LayerCheck
+            layerKey="gfwGaps"
+            on={layerVisibility.gfwGaps}
+            wish={layerWish?.gfwGaps}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={GFW_GAP_STYLE.svg} color={GFW_GAP_STYLE.color} token={GFW_GAP_STYLE.token} />
           {" "}AIS Disabling (Global Fishing Watch) <span className="inferred-tag">GFW&apos;s finding</span>
@@ -504,10 +545,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="gfwDetections">
-          <input
-            type="checkbox"
-            checked={layerVisibility.gfwDetections}
-            onChange={(e) => onToggleLayer("gfwDetections", e.target.checked)}
+          <LayerCheck
+            layerKey="gfwDetections"
+            on={layerVisibility.gfwDetections}
+            wish={layerWish?.gfwDetections}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.hullDetection} color={GFW_DETECTION_STYLE.unmatched.color} token={GFW_DETECTION_STYLE.unmatched.token} />
           {" "}Satellite Vessel Detections (GFW)
@@ -562,19 +604,21 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="adsbMilitary">
-          <input
-            type="checkbox"
-            checked={layerVisibility.adsbMilitary}
-            onChange={(e) => onToggleLayer("adsbMilitary", e.target.checked)}
+          <LayerCheck
+            layerKey="adsbMilitary"
+            on={layerVisibility.adsbMilitary}
+            wish={layerWish?.adsbMilitary}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.planeMilitary} color="#ff4d4d" token="aircraft.military" /> Military Aircraft
           <span className="count">{counts.adsbMilitary} ({counts.adsbMilitaryTotal})</span>
         </label>
         <label className="layer-row sub-row" data-layer="adsbMilitaryTrails">
-          <input
-            type="checkbox"
-            checked={layerVisibility.adsbMilitaryTrails}
-            onChange={(e) => onToggleLayer("adsbMilitaryTrails", e.target.checked)}
+          <LayerCheck
+            layerKey="adsbMilitaryTrails"
+            on={layerVisibility.adsbMilitaryTrails}
+            wish={layerWish?.adsbMilitaryTrails}
+            onToggle={onToggleLayer}
           />
           Show military aircraft trails
         </label>
@@ -599,10 +643,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="adsbFlagged">
-          <input
-            type="checkbox"
-            checked={layerVisibility.adsbFlagged}
-            onChange={(e) => onToggleLayer("adsbFlagged", e.target.checked)}
+          <LayerCheck
+            layerKey="adsbFlagged"
+            on={layerVisibility.adsbFlagged}
+            wish={layerWish?.adsbFlagged}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.planeMilitary + SVG.alertRing} color="#ff1a1a" /> Emergency &amp; Hidden Aircraft
           <span className="count">{counts.adsbFlagged} ({counts.adsbFlaggedTotal})</span>
@@ -649,10 +694,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="adsbCivilian">
-          <input
-            type="checkbox"
-            checked={layerVisibility.adsbCivilian}
-            onChange={(e) => onToggleLayer("adsbCivilian", e.target.checked)}
+          <LayerCheck
+            layerKey="adsbCivilian"
+            on={layerVisibility.adsbCivilian}
+            wish={layerWish?.adsbCivilian}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.planeCommercial} color="#d8b9ff" token="aircraft.commercial" /> Civilian Aircraft (ADS-B)
           <span className="count">{counts.adsbCivilian} ({counts.adsbCivilianTotal})</span>
@@ -678,10 +724,11 @@ export default function LayersSection({
       <PanelGroup id="grp-ground" title="Infrastructure & Environment" count={groupCount("ground")}
         open={isOpen("grp-ground")} onToggle={setOpen}>
         <label className="layer-row" data-layer="infra">
-          <input
-            type="checkbox"
-            checked={layerVisibility.infra}
-            onChange={(e) => onToggleLayer("infra", e.target.checked)}
+          <LayerCheck
+            layerKey="infra"
+            on={layerVisibility.infra}
+            wish={layerWish?.infra}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.refinery} color="#ff9500" token="infra.refinery" /> Critical Infrastructure
           <span className="count">{counts.infra} ({counts.infraTotal})</span>
@@ -718,10 +765,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="osmInfra">
-          <input
-            type="checkbox"
-            checked={layerVisibility.osmInfra}
-            onChange={(e) => onToggleLayer("osmInfra", e.target.checked)}
+          <LayerCheck
+            layerKey="osmInfra"
+            on={layerVisibility.osmInfra}
+            wish={layerWish?.osmInfra}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.powerPlant} color={OSM_INFRA_STYLE.power_plant.color} token={OSM_INFRA_STYLE.power_plant.token} />
           {" "}Infrastructure (OpenStreetMap)
@@ -765,10 +813,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="airports">
-          <input
-            type="checkbox"
-            checked={layerVisibility.airports}
-            onChange={(e) => onToggleLayer("airports", e.target.checked)}
+          <LayerCheck
+            layerKey="airports"
+            on={layerVisibility.airports}
+            wish={layerWish?.airports}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.airfield} color="#7f93a8" token="airfield.civil" /> Airfields (OurAirports)
           <span className="count">{counts.airports} ({counts.airportsTotal})</span>
@@ -801,10 +850,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="ports">
-          <input
-            type="checkbox"
-            checked={layerVisibility.ports}
-            onChange={(e) => onToggleLayer("ports", e.target.checked)}
+          <LayerCheck
+            layerKey="ports"
+            on={layerVisibility.ports}
+            wish={layerWish?.ports}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={PORT_STYLE.svg} color={PORT_STYLE.color} token={PORT_STYLE.token} />
           {" "}Ports (NGA World Port Index)
@@ -844,10 +894,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="dams">
-          <input
-            type="checkbox"
-            checked={layerVisibility.dams}
-            onChange={(e) => onToggleLayer("dams", e.target.checked)}
+          <LayerCheck
+            layerKey="dams"
+            on={layerVisibility.dams}
+            wish={layerWish?.dams}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={DAM_STYLE.svg} color={DAM_STYLE.color} token={DAM_STYLE.token} />
           {" "}Dams &amp; Reservoirs (Global Dam Watch)
@@ -891,10 +942,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="cables">
-          <input
-            type="checkbox"
-            checked={layerVisibility.cables}
-            onChange={(e) => onToggleLayer("cables", e.target.checked)}
+          <LayerCheck
+            layerKey="cables"
+            on={layerVisibility.cables}
+            wish={layerWish?.cables}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.cableLanding} color={CABLE_LANDING_STYLE.color} token={CABLE_LANDING_STYLE.token} />
           {" "}Submarine Cables
@@ -931,10 +983,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="firms">
-          <input
-            type="checkbox"
-            checked={layerVisibility.firms}
-            onChange={(e) => onToggleLayer("firms", e.target.checked)}
+          <LayerCheck
+            layerKey="firms"
+            on={layerVisibility.firms}
+            wish={layerWish?.firms}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.fire} color="#ff9500" /> Fires / Thermal Anomalies (FIRMS)
           <span className="count">{counts.firms} ({counts.firmsTotal})</span>
@@ -947,10 +1000,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="jamming">
-          <input
-            type="checkbox"
-            checked={layerVisibility.jamming}
-            onChange={(e) => onToggleLayer("jamming", e.target.checked)}
+          <LayerCheck
+            layerKey="jamming"
+            on={layerVisibility.jamming}
+            wish={layerWish?.jamming}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.jammingSignal} color="#b833e0" /> GPS/Radio Jamming (GPSJam)
           <span className="count">{counts.jamming} ({counts.jammingTotal})</span>
@@ -968,10 +1022,11 @@ export default function LayersSection({
       <PanelGroup id="grp-airspace" title="Airspace &amp; Aviation" count={groupCount("airspace")}
         open={isOpen("grp-airspace")} onToggle={setOpen}>
         <label className="layer-row" data-layer="czib">
-          <input
-            type="checkbox"
-            checked={layerVisibility.czib}
-            onChange={(e) => onToggleLayer("czib", e.target.checked)}
+          <LayerCheck
+            layerKey="czib"
+            on={layerVisibility.czib}
+            wish={layerWish?.czib}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={CZIB_STYLE.active.svg} color={CZIB_STYLE.active.color} token={CZIB_STYLE.active.token} />
           {" "}Airspace Warnings (EASA)
@@ -1019,10 +1074,11 @@ export default function LayersSection({
       <PanelGroup id="grp-hazards" title="Natural Hazards" count={groupCount("hazards")}
         open={isOpen("grp-hazards")} onToggle={setOpen}>
         <label className="layer-row" data-layer="hazards">
-          <input
-            type="checkbox"
-            checked={layerVisibility.hazards}
-            onChange={(e) => onToggleLayer("hazards", e.target.checked)}
+          <LayerCheck
+            layerKey="hazards"
+            on={layerVisibility.hazards}
+            wish={layerWish?.hazards}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.earthquake} color="currentColor" /> Earthquakes &amp; Volcanoes
           <span className="count">{counts.hazards} ({counts.hazardsTotal})</span>
@@ -1059,10 +1115,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="floods">
-          <input
-            type="checkbox"
-            checked={layerVisibility.floods}
-            onChange={(e) => onToggleLayer("floods", e.target.checked)}
+          <LayerCheck
+            layerKey="floods"
+            on={layerVisibility.floods}
+            wish={layerWish?.floods}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={FLOOD_STYLE.svg} color="currentColor" /> Floods (GDACS)
           <span className="count">{counts.floods} ({counts.floodsTotal})</span>
@@ -1107,27 +1164,30 @@ export default function LayersSection({
       <PanelGroup id="grp-space" title="Space" count={groupCount("space")}
         open={isOpen("grp-space")} onToggle={setOpen}>
         <label className="layer-row" data-layer="satellites">
-          <input
-            type="checkbox"
-            checked={layerVisibility.satellites}
-            onChange={(e) => onToggleLayer("satellites", e.target.checked)}
+          <LayerCheck
+            layerKey="satellites"
+            on={layerVisibility.satellites}
+            wish={layerWish?.satellites}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.satellite} color="#6fe3ff" token="satellite.stations" /> Satellites (stations + military)
           <span className="count">{counts.satellites} ({counts.satellitesTotal})</span>
         </label>
         <label className="layer-row sub-row" data-layer="satellitesMilitary">
-          <input
-            type="checkbox"
-            checked={layerVisibility.satellitesMilitary}
-            onChange={(e) => onToggleLayer("satellitesMilitary", e.target.checked)}
+          <LayerCheck
+            layerKey="satellitesMilitary"
+            on={layerVisibility.satellitesMilitary}
+            wish={layerWish?.satellitesMilitary}
+            onToggle={onToggleLayer}
           />
           Show military satellites
         </label>
         <label className="layer-row sub-row" data-layer="satellitesTrails">
-          <input
-            type="checkbox"
-            checked={layerVisibility.satellitesTrails}
-            onChange={(e) => onToggleLayer("satellitesTrails", e.target.checked)}
+          <LayerCheck
+            layerKey="satellitesTrails"
+            on={layerVisibility.satellitesTrails}
+            wish={layerWish?.satellitesTrails}
+            onToggle={onToggleLayer}
           />
           Show satellite trails
         </label>
@@ -1146,10 +1206,11 @@ export default function LayersSection({
         </LayerDetails>
 
         <label className="layer-row" data-layer="launches">
-          <input
-            type="checkbox"
-            checked={layerVisibility.launches}
-            onChange={(e) => onToggleLayer("launches", e.target.checked)}
+          <LayerCheck
+            layerKey="launches"
+            on={layerVisibility.launches}
+            wish={layerWish?.launches}
+            onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.launchPad} color={LAUNCH_STYLE.upcoming.color} token={LAUNCH_STYLE.upcoming.token} />
           {" "}Orbital Launches

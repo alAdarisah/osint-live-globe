@@ -13,6 +13,7 @@ import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
 import { useAppSettings } from "./hooks/useAppSettings";
 import { applyOverrides } from "./settings/applyOverrides";
+import { EDITABLE_SOURCES } from "./settings/defaults";
 import { applyBorderOverrides, staleBorderKeys } from "./settings/borderOverrides";
 import { DEFAULT_EVENT_FILTER } from "./map/severity";
 import { makeCountryScope } from "./map/countryScope";
@@ -31,71 +32,26 @@ import ControlPanel from "./components/controlPanel/ControlPanel";
 import TimelineBar from "./components/TimelineBar";
 import Attribution from "./components/Attribution";
 import CountryInfoCard from "./components/CountryInfoCard";
+import EventDetailCard from "./components/EventDetailCard";
 import CountrySelectionBar from "./components/CountrySelectionBar";
 import BorderEditBar from "./components/BorderEditBar";
 import AdminPanel from "./components/admin/AdminPanel";
 
-// "Tickers" (the layer checkboxes) default off except critical
-// infrastructure, satellites, and the military-only halves of ADS-B/AIS --
-// everything else is opt-in rather than cluttering the map on first load.
+// What a layer's checkbox starts as used to be decided here, by a table of
+// forty booleans with a paragraph of justification each. Those arguments were
+// good, and they have not been thrown away -- they have moved into
+// map/scene.js, next to the zoom gate and the fetch gate for the same layer,
+// where they now express a rule the resolver applies rather than a single
+// global answer a reader had to correct by hand.
+//
+// Two things are left here because they are genuinely not the resolver's
+// business. Both are sub-tickers of a parent layer rather than layers, and
+// both are on because the thing they annotate is on.
 const DEFAULT_LAYER_VISIBILITY = {
-  events: true, conflictHistory: false, firms: false, aisCivilian: false, aisTanker: true, aisTankerTrails: true, aisNavy: true, gdelt: true, officials: true,
-  adsbCivilian: false, adsbMilitary: true, adsbMilitaryTrails: true,
-  countries: true, cities: true, infra: true, jamming: true, satellites: true, satellitesTrails: true,
   satellitesMilitary: true,
-  precip: false, clouds: false, windArrows: false,
-  // Off by default: most days nothing in it bears on the conflict picture, and
-  // an M3.1 tremor competing with a strike for the eye is exactly the clutter
-  // the rest of these defaults avoid.
-  hazards: false,
-  // On by default and deliberately: this is the layer that shows an aircraft
-  // squawking 7500 or one whose operator asked not to be listed. Both are rare,
-  // both are the point, and neither should need to be switched on to be seen.
-  adsbFlagged: true,
-  // Off: 40k airfields is reference material you go looking for.
-  airports: false,
-  // Off, and this one on principle rather than for clutter: every pin in it is
-  // an inference drawn from an absence, and that should be something a reader
-  // chooses to look at rather than something the map asserts at them.
-  darkVessels: false,
-  // Off: 718 cable routes is a dense mesh over every ocean, and it is reference
-  // material for a specific question rather than something to watch.
-  cables: false,
-  // Off: a few dozen pads, and not what this map is primarily for.
-  launches: false,
-  // On, but only ever at close range (OSM_INFRA_MIN_ZOOM in
-  // createMapController.js): it is crowd-sourced geometry sitting next to a
-  // list whose coordinates a person checked, so it stays off the overview
-  // entirely and only fills in once a reader has zoomed into one place, where
-  // its provenance is stated on every pin.
-  osmInfra: true,
-  // Off: a reviewed monthly archive for six countries, which is something a
-  // reader goes looking for rather than something the map should assert
-  // alongside live pins -- and it is the one layer here whose newest data is
-  // weeks old by construction.
-  districts: false,
-  // Off on principle, the same principle darkVessels is off for: the record is
-  // an inference about intent. That the inference is Global Fishing Watch's
-  // rather than this app's does not change what kind of claim it is -- and
-  // every event on it is five or more days old, so it could never be a live
-  // layer even if it wanted to be.
-  gfwGaps: false,
-  // Off for a different reason: these are measurements, and good ones. But a
-  // radar return several weeks old drawn at world zoom beside live AIS is
-  // exactly the confusion this layer risks, so it appears because a reader
-  // asked for it. Also gated hard by zoom, on both the draw and the fetch.
-  gfwDetections: false,
-  // Off: a standing regulatory advisory is reference for a specific question,
-  // the same footing as the cable routes above, not something to watch.
-  czib: false,
-  // Off, matching its sibling hazards layer above for the same reason.
-  floods: false,
-  // Off: a harbour gazetteer is reference material, not a feed. Nothing in it
-  // is an event and nothing in it is current.
-  ports: false,
-  // Off: same, and the popup's whole content is structure-scale detail that
-  // means nothing until a reader is already looking at one place.
-  dams: false,
+  // Trails are drawn wherever their parent is drawn (see TRAIL_PARENT in
+  // scene.js); this is only the reader's own preference for having them at all.
+  aisTankerTrails: true, adsbMilitaryTrails: true, satellitesTrails: true,
 };
 
 export default function App() {
@@ -109,11 +65,17 @@ export default function App() {
   // admin panel wants the object itself.
   const { settings, adminMode, toggleAdminMode, actions, sync, borderNotice } = useAppSettings();
 
-  // Panel starts open on desktop, but an 85vw-wide open drawer would cover
-  // most of a small screen on first load, so it starts closed on phones
-  // (see the mobile media query in style.css, where the panel becomes an
-  // overlay instead of pushing the map).
-  const [panelOpen, setPanelOpen] = useState(() => !isMobileViewport);
+  // The control drawer is an operator's instrument, so it exists only in Admin
+  // Mode now. A reader gets a map: what is drawn is decided by how far in they
+  // are, by what the camera is over and by what they click (see map/scene.js),
+  // which is the same set of decisions the thirty-four checkboxes used to ask
+  // them to make before they had seen anything.
+  //
+  // Derived rather than stored, so `#map.panel-open` (style.css) can never be
+  // set for a reader and the 320px shift it applies needs no separate guard.
+  // The preference underneath survives leaving and re-entering Admin Mode.
+  const [panelOpenPref, setPanelOpenPref] = useState(() => !isMobileViewport);
+  const panelOpen = adminMode && panelOpenPref;
 
   // useLeafletMap and useOsintData each need something the *other* produces
   // (the map needs to tell data-land about an auto-reset; data-land needs
@@ -121,13 +83,28 @@ export default function App() {
   // instead of merging the two hooks into one, so each still reads as a
   // single, focused concern to `git blame`/skim.
   const regionAutoResetRef = useRef(() => {});
+  // The two shipped sub-ticker defaults with Admin Mode's saved layer states on
+  // top. One object for both consumers below -- the map's construction and the
+  // effect that replays it -- because the controller tracks which keys it is
+  // answerable for, and handing it a shorter table on the second call would read
+  // as "the reader has withdrawn these" rather than as "these are unchanged".
+  const layerWishes = useMemo(
+    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish }),
+    [settings.layerWish]
+  );
   const mapApi = useLeafletMap(mapContainerRef, {
     theme,
     onRegionAutoReset: () => regionAutoResetRef.current(),
     // The editor commits whole rings as they are dragged; persisting them is
     // the settings layer's job, exactly as it is for a record edit.
     onBorderRingCommit: actions.setBorderRings,
-    initialLayerVisibility: DEFAULT_LAYER_VISIBILITY,
+    // Read at mount only (useLeafletMap builds the map once), and that is enough
+    // for the common case: useAppSettings seeds itself from localStorage
+    // synchronously, so a saved layer state is in hand before the first paint
+    // rather than applied a frame later as a visible flicker. The effect below
+    // is what covers the rest -- the backend's copy landing after the cache, an
+    // imported file, a reset.
+    initialLayerVisibility: layerWishes,
   });
 
   // While the replay timeline is scrubbed back, live poller ticks must not
@@ -166,6 +143,15 @@ export default function App() {
     ),
     zoom: mapApi.zoom,
     zoomOverrides: layerZoomOverrides,
+    // Clicking a country is a request for that country's whole picture, so its
+    // feeds start fetching regardless of how far out the camera is -- and a
+    // change of subject re-ticks them rather than leaving the previous
+    // country's payload in place (see the scope signature in useOsintData.js).
+    focus: mapApi.focus,
+    // Drives the snapped bbox the heavy sources are clipped to. The viewport
+    // rather than the zoom, because the same zoom over the Pacific and over
+    // Ukraine are different questions.
+    mapBounds: mapApi.mapBounds,
   });
   regionAutoResetRef.current = dataApi.resetRegionToWorld;
 
@@ -176,7 +162,20 @@ export default function App() {
   });
   replayActiveRef.current = replayApi.isReplaying;
 
-  const { health, owmConfigured } = useHealth();
+  // Source-health polling is for the panel that displays it, and that panel is
+  // now admin-only -- so a reader's session stops making the request entirely
+  // rather than fetching a status nothing will render.
+  const { health, owmConfigured } = useHealth(adminMode);
+
+  // Entering or leaving Admin Mode moves the map's left edge by 320px, and
+  // Leaflet caches the container size. Without this the projection stays keyed
+  // to the old width until something else triggers a resize, which shows up as
+  // clicks landing a third of a screen away from where they were aimed. Same
+  // 230ms the panel's own CSS transition takes -- see togglePanel below.
+  useEffect(() => {
+    const timer = setTimeout(() => mapApi.invalidateSize(), 230);
+    return () => clearTimeout(timer);
+  }, [adminMode, mapApi.invalidateSize]);
 
   // --- NASA GIBS satellite imagery ---------------------------------------
   //
@@ -215,19 +214,49 @@ export default function App() {
     mapApi.setIconTheme({
       scale: settings.icons.scale,
       colors: settings.icons.colors,
+      zooms: settings.icons.zooms,
       layers: settings.layers,
+      // useAppSettings pushes these into the module-level theme too, and that is
+      // not enough on its own: a module-level change repaints nothing, which is
+      // the whole reason this effect exists. The stack has to be named here as
+      // well or reordering a layer would update the panel and leave the map
+      // showing the previous order until something else happened to redraw it.
+      stack: settings.layerStack,
+      stackFadeFloor: settings.ui.stackFadeFloor,
     });
-  }, [settings.icons, settings.layers, mapApi.setIconTheme]);
+  }, [
+    settings.icons, settings.layers, settings.layerStack, settings.ui.stackFadeFloor,
+    mapApi.setIconTheme,
+  ]);
 
   useEffect(() => {
     mapApi.setLayerZoomOverrides(layerZoomOverrides);
   }, [layerZoomOverrides, mapApi.setLayerZoomOverrides]);
 
-  // Record edits apply to the payloads already in hand rather than waiting for
-  // the next poll, which for news is a minute away and for the officials feed
-  // two -- long enough that an edit would look like it had not worked.
+  // The saved layer states, replayed whenever the configuration itself is
+  // replaced rather than only at mount: the backend's copy landing on top of the
+  // local cache, an imported file, a reset. A no-op in the ordinary case, since
+  // the click that changed this had already told the map directly.
   useEffect(() => {
-    dataApi.reapplyTransform(["events", "gdelt", "officials"]);
+    mapApi.setLayerWishes(layerWishes);
+  }, [layerWishes, mapApi.setLayerWishes]);
+
+  useEffect(() => {
+    mapApi.setCityZones(settings.cityZones);
+  }, [settings.cityZones, mapApi.setCityZones]);
+
+  // Record edits apply to the payloads already in hand rather than waiting for
+  // the next poll, which for news is a minute away, for the officials feed two,
+  // and for the reference feeds hours -- long enough that an edit would look
+  // like it had not worked.
+  //
+  // Driven off EDITABLE_SOURCES rather than a hand-written list. It was three
+  // names here for as long as only three feeds were editable, and when the
+  // editor grew to eighteen this was exactly the kind of second list that gets
+  // left behind: every new source would have saved its edit correctly, shown
+  // "1 edited" in the panel, and changed nothing on screen until its next poll.
+  useEffect(() => {
+    dataApi.reapplyTransform(EDITABLE_SOURCES.map((s) => s.key));
   }, [settings.data, dataApi.reapplyTransform]);
 
   // The same idea for boundaries, but it takes two calls rather than one.
@@ -270,44 +299,76 @@ export default function App() {
     return scores;
   }, [dataApi.regions, dataApi.eventsRaw, dataApi.gdeltRaw]);
 
-  const [layerVisibility, setLayerVisibility] = useState(DEFAULT_LAYER_VISIBILITY);
+  // What the checkboxes show is what is actually on the map, mirrored out of
+  // the controller (see reportLayerState there). It used to be a React copy
+  // that only changed when a checkbox was clicked, which was fine while a
+  // click was the only thing that could change a layer -- the scene resolver
+  // now moves layers as the camera moves, and a copy like that would be wrong
+  // within one pan.
+  const layerVisibility = mapApi.layerState.on;
+  // Saved, not just applied. The control drawer exists only in Admin Mode (see
+  // panelOpen above), so a checkbox here is an operator deciding what this
+  // deployment shows rather than a reader adjusting their own view for a
+  // minute -- and a decision like that surviving a reload is the whole reason
+  // the drawer is behind Admin Mode in the first place.
+  //
+  // Both calls, and in this order: the map is imperative and answers now, while
+  // the settings write is debounced on its way to data/admin_config.json. Going
+  // through the settings alone would make every click wait on a React round
+  // trip to reach the map.
   const onToggleLayer = useCallback(
     (key, visible) => {
-      setLayerVisibility((prev) => ({ ...prev, [key]: visible }));
       mapApi.setLayerVisible(key, visible);
+      actions.setLayerWish(key, visible);
     },
-    [mapApi.setLayerVisible]
+    [mapApi.setLayerVisible, actions]
   );
 
-  // Picking a conflict zone already drives country-highlight + cities-scope
-  // logic inside createMapController.js (activeConflictZoneBounds/
-  // citiesEnabled), but that's wasted if the countries/cities layers
-  // themselves are still switched off (both default off -- see
-  // DEFAULT_LAYER_VISIBILITY). Force them on here so a zone pick actually
-  // shows the highlighted countries + their cities without a second manual
-  // toggle in the panel; going back to "World" leaves the user's own choice
-  // alone rather than yanking the layers back off.
+  // One record, opened from a row in the country card. Held as resolved HTML
+  // rather than as {kind, id}: the body is the map's own pin detail (see
+  // recordDetail in createMapController.js), and re-resolving it on every render
+  // would rebuild that string on every pan for a card that has not changed.
+  const [recordDetail, setRecordDetail] = useState(null);
+  const openRecordDetail = useCallback(
+    (kind, id) => {
+      const found = mapApi.recordDetail(kind, id);
+      if (!found) {
+        // The row was rendered from an earlier poll and the record has since
+        // left the feed. Saying so beats an empty card or a silent no-op.
+        setRecordDetail({
+          title: "No longer listed",
+          html: '<p class="meta">This record is no longer in the feed &mdash; it may have aged out of the '
+            + "window, or been edited or hidden in Admin Mode since this list was drawn.</p>",
+        });
+        return;
+      }
+      setRecordDetail({
+        ...found,
+        // Only when the record actually has one; a country-scoped row need not.
+        onLocate: Number.isFinite(found.lat) && Number.isFinite(found.lon)
+          ? () => mapApi.flyTo(found.lat, found.lon, 8)
+          : null,
+      });
+    },
+    [mapApi.recordDetail, mapApi.flyTo]
+  );
+
   // Drives the ConflictBriefingCard popup -- null hides it. Only conflict
   // zones (not "world") get one; cleared on going back to World, either by
   // hand or via the map's own pan-away auto-reset (see the effect below).
   const [briefingZone, setBriefingZone] = useState(null);
 
+  // Picking a zone used to have to force the countries and cities layers on,
+  // because both defaulted off and the highlight/scope logic inside the
+  // controller had nothing to draw onto. The resolver decides that now, so the
+  // forcing is gone -- and with it the awkwardness of a zone pick silently
+  // overriding a choice the reader had made.
   const onSelectRegion = useCallback(
     (key) => {
       dataApi.selectRegion(key);
-      if (key !== "world") {
-        setLayerVisibility((prev) => {
-          const next = { ...prev };
-          if (!prev.countries) { next.countries = true; mapApi.setLayerVisible("countries", true); }
-          if (!prev.cities) { next.cities = true; mapApi.setLayerVisible("cities", true); }
-          return next;
-        });
-        setBriefingZone({ key, ...dataApi.regions[key] });
-      } else {
-        setBriefingZone(null);
-      }
+      setBriefingZone(key === "world" ? null : { key, ...dataApi.regions[key] });
     },
-    [dataApi.selectRegion, dataApi.regions, mapApi.setLayerVisible]
+    [dataApi.selectRegion, dataApi.regions]
   );
 
   // The map snaps back to unscoped "World" data on its own when the user
@@ -318,6 +379,28 @@ export default function App() {
     if (!dataApi.currentRegionKey) setBriefingZone(null);
   }, [dataApi.currentRegionKey]);
 
+  // There was, briefly, a second half to that auto-reset: the camera settling
+  // inside exactly one zone's bbox would *select* that zone, so a reader who
+  // never touched a control still got server-side scoping, the per-region row
+  // limits and the briefing card. It was written on the assumption that the
+  // region bar had gone away for readers, and it is deleted because the bar
+  // did not: it is the one control that lives outside Admin Mode.
+  //
+  // The two cannot coexist, and not for a reason a guard could fix. The bar
+  // makes a choice the instant it is clicked; mapBounds only moves on moveend,
+  // at the *end* of the flight that choice starts. So every explicit pick was
+  // judged against where the camera still was, and re-selected from under the
+  // reader -- "World" over Ukraine snapped straight back to Ukraine, and one
+  // zone picked while looking at another reverted to the one on screen. The
+  // camera, already flying, was pulled back mid-flight, which is what "stuck"
+  // looked like. Only Admin Mode escaped, by the guard that assumed the bar
+  // was there.
+  //
+  // Nor is stale state the whole of it. "World while looking at Ukraine" is a
+  // state the auto-select cannot represent at all: an explicit World is a null
+  // key, indistinguishable from never having chosen, so it would be overruled
+  // however fresh the bounds were. A reader asking for unscoped data while
+  // still looking at a theatre is a perfectly ordinary thing to want.
   const [infraFilterText, setInfraFilterText] = useState("");
 
   // The cut-off date of the UCDP record, surfaced in the layer's own label so
@@ -370,7 +453,7 @@ export default function App() {
   );
 
   const togglePanel = useCallback(() => {
-    setPanelOpen((prev) => {
+    setPanelOpenPref((prev) => {
       const next = !prev;
       setTimeout(() => mapApi.invalidateSize(), 230); // after the CSS transition finishes
       return next;
@@ -463,6 +546,15 @@ export default function App() {
     if (!adminMode && mapApi.borderEdit.active) mapApi.endBorderEdit();
   }, [adminMode, mapApi.borderEdit.active, mapApi.endBorderEdit]);
 
+  // Same reasoning, and it became necessary the moment the timeline went behind
+  // the gate: leaving Admin Mode mid-replay would take the scrubber off screen
+  // while the map stayed frozen on a snapshot from hours ago, with every live
+  // feed still suppressed and nothing left to press to get back. The map goes
+  // live with the control that drives it.
+  useEffect(() => {
+    if (!adminMode && replayApi.isReplaying) replayApi.goLive();
+  }, [adminMode, replayApi.isReplaying, replayApi.goLive]);
+
   return (
     <>
       <LoadingScreen sources={dataApi.bootSources} />
@@ -476,6 +568,12 @@ export default function App() {
         onToggleAdminMode={toggleAdminMode}
       />
 
+      {/* Outside Admin Mode, deliberately, and the only thing that is.
+          Picking a theatre is not an operator's adjustment to how the map
+          behaves -- it is the reader saying which part of the world they came
+          here for, and it is the one control that answers a question about the
+          world rather than about the map. Everything else on screen belongs to
+          Admin Mode; this is the reader's way in. */}
       <RegionBar
         regions={dataApi.regions}
         currentRegionKey={dataApi.currentRegionKey}
@@ -483,73 +581,119 @@ export default function App() {
         regionActivity={regionActivity}
       />
 
-      <NewsBroadcastPanel
-        gdeltRaw={dataApi.gdeltRaw}
-        mapBounds={mapApi.mapBounds}
-        regionLabel={dataApi.currentRegionLabel}
-        countryScope={countryScope}
-        onLocate={onLocateNewsItem}
-      />
+      {/* Everything from here down is Admin Mode's.
+          
+          The line is the same one the control drawer was already drawn on: a
+          reader gets the map, and what the map shows is decided by how far in
+          they are, what the camera is over and what they click (see
+          map/scene.js). These panels are the operator's instruments -- a ticker
+          of every headline in view, a ranked board of what is worst right now, a
+          replay scrubber over recorded history. Each is a second reading of data
+          the map is already drawing, which is exactly what an operator wants and
+          exactly what makes a first look cluttered.
 
-      {briefingZone && (
-        <ConflictBriefingCard
-          zone={briefingZone}
-          eventsRaw={dataApi.eventsRaw}
-          eventFilter={eventFilter}
-          gdeltRaw={dataApi.gdeltRaw}
-          onClose={() => setBriefingZone(null)}
-          onLocate={onLocateNewsItem}
-        />
+          The three cards below this block are not gated with them, on purpose:
+          a country card, a record's detail and the boundary-editing bar all open
+          in *response to a click*. Nothing appears unasked, so there is nothing
+          to gate. */}
+      {adminMode && (
+        <>
+          <NewsBroadcastPanel
+            gdeltRaw={dataApi.gdeltRaw}
+            mapBounds={mapApi.mapBounds}
+            regionLabel={dataApi.currentRegionLabel}
+            countryScope={countryScope}
+            onLocate={onLocateNewsItem}
+          />
+
+          {briefingZone && (
+            <ConflictBriefingCard
+              zone={briefingZone}
+              eventsRaw={dataApi.eventsRaw}
+              eventFilter={eventFilter}
+              gdeltRaw={dataApi.gdeltRaw}
+              onClose={() => setBriefingZone(null)}
+              onLocate={onLocateNewsItem}
+            />
+          )}
+
+          {/* Ranks the same /api/events data the map draws, through the same
+              filter, so the two can't disagree. Renders nothing when no event
+              clears its severity floor. */}
+          <NotableEventsPanel
+            eventsRaw={dataApi.eventsRaw}
+            eventFilter={eventFilter}
+            escalation={dataApi.escalation}
+            countryScope={countryScope}
+            onLocate={onLocateNewsItem}
+            isMobile={isMobileViewport}
+          />
+        </>
       )}
 
-      {/* Ranks the same /api/events data the map draws, through the same
-          filter, so the two can't disagree. Renders nothing when no event
-          clears its severity floor. */}
-      <NotableEventsPanel
-        eventsRaw={dataApi.eventsRaw}
-        eventFilter={eventFilter}
-        escalation={dataApi.escalation}
-        countryScope={countryScope}
-        onLocate={onLocateNewsItem}
-        isMobile={isMobileViewport}
-      />
+      {/* The drawer and its handle are the operator's instrument panel: layer
+          toggles, per-layer counts and totals, the zoom-gate notes, the source
+          health lights, the imagery product and the district month. Every one
+          of those answers a question about how the map is behaving rather than
+          about the world, which is why they go together and why they go here.
 
-      <PanelToggle open={panelOpen} onToggle={togglePanel} />
+          The event filter goes with them for a subtler reason. Severity,
+          verification state and age are claim-*quality* dimensions, and no
+          camera position can infer "show me only the corroborated ones" -- so
+          it is the one control zoom and clicks genuinely cannot replace. A
+          reader still gets all of it, because the map already says it without a
+          control: severity sets the colour, an imprecise event is drawn smaller
+          and ringed, low confidence dims the pin, and the uncertainty circle is
+          drawn at its real radius. Filtering the doubtful ones *away* is an
+          analyst's act, and that is what belongs behind this gate. */}
+      {adminMode && (
+        <>
+          <PanelToggle open={panelOpen} onToggle={togglePanel} />
+          <ControlPanel
+            open={panelOpen}
+            counts={mapApi.counts}
+            zoomNotes={mapApi.zoomNotes}
+            layerVisibility={layerVisibility}
+            layerWish={mapApi.layerState.wish}
+            sceneBypass={mapApi.layerState.bypass}
+            onSceneBypassChange={mapApi.setSceneBypass}
+            onToggleLayer={onToggleLayer}
+            health={health}
+            owmConfigured={owmConfigured}
+            windStatus={mapApi.windStatus}
+            infraFilterText={infraFilterText}
+            eventFilter={eventFilter}
+            historyAsOf={historyAsOf}
+            onEventFilterChange={onEventFilterChange}
+            onInfraFilterChange={onInfraFilterChange}
+            imageryKey={imageryKey}
+            imageryDate={imageryDate}
+            onImageryChange={setImageryKey}
+            choropleth={mapApi.choropleth}
+            onChoroplethChange={mapApi.setChoroplethMetric}
+            districts={mapApi.districts}
+            districtMonths={districtMonths}
+            onDistrictMetricChange={mapApi.setDistrictMetric}
+            onDistrictMonthChange={mapApi.setDistrictMonth}
+          />
+        </>
+      )}
 
-      <ControlPanel
-        open={panelOpen}
-        counts={mapApi.counts}
-        zoomNotes={mapApi.zoomNotes}
-        layerVisibility={layerVisibility}
-        onToggleLayer={onToggleLayer}
-        health={health}
-        owmConfigured={owmConfigured}
-        windStatus={mapApi.windStatus}
-        infraFilterText={infraFilterText}
-        eventFilter={eventFilter}
-        historyAsOf={historyAsOf}
-        onEventFilterChange={onEventFilterChange}
-        onInfraFilterChange={onInfraFilterChange}
-        imageryKey={imageryKey}
-        imageryDate={imageryDate}
-        onImageryChange={setImageryKey}
-        choropleth={mapApi.choropleth}
-        onChoroplethChange={mapApi.setChoroplethMetric}
-        districts={mapApi.districts}
-        districtMonths={districtMonths}
-        onDistrictMetricChange={mapApi.setDistrictMetric}
-        onDistrictMonthChange={mapApi.setDistrictMonth}
-      />
-
-      <TimelineBar
-        isReplaying={replayApi.isReplaying}
-        isPlaying={replayApi.isPlaying}
-        replayAt={replayApi.replayAt}
-        bounds={replayApi.bounds}
-        onScrub={replayApi.scrubTo}
-        onTogglePlay={replayApi.togglePlay}
-        onGoLive={replayApi.goLive}
-      />
+      {/* Scrubbing the map back through recorded history is the most operator-
+          shaped control on it: it replaces every live feed with a snapshot, and
+          a reader who found it by accident would be looking at a map that had
+          quietly stopped being live. */}
+      {adminMode && (
+        <TimelineBar
+          isReplaying={replayApi.isReplaying}
+          isPlaying={replayApi.isPlaying}
+          replayAt={replayApi.replayAt}
+          bounds={replayApi.bounds}
+          onScrub={replayApi.scrubTo}
+          onTogglePlay={replayApi.togglePlay}
+          onGoLive={replayApi.goLive}
+        />
+      )}
 
       <Attribution />
 
@@ -557,7 +701,10 @@ export default function App() {
         country={mapApi.selectedCountry}
         onClose={mapApi.closeCountryCard}
         borderEdit={borderEditProps}
+        onOpenRecord={openRecordDetail}
       />
+
+      <EventDetailCard detail={recordDetail} onClose={() => setRecordDetail(null)} />
 
       <BorderEditBar
         state={mapApi.borderEdit}
@@ -586,11 +733,7 @@ export default function App() {
           settings={settings}
           actions={actions}
           sync={sync}
-          sources={{
-            events: dataApi.eventsRaw,
-            gdelt: dataApi.gdeltRaw,
-            officials: dataApi.officialsRaw,
-          }}
+          recordsFor={mapApi.recordsFor}
           staleBorders={staleBorders}
           onClose={toggleAdminMode}
         />

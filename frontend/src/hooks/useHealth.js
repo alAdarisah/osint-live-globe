@@ -1,10 +1,20 @@
 import { useEffect, useState } from "react";
 import { fetchJson } from "../api";
 
-export function useHealth() {
+/**
+ * Per-source health, polled every 15s.
+ *
+ * @param {boolean} enabled  whether anything is going to render this. The only
+ *   reader is the Source status fold of the control panel, which is Admin
+ *   Mode-only, so an ordinary reader's session would otherwise poll /api/health
+ *   240 times an hour to fill a state nothing displays. Off by default for the
+ *   same reason: a caller that wants health has to say so.
+ */
+export function useHealth(enabled = false) {
   const [health, setHealth] = useState({});
 
   useEffect(() => {
+    if (!enabled) return undefined;
     let cancelled = false;
     let timer = null;
     let firstLoadDone = false;
@@ -39,7 +49,7 @@ export function useHealth() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       clearTimeout(timer);
     };
-  }, []);
+  }, [enabled]);
 
   const owmConfigured = !!(health.owm_weather && health.owm_weather.key_configured);
   return { health, owmConfigured };

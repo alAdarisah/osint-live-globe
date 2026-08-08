@@ -1,17 +1,25 @@
 // Editing the OSINT records themselves.
 //
-// Scoped to the three feeds the app holds in React state (see EDITABLE_SOURCES)
-// -- they are the ones every panel reads, so an edit here is an edit
-// everywhere, not just on the map.
+// Every feed that is a list of records with a stable identity (see
+// EDITABLE_SOURCES), which is most of them. An edit reaches every reader of that
+// feed at once -- the map, the news ticker, the notable-activity board, the
+// country cards -- because they all read the same arrays and applyOverrides sits
+// between the fetch and all of them.
 //
 // Nothing is written back to the server, and nothing pretends otherwise: an
 // edit is a local override stored with the rest of the configuration (see
 // settings/applyOverrides.js), applied to each poll as it arrives, and every
 // pin it touches says so in its popup. That is the only honest way to let a map
 // whose whole argument is provenance be edited by hand.
+//
+// The records come from the map controller rather than from React state, which
+// is what let this grow past the original three feeds -- see recordsFor in
+// createMapController.js. Some of these lists are very long (48,000 airfields,
+// 24,000 AIS gaps), so the list is search-first: MAX_ROWS at a time, and the
+// count below says how much is not being shown.
 
 import { useMemo, useState } from "react";
-import { EDITABLE_SOURCES, EDITABLE_FIELDS } from "../../settings/defaults";
+import { EDITABLE_SOURCES, EDITABLE_FIELDS, UNEDITABLE_SOURCES } from "../../settings/defaults";
 import { HIDDEN_FLAG } from "../../settings/applyOverrides";
 
 const MAX_ROWS = 40;
@@ -22,22 +30,26 @@ function labelFor(record, source) {
   return `${source.label} ${record[source.idField]}`;
 }
 
-export default function DataEditor({ sources, settings, actions }) {
+export default function DataEditor({ recordsFor, settings, actions }) {
   const [sourceKey, setSourceKey] = useState(EDITABLE_SOURCES[0].key);
   const [query, setQuery] = useState("");
   const [openId, setOpenId] = useState(null);
 
   const source = EDITABLE_SOURCES.find((s) => s.key === sourceKey);
-  const records = sources[sourceKey] || [];
+  const records = recordsFor(sourceKey);
   const edits = settings.data[sourceKey]?.edits || {};
 
-  const rows = useMemo(() => {
+  // `matched` before `rows` because the note below needs to say how many were
+  // left out, and "40 of 48,000" reads very differently from "40" -- without it
+  // a search that found nothing useful is indistinguishable from a feed that
+  // has nothing in it.
+  const { rows, matched } = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const matched = needle
+    const hits = needle
       ? records.filter((r) => labelFor(r, source).toLowerCase().includes(needle)
           || String(r[source.idField]).toLowerCase().includes(needle))
       : records;
-    return matched.slice(0, MAX_ROWS);
+    return { rows: hits.slice(0, MAX_ROWS), matched: hits.length };
   }, [records, query, source]);
 
   // Hidden records are gone from `records` by the time this component sees them
@@ -67,11 +79,19 @@ export default function DataEditor({ sources, settings, actions }) {
       </div>
 
       <div className="admin-note">
-        {records.length} loaded · {editedCount} edited · {addedCount} added locally.
-        Edits are stored in this browser and re-applied to every poll; the source feed is never changed.
+        {records.length.toLocaleString()} loaded · {editedCount} edited · {addedCount} added locally.
+        {matched > rows.length && ` Showing the first ${rows.length} of ${matched.toLocaleString()} matches — narrow the filter to reach the rest.`}
+        {" "}Edits are stored in this browser and re-applied to every poll; the source feed is never changed.
       </div>
 
-      {rows.length === 0 && <div className="admin-note">No records match.</div>}
+      {rows.length === 0 && (
+        <div className="admin-note">
+          {records.length === 0
+            ? "Nothing loaded for this feed yet. Several of these are only fetched once the map is"
+              + " zoomed in far enough to draw them — see the zoom gate in Layer appearance."
+            : "No records match."}
+        </div>
+      )}
 
       <div className="admin-record-list">
         {rows.map((record) => {
@@ -153,7 +173,29 @@ export default function DataEditor({ sources, settings, actions }) {
       )}
 
       <AddRecordForm sourceKey={sourceKey} actions={actions} />
+      <UneditableNote />
     </div>
+  );
+}
+
+/**
+ * The feeds that are not in the dropdown, and why.
+ *
+ * "Why can I not edit the ships" is a reasonable question with a real answer,
+ * and the answer belongs where it is asked rather than in a source file. Folded
+ * shut because it is read once.
+ */
+function UneditableNote() {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="admin-uneditable" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>Why some layers are not listed</summary>
+      {UNEDITABLE_SOURCES.map((entry) => (
+        <div className="admin-note" key={entry.label}>
+          <b>{entry.label}.</b> {entry.reason}
+        </div>
+      ))}
+    </details>
   );
 }
 
@@ -202,9 +244,12 @@ function AddRecordForm({ sourceKey, actions }) {
               if (value === undefined || value === "") continue;
               record[field.name] = field.type === "number" ? Number(value) : value;
             }
-            // Both feeds date their items, and an undated record is filtered out
-            // by the map's own age gate -- so a hand-added one gets today.
-            if (sourceKey === "events" && !record.date) {
+            // A record with no date is filtered out by the map's own age gate,
+            // so a hand-added one on a dated feed gets today rather than
+            // vanishing the moment it is added. Driven off the field table
+            // rather than off a list of feed names, so a feed that gains a date
+            // field is covered without anyone remembering to come back here.
+            if (fields.some((f) => f.name === "date") && !record.date) {
               record.date = new Date().toISOString().slice(0, 10);
             }
             actions.addRecord(sourceKey, record);

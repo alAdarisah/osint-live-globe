@@ -42,8 +42,11 @@ FAILURE_RETRY_INTERVAL = 600
 # full sweep has all day to finish.
 BETWEEN_REGIONS_SECONDS = 30
 # Overpass' own server-side limit, and ours. Generous because some of these
-# boxes are 20 degrees across.
-QUERY_TIMEOUT = 180
+# boxes are 20 degrees across -- and raised from 180 once the rail selectors
+# were added: the count-only query for the Russia/Ukraine box already took 260s
+# on the 2026-08-06 probe, and a full data query returning the geometry is
+# heavier still, so 180 was guaranteeing a 504 on the largest theatres.
+QUERY_TIMEOUT = 600
 # Per feature class, not per region. The distinction is the whole reason the
 # query below is shaped the way it is: with one shared cap over a combined
 # result set, Russia/Ukraine came back as 725 border-control nodes, 58 military
@@ -51,29 +54,67 @@ QUERY_TIMEOUT = 180
 # each gives 132 airfields, 285 military areas, 300 power plants and 300
 # crossings from the same box.
 MAX_PER_FEATURE = 300
+# Rail points get their own, far higher cap. MAX_PER_FEATURE = 300 exists to
+# suppress unnamed *fragments* of the noisy area classes; a railway station is a
+# discrete, whole feature, not a fragment, so the same cap would silently drop
+# 95% of a real layer -- 5,227 of the 5,527 stations in the Russia/Ukraine box
+# alone. Thinning a dense layer is the renderer's job (declutter: thin the
+# presentation, never delete the data), so the collector keeps all of them. Kept
+# as a large explicit ceiling rather than truly uncapped so one pathological box
+# can never make us ask a volunteer service for an unbounded result set.
+MAX_RAIL_PER_FEATURE = 25000
 
-# What is asked for, and why each one carries a `["name"]` filter or does not.
+# What is asked for, the per-record class it becomes, and its cap.
+#
+# Why each one carries a `["name"]` filter or does not:
 #
 # `military=airfield` does not: an unnamed military airfield is still an
 # airfield, and there are few enough of them that noise is not the risk.
 #
-# The other three do. Without it, `landuse=military` is dominated by small
-# unnamed fragments (perimeter strips, individual firing ranges, sheds inside a
-# base already mapped) -- 432 of 600 results in one theatre -- and
+# The three area classes do. Without it, `landuse=military` is dominated by
+# small unnamed fragments (perimeter strips, individual firing ranges, sheds
+# inside a base already mapped) -- 432 of 600 results in one theatre -- and
 # `barrier=border_control` by every unnamed gate post along a frontier.
+#
+# The four rail classes do NOT, and deliberately: a station/halt/yard is a
+# discrete whole feature rather than a fragment, so there is no fragment noise
+# for a name to filter out -- an unnamed station is a real station and gets the
+# fallback label below. `railway=border` is the emphatic case: only 17 of 101
+# such nodes in the Russia/Ukraine box carry a name, so a `["name"]` filter
+# would discard 83% of them; what they do carry is a UIC or operator ref, which
+# _fallback_name reads instead. (Verified zero overlap with barrier=border_control,
+# so there is nothing to dedup between the two.)
+#
+# Bridges and tunnels are deliberately absent: they are secondary tags on rail
+# *ways* (15,181 bridge + 2,384 tunnel segments in Russia/Ukraine alone), and
+# forcing 40-metre culverts through `out center` would swamp the stations 3:1.
 _FEATURES = (
-    ('nwr["military"="airfield"]', "military_airfield"),
-    ('nwr["landuse"="military"]["name"]', "military_area"),
-    ('nwr["power"="plant"]["name"]', "power_plant"),
-    ('nwr["barrier"="border_control"]["name"]', "border_control"),
+    ('nwr["military"="airfield"]', "military_airfield", MAX_PER_FEATURE),
+    ('nwr["landuse"="military"]["name"]', "military_area", MAX_PER_FEATURE),
+    ('nwr["power"="plant"]["name"]', "power_plant", MAX_PER_FEATURE),
+    ('nwr["barrier"="border_control"]["name"]', "border_control", MAX_PER_FEATURE),
+    ('nwr["railway"="station"]', "railway_station", MAX_RAIL_PER_FEATURE),
+    ('nwr["railway"="halt"]', "railway_halt", MAX_RAIL_PER_FEATURE),
+    ('nwr["railway"="yard"]', "railway_yard", MAX_RAIL_PER_FEATURE),
+    # Node-only: a border marker is a point on the track, never an area.
+    ('node["railway"="border"]', "railway_border", MAX_RAIL_PER_FEATURE),
 )
+
+_RAILWAY_KINDS = {
+    "station": "railway_station",
+    "halt": "railway_halt",
+    "yard": "railway_yard",
+    "border": "railway_border",
+}
 
 
 def build_query(bounds: tuple[float, float, float, float]) -> str:
     """Overpass QL for one region box, capped per feature class.
 
     Each selector is bound to its own named set and given its own `out`, which
-    is what makes the cap per class rather than shared -- see MAX_PER_FEATURE.
+    is what makes the cap per class rather than shared -- and lets the rail
+    classes carry a far higher cap than the noisy area classes (see
+    MAX_RAIL_PER_FEATURE vs MAX_PER_FEATURE).
 
     `out center` is the other load-bearing part: an area has no coordinate of
     its own, and this asks Overpass to compute one rather than shipping every
@@ -83,9 +124,13 @@ def build_query(bounds: tuple[float, float, float, float]) -> str:
     bbox = f"({south},{west},{north},{east})"
     sets = [f".s{i}" for i in range(len(_FEATURES))]
     selectors = "\n".join(
-        f"{selector}{bbox}->{name};" for name, (selector, _kind) in zip(sets, _FEATURES)
+        f"{selector}{bbox}->{setname};"
+        for setname, (selector, _kind, _cap) in zip(sets, _FEATURES)
     )
-    outputs = "\n".join(f"{name} out center tags {MAX_PER_FEATURE};" for name in sets)
+    outputs = "\n".join(
+        f"{setname} out center tags {cap};"
+        for setname, (_selector, _kind, cap) in zip(sets, _FEATURES)
+    )
     return f"[out:json][timeout:{QUERY_TIMEOUT}];\n{selectors}\n{outputs}"
 
 
@@ -98,6 +143,9 @@ def _kind_of(tags: dict) -> str | None:
         return "power_plant"
     if tags.get("barrier") == "border_control":
         return "border_control"
+    railway = tags.get("railway")
+    if railway in _RAILWAY_KINDS:
+        return _RAILWAY_KINDS[railway]
     return None
 
 
@@ -106,7 +154,31 @@ _KIND_FALLBACK_NAME = {
     "military_area": "Military area",
     "power_plant": "Power plant",
     "border_control": "Border crossing",
+    "railway_station": "Railway station",
+    "railway_halt": "Railway halt",
+    "railway_yard": "Railway yard",
+    "railway_border": "Railway border crossing",
 }
+
+
+def _fallback_name(kind: str, tags: dict) -> str:
+    """A label for a feature OSM left unnamed.
+
+    A plain lookup for every class but `railway=border`, which is the one class
+    here that is routinely unnamed yet still identifiable: it carries a UIC
+    station reference (`uic_ref`) or an operator's own ref (`ref:RO:CFR`,
+    `railway:ref`, ...). Preferring those over the generic "Railway border
+    crossing" is what keeps the 83% of border nodes that have no `name` from all
+    reading identically on the map.
+    """
+    if kind == "railway_border":
+        uic = tags.get("uic_ref")
+        if uic:
+            return f"UIC {uic}"
+        for key, value in tags.items():
+            if value and (key == "ref" or key.startswith("ref:") or key.endswith(":ref")):
+                return str(value)
+    return _KIND_FALLBACK_NAME[kind]
 
 
 def parse_overpass(payload: dict, region_key: str) -> list[dict]:
@@ -138,7 +210,7 @@ def parse_overpass(payload: dict, region_key: str) -> list[dict]:
             "kind": kind,
             "lat": float(lat),
             "lon": float(lon),
-            "name": tags.get("name") or tags.get("name:en") or _KIND_FALLBACK_NAME[kind],
+            "name": tags.get("name") or tags.get("name:en") or _fallback_name(kind, tags),
             "named": bool(tags.get("name") or tags.get("name:en")),
             "operator": tags.get("operator"),
             # power=plant carries its own detail worth keeping; the rest do not.

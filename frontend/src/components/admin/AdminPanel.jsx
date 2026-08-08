@@ -7,8 +7,11 @@
 // size or a record by any sequence of clicks.
 //
 // What each section owns:
-//   Icons    the global size multiplier and every marker colour
-//   Layers   per-layer size, opacity and zoom gate
+//   Icons    the one global size multiplier, and the reset buttons
+//   Layers   everything else about how a layer draws -- its size, its opacity,
+//            its zoom gate, and the colour of every kind of pin in it. Grouped
+//            by layer rather than split across two sections, because split is
+//            how the same dial ended up offered twice (see LayerBlock)
 //   Data     the records themselves (see DataEditor.jsx)
 //   Display  panel opacity, accent, text size, motion, leader lines
 //   Config   export / import / reset, and the panel layout
@@ -18,7 +21,8 @@
 // work when it is closed.
 
 import { useRef, useState } from "react";
-import { PALETTE_GROUPS, DEFAULT_COLORS, tokenHasSize } from "../../map/iconTheme";
+import { PALETTE_GROUPS, DEFAULT_COLORS, TOKEN_LAYER, tokenHasSize, tokenHasZoom } from "../../map/iconTheme";
+import { shippedDrawZoom } from "../../map/scene";
 import { SETTINGS_LAYERS, defaultSettings } from "../../settings/defaults";
 import { borderStats } from "../../settings/borderOverrides";
 import { useAccordion } from "../../hooks/useAccordion";
@@ -31,7 +35,7 @@ const DEFAULT_OPEN = { "adm-icons": true };
 const STORAGE_KEY = "osint-admin-accordion";
 const DEFAULTS = defaultSettings();
 
-export default function AdminPanel({ settings, actions, sources, sync, staleBorders, onClose }) {
+export default function AdminPanel({ settings, actions, recordsFor, sync, staleBorders, onClose }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN, STORAGE_KEY);
   const { panelRef, style, handleProps } = useDraggablePanel("adminPanel");
 
@@ -47,7 +51,7 @@ export default function AdminPanel({ settings, actions, sources, sync, staleBord
       </div>
 
       <div className="admin-body">
-        <PanelGroup id="adm-icons" title="Map icons" open={isOpen("adm-icons")} onToggle={setOpen}>
+        <PanelGroup id="adm-icons" title="Global icon size" open={isOpen("adm-icons")} onToggle={setOpen}>
           <SliderField
             label="Icon size"
             value={settings.icons.scale}
@@ -60,90 +64,83 @@ export default function AdminPanel({ settings, actions, sources, sync, staleBord
           />
           <div className="admin-note">
             Scales every marker, and the spacing the declutter pass reserves for it, so pins stay
-            separated at any size.
+            separated at any size. Everything narrower than this &mdash; a layer’s own size, its
+            opacity, its zoom gate, and the colour of each kind of pin in it &mdash; lives under
+            <b> Layers</b> below, beside the layer it belongs to.
           </div>
-
-          <div className="admin-note">
-            Below, each kind of pin has its own colour and its own size. The size is a multiplier on
-            top of this global one and the per-layer one in the next section &mdash; so a layer can be
-            turned down as a whole while one kind of pin inside it stays large.
-          </div>
-
-          {PALETTE_GROUPS.map((group) => (
-            <div className="admin-color-group" key={group.id}>
-              <div className="admin-subhead">{group.label}</div>
-              {group.note && <div className="admin-note">{group.note}</div>}
-              {group.tokens.map((token) => (
-                <IconField
-                  key={token.id}
-                  label={token.label}
-                  color={settings.icons.colors[token.id] || DEFAULT_COLORS[token.id]}
-                  defaultColor={DEFAULT_COLORS[token.id]}
-                  onColorChange={(value) => actions.setColor(token.id, value)}
-                  size={tokenHasSize(token.id) ? settings.icons.sizes[token.id] ?? 1 : null}
-                  onSizeChange={(value) => actions.setTokenSize(token.id, value)}
-                />
-              ))}
-            </div>
-          ))}
           <div className="admin-row">
             <button type="button" onClick={actions.resetColors}>Reset all colours</button>
             <button type="button" onClick={actions.resetSizes}>Reset all sizes</button>
+            <button type="button" onClick={actions.resetZooms}>Reset all zooms</button>
           </div>
         </PanelGroup>
 
-        <PanelGroup id="adm-layers" title="Layer appearance" open={isOpen("adm-layers")} onToggle={setOpen}>
+        <PanelGroup id="adm-stack" title="Layer order" open={isOpen("adm-stack")} onToggle={setOpen}>
+          <StackSection settings={settings} actions={actions} />
+        </PanelGroup>
+
+        <PanelGroup id="adm-layers" title="Layers" open={isOpen("adm-layers")} onToggle={setOpen}>
+          <SavedLayerStates wishes={settings.layerWish} onClear={actions.clearLayerWishes} />
           <div className="admin-note">
-            Per layer, on top of the global icon size. The zoom gate is the zoom level a layer starts
-            drawing at -- lowering it puts more on screen at world view, which is what the gates exist
-            to prevent, so it is worth checking the map after moving one.
+            One layer per row, expanded to show everything that layer has: how big it is drawn, how
+            solid, the zoom it starts drawing at, and the colour of every kind of pin in it.
+            <b> Any zoom</b> means no gate &mdash; where seven of these ship, because a navy hull, an
+            aircraft squawking an emergency or a rescinded airspace warning is worth seeing from the
+            world board.
           </div>
-          {SETTINGS_LAYERS.map((layer) => {
-            const layerStyle = settings.layers[layer.key];
-            return (
-              <div className="admin-layer-block" key={layer.key}>
-                <div className="admin-subhead">{layer.label}</div>
-                <SliderField
-                  label="Size"
-                  value={layerStyle.scale}
-                  defaultValue={1}
-                  min={0.3}
-                  max={3}
-                  step={0.05}
-                  format={(v) => `${Math.round(v * 100)}%`}
-                  onChange={(value) => actions.setLayerStyle(layer.key, { scale: value })}
-                />
-                <SliderField
-                  label="Opacity"
-                  value={layerStyle.opacity}
-                  defaultValue={1}
-                  min={0.1}
-                  max={1}
-                  step={0.05}
-                  format={(v) => `${Math.round(v * 100)}%`}
-                  onChange={(value) => actions.setLayerStyle(layer.key, { opacity: value })}
-                />
-                {layer.zoomGate != null && (
-                  <SliderField
-                    label="Shows from zoom"
-                    value={layerStyle.minZoom ?? layer.zoomGate}
-                    defaultValue={layer.zoomGate}
-                    min={0}
-                    max={12}
-                    step={1}
-                    format={(v) => `z${v}`}
-                    onChange={(value) =>
-                      actions.setLayerStyle(layer.key, { minZoom: value === layer.zoomGate ? null : value })
-                    }
-                  />
-                )}
-              </div>
-            );
-          })}
+          {SETTINGS_LAYERS.map((layer) => (
+            <LayerBlock
+              key={layer.key}
+              layer={layer}
+              settings={settings}
+              actions={actions}
+              open={isOpen(`adm-layer-${layer.key}`)}
+              onToggle={setOpen}
+            />
+          ))}
+          <SharedColours settings={settings} actions={actions} />
+        </PanelGroup>
+
+        <PanelGroup id="adm-zones" title="City zones" open={isOpen("adm-zones")} onToggle={setOpen}>
+          <div className="admin-note">
+            A city is one coordinate, and almost every conflict report filed in a city is filed
+            against the city rather than against a street &mdash; so they land on one point and read
+            as one incident repeated. Grouping them by the city they are about, rather than by how
+            close their pins happened to fall, turns that pile into one pin that says how many. Every
+            report keeps its own coordinate and its own record; <b>Separate these pins</b> inside a
+            grouped pin takes it apart again.
+          </div>
+          <CheckField
+            label="Group conflict reports by city"
+            note="Reports outside every city zone are never grouped — there is no place to group them on."
+            checked={settings.cityZones.group}
+            onChange={(value) => actions.setCityZones({ group: value })}
+          />
+          <CheckField
+            label="Draw the zone rings"
+            note="Only where the Cities layer is already drawing, which is what the ring explains."
+            checked={settings.cityZones.show}
+            onChange={(value) => actions.setCityZones({ show: value })}
+          />
+          <SliderField
+            label="Zone size"
+            value={settings.cityZones.radiusScale}
+            defaultValue={1}
+            min={0.25}
+            max={4}
+            step={0.25}
+            format={(v) => `${Math.round(v * 100)}%`}
+            onChange={(value) => actions.setCityZones({ radiusScale: value })}
+          />
+          <div className="admin-note">
+            Shipped radii are 25 / 15 / 8 / 5 km by population band, scaled by the above. They are a
+            nominal urban footprint, not a boundary and not surveyed &mdash; widening them groups
+            more, and eventually groups two towns that are genuinely two places.
+          </div>
         </PanelGroup>
 
         <PanelGroup id="adm-data" title="OSINT data" open={isOpen("adm-data")} onToggle={setOpen}>
-          <DataEditor sources={sources} settings={settings} actions={actions} />
+          <DataEditor recordsFor={recordsFor} settings={settings} actions={actions} />
           <button type="button" className="admin-wide-btn" onClick={actions.clearDataEdits}>
             Discard every data edit
           </button>
@@ -204,6 +201,365 @@ export default function AdminPanel({ settings, actions, sources, sync, staleBord
         </PanelGroup>
       </div>
     </aside>
+  );
+}
+
+// Every key that can appear in the stack, in the words the rest of the panel
+// uses. `vehicles` and `cables` are the two that stand for more than themselves
+// (see STACK_ALIAS in map/iconTheme.js), and both say so.
+const STACK_LABEL = {
+  ...Object.fromEntries(SETTINGS_LAYERS.map((l) => [l.key, l.label])),
+  vehicles: "Ships & aircraft (one canvas)",
+  cables: "Submarine cables & landings",
+  outagePoints: "Internet disruption (IODA)",
+  firms: "Fires / thermal anomalies (FIRMS)",
+  jamming: "GPS/radio jamming (GPSJam)",
+};
+
+/**
+ * The stack, as two ordered lists.
+ *
+ * Arrows rather than drag-and-drop. A drag needs pointer capture, an autoscroll
+ * and a drop indicator to be usable at all, and this list lives inside a panel
+ * that is itself draggable by its header -- two nested drag gestures is a bug
+ * report waiting to be filed. Two buttons per row are unambiguous, work from the
+ * keyboard, and are one click each for the only move anyone makes.
+ */
+function StackSection({ settings, actions }) {
+  const floor = settings.ui.stackFadeFloor;
+  return (
+    <>
+      <div className="admin-note">
+        What draws over what, top of the list first. Position also sets how much a layer is faded:
+        the top of a group is drawn at full strength and the bottom at the depth below, so pushing
+        reference material down makes it recede behind the layers it is context for. That fade is a
+        multiplier on each layer&apos;s own opacity, not a replacement for it.
+      </div>
+      <SliderField
+        label="Depth fade"
+        value={floor}
+        defaultValue={DEFAULTS.ui.stackFadeFloor}
+        min={0.1}
+        max={1}
+        step={0.05}
+        format={(v) => (v >= 1 ? "off" : `${Math.round(v * 100)}% at the bottom`)}
+        onChange={(value) => actions.setUi({ stackFadeFloor: value })}
+      />
+
+      <StackList
+        group="pins"
+        title="Pins"
+        order={settings.layerStack.pins}
+        floor={floor}
+        onMove={actions.moveLayerInStack}
+      />
+      <StackList
+        group="washes"
+        title="Washes"
+        order={settings.layerStack.washes}
+        floor={1}
+        onMove={actions.moveLayerInStack}
+      />
+      <div className="admin-note">
+        Two lists because the map draws in two ways, and they do not interleave. Every pin is an
+        element in one Leaflet pane; the washes are canvases in the pane below it, so a wash is
+        always beneath every pin however either list is ordered. Country shapes and the district
+        choropleth are not here at all &mdash; they are the substrate the rest is drawn on.
+      </div>
+      <button type="button" className="admin-wide-btn" onClick={actions.resetLayerStack}>
+        Back to the shipped order
+      </button>
+    </>
+  );
+}
+
+function StackList({ group, title, order, floor, onMove }) {
+  return (
+    <>
+      <div className="admin-subhead">{title}</div>
+      {order.map((key, index) => (
+        <div className="admin-stack-row" key={key}>
+          <span className="admin-stack-rank">{index + 1}</span>
+          <span className="admin-stack-name">{STACK_LABEL[key] || key}</span>
+          <span className="admin-stack-fade">
+            {order.length < 2
+              ? "100%"
+              : `${Math.round((1 - (1 - floor) * (index / (order.length - 1))) * 100)}%`}
+          </span>
+          <button
+            type="button"
+            disabled={index === 0}
+            onClick={() => onMove(group, key, -1)}
+            aria-label={`Move ${STACK_LABEL[key] || key} up`}
+            title="Draw this over the layer above it"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            disabled={index === order.length - 1}
+            onClick={() => onMove(group, key, 1)}
+            aria-label={`Move ${STACK_LABEL[key] || key} down`}
+            title="Draw this under the layer below it"
+          >
+            ↓
+          </button>
+        </div>
+      ))}
+    </>
+  );
+}
+
+/**
+ * What the control drawer's checkboxes have been left set to, and the way back.
+ *
+ * Every checkbox in that drawer is now saved (see setLayerWish in
+ * useAppSettings.js), which is what makes this necessary rather than tidy: a
+ * checkbox is a boolean and the resolver's own answer is a third state, so once
+ * a layer has been ticked or unticked there is no gesture in the drawer that
+ * hands it back. This is that gesture. It is here rather than in the drawer
+ * because it is a statement about the saved configuration, not about the map.
+ */
+function SavedLayerStates({ wishes, onClear }) {
+  const entries = Object.entries(wishes || {});
+  const on = entries.filter(([, visible]) => visible).length;
+  const off = entries.length - on;
+  return (
+    <div className="admin-note">
+      Ticking a layer in the control drawer saves it: what is on when you leave is what this
+      deployment comes up with, in every browser this backend serves.{" "}
+      {entries.length === 0 ? (
+        <>Nothing is pinned &mdash; every layer is still chosen by zoom, by what the camera is over
+        and by what you have clicked.</>
+      ) : (
+        <>
+          {on} pinned on, {off} pinned off. Those layers no longer answer to the scene resolver.
+          <button type="button" className="admin-wide-btn" onClick={onClear}>
+            Hand every layer back to the resolver
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Which pin types belong to each layer, built once from the palette.
+//
+// Two tokens name a colour that is only ever drawn as part of another layer, so
+// they are adopted by it rather than left to the shared group at the bottom: a
+// corroborated conflict pin is a conflict pin recoloured, and a cable route is
+// the line its landing points sit on. Everything else with no layer of its own
+// is genuinely shared -- the OFAC ring is drawn on hulls *and* airframes, and
+// the choropleth paints whole countries.
+const ADOPTED_BY = { "event.corroborated": "events", "cable.route": "cables" };
+
+const TOKENS_BY_LAYER = (() => {
+  const byLayer = {};
+  for (const group of PALETTE_GROUPS) {
+    for (const token of group.tokens) {
+      const layerKey = TOKEN_LAYER[token.id] || ADOPTED_BY[token.id];
+      if (!layerKey) continue;
+      (byLayer[layerKey] ||= []).push(token);
+    }
+  }
+  return byLayer;
+})();
+
+// Cable landings have no row of their own in SETTINGS_LAYERS -- one checkbox
+// covers the routes and the places they come ashore, because a cable and its
+// landing are one fact -- so its pin types are shown under Submarine cables.
+const EXTRA_TOKENS_UNDER = { cables: "cableLandings" };
+
+const SHARED_TOKENS = PALETTE_GROUPS.flatMap((group) =>
+  group.tokens.filter((token) => !TOKEN_LAYER[token.id] && !ADOPTED_BY[token.id])
+);
+
+/**
+ * One layer, with every dial that belongs to it.
+ *
+ * The panel used to ask for the same thing twice. A layer's Size sat in one
+ * section and its pin types' sizes in another, and for the ten layers that draw
+ * exactly one kind of pin those are the same dial: Cities' layer size and the
+ * "City / capital" size multiplied to the same number, and nothing said which
+ * one to reach for. Same for the zoom gate, in the same two places.
+ *
+ * So the narrow dial is offered only where it can say something the broad one
+ * cannot -- when a layer holds more than one kind of pin. Infrastructure has
+ * seven, and "nuclear sites bigger than refineries" is a real instruction that
+ * the layer dial cannot express. Cities has one, and there the layer dial *is*
+ * the pin dial, so the row carries a colour and nothing else.
+ */
+function LayerBlock({ layer, settings, actions, open, onToggle }) {
+  const style = settings.layers[layer.key];
+  const tokens = [
+    ...(TOKENS_BY_LAYER[layer.key] || []),
+    ...(TOKENS_BY_LAYER[EXTRA_TOKENS_UNDER[layer.key]] || []),
+  ];
+  // An ungated layer starts the slider at 0, which is the same thing: the map's
+  // own minimum zoom is 2, so nothing on it can be below 0. That is what lets
+  // one control cover both cases instead of the ungated layers having none.
+  const shippedGate = layer.zoomGate ?? 0;
+  // The test that removes the duplication. `sizable` rather than `tokens`,
+  // because a layer whose only extra token is a colour-only one (events, with
+  // its four severity bands plus the corroborated recolour) still counts by its
+  // real pin types.
+  const sizable = tokens.filter((t) => tokenHasSize(t.id));
+  const perPinDials = sizable.length > 1;
+  // Per token, not per block. A cable landing is shown under Submarine cables
+  // but answers to its own gate (cableLandings draws from z5, cables is
+  // ungated), so reading the block's number would tell it it inherits "any
+  // zoom" when it does not.
+  const gateOf = (tokenId) => {
+    const key = TOKEN_LAYER[tokenId] || layer.key;
+    const configured = settings.layers[key]?.minZoom;
+    return Number.isFinite(configured) ? configured : shippedDrawZoom(key);
+  };
+
+  return (
+    <details
+      className="admin-layer-block"
+      open={open}
+      onToggle={(e) => onToggle(`adm-layer-${layer.key}`, e.currentTarget.open)}
+    >
+      <summary className="admin-layer-summary">
+        <span className="admin-layer-name">{layer.label}</span>
+        {/* The swatches are the whole point of a shut row: they say what this
+            layer looks like on the map without opening anything. */}
+        <span className="admin-layer-swatches">
+          {tokens.slice(0, 6).map((token) => (
+            <i
+              key={token.id}
+              className="admin-swatch"
+              style={{ background: settings.icons.colors[token.id] || DEFAULT_COLORS[token.id] }}
+            />
+          ))}
+        </span>
+      </summary>
+
+      <div className="admin-layer-body">
+        <SliderField
+          label="Size"
+          value={style.scale}
+          defaultValue={1}
+          min={0.3}
+          max={3}
+          step={0.05}
+          format={(v) => `${Math.round(v * 100)}%`}
+          onChange={(value) => actions.setLayerStyle(layer.key, { scale: value })}
+        />
+        <SliderField
+          label="Opacity"
+          value={style.opacity}
+          defaultValue={1}
+          min={0.1}
+          max={1}
+          step={0.05}
+          format={(v) => `${Math.round(v * 100)}%`}
+          onChange={(value) => actions.setLayerStyle(layer.key, { opacity: value })}
+        />
+        <SliderField
+          label="Shows from zoom"
+          value={style.minZoom ?? shippedGate}
+          defaultValue={shippedGate}
+          min={0}
+          max={12}
+          step={1}
+          format={(v) => (v === 0 ? "any zoom" : `z${v}`)}
+          onChange={(value) =>
+            actions.setLayerStyle(layer.key, { minZoom: value === shippedGate ? null : value })
+          }
+        />
+
+        {tokens.length > 0 && (
+          <>
+            <div className="admin-subhead">
+              {tokens.length === 1 ? "Pin colour" : `Pin types (${tokens.length})`}
+            </div>
+            {perPinDials && (
+              <div className="admin-note">
+                Each kind of pin can also be sized and held back on its own, on top of the layer
+                dials above &mdash; which is how one layer keeps its nuclear sites on the world board
+                and its refineries for a closer look. A pin type can only be held back past its
+                layer&apos;s gate, never brought forward through it: below that gate the layer is
+                often not fetched at all.
+              </div>
+            )}
+            {tokens.map((token) => (
+              <IconField
+                key={token.id}
+                label={token.label}
+                color={settings.icons.colors[token.id] || DEFAULT_COLORS[token.id]}
+                defaultColor={DEFAULT_COLORS[token.id]}
+                onColorChange={(value) => actions.setColor(token.id, value)}
+                size={perPinDials && tokenHasSize(token.id) ? settings.icons.sizes[token.id] ?? 1 : null}
+                onSizeChange={(value) => actions.setTokenSize(token.id, value)}
+                zoom={perPinDials && tokenHasZoom(token.id) ? settings.icons.zooms[token.id] ?? null : undefined}
+                layerZoom={gateOf(token.id)}
+                onZoomChange={(value) => actions.setTokenZoom(token.id, value)}
+              />
+            ))}
+          </>
+        )}
+        <PinTypesNote layerKey={layer.key} zooms={settings.icons.zooms} />
+      </div>
+    </details>
+  );
+}
+
+/**
+ * The colours that are not one layer's to own.
+ *
+ * The OFAC ring is drawn on a hull and on an airframe, and the choropleth ramp
+ * paints whole countries rather than pins -- so filing either under a single
+ * layer would put the control somewhere it is only half true.
+ */
+function SharedColours({ settings, actions }) {
+  if (!SHARED_TOKENS.length) return null;
+  return (
+    <div className="admin-layer-block admin-shared-colours">
+      <div className="admin-subhead">Shared colours</div>
+      <div className="admin-note">
+        Not tied to one layer: the designation ring is drawn on ships and aircraft alike, and the
+        country fill covers whole countries rather than pins.
+      </div>
+      {SHARED_TOKENS.map((token) => (
+        <IconField
+          key={token.id}
+          label={token.label}
+          color={settings.icons.colors[token.id] || DEFAULT_COLORS[token.id]}
+          defaultColor={DEFAULT_COLORS[token.id]}
+          onColorChange={(value) => actions.setColor(token.id, value)}
+          size={null}
+          onSizeChange={() => {}}
+          onZoomChange={() => {}}
+        />
+      ))}
+    </div>
+  );
+}
+
+const TOKEN_LABEL = Object.fromEntries(
+  PALETTE_GROUPS.flatMap((group) => group.tokens.map((token) => [token.id, token.label]))
+);
+
+/**
+ * Which pin types in this layer are not following its gate.
+ *
+ * Without it the layer slider looks broken from here: it is moved, the map does
+ * not change, and the reason is a number set two sections up on one kind of pin
+ * inside it. Silent while nothing in the layer has been given its own zoom,
+ * which is every layer until someone sets one.
+ */
+function PinTypesNote({ layerKey, zooms }) {
+  const held = Object.entries(zooms || {})
+    .filter(([token, zoom]) => Number.isFinite(zoom) && TOKEN_LAYER[token] === layerKey)
+    .sort((a, b) => a[1] - b[1]);
+  if (!held.length) return null;
+  return (
+    <div className="admin-note">
+      Held back further by their own zoom, under <b>Map icons</b>:{" "}
+      {held.map(([token, zoom]) => `${TOKEN_LABEL[token] || token} (z${zoom})`).join(", ")}.
+    </div>
   );
 }
 

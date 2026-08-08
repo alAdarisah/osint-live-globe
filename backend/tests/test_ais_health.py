@@ -149,3 +149,74 @@ def test_silence_is_not_reported_as_a_key_problem():
     assert "accepted" in silent
     assert "outage" in silent
     assert issubclass(ais.StreamRefused, Exception)
+
+
+# --- egress -----------------------------------------------------------------
+#
+# The stream can be routed through a proxy when the direct connection keeps
+# failing (see backend/proxypool.py). What is tested here is the policy, not the
+# plumbing: which egresses a cycle is allowed to try, in what order, and what
+# that costs the service. The policy is the part with teeth -- a fallback that
+# quietly became the normal path, or one that multiplied connection attempts
+# during an outage, would each undo something the rest of this file exists to
+# protect.
+
+
+@pytest.fixture
+def proxying(monkeypatch):
+    """PROXY_ENABLED, with small deterministic thresholds."""
+    monkeypatch.setattr(ais.config, "PROXY_ENABLED", True)
+    monkeypatch.setattr(ais.config, "AIS_PROXY_AFTER_FAILURES", 3)
+    monkeypatch.setattr(ais.config, "AIS_PROXY_ATTEMPTS", 3)
+
+
+POOL = [f"socks5://10.0.0.{i}:1080" for i in range(1, 9)]
+
+
+def test_no_proxy_is_considered_while_the_feature_is_off(monkeypatch):
+    monkeypatch.setattr(ais.config, "PROXY_ENABLED", False)
+    assert ais._egress_plan(99, POOL) == [None]
+
+
+def test_an_ordinary_blip_is_never_routed_around(proxying):
+    """A failure or two is aisstream being aisstream. Reaching for a different
+    IP over that would make the fallback the normal path within a day."""
+    assert ais._egress_plan(0, POOL) == [None]
+    assert ais._egress_plan(2, POOL) == [None]
+
+
+def test_a_direct_attempt_still_leads_every_cycle(proxying):
+    """The honest path -- the one aisstream can attribute to this account -- and
+    the one that starts working again the moment the service does, with nothing
+    to switch back. A plan that dropped it would strand us on a proxy for as
+    long as the proxy kept working."""
+    for failures in (3, 10, 500):
+        assert ais._egress_plan(failures, POOL)[0] is None
+
+
+def test_the_plan_is_capped_however_many_proxies_are_available(proxying):
+    plan = ais._egress_plan(3, POOL)
+    assert plan == [None, *POOL[:3]]
+
+
+def test_an_empty_pool_is_a_direct_attempt_and_nothing_else(proxying):
+    assert ais._egress_plan(3, []) == [None]
+
+
+def test_a_day_of_proxying_still_costs_the_service_two_attempts_a_cycle(proxying):
+    """The number that matters to aisstream, and the reason the cycle stops at
+    the first proxy that actually reaches them (see stream_forever): the plan
+    may be four long, but three of those are dead nodes that never open a
+    connection to aisstream at all. Walking past them is free to the service;
+    only the direct attempt and at most one live proxy are not.
+    """
+    plan = ais._egress_plan(3, POOL)
+    reached_per_cycle = 2  # the direct attempt, plus the first proxy that gets through
+    assert len(plan) == 4
+
+    elapsed, cycles, backoff = 0.0, 0, ais.BACKOFF_START
+    while elapsed < 24 * 3600:
+        elapsed += ais.SILENCE_IS_A_FAULT_AFTER + backoff
+        cycles += 1
+        backoff = ais._next_backoff(backoff)
+    assert cycles * reached_per_cycle < 200  # ~170; at a 60s cap it would be ~960

@@ -190,6 +190,35 @@ def _role_from_designator(desc: str) -> str | None:
     return None
 
 
+# Callsign prefixes that mean an aircraft is flying a military mission, whether
+# or not any database says the airframe is military.
+#
+# This heuristic lived in the frontend until the aircraft feed grew a class
+# filter. It had to move, and the reason is worth stating: /api/aircraft can now
+# be asked for only the aircraft a zoomed-out reader can draw, and the server
+# decides who those are. If the server's idea of "military" were narrower than
+# the client's by even one prefix, the client would keep classifying an aircraft
+# as military that the server had already dropped -- and the aircraft would
+# simply not be on the map, with no error anywhere. Two copies of this list
+# would be exactly that bug waiting to happen, so there is one copy, here, and
+# the record carries the answer rather than the rule (see `callsign_military`).
+#
+# Deliberately generous. A false positive puts a civil aircraft in the military
+# bucket, which a reader can see and dismiss; a false negative removes a
+# military aircraft from a map whose whole purpose is showing them.
+_MILITARY_CALLSIGN_PREFIXES = (
+    "RCH", "CNV", "NATO", "HKY", "ASCOT", "IAM", "GAF", "DUKE", "TARTAN",
+    "FORTE", "VIVI", "REACH", "KNIFE", "VADER", "POLAR", "FALCON", "VULCAN",
+    "SLAM", "SPAR", "COBRA", "TITAN", "USAF", "NAVY", "MARINE", "ARMY",
+)
+
+
+def _callsign_military(callsign: str | None) -> bool:
+    """Whether a callsign is one of the military prefixes above."""
+    cs = (callsign or "").strip().upper()
+    return bool(cs) and cs.startswith(_MILITARY_CALLSIGN_PREFIXES)
+
+
 def _infer_military_role(desc: str | None, category: int | None = None) -> str | None:
     """Best-effort role for a military aircraft, or None.
 
@@ -292,6 +321,11 @@ async def _fetch_opensky() -> dict[str, dict]:
             "on_ground": s[8],
             "category": s[17] if len(s) > 17 else 0,
             "military": False,  # OpenSky has no such field -- refined below if airplanes.live agrees
+            # Kept separate from `military` for the same reason `hex_military`
+            # is: that is a database's judgement about an airframe, this is what
+            # the aircraft is calling itself on this flight, and conflating them
+            # would throw away which one fired.
+            "callsign_military": _callsign_military(s[1]),
             # s[3] time_position, s[4] last_contact: when this position was last
             # updated, and when *any* message was last received. Position time is
             # the honest answer to "when was this aircraft last heard where the
@@ -353,6 +387,9 @@ def normalize_airplanes_live(ac: dict) -> dict | None:
         "on_ground": on_ground,
         "category": category,
         "military": bool(db_flags & 1),
+        # See the note on the OpenSky record: a mission callsign and a database
+        # flag are two different claims and are carried as two fields.
+        "callsign_military": _callsign_military(ac.get("flight")),
         "type_code": ac.get("t"),
         "type_desc": type_desc,
         "registration": ac.get("r"),

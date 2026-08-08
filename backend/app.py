@@ -14,8 +14,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import (
-    admin_config, cachestore, config, escalation, history, infrastructure, ingest, mirror, refine,
-    regions, replay, storage,
+    admin_config, cachestore, config, escalation, history, infrastructure, ingest, metrics, mirror,
+    refine, regions, replay, storage,
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
@@ -40,6 +40,10 @@ _background_tasks: list[asyncio.Task] = []
 # operation and actively misleading after a deploy or a data-filtering
 # change. A token minted at import time makes every process's ETags distinct.
 _PROCESS_TOKEN = uuid.uuid4().hex[:8]
+
+# Published as a label on osint_backend_info, so a restart is visible in the
+# metrics as a changed label rather than only as counters resetting to zero.
+metrics.set_process_token(_PROCESS_TOKEN)
 
 
 # The sources this process still fetches for itself: every one of them is
@@ -66,7 +70,11 @@ _SOURCE_MODULES = (
     # by the ingest pollers, so they sit beside sanctions rather than anywhere
     # more logical.
     "icao_blocks", "maritime_watchlists",
-    "cables", "dams", "ports", "czib", "outages", "launches", "energy_flows",
+    "cables", "railways", "dams", "ports", "czib", "outages", "launches", "energy_flows",
+    # 99.78% United States, and there is no US theatre -- so this layer is
+    # visible only on the unfiltered World view, by design. See
+    # backend/sources/deflock.py.
+    "deflock",
     "hdx_conflict_stats", "hapi_conflict", "humanitarian", "food_trade",
     "official_feeds", "officials",
     # Weekly, and only for the countries hapi_conflict covers in volume: the
@@ -127,6 +135,10 @@ async def lifespan(app: FastAPI):
 
     _background_tasks.append(asyncio.create_task(storage.retention_sweep_loop()))
 
+    # Keeps the one metric that lives in the database off the scrape path --
+    # see backend/metrics.py for why /metrics does no I/O of its own.
+    _background_tasks.append(asyncio.create_task(metrics.refresh_loop()))
+
     # Weather has no polling loop of its own -- it's proxied tile-by-tile on
     # demand below -- but is registered here so its key status shows up
     # alongside every other source in /api/health.
@@ -147,6 +159,52 @@ app = FastAPI(title="OSINT Live Globe", lifespan=lifespan)
 # gzip cuts that transfer size dramatically (highly repetitive keys/values)
 # and is the cheapest available win for "loads slowly" on a real network.
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+@app.middleware("http")
+async def record_request_metrics(request: Request, call_next):
+    """Time every request and count it against its route template.
+
+    /metrics excludes itself. Counting a scrape produces a request rate that
+    never falls to zero and a latency series dominated by the one endpoint
+    nobody is waiting on -- it would be measuring the act of measuring.
+
+    An exception on the way out is recorded as a 500 and re-raised: an endpoint
+    that raises is exactly the case worth seeing, and swallowing it here to keep
+    the counter tidy would change the response the client gets.
+    """
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
+    started = time.perf_counter()
+    metrics.http_requests_in_flight.inc()
+    try:
+        response = await call_next(request)
+    except Exception:
+        metrics.observe_request(
+            request.method, metrics.route_label(request), 500, time.perf_counter() - started
+        )
+        raise
+    finally:
+        metrics.http_requests_in_flight.dec()
+    metrics.observe_request(
+        request.method, metrics.route_label(request), response.status_code,
+        time.perf_counter() - started,
+    )
+    return response
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Prometheus exposition for this process.
+
+    Not under /api, and so not proxied by the frontend's nginx (see
+    frontend/nginx.conf, which forwards /api/ only) -- Prometheus reaches it at
+    backend:8000 on the compose network, and nothing published to the host
+    serves it. That is the intended boundary: this exposes route names, source
+    names and error counts, which is operational detail rather than map data.
+    """
+    return Response(content=metrics.render(), media_type=metrics.CONTENT_TYPE)
 
 
 @app.get("/api/health")
@@ -179,6 +237,15 @@ async def admin_config_get():
     )
 
 
+# POST as well as PUT, and only for one caller: navigator.sendBeacon.
+#
+# The frontend debounces its writes, so a refresh inside that window would
+# drop the change -- and a normal fetch issued from a document that is being
+# torn down is cancelled with it. sendBeacon is the browser API built for
+# exactly that hand-off, and it can only issue POST. Same handler either way:
+# the body is the whole configuration in both cases, so there is nothing for
+# the two verbs to disagree about.
+@app.post("/api/admin-config")
 @app.put("/api/admin-config")
 async def admin_config_put(request: Request):
     """Store the configuration the client just changed.
@@ -219,7 +286,34 @@ async def infrastructure_list():
     return JSONResponse(infrastructure.serialize(), headers={"Cache-Control": "public, max-age=86400"})
 
 
-def _cached_source_response(request: Request, source_name: str, region: str | None, filter_fn, max_age: int | None = None):
+# Filtered payloads, keyed by (source, version, region, bbox).
+#
+# There was no cache here at all: filter_fn ran on every request that was not a
+# 304, over up to a quarter of a million FIRMS points, once per client per poll.
+# The ETag path avoided re-serialising, never re-filtering. So this is not a cost
+# the bbox work introduces -- it is one the bbox work is a good moment to stop
+# paying, and N clients sharing a snapped cell now cost one filter pass between
+# them instead of N.
+#
+# `version` in the key is what makes it self-invalidating: it only ticks when a
+# poller reassigns a source's data (see backend/cache.py), so a stale entry is
+# unreachable rather than merely unlikely. maxsize is generous because the key
+# space is small by construction -- a handful of sources times a handful of
+# snapped cells -- and each entry is a list of references to objects the source
+# registry is already holding.
+_FILTERED_CACHE = LruTtlCache(maxsize=256, ttl=300)
+metrics.track_local_cache("filtered_source", _FILTERED_CACHE)
+
+
+def _cached_source_response(
+    request: Request,
+    source_name: str,
+    region: str | None,
+    filter_fn,
+    max_age: int | None = None,
+    bbox: str | None = None,
+    variant: str | None = None,
+):
     """Serves a source's (region-filtered) data with a version-based ETag.
 
     A source's data can only actually change when its background poller
@@ -240,6 +334,19 @@ def _cached_source_response(request: Request, source_name: str, region: str | No
     catch (countries/cities, ~once/day) -- there, skipping the round trip
     entirely for a while is safe and actually the point.
     """
+    # A viewport box narrows what the region already allows; it can never widen
+    # it. So a reader inside a selected zone gets that zone clipped to what they
+    # can see, and never a point from outside the zone they chose.
+    box = regions.parse_bbox(bbox)
+    bounds = regions.intersect(regions.bounds_for(region), box)
+    box_key = ",".join(f"{v:g}" for v in box) if box else "-"
+    # A caller-supplied name for a filter_fn that is not the source's default
+    # one. It belongs in the ETag and the cache key for exactly the reason the
+    # box does: two clients on the same source, version, region and box can
+    # still be holding different bodies, and without this the second would be
+    # handed a 304 telling it the body it has is the one it asked for.
+    variant_key = variant or "-"
+
     state = registry.get(source_name)
     # Before a source's very first successful poll, state.data is still the
     # empty placeholder it was constructed with -- caching *that* for the
@@ -250,13 +357,21 @@ def _cached_source_response(request: Request, source_name: str, region: str | No
     # at least one real refresh; browsers additionally never cache no-store
     # at all, so this costs nothing once version ticks past 0.
     if state.version == 0:
-        return JSONResponse(filter_fn(state.data, regions.bounds_for(region)), headers={"Cache-Control": "no-store"})
-    etag = f'"{_PROCESS_TOKEN}:{state.version}:{region or "world"}"'
+        return JSONResponse(filter_fn(state.data, bounds), headers={"Cache-Control": "no-store"})
+    # The box belongs in the ETag: two clients on the same source and version
+    # but different cells hold genuinely different bodies, and without it the
+    # second would be told its stale one is still good.
+    etag = f'"{_PROCESS_TOKEN}:{state.version}:{region or "world"}:{box_key}:{variant_key}"'
     cache_control = f"public, max-age={max_age}" if max_age else "no-cache"
     headers = {"Cache-Control": cache_control, "ETag": etag}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
-    payload = filter_fn(state.data, regions.bounds_for(region))
+
+    cache_key = (source_name, state.version, region or "world", box_key, variant_key)
+    payload = _FILTERED_CACHE.get(cache_key)
+    if payload is None:
+        payload = filter_fn(state.data, bounds)
+        _FILTERED_CACHE.set(cache_key, payload)
     return JSONResponse(payload, headers=headers)
 
 
@@ -282,11 +397,11 @@ async def conflict_stats(request: Request):
 
 
 @app.get("/api/conflict-history")
-async def conflict_history(request: Request, region: str | None = None):
+async def conflict_history(request: Request, region: str | None = None, bbox: str | None = None):
     # UCDP's reviewed record, ungated by recency (see backend/sources/acled.py).
     # Every row carries as_of/lag_days; anything rendering this is expected to
     # show that it is not live.
-    return _cached_source_response(request, "conflict_history", region, regions.filter_points)
+    return _cached_source_response(request, "conflict_history", region, regions.filter_points, bbox=bbox)
 
 
 # District geometry is stored per country (see sources/admin2_boundaries.py) and
@@ -294,6 +409,7 @@ async def conflict_history(request: Request, region: str | None = None):
 # handing over all six because a reader opened the layer would be several
 # megabytes for districts they are not looking at.
 _DISTRICT_BOUNDARY_CACHE = LruTtlCache(maxsize=8, ttl=3600)
+metrics.track_local_cache("district_boundaries", _DISTRICT_BOUNDARY_CACHE)
 
 
 @app.get("/api/district-boundaries")
@@ -374,11 +490,26 @@ async def conflict_districts(
 EVENTS_MAX_ITEMS = 2500
 
 
-def _events_filter(items: list[dict], bounds) -> list[dict]:
-    scoped = regions.filter_points(items, bounds)
-    if bounds is None and len(scoped) > EVENTS_MAX_ITEMS:
-        return sorted(scoped, key=lambda d: d.get("severity") or 0, reverse=True)[:EVENTS_MAX_ITEMS]
-    return scoped
+def _events_filter_for(region: str | None):
+    """The events filter, bound to whether this is the unscoped world view.
+
+    The ceiling used to key on `bounds is None`, which was the same question
+    while a named region was the only thing that could produce bounds. It stops
+    being the same question the moment a viewport bbox can: a box covering a
+    third of the planet would make `bounds` non-None and silently lift the cap,
+    which is the exact opposite of what it is for. So the ceiling asks about the
+    region directly, and a bbox narrows what is returned without ever widening
+    it.
+    """
+    world = region is None
+
+    def _filter(items: list[dict], bounds) -> list[dict]:
+        scoped = regions.filter_points(items, bounds)
+        if world and len(scoped) > EVENTS_MAX_ITEMS:
+            return sorted(scoped, key=lambda d: d.get("severity") or 0, reverse=True)[:EVENTS_MAX_ITEMS]
+        return scoped
+
+    return _filter
 
 
 @app.get("/api/events")
@@ -388,7 +519,7 @@ async def events(request: Request, region: str | None = None):
     # referenced and collapsed into one record per real-world incident. See
     # backend/sources/event_fusion.py. This replaces rendering ACLED/UCDP
     # and GDELT-derived conflict pins as separate, unmerged layers.
-    return _cached_source_response(request, "events", region, _events_filter)
+    return _cached_source_response(request, "events", region, _events_filter_for(region))
 
 
 # Same world-view-only reasoning as EVENTS_MAX_ITEMS above. Lower because this
@@ -397,15 +528,21 @@ async def events(request: Request, region: str | None = None):
 OFFICIALS_MAX_ITEMS = 1200
 
 
-def _officials_filter(items: list[dict], bounds) -> list[dict]:
-    scoped = regions.filter_points(items, bounds)
-    if bounds is None and len(scoped) > OFFICIALS_MAX_ITEMS:
-        # officials.py already sorted by its own recency-weighted rank, so the
-        # cut here is a prefix rather than a re-sort -- which also means a
-        # government's own release is never dropped in favour of a wire story
-        # about it (see officials._rank).
-        return scoped[:OFFICIALS_MAX_ITEMS]
-    return scoped
+def _officials_filter_for(region: str | None):
+    """Same shape, and the same reason, as _events_filter_for above."""
+    world = region is None
+
+    def _filter(items: list[dict], bounds) -> list[dict]:
+        scoped = regions.filter_points(items, bounds)
+        if world and len(scoped) > OFFICIALS_MAX_ITEMS:
+            # officials.py already sorted by its own recency-weighted rank, so
+            # the cut here is a prefix rather than a re-sort -- which also means
+            # a government's own release is never dropped in favour of a wire
+            # story about it (see officials._rank).
+            return scoped[:OFFICIALS_MAX_ITEMS]
+        return scoped
+
+    return _filter
 
 
 @app.get("/api/officials")
@@ -415,25 +552,25 @@ async def officials(request: Request, region: str | None = None):
     # trusted newsrooms and, separately, straight from the governments' own
     # press feeds. See backend/sources/officials.py; the per-record `origin`
     # field is what tells those two apart, and the popup says which it is.
-    return _cached_source_response(request, "officials", region, _officials_filter)
+    return _cached_source_response(request, "officials", region, _officials_filter_for(region))
 
 
 @app.get("/api/fires")
-async def fires(request: Request, region: str | None = None):
-    return _cached_source_response(request, "firms", region, regions.filter_points)
+async def fires(request: Request, region: str | None = None, bbox: str | None = None):
+    return _cached_source_response(request, "firms", region, regions.filter_points, bbox=bbox)
 
 
 @app.get("/api/jamming")
-async def jamming_endpoint(request: Request, region: str | None = None):
-    return _cached_source_response(request, "jamming", region, regions.filter_points)
+async def jamming_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
+    return _cached_source_response(request, "jamming", region, regions.filter_points, bbox=bbox)
 
 
 @app.get("/api/osm-infrastructure")
-async def osm_infrastructure_endpoint(request: Request, region: str | None = None):
+async def osm_infrastructure_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
     # Crowd-sourced, and served on its own endpoint rather than merged into
     # /api/infrastructure for exactly that reason -- see the module docstring in
     # backend/sources/osm_infra.py.
-    return _cached_source_response(request, "osm_infra", region, regions.filter_points, max_age=3600)
+    return _cached_source_response(request, "osm_infra", region, regions.filter_points, max_age=3600, bbox=bbox)
 
 
 @app.get("/api/humanitarian")
@@ -487,6 +624,25 @@ async def cables_endpoint(request: Request):
     return _cached_source_response(request, "cables", None, lambda data, _bounds: data, max_age=86400)
 
 
+@app.get("/api/railways")
+async def railways_endpoint(request: Request):
+    # Coarse Natural Earth line geometry, theatre-clipped and served whole (see
+    # backend/sources/railways.py) -- same shape and hard cache as /api/cables,
+    # and no region filter for the same reason: a rail line is one object the
+    # client splits, not a set of points to clip. The station/yard/border POINTS
+    # are a different thing entirely and ride /api/osm-infrastructure.
+    return _cached_source_response(request, "railways", None, lambda data, _bounds: data, max_age=86400)
+
+
+@app.get("/api/deflock")
+async def deflock_endpoint(request: Request, region: str | None = None):
+    # ALPR camera locations, worldwide (see backend/sources/deflock.py). 99.78%
+    # United States and regions.py has no US theatre, so a region filter returns
+    # nothing and this is really a World-view layer -- the filter is offered only
+    # for consistency with the other point sources.
+    return _cached_source_response(request, "deflock", region, regions.filter_points)
+
+
 @app.get("/api/outages")
 async def outages_endpoint(request: Request):
     # Country-keyed, not point data (see backend/sources/outages.py) -- no
@@ -503,7 +659,7 @@ async def dark_vessels_endpoint(request: Request, region: str | None = None):
 
 
 @app.get("/api/gfw-gaps")
-async def gfw_gaps_endpoint(request: Request, region: str | None = None):
+async def gfw_gaps_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
     """AIS disabling events as Global Fishing Watch records them.
 
     The independent counterpart to /api/dark-vessels above, and the reason both
@@ -513,11 +669,11 @@ async def gfw_gaps_endpoint(request: Request, region: str | None = None):
     not this -- and every record is GFW's claim rather than ours, carrying their
     dated attribution (see backend/sources/gfw_gaps.py).
     """
-    return _cached_source_response(request, "gfw_gaps", region, regions.filter_points)
+    return _cached_source_response(request, "gfw_gaps", region, regions.filter_points, bbox=bbox)
 
 
 @app.get("/api/gfw-detections")
-async def gfw_detections_endpoint(request: Request, region: str | None = None):
+async def gfw_detections_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
     """Radar and optical vessel detections as Global Fishing Watch publishes them.
 
     The only thing in this project's maritime stack entitled to say *detected*:
@@ -532,7 +688,7 @@ async def gfw_detections_endpoint(request: Request, region: str | None = None):
     was imaged and found empty from water that was never imaged. Absence is
     not evidence of absence at sea.
     """
-    return _cached_source_response(request, "gfw_detections", region, regions.filter_points)
+    return _cached_source_response(request, "gfw_detections", region, regions.filter_points, bbox=bbox)
 
 
 # Which payload fields travel with a track, per kind.
@@ -598,30 +754,30 @@ async def hazards_endpoint(request: Request, region: str | None = None):
 
 
 @app.get("/api/floods")
-async def floods_endpoint(request: Request, region: str | None = None):
+async def floods_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
     # GDACS flood alerts (see backend/sources/floods.py). A separate layer from
     # /api/hazards rather than a third kind inside it: these points are modelled
     # basin centroids, not the measured positions that module's docstring
     # promises, and an event stays open for weeks where a quake is instantaneous.
-    return _cached_source_response(request, "floods", region, regions.filter_points)
+    return _cached_source_response(request, "floods", region, regions.filter_points, bbox=bbox)
 
 
 @app.get("/api/dams")
-async def dams_endpoint(request: Request, region: str | None = None):
+async def dams_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
     # Global Dam Watch barriers, clipped to the conflict theatres (see
     # backend/sources/dams.py). Filters like any other point source, but note
     # 81% of these coordinates are snapped to a river network rather than
     # published for the structure -- every record says which, via coord_source.
-    return _cached_source_response(request, "dams", region, regions.filter_points)
+    return _cached_source_response(request, "dams", region, regions.filter_points, bbox=bbox)
 
 
 @app.get("/api/ports")
-async def ports_endpoint(request: Request, region: str | None = None):
+async def ports_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
     # NGA World Port Index, clipped to the theatres and the AIS watch boxes (see
     # backend/sources/ports.py). Also read by dark_vessels.py, which excludes
     # ship-to-ship candidates near a port -- that consumer reads Postgres
     # directly rather than this endpoint.
-    return _cached_source_response(request, "ports", region, regions.filter_points)
+    return _cached_source_response(request, "ports", region, regions.filter_points, bbox=bbox)
 
 
 @app.get("/api/czib")
@@ -678,9 +834,58 @@ async def news(request: Request, region: str | None = None):
     return _cached_source_response(request, "gdelt", region, _gdelt_filter)
 
 
+# Which aircraft a reader who cannot draw ordinary traffic still needs.
+#
+# Deliberately a superset of what the map draws below its civilian gate, and
+# deliberately built from stored fields rather than re-deriving anything: the
+# frontend classifies an aircraft as military from `military` or
+# `callsign_military`, and puts it in the always-on flagged bucket for an
+# emergency or an OFAC designation. Every one of those is checked here, plus
+# two the client does not use directly (`hex_military`, `military_role`), which
+# can only ever keep an extra aircraft.
+#
+# `display_limited` is the one status not here, and that is the whole point:
+# a LADD or PIA listing is a fact about a registry entry, the map gates it at
+# the same zoom as ordinary traffic, and it is ~640 of the ~17,000 aircraft in
+# the feed -- the single largest group a zoomed-out reader is sent and cannot
+# see. Getting this predicate wrong in the other direction is the dangerous
+# case: an aircraft dropped here is simply absent from the map, with no error
+# and no empty layer to notice.
+def _aircraft_priority(item: dict) -> bool:
+    return bool(
+        item.get("military")
+        or item.get("callsign_military")
+        or item.get("hex_military")
+        or item.get("military_role")
+        or item.get("emergency")
+        or item.get("emergency_squawk")
+        or item.get("sanctions")
+    )
+
+
+def _aircraft_priority_filter(items: list[dict], bounds) -> list[dict]:
+    return regions.filter_points([d for d in items if _aircraft_priority(d)], bounds)
+
+
 @app.get("/api/aircraft")
-async def aircraft(request: Request, region: str | None = None):
-    return _cached_source_response(request, "adsb", region, regions.filter_points)
+async def aircraft(request: Request, region: str | None = None, civilian: str | None = None):
+    # The largest payload this API serves -- ~17,000 aircraft, ~6.6 MB -- and
+    # the one a zoomed-out reader has least use for: below zoom 9 the map draws
+    # only military, emergency and designated aircraft, a few hundred of them.
+    # `civilian=0` asks for that slice.
+    #
+    # An opt-out rather than an opt-in, so a caller that knows nothing about the
+    # parameter (curl, an old cached bundle, anything that is not our client)
+    # keeps getting the whole feed. Typed as a string and compared to exactly
+    # "0" rather than declared an int, for the same reason parse_bbox refuses a
+    # malformed box instead of erroring on it: this is a browser query parameter
+    # and a typo in one must cost a larger correct answer, never a 422 and never
+    # a layer that silently loses its aircraft.
+    if civilian != "0":
+        return _cached_source_response(request, "adsb", region, regions.filter_points)
+    return _cached_source_response(
+        request, "adsb", region, _aircraft_priority_filter, variant="nocivil"
+    )
 
 
 @app.get("/api/countries")
@@ -692,17 +897,17 @@ async def countries(request: Request, region: str | None = None):
 
 
 @app.get("/api/cities")
-async def cities(request: Request, region: str | None = None):
-    return _cached_source_response(request, "cities", region, regions.filter_points, max_age=3600)
+async def cities(request: Request, region: str | None = None, bbox: str | None = None):
+    return _cached_source_response(request, "cities", region, regions.filter_points, max_age=3600, bbox=bbox)
 
 
 @app.get("/api/airports")
-async def airports_endpoint(request: Request, region: str | None = None):
+async def airports_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
     # Reference data on the same footing as cities: it refreshes once a day, so
     # a client may sit on a cached copy for an hour rather than revalidating on
     # every poll. Only the served slice is here -- the wider index ADS-B popups
     # query never leaves the backend (see backend/sources/airports.py).
-    return _cached_source_response(request, "airports", region, regions.filter_points, max_age=3600)
+    return _cached_source_response(request, "airports", region, regions.filter_points, max_age=3600, bbox=bbox)
 
 
 # The ranking is computed by the refine process now, so this is a read of one
@@ -711,6 +916,7 @@ async def airports_endpoint(request: Request, region: str | None = None):
 # process writes it (minutes apart), and a cache here keeps a frontend polling
 # on a timer from hitting the database for an answer it already has.
 _ESCALATION_CACHE = LruTtlCache(maxsize=1, ttl=120)
+metrics.track_local_cache("escalation", _ESCALATION_CACHE)
 
 
 @app.get("/api/escalation")
@@ -733,6 +939,7 @@ async def escalation_endpoint():
 # its own timer. The TTL is what stops those two cadences multiplying into a
 # database read per client per poll.
 _AIRFIELD_ACTIVITY_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("airfield_activity", _AIRFIELD_ACTIVITY_CACHE)
 
 
 @app.get("/api/airfield-activity")
@@ -848,6 +1055,7 @@ async def replay_at(at: float, region: str | None = None):
 _WIND_CACHE_TTL = 600
 _WIND_CACHE_GRID_DEG = 4
 _WIND_CACHE = LruTtlCache(maxsize=500, ttl=_WIND_CACHE_TTL)
+metrics.track_local_cache("wind", _WIND_CACHE)
 _wind_version = 0  # bumped only on an actual re-fetch, same idea as SourceState.version
 
 # Guards Open-Meteo's daily quota. Only cache *misses* draw a token, since a
@@ -857,6 +1065,7 @@ _wind_version = 0  # bumped only on an actual re-fetch, same idea as SourceState
 # first load panning across fresh grid squares; 1/s sustained is far more
 # than a human map session generates and far less than the daily cap.
 _WIND_UPSTREAM_LIMIT = TokenBucket(capacity=30, refill_per_second=1.0)
+metrics.track_token_bucket("wind", _WIND_UPSTREAM_LIMIT)
 
 # Open-Meteo's cap is a hard *daily* count, not a rate limit that recovers in
 # seconds -- once it's exhausted (or the upstream is otherwise down), retrying
@@ -882,8 +1091,11 @@ async def wind(request: Request, south: float, west: float, north: float, east: 
         raise HTTPException(502, f"Wind data fetch failed: {cached_error[1]}")
 
     cached = _WIND_CACHE.get(cache_key)
+    if cached is not None:
+        metrics.upstream_requests.labels(upstream="open_meteo_wind", result="hit").inc()
     if cached is None:
         if not _WIND_UPSTREAM_LIMIT.take():
+            metrics.upstream_requests.labels(upstream="open_meteo_wind", result="rate_limited").inc()
             # Deliberately 503 + Retry-After rather than 502: nothing is
             # broken, we're just declining to spend more of the daily quota
             # this second. The frontend already treats a failed wind fetch as
@@ -899,7 +1111,9 @@ async def wind(request: Request, south: float, west: float, north: float, east: 
             reason = f"{type(exc).__name__}: {exc}".rstrip(": ")
             log.warning("Wind fetch failed for %s: %s", cache_key, reason, exc_info=True)
             _WIND_ERROR_CACHE[cache_key] = (time.time(), reason)
+            metrics.upstream_requests.labels(upstream="open_meteo_wind", result="error").inc()
             raise HTTPException(502, f"Wind data fetch failed: {reason}")
+        metrics.upstream_requests.labels(upstream="open_meteo_wind", result="success").inc()
         _wind_version += 1
         cached = (data, _wind_version)
         _WIND_CACHE.set(cache_key, cached)
@@ -930,12 +1144,14 @@ async def wind(request: Request, south: float, west: float, north: float, east: 
 _WEATHER_LAYERS = {"clouds_new", "wind_new", "precipitation_new", "temp_new", "pressure_new"}
 _TILE_CACHE_TTL = 900
 _TILE_CACHE = LruTtlCache(maxsize=8000, ttl=_TILE_CACHE_TTL)
+metrics.track_local_cache("weather_tile", _TILE_CACHE)
 
 # Same reasoning as the wind limiter above, sized for tiles: one screenful is
 # roughly 10-20 tiles, so a 200-token burst absorbs several pans over unseen
 # area, and 20/s sustained keeps a scripted crawl of the tile pyramid from
 # quietly draining the OWM quota. Only misses draw tokens.
 _TILE_UPSTREAM_LIMIT = TokenBucket(capacity=200, refill_per_second=20.0)
+metrics.track_token_bucket("weather_tile", _TILE_UPSTREAM_LIMIT)
 
 # z/x/y arrive straight off the URL. Web Mercator only defines 0 <= x,y < 2^z,
 # and OWM serves nothing past z~20 -- without this, an out-of-range request
@@ -958,14 +1174,25 @@ async def weather_tile(layer: str, z: int, x: int, y: int, request: Request):
 
     cache_key = (layer, z, x, y)
     cached = _TILE_CACHE.get(cache_key)
+    if cached is not None:
+        metrics.upstream_requests.labels(upstream="owm_tile", result="hit").inc()
     if cached is None:
         if not _TILE_UPSTREAM_LIMIT.take():
+            metrics.upstream_requests.labels(upstream="owm_tile", result="rate_limited").inc()
             raise HTTPException(503, "Weather tile rate limit reached", headers={"Retry-After": "2"})
 
         url = f"https://tile.openweathermap.org/map/{layer}/{z}/{x}/{y}.png"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, params={"appid": config.OWM_API_KEY})
-            resp.raise_for_status()
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(url, params={"appid": config.OWM_API_KEY})
+                resp.raise_for_status()
+        except Exception:
+            # Counted, then re-raised unchanged: this endpoint deliberately has
+            # no negative cache (unlike wind above), and adding error handling
+            # here beyond the counter would change that behaviour.
+            metrics.upstream_requests.labels(upstream="owm_tile", result="error").inc()
+            raise
+        metrics.upstream_requests.labels(upstream="owm_tile", result="success").inc()
         etag = hashlib.sha256(resp.content).hexdigest()[:16]
         cached = (resp.content, etag)
         _TILE_CACHE.set(cache_key, cached)

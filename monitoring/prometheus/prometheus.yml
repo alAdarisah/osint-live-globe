@@ -1,0 +1,51 @@
+# Prometheus scrape configuration for the local stack.
+#
+# Two targets, both inside the compose network: Prometheus itself (so the
+# monitoring stack can report on its own scrape health) and postgres-exporter,
+# which turns Postgres' own statistics views into metrics. Nothing here reaches
+# the public internet, and nothing is pushed anywhere -- this is a pull-only,
+# host-local setup.
+#
+# The scrape interval is deliberately the same as the evaluation interval: with
+# no alerting rules loaded there is nothing to evaluate between scrapes, and
+# keeping them equal means a rate() over the default $__rate_interval always has
+# at least the four samples Grafana assumes.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: osint-local
+
+scrape_configs:
+  # Prometheus scraping itself. Cheap, and it is the only way to notice that
+  # scrapes are failing when the thing that would tell you is Prometheus.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Postgres statistics. The exporter holds one connection to the database and
+  # reads pg_stat_database, pg_stat_user_tables, pg_locks, pg_stat_bgwriter and
+  # pg_settings, plus the custom queries in
+  # monitoring/postgres-exporter/queries.yaml.
+  #
+  # scrape_timeout is under the interval on purpose: a scrape that outlives its
+  # own interval stacks connections on a database that is already struggling,
+  # which is precisely when you are looking at this dashboard.
+  - job_name: postgres
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  # The FastAPI process, on backend:8000/metrics (see backend/metrics.py).
+  # Reached directly rather than through the frontend's nginx, which forwards
+  # /api/ only -- so /metrics is on the compose network and nowhere else.
+  #
+  # The exposition is built entirely from process memory, so this scrape stays
+  # fast and keeps answering while Postgres or Redis is unreachable. That is the
+  # point: the scrape that explains an outage must not be the one the outage
+  # takes down.
+  - job_name: backend
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["backend:8000"]

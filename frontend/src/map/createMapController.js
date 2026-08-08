@@ -23,6 +23,8 @@ import {
   createWeatherLayers,
   createFirmsLayers,
   createJammingLayers,
+  FIRMS_HEAT_OPACITY,
+  JAMMING_HEAT_OPACITY,
   createJammingPingGroup,
   createCablesGroup,
   createImageryLayer,
@@ -31,6 +33,7 @@ import {
   createEntityClusterGroups,
   createCountriesLayer,
   createUncertaintyLayer,
+  createCityZoneLayer,
   createCitiesGroup,
   createInfraGroup,
   createPipelinesGroup,
@@ -67,7 +70,6 @@ import {
   decorateHazard,
   hazardIconSize,
   aircraftFlagBucket,
-  isFlaggedAircraft,
   withAircraftFlag,
   isSanctioned,
   withSanctionRing,
@@ -97,10 +99,21 @@ import {
   portIconSize,
   decorateDam,
   damIconSize,
+  setIconDetail,
+  detailSize,
+  applyCollapsedFallback,
+  TOKEN_FOR,
 } from "./decorators";
-import { setIconTheme, themedStyle } from "./iconTheme";
+import {
+  setIconTheme, themedStyle, tokenZoom, layerHasTokenZoom, layerOpacity, stackZIndex, scaledSize, scaledWeight, layerScale,
+} from "./iconTheme";
 import { placeAll } from "./declutter";
-import { collapseByProximity, collapseByKey, COLLAPSE_MAX_ZOOM } from "./collapse";
+import {
+  collapseByProximity, collapseByKey, collapseHeadsByProximity, officialsKey, COLLAPSE_MAX_ZOOM,
+} from "./collapse";
+import { buildCityZoneIndex } from "./cityZones";
+import { resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST } from "./scene";
+import { profileViewport } from "./viewportProfile";
 import { buildCountryIndex, findCountryAt, representativePointOf } from "./countryHitTest";
 import { createBorderEditor } from "./borderEdit";
 import { countryFingerprints } from "../settings/borderOverrides";
@@ -114,7 +127,7 @@ import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { createEntityWebglLayer } from "./webglLayer";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
-import { boundsContainsPoint } from "../utils/geo";
+import { nearestLon, unwrapPath, boundsContainsPoint } from "../utils/geo";
 import { fetchJson } from "../api";
 
 // A nearby ACLED/GDELT event within this radius flags an infrastructure
@@ -131,69 +144,22 @@ const WAR_FATALITY_THRESHOLD = 25;
 const WAR_EVENT_COUNT_THRESHOLD = 8;
 
 // No clustering anywhere (see layers.js) -- instead every point layer hides
-// below its own MIN_ZOOM and shows its ...ZoomNote, so world zoom stays
-// clean by construction rather than by grouping markers into bubbles. The
-// map's own initial view is zoom 3 (see L.map(...).setView below), so
-// ACLED/GDELT/AIS start hidden by default and appear one zoom step in.
-const ADSB_MIN_ZOOM = 5;
-const CITIES_MIN_ZOOM = 5;
-const EVENTS_MIN_ZOOM = 3;
-const GDELT_MIN_ZOOM = 3;
-const AIS_MIN_ZOOM = 3;
-// AIS has its own dedicated renderAisLayer (civilian/Navy split, like ADS-B's
-// civilian/military split) so it isn't part of this generic lookup.
-const OFFICIALS_MIN_ZOOM = 3;
-const HAZARDS_MIN_ZOOM = 3;
-const AIRPORTS_MIN_ZOOM = 7;
-// 1,922 landing points, most of them within a few km of another one. The routes
-// themselves have no gate -- a cable is only legible as a whole line.
-const CABLE_LANDINGS_MIN_ZOOM = 5;
-// Thousands of features across the conflict theatres, and every one of them is
-// context rather than an event. On by default (see DEFAULT_LAYER_VISIBILITY in
-// App.jsx), so the gate is what keeps it honest: deeper than airfields, deep
-// enough that it never lands on a regional or country-wide view, and only
-// appears once the map is already showing one town's worth of ground.
-// Exported because the fetch is gated on the same number: useOsintData.js does
-// not poll /api/osm-infrastructure at all until the map is this deep, so the
-// gate has to be one constant rather than two that can drift apart.
-export const OSM_INFRA_MIN_ZOOM = 9;
-// Satellite vessel detections are concentrated inside the eight AIS watch boxes,
-// so they are far denser than their count suggests. Exported for the same reason
-// OSM_INFRA_MIN_ZOOM is: useOsintData.js does not fetch /api/gfw-detections at
-// all below this zoom, and one constant cannot drift from itself.
-export const GFW_DETECTIONS_MIN_ZOOM = 6;
-const MARKER_LAYER_MIN_ZOOM = {
-  events: EVENTS_MIN_ZOOM, gdelt: GDELT_MIN_ZOOM, conflictHistory: 4,
-  officials: OFFICIALS_MIN_ZOOM, hazards: HAZARDS_MIN_ZOOM,
-  // GDACS's flood events, on the same gate as its sibling hazards layer so the
-  // two behave identically in the panel group they share.
-  floods: HAZARDS_MIN_ZOOM,
-  // Hard gate: the served slice is still ~40k airfields worldwide, which below
-  // this zoom is a texture rather than a layer.
-  airports: AIRPORTS_MIN_ZOOM, cableLandings: CABLE_LANDINGS_MIN_ZOOM,
-  osmInfra: OSM_INFRA_MIN_ZOOM,
-  gfwDetections: GFW_DETECTIONS_MIN_ZOOM,
-  // A 30-day global window of AIS disabling events is ~20k rows. Deeper than
-  // the conflict layers because a gap is not an incident report; shallower than
-  // airfields, whose gate is the template for this one.
-  gfwGaps: 5,
-  // Same band as cable landings: a place layer that is context for the vessels
-  // drawn above it. Deliberately shallower than airports, which has a hundred
-  // times as many rows.
-  ports: 5,
-  // Same band as airfields. 3,555 barriers clipped to eleven theatres is locally
-  // very dense, and everything in the popup -- capacity, height, river -- is
-  // structure-scale detail that means nothing at regional zoom.
-  dams: 7,
-  // Deliberately absent: darkVessels has no zoom gate. There are only ever a
-  // handful worldwide, and "somewhere a designated tanker went dark" is exactly
-  // the thing worth seeing at world zoom. czib is absent for the same reason --
-  // "a regulator has told airlines to stop flying through a national airspace"
-  // is precisely a world-zoom fact, and there are only a few dozen of them.
-};
-// Gates only the interactive per-point FIRMS layer -- the heat layer itself
-// always stays on regardless of zoom.
-const FIRMS_DETAIL_MIN_ZOOM = 5;
+// below its own gate and shows its ...ZoomNote, so world zoom stays clean by
+// construction rather than by grouping markers into bubbles.
+//
+// The gates themselves used to live here, as a block of named constants plus a
+// MARKER_LAYER_MIN_ZOOM lookup. They now live in map/scene.js, together with
+// the arguments that produced each one and with the *fetch* gate that has to
+// agree with them -- one entry per layer instead of a draw number here, a fetch
+// number in useOsintData.js and a third copy in settings/defaults.js. Read
+// through minZoomFor below, which is the only thing in this file that knows a
+// gate is a number at all.
+//
+// Two constants used to be exported from here for useOsintData.js to import,
+// because osmInfra and gfwDetections were the only layers whose gate moved the
+// fetch as well as the drawing. Every layer's does now, and both sides read
+// scene.js directly, so there is nothing left to keep in step across a module
+// boundary.
 
 // Raised from 60/90 when trails started being seeded from recorded history
 // (see seedTrailFromTrack). These are one budget shared by two producers: the
@@ -238,7 +204,7 @@ const DECORATORS = {
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
 // both places rather than restated here.
-const ICON_SIZE_FOR = {
+const ICON_SIZE_FOR_GLYPH = {
   events: eventIconSize, gdelt: gdeltIconSize, conflictHistory: historicalIconSize,
   officials: officialsIconSize, hazards: hazardIconSize, airports: airportIconSize,
   darkVessels: darkVesselIconSize, cableLandings: cableLandingIconSize,
@@ -246,6 +212,49 @@ const ICON_SIZE_FOR = {
   gfwGaps: gfwGapIconSize, gfwDetections: gfwDetectionIconSize,
   czib: czibIconSize, floods: floodIconSize, ports: portIconSize, dams: damIconSize,
 };
+// The same sizes with the current level of detail applied, which is what the
+// placement pass has to reserve: a dot needs a dot's worth of room, and routing
+// every size through detailSize is what stops the two systems disagreeing if
+// the detail boundary is ever moved off DECLUTTER_MIN_ZOOM.
+const ICON_SIZE_FOR = Object.fromEntries(
+  Object.entries(ICON_SIZE_FOR_GLYPH).map(([key, sizeOf]) => [
+    key,
+    (item, ...rest) => detailSize(sizeOf(item, ...rest)),
+  ])
+);
+// The keys renderMarkerLayer draws directly, i.e. everything with a decorator
+// except the two vehicle feeds, whose own renderers split one payload across
+// three toggles each (see renderAisLayer/renderAdsbLayer). Read by
+// setLayerVisible to know which renderer to catch up with when a layer is
+// switched back on -- the renderers return immediately while their layer is
+// off, so without the catch-up a re-shown layer would stay empty until the
+// reader happened to pan.
+const MARKER_LAYER_KEYS = new Set(
+  Object.keys(DECORATORS).filter((key) => key !== "ais" && key !== "adsb")
+);
+
+// Every popup on the map is built through this.
+//
+// `maxHeight` is the load-bearing part and it was missing everywhere: without it
+// a popup grows to whatever its content needs, so the long ones -- a fused
+// conflict pin listing its coverage, a country-scale bulletin, a city -- ran off
+// the top of the viewport with no way to reach what had overflowed. With it,
+// Leaflet adds .leaflet-popup-scrolled to the content element, which is also
+// what the stylesheet hangs the pinned title off (see .leaflet-popup-scrolled in
+// style.css).
+//
+// A share of the viewport rather than a pixel number: a popup is anchored to a
+// pin and opens upward from it, so a little under half the window is about as
+// much as it can use before it is taller than the room above its own anchor.
+//
+// A function rather than two constants because Leaflet copies an options object
+// once, when the popup is bound -- so a value captured at module load would be
+// the height the tab happened to start at, for the rest of the session. Called
+// per bind, and markers are rebuilt often enough that a resized window catches
+// up on the next pan.
+function popupOptions(maxWidth) {
+  return { maxWidth, maxHeight: Math.round(window.innerHeight * 0.46) };
+}
 
 const REGION_FLY_DURATION = 1.2;
 
@@ -293,7 +302,30 @@ function boundsToPlainObject(bounds) {
  * @param {object} callbacks - { onCountsChange, onZoomNotesChange, onBoundsChange, onZoomChange, onRegionAutoReset }
  */
 export function createMapController(container, initial, callbacks) {
-  const map = L.map(container, { worldCopyJump: true, minZoom: 2, zoomControl: true }).setView([20, 15], 3);
+  // doubleClickZoom off: a double-click is two real `click` events before it is
+  // a zoom, and every one of them runs the full selection path -- the sprite
+  // hit-test in webglLayer.js, the district popup, the country hit-test below.
+  // So zooming that way silently reselected whatever happened to be under the
+  // cursor, twice, and read as the map clicking things on its own. The wheel,
+  // the +/- control and the keyboard all zoom without carrying a click, so
+  // nothing is lost by dropping the one gesture that cannot.
+  const map = L.map(container, {
+    // Deliberately off, and it used to be on.
+    //
+    // worldCopyJump is Leaflet's answer to the same problem the "the seam"
+    // section below now solves properly: it waits for the centre to drift past
+    // +-180 and then setViews the map back to the equivalent longitude in the
+    // primary copy, teleporting every layer into view at once. That is a jump --
+    // the map lurches sideways mid-pan -- and it is only worth paying if the
+    // layers cannot follow the camera on their own. Now they can: viewportFilter,
+    // drawLatLng, the trail unwrap and the WebGL projection each place their
+    // content on the copy being looked at (see nearestLon in utils/geo.js), so
+    // panning east from Kamchatka to Alaska is continuous and nothing jumps.
+    worldCopyJump: false,
+    minZoom: 2,
+    zoomControl: true,
+    doubleClickZoom: false,
+  }).setView([20, 15], 3);
   const baseLayer = createBaseLayer(map, initial.theme);
   const weatherLayers = createWeatherLayers(map);
   const { firmsHeat, firmsPointsLayer, firmsLayer, firmsCanvasRenderer } = createFirmsLayers(map);
@@ -306,6 +338,7 @@ export function createMapController(container, initial, callbacks) {
   // as the pin, drawn honestly, not a layer a reader should have to find.
   const uncertaintyLayer = createUncertaintyLayer(map);
   const citiesGroup = createCitiesGroup(map);
+  const cityZoneLayer = createCityZoneLayer(map);
   const infraGroup = createInfraGroup();
   const pipelinesGroup = createPipelinesGroup();
   const infraLayer = L.layerGroup([infraGroup, pipelinesGroup]).addTo(map);
@@ -503,9 +536,336 @@ export function createMapController(container, initial, callbacks) {
   // one is deleting an entry rather than restoring a remembered number.
   let layerZoomOverrides = {};
 
-  function minZoomFor(key, shipped) {
-    const override = layerZoomOverrides[key];
-    return Number.isFinite(override) ? override : shipped;
+  // Admin Mode's "ignore the scene resolver" switch. Session-scoped and
+  // deliberately not persisted: an admin who forgot to switch it off would be
+  // permanently looking at a different app from every reader, which is exactly
+  // the failure the Admin Mode gate exists to avoid.
+  let sceneBypass = false;
+
+  // What the camera is looking at, and what the reader has clicked. Both feed
+  // the resolver.
+  let viewportProfile = null;
+  let focus = null;
+
+  // Collapsed groups the reader has opened in place. Cleared whenever the
+  // subject changes -- see setFocus. Keyed by the group head's id, which
+  // collapse.js guarantees is deterministic across pans (byRankThenId), and
+  // that determinism is the whole reason expanding in place is stable rather
+  // than a group that re-forms under a different head the moment the map moves.
+  const expandedClusters = new Set();
+
+  /**
+   * Dim every layer except the one the reader clicked.
+   *
+   * Done entirely in CSS, which costs nothing: buildDivIcon puts the layer
+   * class on the divIcon's `className`, while updateMarker's repaint test
+   * compares `icon.options.html` -- so the class sits *outside* the string that
+   * decides whether a marker's DOM is rebuilt. Emphasising a layer therefore
+   * repaints no markers at all; it sets one attribute on the map container and
+   * lets the stylesheet do the rest.
+   *
+   * Pixi sprites cannot take a CSS class, so the six WebGL buckets are dimmed
+   * through their own per-bucket alpha instead. One property write per bucket,
+   * no texture churn.
+   */
+  function applyEmphasis() {
+    const key = focus?.kind === "layer" ? focus.key : null;
+    const el = map.getContainer();
+    if (key) el.setAttribute("data-emphasis", key);
+    else el.removeAttribute("data-emphasis");
+    for (const bucket of WEBGL_BUCKET_KEYS) {
+      entityWebglLayer.setBucketAlpha?.(bucket, !key || bucket === key ? 1 : 0.28);
+    }
+  }
+
+  // The resolved scene. Recomputed by applyScene() whenever any of its inputs
+  // move -- zoom, profile, focus, the admin overrides, the bypass -- and read
+  // by minZoomFor below and by every renderer through it. Seeded here so the
+  // renderers that run during construction have an answer.
+  let scene = resolveScene({ zoom: 3, overrides: layerZoomOverrides });
+
+  /**
+   * The zoom `key` starts drawing at, or null when it has no gate.
+   *
+   * Two things resolve here rather than in the caller. Admin Mode's per-layer
+   * override still wins outright, which is what makes it a diagnostic rather
+   * than a suggestion. Everything else -- the shipped gate, and any promotion
+   * the camera or a focus has earned -- comes from the scene, so the four
+   * renderers that used to compare against a bare constant (FIRMS, jamming,
+   * cities, ADS-B) are now overridable like every other layer, which they
+   * silently were not.
+   */
+  function minZoomFor(key) {
+    return drawZoomFor(scene, key);
+  }
+
+  /**
+   * The zoom one individual pin starts drawing at.
+   *
+   * Two gates, and the later of them wins: its layer's (`layerZ`, from
+   * minZoomFor above) and its own kind's, if Admin Mode has given that kind of
+   * pin one. So "nuclear plants from z8" thins the infrastructure layer without
+   * touching the six other kinds in it, and the layer's gate stays the floor
+   * every pin in it answers to -- see tokenZoom in iconTheme.js for why a pin
+   * type is not allowed to undercut its layer.
+   *
+   * Null means no gate at all, which is what an ungated layer with no configured
+   * pin types returns.
+   */
+  function pinZoomGate(key, item, layerZ) {
+    const tokenOf = TOKEN_FOR[key];
+    const own = tokenOf ? tokenZoom(tokenOf(item)) : null;
+    if (own == null) return layerZ;
+    return layerZ == null ? own : Math.max(layerZ, own);
+  }
+
+  /**
+   * Whether this pin is past both of its gates.
+   *
+   * Callers guard with layerHasTokenZoom first: on a map where nobody has
+   * configured a pin type -- which is every map until someone does -- resolving
+   * a token for every hull, aircraft and fire on screen would be pure cost, so
+   * the layer-level test stays the only one that runs.
+   */
+  function pinDrawsAt(key, item, zoom, layerZ) {
+    const gate = pinZoomGate(key, item, layerZ);
+    return gate == null || zoom >= gate;
+  }
+
+  /**
+   * Push opacity and stack order onto the three canvas layers.
+   *
+   * The panel has had an Opacity slider for FIRMS and for jamming since Admin
+   * Mode existed, and until now it moved nothing a reader could see: opacity
+   * reaches a marker through themedStyle, and neither of these layers draws
+   * markers -- they draw one canvas each, plus the near-invisible click targets
+   * on top. So the slider appeared to work on the layer while only ever acting
+   * on hit-test circles at 0.02 opacity.
+   *
+   * CSS on the element rather than a leaflet.heat option, because leaflet.heat
+   * has none that means this (see FIRMS_HEAT_OPACITY in layers.js). Re-applied
+   * on every settings change and after every render: leaflet.heat rebuilds its
+   * canvas on redraw, which drops any style written onto the old one.
+   */
+  function applyWashStack() {
+    const canvases = [
+      [firmsHeat?._canvas, FIRMS_HEAT_OPACITY, "firms"],
+      [jammingHeat?._canvas, JAMMING_HEAT_OPACITY, "jamming"],
+      [entityWebglLayer.canvas?.(), 1, "vehicles"],
+    ];
+    for (const [canvas, shipped, key] of canvases) {
+      // Absent until the layer has been added to the map at least once, which
+      // for jamming is "not until somebody switches it on".
+      if (!canvas) continue;
+      canvas.style.opacity = String(shipped * layerOpacity(key));
+      // The three washes share one pane, so their order among themselves is
+      // plain CSS stacking on sibling elements. They cannot be ordered against
+      // the pins from here and are not meant to be -- see the note above
+      // PIN_STACK in iconTheme.js.
+      canvas.style.zIndex = String(stackZIndex(key));
+    }
+  }
+
+  /**
+   * The Size dial, for the two layers that draw no icons.
+   *
+   * Every other layer's size reaches the map through scaledSize inside a
+   * decorator. FIRMS and jamming have no decorator and no glyph -- they are a
+   * density canvas plus an invisible click target each -- so the slider in the
+   * panel moved nothing at all for them, which is indistinguishable from a
+   * broken control.
+   *
+   * What "size" means for a heat layer is its kernel: `radius` is how far one
+   * reading spreads and `blur` how softly it falls off, and scaling both
+   * together is the honest reading of "draw this bigger". The click radius is
+   * scaled with it so the target keeps matching what a reader sees.
+   *
+   * setOptions alone does not repaint -- leaflet.heat reads these at draw time
+   * -- so this runs before the redraw its caller is about to trigger.
+   */
+  const HEAT_KERNEL = {
+    firms: { radius: 16, blur: 22 },
+    jamming: { radius: 22, blur: 28 },
+  };
+
+  function applyHeatKernel(heat, key) {
+    if (!heat?.setOptions) return;
+    const shipped = HEAT_KERNEL[key];
+    heat.setOptions({
+      radius: Math.max(2, Math.round(shipped.radius * layerScale(key))),
+      blur: Math.max(2, Math.round(shipped.blur * layerScale(key))),
+    });
+  }
+
+  /**
+   * What the reader has said about a layer, overriding the scene.
+   *
+   * Three states, and the third is the point:
+   *   true      show it, whatever the scene thinks
+   *   false     hide it, whatever the scene thinks
+   *   absent    the scene decides
+   *
+   * Without the absent state a checkbox and a resolver cannot coexist -- the
+   * checkbox's own value would be indistinguishable from the scene's answer,
+   * so every scene change would look like a user preference and stick. This is
+   * what lets the admin panel act as a debugger for the resolver rather than a
+   * competitor to it.
+   */
+  const userLayerWish = {};
+
+  /**
+   * Recompute the scene and make the map match it.
+   *
+   * Runs before renderAll on every moveend, so a renderer never sees a scene
+   * from the previous viewport. Layer state is applied through setLayerVisible
+   * rather than by touching layerOnMap directly, because that function is where
+   * a dozen special cases live -- the news layer's AND with its parent, the
+   * WebGL buckets' own visibility, the trail sub-tickers, the uncertainty
+   * teardown, the districts' lazy geometry load -- and duplicating any of them
+   * here would mean two places to keep in step.
+   */
+  function applyScene() {
+    viewportProfile = profileViewport({
+      countryIndex,
+      bounds: boundsToPlainObject(map.getBounds()),
+      zoom: map.getZoom(),
+      hotCountryKeys: refreshHotCountries(),
+      previous: viewportProfile,
+    });
+
+    scene = resolveScene({
+      zoom: map.getZoom(),
+      profile: viewportProfile,
+      focus,
+      overrides: layerZoomOverrides,
+      bypass: sceneBypass,
+    });
+
+    // Pushed into decorators.js before any renderer runs, so every marker built
+    // or updated in this pass agrees about what it should look like. Reading it
+    // back rather than tracking it here keeps one source of truth; a change is
+    // the one moment every visible marker legitimately repaints, and applyScene
+    // is always followed by a render.
+    setIconDetail(scene.detail);
+
+    for (const key of SCENE_APPLY_KEYS) {
+      const wish = userLayerWish[key];
+      let want = wish === undefined ? scene.active.has(key) : wish;
+      // A tick makes a layer eligible; a gate typed into Admin Mode still says
+      // from what zoom it draws.
+      //
+      // Without this the two controls cancelled each other, and for the
+      // corroborating layers they cancelled each other *always*: cables, ports,
+      // dams, airfields and the GFW layers are only reachable by ticking them,
+      // and a wish beat the gate outright -- so "Shows from zoom" was a slider
+      // that could never do anything for the layers most likely to need it. Set
+      // Submarine cables to z6, watch 718 routes stay on the world board.
+      //
+      // The gate that applies is the one the panel is *showing*, which is the
+      // override when there is one and the shipped number otherwise.
+      //
+      // This was narrower for one revision -- explicit overrides only -- and
+      // that left the control lying at exactly the value most likely to be
+      // chosen. FIRMS ships drawing from z4, so its slider reads "z4"; dragging
+      // it to 4 stores "no override" (that is how the reset-to-default works),
+      // the gate was then skipped, and a layer whose control said z4 drew at z3.
+      // Every layer had the same dead spot at its own shipped number.
+      //
+      // The cost is that ticking a layer below its gate now shows nothing where
+      // it used to force the layer on. That is the honest reading of a control
+      // that states a zoom, and it is no longer mysterious: the checkbox goes
+      // amber and says "pinned on, held back by its zoom gate" (see
+      // LayerCheck.jsx), with the count beside it reading 0 of N.
+      //
+      // Skipped under the bypass, whose whole job is to be the state with
+      // nothing applied.
+      if (want && wish === true && !sceneBypass) {
+        const override = layerZoomOverrides[key];
+        const gate = Number.isFinite(override) ? override : shippedDrawZoom(key);
+        if (Number.isFinite(gate) && map.getZoom() < gate) want = false;
+      }
+      // Only on a real change: setLayerVisible re-renders the layer it switches
+      // on, and calling it for every key on every pan would undo the whole
+      // point of the early returns in the renderers.
+      if (layerOnMap[key] !== want) setLayerVisible(key, want);
+    }
+
+    reportLayerState();
+  }
+
+  // The panel's checkboxes read this rather than a React copy of their own,
+  // because the resolver moves layers on and off as the camera moves and a copy
+  // that only changed on a click would be wrong within one pan. Diffed before
+  // reporting for the same reason the counts are coalesced: this runs on every
+  // moveend, and handing React a fresh object each time would re-render the
+  // whole panel for an answer that had not changed.
+  let lastLayerStateSignature = null;
+  function reportLayerState() {
+    if (!callbacks.onLayerStateChange) return;
+    const on = {};
+    for (const key of SCENE_APPLY_KEYS) on[key] = layerOnMap[key] === true;
+    for (const trailKey of Object.keys(TRAIL_TOGGLES)) on[trailKey] = layerOnMap[trailKey] === true;
+    on.satellitesMilitary = satellitesMilitaryVisible;
+    const signature = `${JSON.stringify(on)}|${JSON.stringify(userLayerWish)}|${sceneBypass}`;
+    if (signature === lastLayerStateSignature) return;
+    lastLayerStateSignature = signature;
+    callbacks.onLayerStateChange({ on, wish: { ...userLayerWish }, bypass: sceneBypass });
+  }
+
+  /**
+   * A reader (or an admin) asking for a layer directly, which outranks the
+   * scene until they hand it back. `visible === null` hands it back.
+   */
+  function setLayerWish(key, visible) {
+    if (visible === null || visible === undefined) delete userLayerWish[key];
+    else userLayerWish[key] = visible;
+    // The trail sub-tickers, satellitesMilitary and the weather tiles are not
+    // the resolver's business, so applyScene's loop does not walk them -- they
+    // have to be pushed through by hand or a click on one would do nothing.
+    if (!SCENE_APPLY_KEYS.includes(key)) {
+      if (typeof visible === "boolean" && layerOnMap[key] !== visible) setLayerVisible(key, visible);
+      reportLayerState();
+      return;
+    }
+    applyScene();
+  }
+
+  // Which keys the last applyLayerWishes call is answerable for. Needed because
+  // that table is replaceable -- a saved configuration is loaded, imported or
+  // reset -- and a key that has dropped out of it has to go back to the resolver
+  // rather than keep the answer the previous table gave it.
+  let appliedWishKeys = new Set();
+
+  /**
+   * Apply a whole table of wishes at once -- Admin Mode's saved layer states.
+   *
+   * One applyScene for the table rather than one per key: this runs at
+   * construction, and again whenever the configuration is replaced (the backend
+   * copy landing after the local cache, an imported file, a reset), and
+   * applyScene reprofiles the viewport every time it is called.
+   *
+   * Keys the resolver does not manage -- the weather tiles, the trail
+   * sub-tickers, the military-satellite row -- are not walked by applyScene's
+   * loop, so they are pushed by hand afterwards. Those same keys have no
+   * resolver answer to hand back to either, so dropping one out of the table
+   * leaves it where it was until the page is reloaded; there is nothing else it
+   * could mean.
+   */
+  function applyLayerWishes(table) {
+    const next = table || {};
+    for (const key of appliedWishKeys) {
+      if (!(key in next)) delete userLayerWish[key];
+    }
+    for (const [key, visible] of Object.entries(next)) {
+      if (typeof visible === "boolean") userLayerWish[key] = visible;
+    }
+    appliedWishKeys = new Set(Object.keys(next));
+    applyScene();
+    for (const [key, visible] of Object.entries(next)) {
+      if (typeof visible !== "boolean" || SCENE_APPLY_KEYS.includes(key)) continue;
+      if (layerOnMap[key] !== visible) setLayerVisible(key, visible);
+    }
+    reportLayerState();
   }
 
   // ---------- conflict-event filters ----------
@@ -583,31 +943,102 @@ export function createMapController(container, initial, callbacks) {
     officials: passesOfficialsFilter,
   };
 
-  // At world zoom the map should read as "where is the significant activity",
-  // not as an undifferentiated smear. A rank-based cap rather than an absolute
-  // severity floor, deliberately: severity is calibrated against real data
-  // where a single-outlet report scores in the 20s, so a fixed threshold like
-  // "hide anything under 55" would empty the map entirely on a quiet day. A cap
-  // adapts -- it only ever removes the least significant events, and only once
-  // there are more than can be read at once.
-  const ZOOM_MARKER_CAP = [
-    { maxZoom: 3, cap: 150 },
-    { maxZoom: 5, cap: 400 },
-    { maxZoom: 7, cap: 900 },
-  ];
-
-  // Reported to the panel (see zoomNotes.eventsCapped) rather than applied
-  // silently. The boot view is zoom 3, where this keeps 150 of what can be
-  // 2500 events, and a layer showing 6% of its own count with no explanation
-  // reads as a broken layer rather than as a deliberately thinned one.
-  function capBySeverity(items, zoom) {
-    const rule = ZOOM_MARKER_CAP.find((r) => zoom <= r.maxZoom);
-    if (!rule || items.length <= rule.cap) {
-      zoomNotes.eventsCapped = 0;
+  /**
+   * Thin a layer to the most significant N, per band.
+   *
+   * At world zoom the map should read as "where is the significant activity",
+   * not as an undifferentiated smear. A rank-based cap rather than an absolute
+   * floor, deliberately: severity is calibrated against real data where a
+   * single-outlet report scores in the 20s, so a fixed threshold like "hide
+   * anything under 55" would empty the map entirely on a quiet day. A cap
+   * adapts -- it only ever removes the least significant, and only once there
+   * are more than can be read at once.
+   *
+   * Reported rather than applied silently, and that is the whole reason this
+   * writes to zoomNotes. The boot view is zoom 3, where the events cap keeps
+   * 150 of what can be 2500, and a layer showing 6% of its own count with no
+   * explanation reads as a broken layer rather than a deliberately thinned one.
+   *
+   * The cap and the rank both come from map/scene.js now, so a layer opts in by
+   * gaining a `cap` in the manifest rather than by being special-cased here.
+   *
+   * `rankOverride` is the one exception to that, and it exists because two
+   * layers have no rank a table could hold -- see nearestToCentreRank below.
+   * Anything expressible as a property of one item belongs in the manifest.
+   */
+  function capByRank(key, items, rankOverride) {
+    const cap = scene.caps.get(key);
+    if (!Number.isFinite(cap) || items.length <= cap) {
+      if (cappedCounts[key]) {
+        delete cappedCounts[key];
+        publishCapped();
+      }
       return items;
     }
-    zoomNotes.eventsCapped = rule.cap;
-    return [...items].sort((a, b) => (b.severity || 0) - (a.severity || 0)).slice(0, rule.cap);
+    if (cappedCounts[key] !== cap) {
+      cappedCounts[key] = cap;
+      publishCapped();
+    }
+    const rank = rankOverride || LAYER_MANIFEST[key]?.rank || ((d) => d.severity || 0);
+    return [...items].sort((a, b) => rank(b) - rank(a)).slice(0, cap);
+  }
+
+  // Enough to outrank any distance: the squared-degree term below cannot exceed
+  // ~65,000 even between opposite corners of the world.
+  const RANK_ALWAYS_KEEP = 1e6;
+
+  /**
+   * Rank by distance from the middle of the view, nearest first.
+   *
+   * The two vehicle layers that need capping -- ordinary aircraft and merchant
+   * hulls -- have no severity, no magnitude and no editorial rank of any kind.
+   * Left to the default rank every item would score zero, and the sort would
+   * keep whatever order the feed happened to arrive in. That order changes on
+   * every poll, so a 20-second tick would swap out most of the fleet and the
+   * sprites would flicker.
+   *
+   * Distance from the camera centre is stable across a poll (a hull moves
+   * metres, an airliner a few km), deterministic, and states something a reader
+   * can check: these are the four hundred nearest the middle of what you are
+   * looking at. It cannot live in map/scene.js -- that table is a pure function
+   * of the zoom band and knows nothing about where the camera is pointed -- so
+   * it is built here, per render, from map.getCenter().
+   *
+   * `keepFirst` lifts a class above distance entirely. A designated hull is the
+   * rarest thing in a bucket of thousands and must not be dropped for being far
+   * from the middle of the screen; aircraft need no equivalent because the
+   * flagged bucket has already taken those out of this layer.
+   */
+  function nearestToCentreRank(keepFirst) {
+    const centre = map.getCenter();
+    const cosLat = Math.cos((centre.lat * Math.PI) / 180);
+    return (d) => {
+      // Wrapped, because Leaflet reports longitudes outside +-180 on a wrapped
+      // world: without this a hull just west of the antimeridian would read as
+      // 358 degrees from a camera just east of it.
+      let dLon = d.lon - centre.lng;
+      if (dLon > 180) dLon -= 360;
+      else if (dLon < -180) dLon += 360;
+      // Longitude degrees shrink toward the poles. Unscaled, a Baltic view
+      // would rank a ship far to the east above one much closer due north.
+      dLon *= cosLat;
+      const dLat = d.lat - centre.lat;
+      const near = -(dLat * dLat + dLon * dLon);
+      return keepFirst?.(d) ? near + RANK_ALWAYS_KEEP : near;
+    };
+  }
+
+  // How many each capped layer is currently showing. Kept as its own object so
+  // zoomNotes.capped is a fresh reference only when something really changed --
+  // it is handed to React and read on every panel render.
+  const cappedCounts = {};
+  function publishCapped() {
+    zoomNotes.capped = { ...cappedCounts };
+    // eventsCapped predates this and is what LayersSection and
+    // useLeafletMap's EMPTY_ZOOM_NOTES still read. Kept as an alias rather than
+    // migrated, so generalising the cap changes no UI in the same commit.
+    zoomNotes.eventsCapped = cappedCounts.events || 0;
+    scheduleReports({ notes: true });
   }
 
   // News is the one layer that groups rather than merely spreading out -- see
@@ -620,20 +1051,142 @@ export function createMapController(container, initial, callbacks) {
     return Number.isFinite(hours) ? reach * 0.5 ** (hours / 6) : reach;
   }
 
+  /**
+   * Group a layer's pile-ups, per its manifest entry.
+   *
+   * Two layers had this hand-wired; the rest could not have it at all without
+   * another branch here. It is now a property a layer declares, which is what
+   * lets `hazards`, `airports`, `ports`, `dams`, `osmInfra` and the two GFW
+   * layers stop drawing forty coincident pins at their shallowest band.
+   *
+   * `events` deliberately declares no collapse, and that is a claim about the
+   * data rather than a tuning choice: merging two incident reports into one pin
+   * asserts they were one event, which nothing in the feed supports. Capping
+   * removes the least significant and says so in the panel -- a stated
+   * editorial act. Collapsing would be an unstated factual one.
+   *
+   * The two bespoke groupings keep their own functions: news ranks by decayed
+   * reach, and diplomacy groups on an exact anchor rather than on pixels (see
+   * collapseByKey's own note for why proximity is the wrong question there).
+   */
+  // ---------- city zones ----------
+  //
+  // See map/cityZones.js for what a zone is and, more importantly, what it is
+  // not. Rebuilt when the city list or the configured radius changes rather than
+  // per render: it is ~6,200 cities into a grid, which is cheap once and
+  // needless sixty times a minute.
+  let cityZoneIndex = null;
+  let cityZoneSettings = { group: true, show: true, radiusScale: 1 };
+
+  function rebuildCityZoneIndex() {
+    cityZoneIndex = buildCityZoneIndex(raw.cities, {
+      // Population, not capital status. CAPITAL_TIER answers "how should this be
+      // drawn"; a zone is asking how far the built-up area reaches, and a small
+      // capital is still a small city on the ground.
+      tierOf: (city) => cityTier(city.population),
+      keyOf: cityKey,
+      radiusScale: cityZoneSettings.radiusScale,
+    });
+  }
+
+  /**
+   * Which city zone an item belongs to, or null for "do not group".
+   *
+   * Null is the important half. An event outside every city zone is an event in
+   * open country, and it keeps its own pin -- grouping is a claim that several
+   * reports are about one place, and there is no place to make that claim about
+   * out there.
+   */
+  function cityZoneKeyOf(item) {
+    if (!cityZoneSettings.group || !cityZoneIndex) return null;
+    return cityZoneIndex.zoneAt(item.lat, item.lon)?.key ?? null;
+  }
+
+  function collapseFor(key, items, zoom) {
+    // Before the manifest's own rules, and it applies at every zoom: a city zone
+    // is a fact about a place rather than about the projection, so unlike the
+    // proximity collapses below there is no zoom at which it stops being true.
+    // The reader's way out is per group and explicit -- "Separate these pins",
+    // through expandOpened, exactly as it is for news.
+    if (key === "events" && cityZoneSettings.group && cityZoneIndex) {
+      const grouped = expandOpened(collapseByKey(items, cityZoneKeyOf, (d) => d.severity || 0));
+      // Named here rather than in the decorator, which has no way to know which
+      // city was asked about. Without it a collapsed head would say "12 at this
+      // location" and leave the reader to guess what location was meant.
+      for (const head of grouped) {
+        if (!head.collapsedCount) continue;
+        const zone = cityZoneIndex.zoneAt(head.lat, head.lon);
+        if (zone) head.collapsedLabel = `${zone.city.name} &mdash; within ${Math.round(zone.radiusM / 1000)} km`;
+      }
+      items = grouped;
+    }
+    if (key === "gdelt") return collapseNews(items, zoom);
+    if (key === "officials") return collapseOfficials(items, zoom);
+    const rule = scene.collapse.get(key);
+    if (!rule || rule.mode !== "proximity") return items;
+    if (zoom > (rule.maxZoom ?? COLLAPSE_MAX_ZOOM)) return items;
+    if (items.length < 2) return items;
+    return expandOpened(collapseByProximity(
+      items,
+      (item) => map.latLngToLayerPoint([item.lat, item.lon]),
+      // No rank of its own: these layers have no reach or recency to decay, so
+      // the head is whichever the deterministic id tiebreak picks. That is
+      // arbitrary but stable, which is the property that matters -- a head that
+      // changed as the map panned would make groups re-form under a different
+      // pin on every move (see byRankThenId in collapse.js).
+      rule.rank || (() => 0),
+      rule.radiusPx
+    ));
+  }
+
   function collapseNews(items, zoom) {
     if (zoom > COLLAPSE_MAX_ZOOM) return items;
-    return collapseByProximity(
+    return expandOpened(collapseByProximity(
       items,
       // The same projection registerPlacement uses, so what collapse considers
       // "on top of each other" is what the reader actually sees.
       (item) => map.latLngToLayerPoint([item.lat, item.lon]),
       newsRank
-    );
+    ));
   }
 
-  // Diplomacy groups too, but on an exact anchor rather than on pixels -- see
-  // collapseByKey. Every record the backend snapped to a given capital, and
-  // every press release from a given institution, shares one coordinate by
+  /**
+   * Put back the members of any group the reader has opened.
+   *
+   * Applied after collapsing rather than instead of it, so a group the reader
+   * has not touched still forms normally and the one they have opened is the
+   * only thing that changes. The head's id is what identifies an opened group,
+   * and collapse.js's byRankThenId is what makes that safe: the head is chosen
+   * deterministically from rank then id, so it does not change as the map pans
+   * and a group cannot silently re-form under a different head while open.
+   *
+   * The popup used to say "zoom in to separate them", which asked the reader to
+   * change what they were looking at in order to read what was already under
+   * the pointer. Now they can just ask.
+   */
+  function expandOpened(heads) {
+    if (!expandedClusters.size) return heads;
+    const out = [];
+    for (const head of heads) {
+      const id = head.event_id ?? head.id;
+      if (head.collapsed?.length && expandedClusters.has(String(id))) out.push(...head.collapsed);
+      else out.push(head);
+    }
+    return out;
+  }
+
+  /** Open or close one collapsed group, by its head's id. */
+  function toggleCluster(id) {
+    const key = String(id);
+    if (expandedClusters.has(key)) expandedClusters.delete(key);
+    else expandedClusters.add(key);
+    renderAll();
+  }
+
+  // Diplomacy groups too, but on an exact position rather than on pixels -- see
+  // officialsKey and collapseByKey. Every record the backend snapped to a given
+  // capital, every press release from a given institution, and every mention
+  // GDELT geocoded to a given city centroid shares one coordinate by
   // construction, so "are these on top of each other" has an exact answer and
   // does not need to be measured.
   //
@@ -658,9 +1211,39 @@ export function createMapController(container, initial, callbacks) {
     return Number.isFinite(hours) ? reach * 0.5 ** (hours / 6) : reach;
   }
 
+  // Sized against the officials glyph, which draws at 10-11px (see
+  // officialsIconSize). A radius near the icon's own width means "these were
+  // going to overlap anyway" rather than grouping two pins a reader can already
+  // tell apart -- the same reasoning behind COLLAPSE_RADIUS_PX, which is 26
+  // because the news glyph is 14-21px and would over-merge these.
+  const OFFICIALS_COLLAPSE_RADIUS_PX = 14;
+
   function collapseOfficials(items, zoom) {
-    const collapsed = collapseByKey(items, (item) => item.anchor?.id ?? null, officialsRank);
-    if (zoom < OFFICIALS_EXPAND_MIN_ZOOM) return collapsed;
+    const collapsed = collapseByKey(items, officialsKey, officialsRank);
+    if (zoom < OFFICIALS_EXPAND_MIN_ZOOM) {
+      // Not yet deep enough to hand every member back on its own. A group the
+      // reader has explicitly opened still opens -- but only above the zoom the
+      // declutter spiral runs at, because these members share an exact
+      // coordinate and without the spiral they would land in a stack nobody can
+      // click. Below that the group stays whole, which is honest: one pin
+      // standing for nine is better than nine pins standing on each other.
+      if (zoom >= DECLUTTER_MIN_ZOOM) return expandOpened(collapsed);
+      // Below the spiral, exact keys are not enough. Two different anchors can
+      // still land on one pixel down here -- the UN spokesperson's office and
+      // the UN news service share a building, and at this zoom a whole city is a
+      // pixel or two -- and nothing separates them. So the same instrument is
+      // applied a second time, spatially. Not expandOpened for the same reason
+      // the branch above is not: without the spiral, opening a group produces a
+      // stack nobody can click.
+      return collapseHeadsByProximity(
+        collapsed,
+        // The same projection registerPlacement uses, so what this considers
+        // "on top of each other" is what the reader actually sees.
+        (item) => map.latLngToLayerPoint([item.lat, item.lon]),
+        officialsRank,
+        OFFICIALS_COLLAPSE_RADIUS_PX
+      );
+    }
     // Zoomed in: hand every member back as its own marker, except where the
     // group is too big for the spiral to place.
     return collapsed.flatMap((item) =>
@@ -894,10 +1477,62 @@ export function createMapController(container, initial, callbacks) {
       ? key
       : [...selectedCountryKeys][selectedCountryKeys.size - 1] ?? null;
 
+    // Clicking a country is the reader saying "this one". That is what the
+    // control panel's checkboxes used to be for, and it is a better version of
+    // the same act: the layers that corroborate a country's picture become
+    // eligible, the ones that are only legible up close come a band earlier,
+    // and the feeds behind them start fetching regardless of how far out the
+    // camera is (see FOCUS_PROMOTE in scene.js). Dropping the selection puts
+    // all of that back.
+    // The country's own bounds travel with the focus, because the fetch layer
+    // clips to them rather than to the camera: focusing a country is a request
+    // for its whole picture, and a viewport clip would leave the parts the
+    // reader has not scrolled to missing from a card that claims to describe
+    // the country.
+    setFocus(nextFocus ? { kind: "country", key: nextFocus, bounds: boundsOfCountry(nextFocus) } : null);
+
     renderCities();
     focusCountry(nextFocus);
     reportCountrySelection();
     return true;
+  }
+
+  /**
+   * What the reader has singled out: a country, a layer, or nothing.
+   *
+   * Re-resolves the scene and redraws, because a focus change can make whole
+   * layers eligible that were not a moment ago -- and tells React, so the fetch
+   * layer can lift its gates on the same feeds (see the `focus` prop in
+   * useOsintData.js). Cheap to call with an unchanged value: it returns before
+   * doing any of that.
+   */
+  /**
+   * A country's bounding box as (south, west, north, east), or null.
+   *
+   * Read from the hit-test index rather than the Leaflet layer, because the
+   * index already holds a bbox per country (buildCountryIndex computes one to
+   * reject points cheaply) and asking the layer would mean walking its geometry
+   * again for a number that is sitting right there.
+   */
+  function boundsOfCountry(key) {
+    const entry = countryIndex.find((c) => c.key === key);
+    const b = entry?.bbox;
+    return b ? [b.minLat, b.minLon, b.maxLat, b.maxLon] : null;
+  }
+
+  function setFocus(next) {
+    const before = focus ? `${focus.kind}:${focus.key}` : "";
+    const after = next ? `${next.kind}:${next.key}` : "";
+    if (before === after) return;
+    focus = next;
+    // A collapsed cluster the reader had opened belongs to the view they opened
+    // it in; carrying it across a change of subject would leave pins expanded
+    // for a reason nobody could see.
+    expandedClusters.clear();
+    applyEmphasis();
+    applyScene();
+    renderAll();
+    callbacks.onFocusChange?.(next);
   }
 
   function setHoveredCountry(key) {
@@ -1063,6 +1698,23 @@ export function createMapController(container, initial, callbacks) {
         satelliteTrailsLayer.clearLayers();
       }
     }
+
+    // Everything below is the same catch-up the satellites branch above has
+    // always done, generalised: these renderers now return immediately while
+    // their layer is off (see the guard at the top of each), so switching one
+    // back on has to draw it rather than leave it empty until the reader
+    // happens to pan. `visible` only -- switching off is what the early return
+    // already handles.
+    if (visible) {
+      // The wind fetch is gated on this layer now, so a reader who switches it
+      // on has no data at all until the next five-minute tick without this.
+      if (key === "windArrows") refreshWindArrows();
+      else if (key === "firms") renderFirms();
+      else if (key === "jamming") renderJamming();
+      else if (key === "cities") renderCities();
+      else if (key === "infra") renderInfra();
+      else if (MARKER_LAYER_KEYS.has(key)) renderMarkerLayer(key);
+    }
   }
 
   // ---------- selection + trails ----------
@@ -1109,7 +1761,7 @@ export function createMapController(container, initial, callbacks) {
         () => selectedIcao === chosen, renderAdsbLayer
       );
       const d = decorateAdsb(item, { selectedIcao });
-      L.popup({ maxWidth: 320 }).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+      L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
     } else {
       aircraftTrails.clear();
       map.closePopup();
@@ -1127,7 +1779,7 @@ export function createMapController(container, initial, callbacks) {
         () => selectedMmsi === chosen, () => renderMarkerLayer("ais")
       );
       const d = decorateAis(item, { selectedMmsi });
-      L.popup({ maxWidth: 320 }).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+      L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
     } else {
       shipTrails.clear();
       map.closePopup();
@@ -1151,8 +1803,41 @@ export function createMapController(container, initial, callbacks) {
   // end up completely buried under a 31px neighbour with no way to click it.
   // Leaflet's own default orders markers by latitude, which says nothing about
   // which of two overlapping icons the user can actually reach.
-  function applyStacking(marker, size) {
-    marker.setZIndexOffset(-Math.round(size));
+  // `key` places the marker's whole layer in the stack; the size term keeps the
+  // existing behaviour inside that layer, where a small icon sits above a large
+  // one so it stays clickable rather than being swallowed by its neighbour.
+  // ---------- the seam ----------
+  //
+  // A web map repeats east-west for ever, so a stored longitude names infinitely
+  // many points and only one of them is the one being looked at. See nearestLon
+  // in utils/geo.js for the arithmetic; these three are every place the map has
+  // to apply it.
+
+  /**
+   * A viewport test that knows the world repeats.
+   *
+   * Built once per render pass rather than per item: getBounds and getCenter are
+   * both live reads off the map, and asking them ten thousand times a pan is
+   * exactly the sort of thing that made pans jank before the placement pass was
+   * batched. Also does the finite-coordinate check every caller used to do for
+   * itself, so a record with no position is rejected in one place.
+   */
+  function viewportFilter() {
+    const bounds = map.getBounds().pad(0.25);
+    const refLon = map.getCenter().lng;
+    return (lat, lon) => {
+      if (typeof lat !== "number" || typeof lon !== "number") return false;
+      return bounds.contains([lat, nearestLon(lon, refLon)]);
+    };
+  }
+
+  /** Where a record should actually be drawn, given where the camera is. */
+  function drawLatLng(item) {
+    return [item.lat, nearestLon(item.lon, map.getCenter().lng)];
+  }
+
+  function applyStacking(marker, size, key) {
+    marker.setZIndexOffset(stackZIndex(key) - Math.round(size));
   }
 
   // Only the conflict layer carries a placement confidence, so only it can be
@@ -1188,19 +1873,48 @@ export function createMapController(container, initial, callbacks) {
     };
   }
 
+  /**
+   * Stamp a divIcon with the layer it belongs to, so a stylesheet can dim every
+   * other layer when the reader clicks one.
+   *
+   * Done here rather than by threading an extraClass through all nineteen
+   * decorators, and it is free: buildDivIcon puts extraClass on the divIcon's
+   * `className`, while updateMarker decides whether to rebuild a marker's DOM
+   * by comparing `icon.options.html`. The class is not part of that string, so
+   * adding it costs no repaints and changing the emphasis costs none either --
+   * one attribute on the map container is the whole gesture.
+   */
+  function tagIconLayer(icon, key) {
+    if (!icon?.options) return icon;
+    const existing = icon.options.className || "";
+    if (!existing.includes(`layer-${key}`)) icon.options.className = `${existing} layer-${key}`.trim();
+    return icon;
+  }
+
   function buildMarker(key, item, decorate, sizeOf) {
     const id = item[ID_FIELD[key]];
-    const d = decorate(item, decorateOptionsFor(key, item, id));
-    const marker = L.marker([item.lat, item.lon], { icon: d.icon });
+    const d = applyCollapsedFallback(decorate(item, decorateOptionsFor(key, item, id)), item);
+    tagIconLayer(d.icon, key);
+    const marker = L.marker(drawLatLng(item), { icon: d.icon });
+    // Clicking a pin says "this kind of thing". Everything else on the map
+    // recedes, and the layers that corroborate this one become eligible -- so
+    // clicking a tanker is how a reader reaches the dark-vessel record that is
+    // a claim about tankers, without ever being handed that inference
+    // unasked. See CORROBORATES in scene.js.
+    marker.on("click", () => setFocus({ kind: "layer", key }));
     marker._item = item;
     marker._iconHtml = d.icon.options.html;
-    applyStacking(marker, sizeOf(item));
+    applyStacking(marker, sizeOf(item), key);
     // Same options the icon was built from, so a popup opened on an airfield
     // shows the traffic its glyph was already sized by. Rebuilt per open rather
     // than captured, because the table behind it is refreshed on its own timer.
     const lazyOptions = () => ({ selectedIcao, selectedMmsi, ...decorateOptionsFor(key, marker._item, id) });
-    marker.bindPopup(() => decorate(marker._item, lazyOptions()).detail, { maxWidth: 320 });
-    marker.bindTooltip(() => decorate(marker._item, lazyOptions()).tooltip, {
+    // Through the same fallback as the icon above, or a collapsed head would
+    // draw a count badge and then open a popup describing only itself.
+    const lazyDecorate = () =>
+      applyCollapsedFallback(decorate(marker._item, lazyOptions()), marker._item);
+    marker.bindPopup(() => lazyDecorate().detail, popupOptions(320));
+    marker.bindTooltip(() => lazyDecorate().tooltip, {
       className: "map-tooltip",
       direction: "top",
     });
@@ -1209,12 +1923,13 @@ export function createMapController(container, initial, callbacks) {
 
   function updateMarker(marker, item, decorate, key, sizeOf) {
     const id = item[ID_FIELD[key]];
-    const d = decorate(item, {
+    const d = applyCollapsedFallback(decorate(item, {
       selectedIcao, selectedMmsi, ...decorateOptionsFor(key, item, id),
-    });
+    }), item);
+    tagIconLayer(d.icon, key);
     marker._item = item;
-    marker.setLatLng([item.lat, item.lon]);
-    applyStacking(marker, sizeOf(item));
+    marker.setLatLng(drawLatLng(item));
+    applyStacking(marker, sizeOf(item), key);
     // setIcon tears down and recreates the marker's DOM element, so doing it
     // unconditionally meant every pan re-created hundreds of icons that were
     // pixel-identical. The generated html string is a complete description
@@ -1285,8 +2000,13 @@ export function createMapController(container, initial, callbacks) {
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
     gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
     // czib is deliberately absent: it has no gate, so it can never have a note.
-    // Not a zoom gate but a zoom-dependent thinning, so it travels with the
-    // rest: how many events capBySeverity kept, or 0 when it kept everything.
+    // Not a zoom gate but a band-dependent thinning, so it travels with the
+    // rest: { [layerKey]: howManyKept } for every layer capByRank is currently
+    // thinning, absent for every layer it is not.
+    capped: {},
+    // The same number for events alone. Kept because LayersSection and
+    // useLeafletMap's EMPTY_ZOOM_NOTES read it, and generalising the cap should
+    // not drag a UI change into the same commit.
     eventsCapped: 0,
   };
 
@@ -1370,6 +2090,85 @@ export function createMapController(container, initial, callbacks) {
     callbacks.onCountsChange?.({ ...counts, ...totalsSuffixed });
   }
   function reportZoomNotes() { callbacks.onZoomNotesChange?.({ ...zoomNotes }); }
+
+  // Every layer renderer used to call the two functions above directly, and
+  // renderAll runs about twenty-five of them -- so a single pan pushed
+  // twenty-five fresh objects into React state, each one re-rendering the whole
+  // control panel (LayersSection alone is ~34 checkbox rows) for numbers that
+  // were about to be superseded a microsecond later. Only the last one of each
+  // was ever worth anything.
+  //
+  // Renderers now mark what changed and the flush happens once. A microtask
+  // rather than a rAF on purpose: the boot sweep runs synchronously before the
+  // first paint and has to deliver its counts in the same turn, and useReplay
+  // pushes whole snapshots through applyData in bursts that must not straddle a
+  // frame. renderAll flushes explicitly at its end (see below) so a full render
+  // pass lands in one React commit; the microtask is the safety net for the
+  // renderers that are called on their own.
+  let reportsDirtyCounts = false;
+  let reportsDirtyNotes = false;
+  let reportsFlushQueued = false;
+  function scheduleReports({ counts: wantCounts, notes: wantNotes } = {}) {
+    if (wantCounts) reportsDirtyCounts = true;
+    if (wantNotes) reportsDirtyNotes = true;
+    if (reportsFlushQueued) return;
+    reportsFlushQueued = true;
+    queueMicrotask(() => {
+      reportsFlushQueued = false;
+      flushReports();
+    });
+  }
+  function flushReports() {
+    if (reportsDirtyCounts) {
+      reportsDirtyCounts = false;
+      reportCounts();
+    }
+    if (reportsDirtyNotes) {
+      reportsDirtyNotes = false;
+      reportZoomNotes();
+    }
+  }
+
+  /**
+   * True when this layer is off the map, in which case its renderer should stop
+   * here.
+   *
+   * Every renderer used to run in full whether or not its layer was on the map:
+   * filtering the whole feed to the viewport, decorating each survivor, diffing
+   * it against the marker map and building real DOM elements inside a
+   * layerGroup nobody could see. On a default session that is most of the
+   * layers, on every pan. renderSatellites was the one renderer that already
+   * returned early; this is that idea, given a name and applied to the rest.
+   *
+   * The counts still have to be honest, which is the whole reason this is a
+   * helper rather than a bare `return`. `counts[key] = 0` says nothing is
+   * drawn, and `totals[key]` keeps saying how many the feed holds -- that pair
+   * is what lets an operator tell "the layer is off" from "the feed is dead",
+   * and collapsing them into one number would take that away. The sub-tickers
+   * have to be zeroed with the parent for the same reason: a row reading
+   * "0 sites (3 military, 2 refinery)" is worse than either number alone. The
+   * empty placement registration matters for the reason settlePlacement gives:
+   * a hidden layer must not reserve screen space that shoves visible icons
+   * around.
+   */
+  function skipHiddenLayer(key) {
+    if (layerOnMap[key] !== false) return false;
+    counts[key] = 0;
+    for (const subKey of LAYER_SUBCOUNT_KEY[key]?.keys || []) counts[subKey] = 0;
+    // Infrastructure predates LAYER_SUBCOUNT_KEY and keeps its own table.
+    // counts.pipelineRoutes is deliberately left alone: it is how many routes
+    // are loaded rather than how many are on screen (renderPipelines is not
+    // viewport-filtered), so zeroing it here would answer a different question
+    // from the one it is asked.
+    if (key === "infra") {
+      for (const subKey of Object.values(INFRA_TYPE_COUNT_KEY)) counts[subKey] = 0;
+    }
+    const items = raw[key];
+    if (Array.isArray(items)) totals[key] = items.length;
+    registerPlacement(key, []);
+    scheduleReports({ counts: true });
+    return true;
+  }
 
   // The current zoom, handed to React so the fetch layer can hold off on
   // sources that are pointless above a certain height (see POLL_CONFIG's
@@ -1508,13 +2307,24 @@ export function createMapController(container, initial, callbacks) {
     return out;
   }
 
+  // Only the layers with a renderer of their own are named. Everything else in
+  // placementInput is a plain marker layer and goes to the generic renderer --
+  // as a fallback rather than a list, because the list silently rotted: it was
+  // written when this map had six point layers, and officials, hazards,
+  // airports, cableLandings, darkVessels, czib, dams, floods, gfwGaps,
+  // gfwDetections, launches, osmInfra, outagePoints and ports were all added
+  // afterwards. Each of those registered placement input, was duly marked dirty
+  // by settlePlacement, and then fell off the end of this function without being
+  // repainted -- so their declutter offsets only landed if some later renderAll
+  // happened to run. That made "do these pins separate or sit on top of each
+  // other" depend on render ordering, which is why it looked intermittent.
   function redrawLayerGroup(group) {
-    if (group === "events" || group === "gdelt" || group === "conflictHistory") renderMarkerLayer(group);
-    else if (group === "infra") renderInfra();
+    if (group === "infra") renderInfra();
     else if (group === "satellites") renderSatellites();
     else if (group === "cities") renderCities();
     else if (group === "ais") renderAisLayer();
     else if (group === "adsb") renderAdsbLayer();
+    else renderMarkerLayer(group);
   }
 
   // Recomputes every offset, then redraws only the layers whose offsets
@@ -1671,7 +2481,7 @@ export function createMapController(container, initial, callbacks) {
         radius: uncertaintyRadiusMetres(item),
       }),
       (circle, item) => {
-        circle.setLatLng([item.lat, item.lon]);
+        circle.setLatLng(drawLatLng(item));
         circle.setRadius(uncertaintyRadiusMetres(item));
         circle.setStyle(uncertaintyStyle(item));
       }
@@ -1695,6 +2505,7 @@ export function createMapController(container, initial, callbacks) {
       renderAisLayer();
       return;
     }
+    if (skipHiddenLayer(key)) return;
     const group = groups[key];
     const decorate = DECORATORS[key];
     // Airfields are the one layer whose size depends on data outside the item.
@@ -1705,15 +2516,19 @@ export function createMapController(container, initial, callbacks) {
     const sizeOf = key === "airports"
       ? (item) => airportIconSize(item, airfieldActivityFor(item))
       : ICON_SIZE_FOR[key];
-    const bounds = map.getBounds().pad(0.25);
+    const inView = viewportFilter();
     const idField = ID_FIELD[key];
-    const minZoom = minZoomFor(key, MARKER_LAYER_MIN_ZOOM[key]);
-    const belowMinZoom = minZoom != null && map.getZoom() < minZoom;
+    const zoom = map.getZoom();
+    const minZoom = minZoomFor(key);
+    const belowMinZoom = minZoom != null && zoom < minZoom;
     if (minZoom != null) {
       zoomNotes[key] = belowMinZoom;
-      reportZoomNotes();
+      scheduleReports({ notes: true });
     }
     const itemFilter = LAYER_ITEM_FILTER[key];
+    // Only asked when some pin type in this layer has been given a zoom of its
+    // own, which is the uncommon case -- see pinDrawsAt.
+    const perPinZoom = layerHasTokenZoom(key);
     // `|| []` because a source can hand us nothing: /api/replay omits a key
     // entirely when it has no history for it, and an undefined here used to
     // take the whole render down rather than drawing an empty layer.
@@ -1722,22 +2537,19 @@ export function createMapController(container, initial, callbacks) {
     if (!belowMinZoom) {
       for (const item of items) {
         if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
-        if (!bounds.contains([item.lat, item.lon])) continue;
+        if (!inView(item.lat, item.lon)) continue;
         if (itemFilter && !itemFilter(item)) continue;
+        if (perPinZoom && !pinDrawsAt(key, item, zoom, minZoom)) continue;
         visible.push(item);
       }
     }
-    if (key === "events") {
-      // Reported only on a change: reportZoomNotes hands React a fresh object
-      // every call, and this runs on every pan.
-      const cappedBefore = zoomNotes.eventsCapped;
-      visible = capBySeverity(visible, map.getZoom());
-      if (zoomNotes.eventsCapped !== cappedBefore) reportZoomNotes();
-      // After the cap, so a circle can never outlive the pin it belongs to.
-      renderEventUncertainty(visible);
-    }
-    if (key === "gdelt") visible = collapseNews(visible, map.getZoom());
-    if (key === "officials") visible = collapseOfficials(visible, map.getZoom());
+    // Cap first, then group: capping decides what is worth drawing at all, and
+    // grouping decides how to draw what survived. The other order would let a
+    // group form around a head that the cap then removed.
+    visible = capByRank(key, visible);
+    // After the cap, so a circle can never outlive the pin it belongs to.
+    if (key === "events") renderEventUncertainty(visible);
+    visible = collapseFor(key, visible, map.getZoom());
     registerPlacement(
       key,
       visible.map((item) => ({ id: item[idField], lat: item.lat, lon: item.lon, size: sizeOf(item) }))
@@ -1769,7 +2581,7 @@ export function createMapController(container, initial, callbacks) {
         if (bucket) totals[bucket] += 1;
       }
     }
-    reportCounts();
+    scheduleReports({ counts: true });
     settlePlacement();
   }
 
@@ -1777,33 +2589,44 @@ export function createMapController(container, initial, callbacks) {
   // same exemption renderAdsbLayer already gives military aircraft.
   function renderAisLayer() {
     const decorate = DECORATORS.ais;
-    const bounds = map.getBounds().pad(0.25);
+    const inView = viewportFilter();
     // Civilian and tanker share a shipped gate but read it separately, so an
     // Admin Mode override on one does not silently move the other.
     const zoom = map.getZoom();
-    const belowAisMinZoom = zoom < minZoomFor("aisCivilian", AIS_MIN_ZOOM);
-    const belowTankerMinZoom = zoom < minZoomFor("aisTanker", AIS_MIN_ZOOM);
+    const belowAisMinZoom = zoom < (minZoomFor("aisCivilian") ?? -Infinity);
+    const belowTankerMinZoom = zoom < (minZoomFor("aisTanker") ?? -Infinity);
     zoomNotes.ais = belowAisMinZoom;
-    reportZoomNotes();
+    scheduleReports({ notes: true });
 
     // Tankers get their own ticker/layer (see createTankerAisGroup) instead
     // of being mixed into "Civilian Ships" -- three-way split on the same
     // classifyShip() decorators.js already uses to pick the marker icon/color.
-    const civilianVisible = [];
+    // Exactly one pin type per bucket, so the per-pin gate is read once here
+    // rather than per hull: the split below has already done the classifying
+    // that pinZoomGate would otherwise repeat ten thousand times.
+    const belowNavyPinZoom = zoom < (tokenZoom("ship.navy") ?? -Infinity);
+    const belowTankerPinZoom = zoom < (tokenZoom("ship.tanker") ?? -Infinity);
+    const belowCivilianPinZoom = zoom < (tokenZoom("ship.other") ?? -Infinity);
+
+    let civilianVisible = [];
     const tankerVisible = [];
     const navyVisible = [];
     for (const item of raw.ais) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
-      if (!bounds.contains([item.lat, item.lon])) continue;
+      if (!inView(item.lat, item.lon)) continue;
       const type = classifyShip(item);
       if (type === "navy") {
-        navyVisible.push(item);
+        if (!belowNavyPinZoom) navyVisible.push(item);
       } else if (type === "tanker") {
-        if (!belowTankerMinZoom) tankerVisible.push(item);
-      } else if (!belowAisMinZoom) {
+        if (!belowTankerMinZoom && !belowTankerPinZoom) tankerVisible.push(item);
+      } else if (!belowAisMinZoom && !belowCivilianPinZoom) {
         civilianVisible.push(item);
       }
     }
+    // Only the anonymous bucket is thinned. Navy hulls and designated tankers
+    // are what this layer is for and neither is dense enough to need it; a
+    // sanctioned merchant hull is lifted clear of the cap for the same reason.
+    civilianVisible = capByRank("aisCivilian", civilianVisible, nearestToCentreRank(isSanctioned));
 
     // If the selected ship is no longer in the feed at all (out of AIS
     // range / stopped reporting), drop the selection so the highlight/trail
@@ -1870,7 +2693,7 @@ export function createMapController(container, initial, callbacks) {
       else if (type === "tanker") totals.aisTanker += 1;
       else totals.aisCivilian += 1;
     }
-    reportCounts();
+    scheduleReports({ counts: true });
     settlePlacement();
     // Extend the selected ship's trail on every render, not just at the
     // moment it was clicked. updateTrails appends at most one point per
@@ -1878,7 +2701,7 @@ export function createMapController(container, initial, callbacks) {
     // one point long -- and renderTrailLayer skips anything under two
     // points, so a selected ship's trail could never draw at all.
     if (selectedMmsi) updateTrails(shipTrails, raw.ais, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
-    renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set());
+    renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set(), { refLon: map.getCenter().lng, layerKey: "aisCivilian" });
 
     // Every on-screen tanker gets a trail, not just a selected one -- same
     // "the path itself is the point" reasoning as renderSatellites, just
@@ -1893,6 +2716,8 @@ export function createMapController(container, initial, callbacks) {
     updateTrails(tankerTrails, tankerVisible, "mmsi", TANKER_TRAIL_MAX_POINTS, undefined);
     if (tankerTrailsVisible) {
       renderTrailLayer(tankerTrailsLayer, tankerTrails, "#ffb347", new Set(tankerTrails.keys()), {
+        refLon: map.getCenter().lng,
+        layerKey: "aisTanker",
         maxOpacity: 0.35,
         dashArray: "2 5",
       });
@@ -1904,12 +2729,38 @@ export function createMapController(container, initial, callbacks) {
   // clustered/zoom-gated behavior.
   function renderAdsbLayer() {
     const decorate = DECORATORS.adsb;
-    const bounds = map.getBounds().pad(0.25);
-    const belowAdsbMinZoom = map.getZoom() < minZoomFor("adsbCivilian", ADSB_MIN_ZOOM);
+    const inView = viewportFilter();
+    const belowAdsbMinZoom = map.getZoom() < (minZoomFor("adsbCivilian") ?? -Infinity);
     zoomNotes.adsb = belowAdsbMinZoom;
-    reportZoomNotes();
+    scheduleReports({ notes: true });
 
-    const civilianVisible = [];
+    /**
+     * Which always-on status an aircraft carries right now, or null.
+     *
+     * Not simply aircraftFlagBucket: two of the three statuses earn the
+     * ungated bucket at every zoom and the third does not. An emergency squawk
+     * and an OFAC designation are facts about a flight and an operator; a LADD
+     * or PIA listing is a fact about a registry entry, and it was riding the
+     * other two's argument to a world-zoom pin. Below its own gate the aircraft
+     * reads as unflagged and falls through to the class it actually belongs to
+     * -- so a display-limited military airframe keeps drawing at every zoom.
+     */
+    const belowHiddenMinZoom = map.getZoom() < (minZoomFor("adsbDisplayLimited") ?? -Infinity);
+    const flagOf = (item) => {
+      const flag = aircraftFlagBucket(item);
+      return flag === "displayLimited" && belowHiddenMinZoom ? null : flag;
+    };
+
+    // Per-pin gates, asked per aircraft because a single bucket holds several
+    // pin types -- an airliner, a helicopter and a light aircraft all land in
+    // "adsbCivilian". The layer key each one answers to is the bucket it was
+    // sorted into, so the classification below decides both.
+    const zoom = map.getZoom();
+    const civilianPerPin = layerHasTokenZoom("adsbCivilian");
+    const militaryPerPin = layerHasTokenZoom("adsbMilitary");
+    const flaggedPerPin = layerHasTokenZoom("adsbFlagged");
+
+    let civilianVisible = [];
     const militaryVisible = [];
     // Aircraft squawking an emergency code, or listed under LADD/PIA, get their
     // own bucket rather than staying in whichever class they belong to. Two
@@ -1920,15 +2771,26 @@ export function createMapController(container, initial, callbacks) {
     const flaggedVisible = [];
     for (const item of raw.adsb) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
-      if (!bounds.contains([item.lat, item.lon])) continue;
-      if (isFlaggedAircraft(item)) {
-        flaggedVisible.push(item);
+      if (!inView(item.lat, item.lon)) continue;
+      if (flagOf(item)) {
+        if (!flaggedPerPin || pinDrawsAt("adsbFlagged", item, zoom, minZoomFor("adsbFlagged"))) {
+          flaggedVisible.push(item);
+        }
       } else if (classifyAircraft(item) === "military") {
-        militaryVisible.push(item);
+        if (!militaryPerPin || pinDrawsAt("adsbMilitary", item, zoom, minZoomFor("adsbMilitary"))) {
+          militaryVisible.push(item);
+        }
       } else if (!belowAdsbMinZoom) {
-        civilianVisible.push(item);
+        if (!civilianPerPin || pinDrawsAt("adsbCivilian", item, zoom, minZoomFor("adsbCivilian"))) {
+          civilianVisible.push(item);
+        }
       }
     }
+    // Only the anonymous bucket. Military and flagged aircraft are uncapped --
+    // they are why this layer exists -- and the flagged split above has already
+    // lifted every emergency, display-limited and designated airframe out of
+    // here, so nothing that needs keeping is left to a distance rank.
+    civilianVisible = capByRank("adsbCivilian", civilianVisible, nearestToCentreRank());
 
     // If the selected aircraft is no longer in the feed at all (out of
     // ADS-B range / stopped reporting), drop the selection so the
@@ -1988,7 +2850,7 @@ export function createMapController(container, initial, callbacks) {
     counts.adsbSanctioned = 0;
     counts.adsbEmergency = 0;
     counts.adsbHidden = 0;
-    for (const item of flaggedVisible) counts[AIRCRAFT_FLAG_COUNT_KEY[aircraftFlagBucket(item)]] += 1;
+    for (const item of flaggedVisible) counts[AIRCRAFT_FLAG_COUNT_KEY[flagOf(item)]] += 1;
     totals.adsbCivilian = 0;
     totals.adsbMilitary = 0;
     totals.adsbFlagged = 0;
@@ -1996,19 +2858,23 @@ export function createMapController(container, initial, callbacks) {
     totals.adsbHidden = 0;
     totals.adsbSanctioned = 0;
     for (const item of raw.adsb) {
-      const bucket = aircraftFlagBucket(item);
+      // flagOf, not aircraftFlagBucket: the totals have to split the feed the
+      // same way the render does, or below the display-limited gate the panel
+      // would show a bucket holding more aircraft on screen than exist in the
+      // feed -- counts.adsbMilitary above totals.adsbMilitary.
+      const bucket = flagOf(item);
       if (bucket) {
         totals.adsbFlagged += 1;
         totals[AIRCRAFT_FLAG_COUNT_KEY[bucket]] += 1;
       } else if (classifyAircraft(item) === "military") totals.adsbMilitary += 1;
       else totals.adsbCivilian += 1;
     }
-    reportCounts();
+    scheduleReports({ counts: true });
     settlePlacement();
     // Same per-render accumulation the selected ship needs -- see the note
     // in renderAisLayer.
     if (selectedIcao) updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
-    renderTrailLayer(aircraftTrailsLayer, aircraftTrails, "#d8b9ff", selectedIcao ? new Set([selectedIcao]) : new Set());
+    renderTrailLayer(aircraftTrailsLayer, aircraftTrails, "#d8b9ff", selectedIcao ? new Set([selectedIcao]) : new Set(), { refLon: map.getCenter().lng, layerKey: "adsbCivilian" });
 
     // Every on-screen military aircraft gets a trail, not just a selected
     // one -- same "the path itself is the point" reasoning as tanker/
@@ -2017,6 +2883,8 @@ export function createMapController(container, initial, callbacks) {
     updateTrails(militaryTrails, militaryVisible, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, undefined);
     if (militaryTrailsVisible) {
       renderTrailLayer(militaryTrailsLayer, militaryTrails, "#ff4d4d", new Set(militaryTrails.keys()), {
+        refLon: map.getCenter().lng,
+        layerKey: "adsbMilitary",
         maxOpacity: 0.35,
         dashArray: "2 5",
       });
@@ -2024,19 +2892,26 @@ export function createMapController(container, initial, callbacks) {
   }
 
   function renderFirms() {
-    const bounds = map.getBounds().pad(0.25);
+    if (skipHiddenLayer("firms")) return;
+    const inView = viewportFilter();
     const visible = raw.firms.filter(
-      (d) => typeof d.lat === "number" && typeof d.lon === "number" && bounds.contains([d.lat, d.lon])
+      (d) => inView(d.lat, d.lon)
     );
     // Always on, any zoom -- leaflet.heat draws this as one canvas
     // regardless of point count, so it stays cheap even with tens of
     // thousands visible.
+    applyHeatKernel(firmsHeat, "firms");
     safeHeatSetLatLngs(firmsHeat, visible.map((d) => [d.lat, d.lon, Math.min((d.frp ? Number(d.frp) : 5) / 50, 1) + 0.2]));
+    // After the redraw, not before: leaflet.heat replaces its canvas element on
+    // every setLatLngs, taking the style written onto the previous one with it.
+    applyWashStack();
 
     firmsPointsLayer.clearLayers();
-    const belowFirmsDetailZoom = map.getZoom() < FIRMS_DETAIL_MIN_ZOOM;
+    // The heat above is drawn whatever the zoom; only the clickable per-point
+    // circles are gated, which is why this reads firmsPoints rather than firms.
+    const belowFirmsDetailZoom = map.getZoom() < (minZoomFor("firmsPoints") ?? -Infinity);
     zoomNotes.firms = belowFirmsDetailZoom;
-    reportZoomNotes();
+    scheduleReports({ notes: true });
     if (!belowFirmsDetailZoom) {
       for (const d of visible) {
         const dt = fmtFirmsDateTime(d.acq_date, d.acq_time);
@@ -2059,20 +2934,20 @@ export function createMapController(container, initial, callbacks) {
         // one DOM/SVG node each, which is what makes even the gated (zoomed
         // in) count affordable.
         const marker = L.circleMarker([d.lat, d.lon], {
-          radius: 6,
+          radius: Math.max(3, Math.round(6 * layerScale("firms"))),
           fillOpacity: 0.02,
           opacity: 0,
           renderer: firmsCanvasRenderer,
         });
         marker.bindTooltip(tooltip, { className: "map-tooltip", direction: "top" });
-        marker.bindPopup(detail, { maxWidth: 280 });
+        marker.bindPopup(detail, popupOptions(280));
         firmsPointsLayer.addLayer(marker);
       }
     }
 
     counts.firms = visible.length;
     totals.firms = raw.firms.length;
-    reportCounts();
+    scheduleReports({ counts: true });
   }
 
   function satelliteIconSize(sat) {
@@ -2081,11 +2956,11 @@ export function createMapController(container, initial, callbacks) {
 
   function buildSatelliteMarker(sat) {
     const d = decorateSatellite(sat, { offset: offsetFor("satellites", sat.norad_id) });
-    const marker = L.marker([sat.lat, sat.lon], { icon: d.icon });
+    const marker = L.marker(drawLatLng(sat), { icon: d.icon });
     marker._item = sat;
     marker._iconHtml = d.icon.options.html;
-    applyStacking(marker, satelliteIconSize(sat));
-    marker.bindPopup(() => decorateSatellite(marker._item).detail, { maxWidth: 320 });
+    applyStacking(marker, detailSize(satelliteIconSize(sat)), "satellites");
+    marker.bindPopup(() => decorateSatellite(marker._item).detail, popupOptions(320));
     marker.bindTooltip(() => decorateSatellite(marker._item).tooltip, {
       className: "map-tooltip",
       direction: "top",
@@ -2099,7 +2974,7 @@ export function createMapController(container, initial, callbacks) {
   // uses.
   function updateSatelliteMarker(marker, sat) {
     marker._item = sat;
-    marker.setLatLng([sat.lat, sat.lon]);
+    marker.setLatLng(drawLatLng(sat));
     const d = decorateSatellite(sat, { offset: offsetFor("satellites", sat.norad_id) });
     if (marker._iconHtml !== d.icon.options.html) {
       marker.setIcon(d.icon);
@@ -2125,18 +3000,27 @@ export function createMapController(container, initial, callbacks) {
       ? raw.satellites
       : raw.satellites.filter((s) => !isMilitarySatellite(s));
 
-    const bounds = map.getBounds().pad(0.25);
+    const inView = viewportFilter();
+    // The layer itself is ungated (see LAYER_MANIFEST), so a per-pin gate is
+    // the only zoom question this layer has -- "military satellites from z4,
+    // stations at every zoom" and the reverse are both configurable here.
+    const zoom = map.getZoom();
+    const satellitesPerPin = layerHasTokenZoom("satellites");
     const visible = pool.filter(
-      (s) => typeof s.lat === "number" && typeof s.lon === "number" && bounds.contains([s.lat, s.lon])
+      (s) =>
+        typeof s.lat === "number" &&
+        typeof s.lon === "number" &&
+        inView(s.lat, s.lon) &&
+        (!satellitesPerPin || pinDrawsAt("satellites", s, zoom, minZoomFor("satellites")))
     );
     registerPlacement(
       "satellites",
-      visible.map((s) => ({ id: s.norad_id, lat: s.lat, lon: s.lon, size: satelliteIconSize(s) }))
+      visible.map((s) => ({ id: s.norad_id, lat: s.lat, lon: s.lon, size: detailSize(satelliteIconSize(s)) }))
     );
     syncLayerMarkers(markersByKey.satellites, satelliteGroup, visible, (s) => s.norad_id, buildSatelliteMarker, updateSatelliteMarker);
     counts.satellites = visible.length;
     totals.satellites = pool.length;
-    reportCounts();
+    scheduleReports({ counts: true });
     settlePlacement();
 
     // Satellites have no click-to-select model like ships/aircraft, so every
@@ -2161,7 +3045,7 @@ export function createMapController(container, initial, callbacks) {
         satelliteTrails,
         (id) => (militaryIds.has(id) ? satelliteStyle("military").color : satelliteStyle("stations").color),
         new Set(satelliteTrails.keys()),
-        { maxOpacity: 0.22, dashArray: "2 5" }
+        { refLon: map.getCenter().lng, layerKey: "satellites", maxOpacity: 0.22, dashArray: "2 5" }
       );
     }
   }
@@ -2181,26 +3065,33 @@ export function createMapController(container, initial, callbacks) {
       '<span class="jamming-ping-ring" style="animation-delay:3000ms"></span>' +
       "</div>";
     const icon = L.divIcon({ html, className: "", iconSize: [1, 1], iconAnchor: [0, 0] });
-    const marker = L.marker([d.lat, d.lon], { icon, interactive: false });
+    const marker = L.marker(drawLatLng(d), { icon, interactive: false });
     jammingPingGroup.addLayer(marker);
   }
 
   function renderJamming() {
-    const bounds = map.getBounds().pad(0.25);
-    // Same zoom gate as civilian ADS-B (ADSB_MIN_ZOOM) -- world zoom stays
-    // clean by construction rather than by showing a purple blur everywhere,
-    // heat/pings/points all withheld together until the user zooms in.
-    const belowJammingDetailZoom = map.getZoom() < ADSB_MIN_ZOOM;
+    if (skipHiddenLayer("jamming")) return;
+    const inView = viewportFilter();
+    // World zoom stays clean by construction rather than by showing a purple
+    // blur everywhere: heat, pings and click points are all withheld together
+    // until the reader zooms in. The gate used to be a bare constant here,
+    // which meant Admin Mode's per-layer zoom slider silently did nothing to
+    // this layer; it now reads the same scene entry as everything else.
+    const belowJammingDetailZoom = map.getZoom() < (minZoomFor("jamming") ?? -Infinity);
     zoomNotes.jamming = belowJammingDetailZoom;
-    reportZoomNotes();
+    scheduleReports({ notes: true });
 
     const visible = belowJammingDetailZoom
       ? []
       : raw.jamming.filter(
-          (d) => typeof d.lat === "number" && typeof d.lon === "number" && bounds.contains([d.lat, d.lon])
+          (d) => inView(d.lat, d.lon)
         );
 
+    applyHeatKernel(jammingHeat, "jamming");
     safeHeatSetLatLngs(jammingHeat, visible.map((d) => [d.lat, d.lon, d.jam_ratio]));
+    applyWashStack(); // see the note beside the FIRMS call
+
+
 
     jammingPointsLayer.clearLayers();
     jammingPingGroup.clearLayers();
@@ -2219,19 +3110,19 @@ export function createMapController(container, initial, callbacks) {
       // see and click on covers far more area than the thing registering
       // the click, and most clicks miss.
       const marker = L.circleMarker([d.lat, d.lon], {
-        radius: 18,
+        radius: Math.max(6, Math.round(18 * layerScale("jamming"))),
         fillOpacity: 0.02,
         opacity: 0,
         renderer: jammingCanvasRenderer,
       });
       marker.bindTooltip(tooltip, { className: "map-tooltip", direction: "top" });
-      marker.bindPopup(detail, { maxWidth: 280 });
+      marker.bindPopup(detail, popupOptions(280));
       jammingPointsLayer.addLayer(marker);
     }
 
     counts.jamming = visible.length;
     totals.jamming = raw.jamming.length;
-    reportCounts();
+    scheduleReports({ counts: true });
   }
 
   // Country boundaries only actually change once/day server-side (see
@@ -2365,7 +3256,12 @@ export function createMapController(container, initial, callbacks) {
       focusedCountryLayer = countryLayerFor(focusedCountryKey);
       counts.countries = features.length;
       totals.countries = features.length;
-      reportCounts();
+      scheduleReports({ counts: true });
+      // The boundaries are what the viewport profile hit-tests against, so
+      // until they land the profile is null and the scene applies no promotion
+      // at all. This is the moment it can start -- without it, an ocean view
+      // would stay unpromoted until the reader happened to pan.
+      applyScene();
       // The shapes were just rebuilt from scratch, so whatever fill they were
       // carrying went with them. Repainting here rather than leaving it to the
       // next poll is what stops a boundary refresh blanking an active metric.
@@ -2421,6 +3317,46 @@ export function createMapController(container, initial, callbacks) {
   // the user picked first. Only toggles a CSS class on the already-rendered
   // path -- cheap enough to re-run after every ACLED update, not just when
   // the country boundaries themselves change.
+  /**
+   * Every country currently over one of the war thresholds, by country key.
+   *
+   * Split out of updateCountryWarFlare so the flare and the viewport profile
+   * cannot end up with two definitions of "at war". The flare below still only
+   * *draws* on countries in scope -- that is a presentation choice about not
+   * lighting up the whole world -- but the underlying judgement is made once,
+   * here, from the same thresholds.
+   *
+   * Recomputed only when the events feed or the boundaries change: it is one
+   * pass over the events plus one over ~180 countries, which is nothing on a
+   * poll and would be waste on every pan.
+   */
+  let hotCountryKeys = new Set();
+  let hotCountryStamp = null;
+  function refreshHotCountries() {
+    const stamp = `${raw.events?.length ?? 0}:${countryIndex.length}`;
+    if (stamp === hotCountryStamp) return hotCountryKeys;
+    hotCountryStamp = stamp;
+    const tally = new Map();
+    for (const e of raw.events) {
+      const name = normalizeCountryName(e.country);
+      if (!name) continue;
+      const row = tally.get(name) || { fatalities: 0, count: 0 };
+      row.fatalities += e.fatalities || 0;
+      row.count += 1;
+      tally.set(name, row);
+    }
+    const next = new Set();
+    for (const entry of countryIndex) {
+      const row = tally.get(normalizeCountryName(entry.name));
+      if (!row) continue;
+      if (row.fatalities >= WAR_FATALITY_THRESHOLD || row.count >= WAR_EVENT_COUNT_THRESHOLD) {
+        next.add(entry.key);
+      }
+    }
+    hotCountryKeys = next;
+    return hotCountryKeys;
+  }
+
   function updateCountryWarFlare() {
     countriesLayer.eachLayer((layer) => {
       const props = layer.feature?.properties;
@@ -2484,10 +3420,10 @@ export function createMapController(container, initial, callbacks) {
   // everything from a 100k town to Shanghai.
   function buildCityMarker(city) {
     const { icon, size, tier } = decorateCity(city, { offset: offsetFor("cities", cityKey(city)) });
-    const marker = L.marker([city.lat, city.lon], { icon });
+    const marker = L.marker(drawLatLng(city), { icon });
     marker._iconHtml = icon.options.html;
-    applyStacking(marker, size);
-    marker.bindPopup(() => cityPopupHtml(city, raw, countryNameByIso2), { maxWidth: 320 });
+    applyStacking(marker, size, "cities");
+    marker.bindPopup(() => cityPopupHtml(city, raw, countryNameByIso2), popupOptions(320));
     // Capitals name both facts -- "Capital city" alone loses the size band a
     // reader is comparing against, and the population tier alone loses the
     // reason it is drawn with a star.
@@ -2509,15 +3445,53 @@ export function createMapController(container, initial, callbacks) {
     }
   }
 
+  // The ring a city groups reports inside. Drawn only for the cities actually on
+  // screen, and only while the cities layer is on: the ring is the explanation
+  // for a grouped pin, and an explanation nobody can see is not one. The
+  // grouping itself runs regardless -- a collapsed head says which city it was
+  // grouped on in its own popup, which is the explanation that always travels
+  // with it.
+  const CITY_ZONE_STYLE = {
+    color: "#ff6fb5",
+    weight: 1,
+    opacity: 0.35,
+    fillColor: "#ff6fb5",
+    fillOpacity: 0.05,
+    dashArray: "3 5",
+    interactive: false,
+  };
+
+  function renderCityZones(visible) {
+    cityZoneLayer.clearLayers();
+    if (!cityZoneSettings.show || !cityZoneIndex) return;
+    for (const city of visible) {
+      const zone = cityZoneIndex.zoneAt(city.lat, city.lon);
+      // zoneAt answers with the *smallest* containing zone, which for a town
+      // inside a megacity's radius is the town rather than the city being drawn.
+      // Matching on the key keeps a ring attached to the city it belongs to.
+      if (!zone || zone.key !== cityKey(city)) continue;
+      cityZoneLayer.addLayer(
+        L.circle([zone.lat, zone.lon], { ...CITY_ZONE_STYLE, radius: zone.radiusM, pane: "uncertaintyPane" })
+      );
+    }
+  }
+
   function renderCities() {
-    const belowCitiesMinZoom = map.getZoom() < minZoomFor("cities", CITIES_MIN_ZOOM);
+    if (skipHiddenLayer("cities")) {
+      cityZoneLayer.clearLayers();
+      return;
+    }
+    // One pin type for the whole layer, so its gate is simply the later of the
+    // two -- there is nothing to ask per city.
+    const citiesGate = Math.max(minZoomFor("cities") ?? -Infinity, tokenZoom("city.marker") ?? -Infinity);
+    const belowCitiesMinZoom = map.getZoom() < citiesGate;
     // citiesScoped tells the UI *which* note to show (see PlacesSection.jsx)
     // -- "select a country/zone" takes priority over "zoom in", since
     // zooming in without a scope selected still shows nothing.
     zoomNotes.citiesScoped = citiesEnabled;
     zoomNotes.cities = !citiesEnabled || belowCitiesMinZoom;
-    reportZoomNotes();
-    const bounds = map.getBounds().pad(0.25);
+    scheduleReports({ notes: true });
+    const inView = viewportFilter();
     // Scoped to the in-scope countries/zone, not just whatever's in the
     // viewport -- selected countries only show *their own* cities (matched by
     // country_code, the same ISO2 the selection holds), and a conflict-zone
@@ -2530,7 +3504,7 @@ export function createMapController(container, initial, callbacks) {
       !citiesEnabled || belowCitiesMinZoom
         ? []
         : raw.cities.filter((c) => {
-            if (!bounds.contains([c.lat, c.lon])) return false;
+            if (!inView(c.lat, c.lon)) return false;
             if (selectedCountryKeys.size) return selectedCountryKeys.has(c.country_code);
             if (activeConflictZoneBounds) return boundsContainsPoint(activeConflictZoneBounds, c.lat, c.lon);
             return false;
@@ -2550,9 +3524,10 @@ export function createMapController(container, initial, callbacks) {
     // unclickable. See renderMarkerLayer/syncLayerMarkers for the same fix
     // applied to every other point layer.
     syncLayerMarkers(markersByKey.cities, citiesGroup, visible, cityKey, buildCityMarker, updateCityMarker);
+    renderCityZones(visible);
     counts.cities = visible.length;
     totals.cities = raw.cities.length;
-    reportCounts();
+    scheduleReports({ counts: true });
     settlePlacement();
   }
 
@@ -2604,11 +3579,11 @@ export function createMapController(container, initial, callbacks) {
 
   function buildInfraMarker(site) {
     const d = infraDecoration(site, offsetFor("infra", site.id));
-    const marker = L.marker([site.lat, site.lon], { icon: d.icon });
+    const marker = L.marker(drawLatLng(site), { icon: d.icon });
     marker._item = site;
     marker._iconHtml = d.icon.options.html;
-    applyStacking(marker, infraIconSize(site));
-    marker.bindPopup(() => infraDecoration(marker._item).detail, { maxWidth: 320 });
+    applyStacking(marker, detailSize(infraIconSize(site)), "infra");
+    marker.bindPopup(() => infraDecoration(marker._item).detail, popupOptions(320));
     marker.bindTooltip(() => infraDecoration(marker._item).tooltip, {
       className: "map-tooltip",
       direction: "top",
@@ -2626,14 +3601,23 @@ export function createMapController(container, initial, callbacks) {
   }
 
   function renderInfra() {
-    const bounds = map.getBounds().pad(0.25);
+    if (skipHiddenLayer("infra")) return;
+    const inView = viewportFilter();
     const needle = infraNameFilter.trim().toLowerCase();
+    // Seven pin types in one layer, which is where a per-pin gate earns its
+    // keep: refineries and pipeline nodes can be held back to the zoom where
+    // they are worth reading while nuclear sites and fabs keep the layer's own.
+    const zoom = map.getZoom();
+    const infraPerPin = layerHasTokenZoom("infra");
     const visible = raw.infra.filter(
-      (s) => bounds.contains([s.lat, s.lon]) && (!needle || s.name.toLowerCase().includes(needle))
+      (s) =>
+        inView(s.lat, s.lon) &&
+        (!needle || s.name.toLowerCase().includes(needle)) &&
+        (!infraPerPin || pinDrawsAt("infra", s, zoom, minZoomFor("infra")))
     );
     registerPlacement(
       "infra",
-      visible.map((s) => ({ id: s.id, lat: s.lat, lon: s.lon, size: infraIconSize(s) }))
+      visible.map((s) => ({ id: s.id, lat: s.lat, lon: s.lon, size: detailSize(infraIconSize(s)) }))
     );
     // Diff-sync like every other point layer -- re-runs on every ACLED/GDELT
     // update too (see renderAll) so a flare turns on/off promptly, without
@@ -2654,7 +3638,7 @@ export function createMapController(container, initial, callbacks) {
       const key = INFRA_TYPE_COUNT_KEY[s.type];
       if (key) totals[key] += 1;
     }
-    reportCounts();
+    scheduleReports({ counts: true });
     settlePlacement();
   }
 
@@ -2666,17 +3650,20 @@ export function createMapController(container, initial, callbacks) {
     for (const route of raw.pipelines) {
       const line = L.polyline(route.coords, {
         color: pipelineRouteColor(),
-        weight: 2,
-        opacity: 0.65,
+        // Pipelines are drawn as part of the infrastructure layer and share its
+        // dials, the same way the pipeline node's colour token is shared -- a
+        // node and the line it sits on must not drift apart.
+        weight: scaledWeight(2, "infra"),
+        opacity: 0.65 * layerOpacity("infra"),
         dashArray: "6 6",
       });
       line.bindTooltip(esc(route.name), { className: "map-tooltip", direction: "top" });
-      line.bindPopup(`<h3>${esc(route.name)}</h3><p>${esc(route.note || "")}</p>`, { maxWidth: 280 });
+      line.bindPopup(`<h3>${esc(route.name)}</h3><p>${esc(route.note || "")}</p>`, popupOptions(280));
       pipelinesGroup.addLayer(line);
     }
     counts.pipelineRoutes = raw.pipelines.length;
     totals.pipelineRoutes = raw.pipelines.length;
-    reportCounts();
+    scheduleReports({ counts: true });
   }
 
   // Cable routes are drawn once and never re-drawn on pan or zoom: unlike every
@@ -2692,8 +3679,13 @@ export function createMapController(container, initial, callbacks) {
           // The publisher's own per-cable colour where there is one, so a cable
           // looks the same here as on the map most readers have already seen.
           color: cable.color || color,
-          weight: 1.4,
-          opacity: 0.5,
+          // Both dials, on a line rather than an icon: weight is what "size"
+          // means for a polyline, and the shipped 0.5 is the layer's own
+          // judgement that a mesh of 718 routes should sit back -- Admin Mode's
+          // opacity multiplies that judgement rather than replacing it, exactly
+          // as it does for a marker through layerOpacity.
+          weight: scaledWeight(1.4, "cables"),
+          opacity: 0.5 * layerOpacity("cables"),
         });
         line.bindTooltip(esc(cable.name), { className: "map-tooltip", direction: "top", sticky: true });
         line.bindPopup(
@@ -2701,14 +3693,14 @@ export function createMapController(container, initial, callbacks) {
           '<p class="meta">Route drawn schematically, for legibility &mdash; roughly where the cable runs, ' +
           "not its surveyed position on the seabed.</p>" +
           '<div class="meta">Source: TeleGeography submarine cable map</div>',
-          { maxWidth: 300 }
+          popupOptions(280)
         );
         cablesGroup.addLayer(line);
       }
     }
     counts.cables = raw.cables.length;
     totals.cables = raw.cables.length;
-    reportCounts();
+    scheduleReports({ counts: true });
   }
 
   // IODA's country-keyed scores -> one marker item per affected country.
@@ -2752,6 +3744,15 @@ export function createMapController(container, initial, callbacks) {
       settleSuspended -= 1;
     }
     settlePlacement();
+    // Here as well as inside the two heat renderers: the sprite canvas is a
+    // dynamic import that can land after a render has already run, and a layer
+    // that is switched off is never re-rendered at all, so neither would
+    // otherwise pick up an order change.
+    applyWashStack();
+    // Synchronously, after the placement pass: every renderer above marked its
+    // numbers dirty, and a whole render pass should reach React as one commit
+    // rather than as whatever the microtask queue happens to interleave.
+    flushReports();
   }
 
   function renderAllLayers() {
@@ -2802,6 +3803,13 @@ export function createMapController(container, initial, callbacks) {
 
   let firstWindLoadDone = false;
   async function refreshWindArrows() {
+    // The layer is off by default (see DEFAULT_LAYER_VISIBILITY in App.jsx), and
+    // this used to run regardless: a debounced round trip on every moveend, plus
+    // a five-minute interval, plus a visibilitychange catch-up, all to hand data
+    // to a layer that is not on the map. Open-Meteo's free tier has a hard daily
+    // cap, so this was not merely wasted -- it was spending the day's budget on
+    // nothing. setLayerVisible catches up when the layer is switched on.
+    if (layerOnMap.windArrows === false) return;
     // Backgrounded tab: skip, visibilitychange below catches up on return --
     // except the very first call (map just mounted), so a map opened in a
     // background tab still gets its initial wind data instead of sitting
@@ -2891,6 +3899,9 @@ export function createMapController(container, initial, callbacks) {
       currentRegionKey = null;
       callbacks.onRegionAutoReset?.();
     }
+    // Before renderAll, so no renderer ever sees a scene resolved for the
+    // previous viewport.
+    applyScene();
     renderAll();
     callbacks.onBoundsChange?.(boundsToPlainObject(map.getBounds()));
     reportZoom();
@@ -2944,7 +3955,7 @@ export function createMapController(container, initial, callbacks) {
     if (layerOnMap.districts && !borderSession && districtIndex.length) {
       const district = findDistrictAt(districtIndex, e.latlng.lat, e.latlng.lng);
       if (district) {
-        L.popup({ maxWidth: 300, autoPan: false })
+        L.popup({ ...popupOptions(280), autoPan: false })
           .setLatLng(e.latlng)
           .setContent(districtPopupHtml(
             district, districtCounts.get(district.pcode) || null, districtMonth, districtMetricId
@@ -2993,6 +4004,12 @@ export function createMapController(container, initial, callbacks) {
       shipTrails.clear();
       renderMarkerLayer("ais");
     }
+
+    // Nothing was under the click and nothing above claimed it, so the reader
+    // is looking at the whole picture again: drop the emphasis, put the
+    // corroborating layers away, and close any group they had opened. Last,
+    // because every branch above returns before reaching here.
+    setFocus(null);
   });
 
   // Hover highlight, same fallback path as the click above. Throttled to one
@@ -3028,20 +4045,33 @@ export function createMapController(container, initial, callbacks) {
   // under the pointer.
   map.on("mouseout", () => setHoveredCountry(null));
 
-  // Sync every layer's actual add/remove state to the caller's initial
-  // defaults (see DEFAULT_LAYER_VISIBILITY in App.jsx) right after
-  // construction -- most layers default to .addTo(map) individually in
-  // layers.js, so a layer whose default is *false* needs removing once,
-  // here, before the map ever paints (no flash-then-hide). Must run after
-  // every render function/const it might call into (setLayerVisible("satellites",
-  // true) calls renderSatellites(), which reads `counts`/`zoomNotes` --
-  // running this any earlier hits their temporal-dead-zone before those
-  // `const`s are initialized).
-  if (initial.layerVisibility) {
-    for (const [key, visible] of Object.entries(initial.layerVisibility)) {
-      setLayerVisible(key, visible);
-    }
-  }
+  // "Separate these pins", inside a collapsed group's popup. Delegated from the
+  // popup pane rather than bound per popup, because popups are built lazily on
+  // open (see buildMarker's bindPopup) and rebuilt on every open, so anything
+  // bound to a specific popup's DOM would have to be re-bound each time.
+  map.on("popupopen", (e) => {
+    const button = e.popup?.getElement()?.querySelector(".cluster-expand");
+    if (!button) return;
+    button.addEventListener("click", () => {
+      map.closePopup();
+      toggleCluster(button.dataset.clusterId);
+    }, { once: true });
+  });
+
+  // Sync every layer's actual add/remove state right after construction --
+  // most layers default to .addTo(map) individually in layers.js, so a layer
+  // that should start hidden needs removing once, here, before the map ever
+  // paints (no flash-then-hide). Must run after every render function/const it
+  // might call into (setLayerVisible("satellites", true) calls
+  // renderSatellites(), which reads `counts`/`zoomNotes` -- running this any
+  // earlier hits their temporal-dead-zone before those `const`s are
+  // initialized).
+  //
+  // The caller's own defaults, when it passes any, are applied as *wishes*
+  // rather than as state: an explicit default outranks the resolver for as long
+  // as it stands, which is what keeps Admin Mode's checkboxes authoritative.
+  // Anything the caller does not name is left to the scene.
+  applyLayerWishes(initial.layerVisibility);
 
   refreshWindArrows();
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
@@ -3082,7 +4112,14 @@ export function createMapController(container, initial, callbacks) {
       }
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();
-      else if (key === "cities") renderCities();
+      else if (key === "cities") {
+        // The zones are derived from this feed, so they are rebuilt with it --
+        // and the conflict layer redrawn, because whether two reports group
+        // depends on an index that has just changed underneath it.
+        rebuildCityZoneIndex();
+        renderCities();
+        renderMarkerLayer("events");
+      }
       else if (key === "infra") renderInfra();
       else if (key === "pipelines") renderPipelines();
     else if (key === "cables") renderCables();
@@ -3133,7 +4170,10 @@ export function createMapController(container, initial, callbacks) {
     flyToRegion,
     flyTo,
 
-    setLayerVisible,
+    // The checkbox path. Writes a wish rather than touching the map directly,
+    // so the resolver knows it has been overruled for this key and stops
+    // deciding it. Pass null to hand the key back to the scene.
+    setLayerVisible: setLayerWish,
 
     setInfraFilter(text) {
       infraNameFilter = text || "";
@@ -3297,6 +4337,10 @@ export function createMapController(container, initial, callbacks) {
       setIconTheme(next);
       renderAll();
       renderCountries();
+      // After renderAll rather than instead of the calls inside it: a layer that
+      // is switched off is not re-rendered, so its canvas would keep the
+      // previous opacity until the next time it was drawn.
+      applyWashStack();
     },
 
     // Per-layer zoom gates from Admin Mode: { [layerKey]: minZoom|null }.
@@ -3305,6 +4349,99 @@ export function createMapController(container, initial, callbacks) {
     // the original number was.
     setLayerZoomOverrides(next) {
       layerZoomOverrides = next || {};
+      applyScene();
+      renderAll();
+    },
+
+    /**
+     * Admin Mode's saved layer states: { [key]: boolean }, sparse.
+     *
+     * A checkbox in the control drawer is an operator's standing decision about
+     * a layer, not a decision about this session, so it is stored with the rest
+     * of the configuration and replayed here. Sparse for the reason the setting
+     * itself documents: an absent key is "the resolver decides", and that is a
+     * state a boolean cannot express.
+     */
+    setLayerWishes(next) {
+      applyLayerWishes(next);
+    },
+
+    /**
+     * City zones: whether reports are grouped by city, whether the rings are
+     * drawn, and how wide a zone is (see map/cityZones.js).
+     *
+     * The index is rebuilt rather than re-filtered, because the radius is baked
+     * into the grid registration -- a zone is indexed into every cell it can
+     * reach, and changing how far it reaches changes which cells those are.
+     */
+    /**
+     * One record's full detail, by layer and id -- what its pin would say.
+     *
+     * Deliberately the decorator's own `detail` rather than a second renderer
+     * written for the card. That string is where a record's sourcing lives: the
+     * outlet and its reliability band, how the position was arrived at and
+     * whether anyone corroborated it, the caveats each feed carries. A card that
+     * rebuilt "the details and the source" by hand would be a second opinion
+     * about the same record, and the two would drift.
+     *
+     * Resolved against the live feed at click time, so a row rendered from a
+     * poll three minutes ago cannot show a record that has since been edited in
+     * Admin Mode or dropped by the backend -- it returns null instead, and the
+     * caller says so.
+     */
+    recordDetail(kind, id) {
+      const decorate = DECORATORS[kind];
+      const idField = ID_FIELD[kind];
+      if (!decorate || !idField) return null;
+      const item = (raw[kind] || []).find((record) => String(record[idField]) === String(id));
+      if (!item) return null;
+      const d = decorate(item, decorateOptionsFor(kind, item, id));
+      return { title: d.title || null, html: d.detail, lat: item.lat, lon: item.lon };
+    },
+
+    /**
+     * One feed's records, for the data editor to browse.
+     *
+     * The controller is where every payload lands (see applyData), so this is
+     * the only place that has all of them. Handed back by reference rather than
+     * copied: several of these run to tens of thousands of rows, the editor
+     * filters and caps before it renders anything, and duplicating a 48,000-row
+     * airfield list into React state on every poll to populate a panel that is
+     * usually closed would be a real cost for no gain.
+     *
+     * That does mean the editor's list is whatever was in hand when it rendered
+     * rather than a live view, which is the better behaviour anyway -- a list
+     * that reshuffled under the cursor mid-edit would be worse than one a beat
+     * out of date.
+     */
+    recordsFor(key) {
+      const value = raw[key];
+      return Array.isArray(value) ? value : [];
+    },
+
+    setCityZones(next) {
+      const previousScale = cityZoneSettings.radiusScale;
+      cityZoneSettings = { ...cityZoneSettings, ...(next || {}) };
+      if (cityZoneSettings.radiusScale !== previousScale || !cityZoneIndex) rebuildCityZoneIndex();
+      renderAll();
+    },
+
+    /**
+     * Admin Mode's "ignore the scene resolver" switch.
+     *
+     * The panel's job is diagnosis, and an empty layer has four possible
+     * causes: the feed is dead, the viewport filter caught everything, it is
+     * below its gate, or the resolver decided. Without a way to defeat the
+     * resolver an admin can only tell the first three apart. Under bypass every
+     * auto and corroborating layer is eligible, gates fall back to their
+     * shipped numbers rather than any promoted ones, and caps are lifted -- so
+     * an admin comparing against the shipped table reaches it exactly.
+     */
+    setSceneBypass(on) {
+      const next = Boolean(on);
+      if (next === sceneBypass) return;
+      sceneBypass = next;
+      applyScene();
       renderAll();
     },
 

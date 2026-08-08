@@ -1,0 +1,578 @@
+{
+  "uid": "osint-postgres",
+  "title": "Postgres — stats and load",
+  "description": "Throughput, session load, locks and bloat for the OSINT stack's Postgres, from postgres-exporter. Provisioned from monitoring/grafana/dashboards/postgres.json; edits in the UI are not persisted.",
+  "tags": ["osint", "postgres"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datname",
+        "label": "Database",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+        "query": { "query": "label_values(pg_stat_database_numbackends, datname)", "refId": "datname" },
+        "current": { "text": "osint", "value": "osint" },
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Postgres",
+      "description": "pg_up is the exporter's own verdict: 1 means its connection to Postgres succeeded on the last scrape. 0 with everything else blank means the exporter is running and the database is not.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "pg_up", "instant": true, "legendFormat": "up" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 }, "1": { "text": "UP", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "gauge",
+      "title": "Connection slots used",
+      "description": "Sessions across the whole instance against max_connections minus the superuser-reserved slots — the ceiling ordinary clients actually hit. Six processes hold asyncpg pools of up to 10 here, so a steady climb usually means a pool that is not being closed.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 3, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "100 * pg_connection_budget_used / pg_connection_budget_limit_ordinary", "instant": true, "legendFormat": "used" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active sessions",
+      "description": "Sessions in state 'active' — running a query this instant, as opposed to connected and idle.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 4, "w": 3, "x": 7, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "sum(pg_stat_activity_count{datname=~\"$datname\", state=\"active\"})", "instant": true, "legendFormat": "active" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 8 }, { "color": "red", "value": 20 }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Cache hit ratio",
+      "description": "Share of block reads served from shared buffers rather than the filesystem, over the dashboard window. Sustained below ~95% on a working set this small usually means a sequential scan is churning the buffer pool.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(pg_stat_database_blks_hit{datname=~\"$datname\"}[$__rate_interval])) / (sum(rate(pg_stat_database_blks_hit{datname=~\"$datname\"}[$__rate_interval])) + sum(rate(pg_stat_database_blks_read{datname=~\"$datname\"}[$__rate_interval])))",
+          "instant": true,
+          "legendFormat": "hit ratio"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 3,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "orange", "value": 0.9 }, { "color": "green", "value": 0.98 }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Database size",
+      "description": "On-disk size of the selected database, including indexes and bloat. This is the pgdata volume growing.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 14, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "pg_database_size_bytes{datname=~\"$datname\"}", "instant": true, "legendFormat": "{{datname}}" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "none",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Oldest transaction",
+      "description": "Age of the longest-open client transaction. Vacuum cannot reclaim any row still visible to it, so a transaction left open for hours is what turns routine churn into permanent bloat.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "max(pg_long_running_max_transaction_seconds)", "instant": true, "legendFormat": "oldest" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 300 }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Blocked sessions",
+      "description": "Sessions waiting on a lock someone else holds. Anything sustained above zero is a real stall, not a slow query.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "max(pg_blocked_sessions)", "instant": true, "legendFormat": "blocked" }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Transactions / sec",
+      "description": "Commits and rollbacks. A rollback rate that tracks the commit rate means something is failing every write, not occasionally.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "refId": "A", "expr": "rate(pg_stat_database_xact_commit{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "commit" },
+        { "refId": "B", "expr": "rate(pg_stat_database_xact_rollback{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "rollback" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 12, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "rollback" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Sessions by state",
+      "description": "Every connection, grouped by what it is doing. 'idle in transaction' is the one to watch: those hold locks and pin vacuum without doing work.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (state) (pg_stat_activity_count{datname=~\"$datname\"})", "legendFormat": "{{state}}" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 25, "stacking": { "mode": "normal", "group": "A" }, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "idle in transaction" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byName", "options": "active" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+        ]
+      }
+    },
+
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Tuples / sec",
+      "description": "Row-level work. inserted/updated/deleted is what the ingest and refine processes are writing; returned/fetched is what the API is reading back.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "refId": "A", "expr": "rate(pg_stat_database_tup_inserted{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "inserted" },
+        { "refId": "B", "expr": "rate(pg_stat_database_tup_updated{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "updated" },
+        { "refId": "C", "expr": "rate(pg_stat_database_tup_deleted{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "deleted" },
+        { "refId": "D", "expr": "rate(pg_stat_database_tup_fetched{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "fetched" },
+        { "refId": "E", "expr": "rate(pg_stat_database_tup_returned{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "returned" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rowsps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Buffer reads / sec — cache vs disk",
+      "description": "blks_hit came from shared buffers; blks_read went to the filesystem (which may still be the OS page cache, so this is an upper bound on real disk I/O).",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "refId": "A", "expr": "rate(pg_stat_database_blks_hit{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "from cache" },
+        { "refId": "B", "expr": "rate(pg_stat_database_blks_read{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "from disk" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 12, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "from disk" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] }
+        ]
+      }
+    },
+
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Locks held, by mode",
+      "description": "From pg_locks. RowExclusiveLock tracks ordinary writes; anything in the Access/Exclusive family appearing and staying is a schema change or a vacuum full holding the table.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (mode) (pg_locks_count{datname=~\"$datname\"}) > 0", "legendFormat": "{{mode}}" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 15, "stacking": { "mode": "normal", "group": "A" }, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Deadlocks and conflicts / sec",
+      "description": "Both should be flat zero. A deadlock means two writers took the same rows in opposite order — worth tracing to the source module that did it.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
+      "targets": [
+        { "refId": "A", "expr": "rate(pg_stat_database_deadlocks{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "deadlocks" },
+        { "refId": "B", "expr": "rate(pg_stat_database_conflicts{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "conflicts" }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 60, "showPoints": "never", "spanNulls": true },
+          "color": { "mode": "fixed", "fixedColor": "red" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "conflicts" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] }
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Temp file bytes / sec",
+      "description": "Sorts and hashes that did not fit in work_mem and spilled to disk. Bursts here line up with the heavy history and fusion queries.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
+      "targets": [
+        { "refId": "A", "expr": "rate(pg_stat_database_temp_bytes{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "spilled" },
+        { "refId": "B", "expr": "rate(pg_stat_database_temp_files{datname=~\"$datname\"}[$__rate_interval])", "legendFormat": "files/sec" }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "files/sec" }, "properties": [{ "id": "unit", "value": "ops" }, { "id": "custom.axisPlacement", "value": "right" }] }
+        ]
+      }
+    },
+
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Background writer buffers / sec",
+      "description": "Who is flushing dirty pages. buffers_backend rising means client backends are doing their own writes because the checkpointer and bgwriter are behind — that is felt directly as query latency.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "targets": [
+        { "refId": "A", "expr": "rate(pg_stat_bgwriter_buffers_checkpoint_total[$__rate_interval])", "legendFormat": "checkpoint" },
+        { "refId": "B", "expr": "rate(pg_stat_bgwriter_buffers_clean_total[$__rate_interval])", "legendFormat": "bgwriter" },
+        { "refId": "C", "expr": "rate(pg_stat_bgwriter_buffers_backend_total[$__rate_interval])", "legendFormat": "backend" },
+        { "refId": "D", "expr": "rate(pg_stat_bgwriter_buffers_alloc_total[$__rate_interval])", "legendFormat": "allocated" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "backend" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Longest transaction and query",
+      "description": "Two ages, not durations: how long the oldest open transaction and the longest currently-running query have been alive. A flat rising line is one thing stuck, a sawtooth is normal churn.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "targets": [
+        { "refId": "A", "expr": "max(pg_long_running_max_transaction_seconds)", "legendFormat": "oldest transaction" },
+        { "refId": "B", "expr": "max(pg_long_running_max_active_query_seconds)", "legendFormat": "longest query" },
+        { "refId": "C", "expr": "max by (state) (pg_stat_activity_max_state_seconds{datname=~\"$datname\", state=\"idle in transaction\"})", "legendFormat": "oldest idle-in-transaction" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "oldest idle-in-transaction" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] }
+        ]
+      }
+    },
+
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Scans / sec — sequential vs index",
+      "description": "Per table. A sequential scan rate that stays high on a large table is the signal that an index is missing or is not being chosen.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "targets": [
+        { "refId": "A", "expr": "topk(8, rate(pg_stat_user_tables_seq_scan{datname=~\"$datname\"}[$__rate_interval]))", "legendFormat": "seq · {{relname}}" },
+        { "refId": "B", "expr": "topk(8, rate(pg_stat_user_tables_idx_scan{datname=~\"$datname\"}[$__rate_interval]))", "legendFormat": "idx · {{relname}}" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "Dead tuples by table",
+      "description": "Rows superseded but not yet reclaimed. High counts on entity_latest and entity_history are expected between autovacuum runs; counts that only ever climb mean vacuum is being held off, usually by the oldest transaction above.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "targets": [
+        { "refId": "A", "expr": "topk(12, pg_stat_user_tables_n_dead_tup{datname=~\"$datname\"})", "instant": true, "format": "table" }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "server": true, "datname": true, "monitor": true },
+            "renameByName": { "schemaname": "Schema", "relname": "Table", "Value": "Dead tuples" }
+          }
+        },
+        { "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Dead tuples", "desc": true }] } }
+      ],
+      "options": { "showHeader": true, "cellHeight": "sm", "footer": { "show": false, "reducer": ["sum"], "countRows": false, "fields": "" } },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Dead tuples" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "gradient" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50000 }, { "color": "red", "value": 500000 }] } }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Database size over time",
+      "description": "The pgdata volume, per database. The slope is what retention in backend/storage.py is or is not holding down.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+      "targets": [
+        { "refId": "A", "expr": "pg_database_size_bytes", "legendFormat": "{{datname}}" }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Rows written / sec, by table",
+      "description": "Insert + update + delete per table — which collector is actually producing. A source that has quietly stopped shows up here before it shows up on the map.",
+      "datasource": { "type": "prometheus", "uid": "osint-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (relname) (rate(pg_stat_user_tables_n_tup_ins{datname=~\"$datname\"}[$__rate_interval]) + rate(pg_stat_user_tables_n_tup_upd{datname=~\"$datname\"}[$__rate_interval]) + rate(pg_stat_user_tables_n_tup_del{datname=~\"$datname\"}[$__rate_interval])))",
+          "legendFormat": "{{relname}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"], "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rowsps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

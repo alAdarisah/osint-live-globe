@@ -174,6 +174,11 @@ ENTITY_STALE_AFTER = {
     # since 2022 and is valid until 2027 -- and EASA revises rather than
     # reissues. The window has to outlive the poll, not the bulletin.
     "czib": 7 * 86400,
+    # ALPR camera locations, refetched daily from a mirror that itself refreshes
+    # daily. Same reasoning as cities and airports: reference data about things
+    # that do not move, so the window must clear the 24h refresh by a wide margin
+    # or a single missed fetch evicts the layer.
+    "deflock_alpr": 30 * 86400,
 }
 ENTITY_STALE_AFTER_DEFAULT = int(os.getenv("ENTITY_STALE_AFTER_DEFAULT", "86400"))
 
@@ -355,6 +360,55 @@ def _parse_points(raw: str) -> list[tuple[float, float, float]]:
 
 
 AIRPLANES_LIVE_POINTS = _parse_points(os.getenv("AIRPLANES_LIVE_POINTS", _DEFAULT_AIRPLANES_LIVE_POINTS))
+
+# --- Egress proxies (see backend/proxypool.py) -----------------------------
+#
+# Off by default, and it should stay off unless a source is refusing this
+# machine's IP specifically. A direct connection is the honest path: it is the
+# one the source can attribute and rate limit, and routing around a block is a
+# thing to do knowingly, for a source whose terms you have read, with an account
+# you are willing to risk. Nothing here helps with a service-wide outage -- when
+# a source is down for everyone, a different IP reaches the same down service.
+PROXY_ENABLED = os.getenv("PROXY_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Proxifly's list (github.com/proxifly/free-proxy-list), off their CDN. Per
+# protocol, so a run that only wants SOCKS5 downloads 45 KB rather than the
+# 600 KB combined file. Override to point at a private list of your own with the
+# same layout -- {base}/{protocol}/data.json.
+PROXY_LIST_BASE = os.getenv(
+    "PROXY_LIST_BASE",
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols",
+)
+# Preference order, best first. SOCKS ahead of HTTP because a SOCKS node tunnels
+# arbitrary TCP without interpreting it, where an HTTP proxy has to be willing to
+# CONNECT and many that advertise it are not.
+PROXY_PROTOCOLS = [
+    p.strip().lower() for p in os.getenv("PROXY_PROTOCOLS", "socks5,socks4,http").split(",") if p.strip()
+]
+# Proxifly rebuilds every 5 minutes. Longer than that on purpose: the list is
+# only fetched while something is already failing, and re-reading it faster than
+# nodes die does not produce better nodes.
+PROXY_LIST_TTL = int(os.getenv("PROXY_LIST_TTL", "900"))
+PROXY_POOL_MAX = int(os.getenv("PROXY_POOL_MAX", "400"))
+# How long to wait for a proxy to establish the tunnel and complete the
+# handshake. Short: most free proxies are dead, and the cost of finding that out
+# is paid once per attempt, in series, inside a reconnect cycle.
+PROXY_CONNECT_TIMEOUT = float(os.getenv("PROXY_CONNECT_TIMEOUT", "12"))
+# Base cooldown after a proxy fails, multiplied by its consecutive-failure
+# streak and capped in proxypool.py.
+PROXY_FAILURE_COOLDOWN = int(os.getenv("PROXY_FAILURE_COOLDOWN", "1800"))
+# How long a proxy that carried a connection stays preferred.
+PROXY_SUCCESS_MEMORY = int(os.getenv("PROXY_SUCCESS_MEMORY", str(6 * 3600)))
+
+# How many consecutive failed *direct* connections before the AIS stream will
+# consider a proxy at all, and how many proxies it may try in one reconnect
+# cycle. The second number is not a multiplier on what aisstream sees: a cycle
+# stops at the first proxy that actually reaches them (see ais.stream_forever),
+# so it bounds how many *dead* nodes we walk past, which costs aisstream
+# nothing. Two connections per cycle is the ceiling either way, and the backoff
+# (ais.BACKOFF_CAP) still governs the cycle itself.
+AIS_PROXY_AFTER_FAILURES = int(os.getenv("AIS_PROXY_AFTER_FAILURES", "3"))
+AIS_PROXY_ATTEMPTS = int(os.getenv("AIS_PROXY_ATTEMPTS", "3"))
 
 FRONTEND_DIR = BASE_DIR / "frontend"
 # `npm run build` (see frontend/package.json) compiles the React app into

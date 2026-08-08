@@ -1,9 +1,12 @@
 # The whole stack: Postgres for durable storage, an ingest process that owns
 # every credentialed or metered outbound call, the FastAPI backend as a pure
 # API, and the React app behind nginx (which proxies /api to the backend, so
-# the browser only ever talks to one origin).
+# the browser only ever talks to one origin). Alongside it, a read-only
+# monitoring trio -- postgres-exporter, Prometheus and Grafana -- that watches
+# the database and touches nothing.
 #
 #   docker compose up --build      -> app at http://localhost:8080
+#                                     Grafana at http://localhost:3000
 #
 # This is the only supported way to run the app. The single-container path
 # (root Dockerfile + render.yaml) and the plain run.bat process were both
@@ -177,6 +180,95 @@ services:
     command: ["python", "-m", "backend.cacheworker"]
     restart: unless-stopped
 
+  # --- Monitoring -----------------------------------------------------------
+  #
+  # Three containers that observe the stack and change nothing in it. They read
+  # Postgres' own statistics views and scrape over the compose network; no
+  # application code, no schema and no collector behaviour depends on them, so
+  # `docker compose stop prometheus postgres-exporter grafana` costs you the
+  # graphs and nothing else.
+  #
+  # Deliberately separate from /api/health and the alerts table, which answer a
+  # different question: those say whether a *source* is producing, this says
+  # whether the *database* is coping. A source can be perfectly healthy while
+  # Postgres is drowning, and vice versa.
+
+  # Turns pg_stat_database, pg_stat_user_tables, pg_locks, pg_stat_bgwriter and
+  # pg_settings into Prometheus metrics, plus the session/lock/transaction-age
+  # queries in monitoring/postgres-exporter/queries.yaml.
+  #
+  # It connects as the same superuser the app uses, which is what gives it
+  # visibility into every session rather than only its own. That is fine for a
+  # local stack; anywhere else, make it a dedicated role with pg_monitor and
+  # nothing more.
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      # sslmode=disable because this connection never leaves the compose
+      # network. Postgres here has no server certificate, so any other value
+      # fails the handshake outright.
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres:5432/${POSTGRES_DB:-osint}?sslmode=disable
+      PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres_exporter/queries.yaml
+    volumes:
+      - ./monitoring/postgres-exporter/queries.yaml:/etc/postgres_exporter/queries.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Not published to the host: only Prometheus needs it, and it is reachable
+    # by service name inside the network. Add `ports: ["9187:9187"]` if you want
+    # to curl the raw metrics while debugging a missing panel.
+    expose:
+      - "9187"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 15 days at a 15s interval and this metric count is a few hundred MB --
+      # enough to see a week-long size trend without the volume becoming the
+      # largest thing on disk after pgdata.
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      # For ad-hoc PromQL and checking Status -> Targets when a panel is empty.
+      - "9090:9090"
+    depends_on:
+      - postgres-exporter
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Default admin/admin, and Grafana will not force a change because the
+      # password came from provisioning. Set GRAFANA_ADMIN_PASSWORD in .env
+      # before exposing port 3000 to anything but this machine.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # No outbound calls: no update checks, no analytics, and the plugin
+      # catalogue off, so the container works identically offline.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      # Datasource and dashboard provider definitions, read once at startup.
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      # The dashboard JSON itself, re-read every 30s (see the provider config),
+      # so editing the file on the host updates the dashboard without a restart.
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend
@@ -220,3 +312,11 @@ volumes:
   # source writes here and reads its own data back at startup -- so `down -v`
   # is the one command that throws the collected history away.
   pgdata:
+
+  # Metric history and Grafana's own state (users, preferences, starred
+  # dashboards). Both are safe to lose: the dashboard is provisioned from a file
+  # in the repo and re-appears on the next start, and losing the time series
+  # costs graph history, not data. Kept as named volumes anyway so a rebuild
+  # does not reset the graphs every time.
+  prometheus-data:
+  grafana-data:

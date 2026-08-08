@@ -1,0 +1,98 @@
+# Custom queries for postgres-exporter, on top of its built-in collectors.
+#
+# The built-ins cover throughput and size well (pg_stat_database_*,
+# pg_database_size_bytes, pg_locks_count, pg_stat_user_tables_*) but say almost
+# nothing about *load* as a human means it: how many sessions are actually
+# doing something right now, how long the oldest transaction has been open, and
+# whether anything is blocked behind a lock. Those three answer "is the
+# database in trouble" far faster than a tuple counter does.
+#
+# Each top-level key is the metric namespace, so `pg_stat_activity` + the
+# `count` column becomes `pg_stat_activity_count`.
+#
+# Every query here reads a statistics view and nothing else -- no table scans,
+# no writes -- so running it every 15s costs effectively nothing.
+
+# Sessions grouped by state, plus how long the oldest session has sat in that
+# state. `idle in transaction` climbing is the classic sign of a client holding
+# a transaction open across an await, which blocks vacuum and eventually
+# everything else.
+pg_stat_activity:
+  query: |
+    SELECT
+      datname,
+      COALESCE(state, 'unknown') AS state,
+      COUNT(*) AS count,
+      COALESCE(MAX(EXTRACT(EPOCH FROM (clock_timestamp() - state_change))), 0) AS max_state_seconds
+    FROM pg_stat_activity
+    WHERE datname IS NOT NULL
+    GROUP BY datname, COALESCE(state, 'unknown')
+  metrics:
+    - datname:
+        usage: "LABEL"
+        description: "Database the sessions are connected to"
+    - state:
+        usage: "LABEL"
+        description: "Session state as reported by pg_stat_activity"
+    - count:
+        usage: "GAUGE"
+        description: "Number of sessions currently in this state"
+    - max_state_seconds:
+        usage: "GAUGE"
+        description: "Seconds the longest-standing session has been in this state"
+
+# The oldest open transaction, whatever it is doing. A long transaction is what
+# turns a routine dead-tuple count into unreclaimable bloat, because vacuum
+# cannot remove rows still visible to it.
+pg_long_running:
+  query: |
+    SELECT
+      COUNT(*) FILTER (WHERE xact_start IS NOT NULL) AS transactions,
+      COALESCE(MAX(EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))), 0) AS max_transaction_seconds,
+      COALESCE(MAX(EXTRACT(EPOCH FROM (clock_timestamp() - query_start))) FILTER (WHERE state = 'active'), 0) AS max_active_query_seconds
+    FROM pg_stat_activity
+    WHERE backend_type = 'client backend'
+      AND pid <> pg_backend_pid()
+  metrics:
+    - transactions:
+        usage: "GAUGE"
+        description: "Client transactions currently open"
+    - max_transaction_seconds:
+        usage: "GAUGE"
+        description: "Age of the oldest open client transaction, in seconds"
+    - max_active_query_seconds:
+        usage: "GAUGE"
+        description: "Runtime of the longest currently-executing query, in seconds"
+
+# Sessions waiting on a lock. Distinct from pg_locks_count, which counts locks
+# held; this counts sessions that are stuck because someone else holds one.
+pg_blocked:
+  query: |
+    SELECT COUNT(*) AS sessions
+    FROM pg_stat_activity
+    WHERE wait_event_type = 'Lock'
+  metrics:
+    - sessions:
+        usage: "GAUGE"
+        description: "Sessions currently waiting on a lock"
+
+# Connection headroom in one number, so a panel does not have to join
+# pg_stat_database_numbackends against pg_settings_max_connections. Superuser
+# reserved slots are subtracted because ordinary clients cannot use them.
+pg_connection_budget:
+  query: |
+    SELECT
+      (SELECT COUNT(*) FROM pg_stat_activity) AS used,
+      current_setting('max_connections')::int AS limit_total,
+      current_setting('max_connections')::int
+        - current_setting('superuser_reserved_connections')::int AS limit_ordinary
+  metrics:
+    - used:
+        usage: "GAUGE"
+        description: "Connection slots in use across the whole instance"
+    - limit_total:
+        usage: "GAUGE"
+        description: "max_connections"
+    - limit_ordinary:
+        usage: "GAUGE"
+        description: "max_connections minus superuser_reserved_connections"
