@@ -12,6 +12,8 @@
 // bookkeeping cost for the (often hundreds of) vehicles that aren't selected.
 
 import { L } from "./leafletGlobal";
+import { unwrapPath } from "../utils/geo";
+import { layerOpacity, scaledWeight } from "./iconTheme";
 
 // restrictTo semantics: omitted (undefined) tracks every reporting entity;
 // a string tracks only that one id (the selected vehicle); an explicit null
@@ -94,18 +96,32 @@ export function seedTrailFromTrack(trailMap, id, points, maxPoints) {
 // higher-opacity "active selection" look.
 export function renderTrailLayer(trailLayer, trailMap, color, visibleIds, style) {
   const maxOpacity = style?.maxOpacity ?? 0.5;
+  // Where the camera is, so a track is drawn on the copy of the world being
+  // looked at and a leg crossing the antimeridian carries on in the direction it
+  // was already going. Without this a tanker steaming past 180 drew a 20,000 km
+  // segment straight back across the map -- the single most visible symptom of
+  // the seam, because a trail is a line and a line cannot be mistaken for a
+  // coincidence. See unwrapPath in utils/geo.js.
+  const refLon = style?.refLon;
+  const layerKey = style?.layerKey;
   const dashArray = style?.dashArray;
   const colorFor = typeof color === "function" ? color : () => color;
   trailLayer.clearLayers();
   for (const [id, points] of trailMap) {
     if (!visibleIds.has(id) || points.length < 2) continue;
     const stroke = colorFor(id);
-    for (let i = 0; i < points.length - 1; i++) {
-      const t = (i + 1) / (points.length - 1); // 0 (oldest) .. 1 (newest)
-      L.polyline([points[i], points[i + 1]], {
+    const path = Number.isFinite(refLon) ? unwrapPath(points, refLon) : points;
+    for (let i = 0; i < path.length - 1; i++) {
+      const t = (i + 1) / (path.length - 1); // 0 (oldest) .. 1 (newest)
+      L.polyline([path[i], path[i + 1]], {
         color: stroke,
-        weight: 2,
-        opacity: (0.08 + t * 0.42) * (maxOpacity / 0.5),
+        // `layerKey` is the trail's parent -- a trail is drawn wherever its
+        // parent is drawn (see TRAIL_PARENT in scene.js), so it answers to the
+        // same two dials. Without this the tanker layer could be turned right
+        // down and its trails would keep drawing at full strength, which reads
+        // as the control having missed something.
+        weight: scaledWeight(2, layerKey),
+        opacity: (0.08 + t * 0.42) * (maxOpacity / 0.5) * layerOpacity(layerKey),
         dashArray,
         interactive: false,
       }).addTo(trailLayer);

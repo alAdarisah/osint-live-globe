@@ -54,3 +54,35 @@ export function urlForRegion(base, region) {
   const sep = base.includes("?") ? "&" : "?";
   return `${base}${sep}region=${encodeURIComponent(region)}`;
 }
+
+/**
+ * Append a viewport bbox, when the source takes one.
+ *
+ * Deliberately after the region parameter rather than instead of it: a bbox
+ * narrows what the region already allows and can never widen it (see
+ * regions.intersect on the backend), so a reader inside a selected zone gets
+ * that zone clipped to what they can see and never a point from outside it.
+ *
+ * The value has to be snapped before it arrives here -- an unsnapped viewport
+ * would mint a new URL, and therefore a new ETag and a full download, on every
+ * pixel of pan. See bboxCellKey in useOsintData.js.
+ */
+export function urlWithBbox(base, bbox) {
+  if (!bbox) return base;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}bbox=${encodeURIComponent(bbox)}`;
+}
+
+/**
+ * Append an already-formed `name=value` a source asks for at this zoom.
+ *
+ * The same shape as the two above and for the same reason: a distinct URL is a
+ * distinct ETag and a distinct cache entry on both sides, so what goes in one
+ * has to be a decision, not a detail. See sourceQueryFor in map/scene.js, which
+ * is the only thing that produces these.
+ */
+export function urlWithQuery(base, query) {
+  if (!query) return base;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}${query}`;
+}

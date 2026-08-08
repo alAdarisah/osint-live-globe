@@ -144,6 +144,73 @@ export function collapseByProximity(items, project, rank, radiusPx = COLLAPSE_RA
  * @param {(item:object) => (string|null|undefined)} keyFn  null means "do not group"
  * @param {(item:object) => number} rank  higher wins the head slot
  */
+/**
+ * A second, spatial pass over heads a first pass already produced.
+ *
+ * Exact keys answer "is this the same position". They cannot answer "are these
+ * two positions the same pixel", and at the shallow end of the map that is the
+ * question: at zoom 4 a whole city is a pixel or two, so the UN spokesperson's
+ * office and the UN news service -- different institutions, different anchors,
+ * one building -- have nothing separating them. Above DECLUTTER_MIN_ZOOM the
+ * declutter spiral does that job; below it there is no spiral, and grouping is
+ * the only honest instrument left. One pin standing for seven beats seven pins
+ * standing on each other, and nothing is lost: every member is in the popup.
+ *
+ * The flattening is the whole reason this is not just another collapseByProximity
+ * call. Its input items already carry `collapsed`, so a merged head would
+ * otherwise stand for the two heads it absorbed and report a count of 2 for
+ * seven records. Members of members are pulled up so the count is always a count
+ * of real records.
+ *
+ * @param {Array<object>} heads   output of collapseByKey or collapseByProximity
+ * @param {(head:object) => {x:number,y:number}} project
+ * @param {(item:object) => number} rank
+ * @param {number} radiusPx
+ */
+export function collapseHeadsByProximity(heads, project, rank, radiusPx) {
+  const grouped = collapseByProximity(heads, project, rank, radiusPx);
+  return grouped.map((head) => {
+    if (!head.collapsed) return head;
+    const members = head.collapsed.flatMap((inner) => inner.collapsed || [inner]);
+    return { ...head, collapsed: members, collapsedCount: members.length };
+  });
+}
+
+/**
+ * The diplomacy layer's key: what exact position this record is standing on.
+ *
+ * A record in this layer rarely has a position of its own. It has one of three
+ * synthetic ones, and every one of them is shared by construction:
+ *
+ *   capital      a country-level report snapped to the capital (capitals.py)
+ *   institution  a press release carrying its issuer's address
+ *   locality     a GDELT mention geocoded to a city's centroid
+ *
+ * `anchor.id` names the first two. It does not name the third, and a null key
+ * means "do not group" -- so every event GDELT placed on a city centroid kept
+ * its own marker and they stacked on a single pixel at every zoom. Six records
+ * sat on Moscow's centroid and three on Riyadh's when this was written, which is
+ * the "diplomacy pins overlap each other" report.
+ *
+ * The coordinate is the right fallback for the same reason the anchor is right
+ * for the other two: it is exact. Records that share a centroid share the
+ * identical double from the identical feed, so it cannot jitter; records at
+ * genuinely different places have genuinely different coordinates, so it cannot
+ * over-merge. A locality-precise event that nothing else shares still keys
+ * uniquely and still comes back as its own marker, which is what the note above
+ * collapseByKey was protecting.
+ *
+ * Namespaced so a feed that one day emits an anchor id shaped like a coordinate
+ * pair cannot be grouped with the records standing on that point.
+ */
+export function officialsKey(item) {
+  const anchorId = item?.anchor?.id;
+  if (anchorId != null) return anchorId;
+  const { lat, lon } = item || {};
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  return `at:${lat},${lon}`;
+}
+
 export function collapseByKey(items, keyFn, rank) {
   if (!items || items.length < 2) return items || [];
 

@@ -170,6 +170,23 @@ html, body {
   0%, 100% { filter: drop-shadow(0 0 3px #ff3d3d) drop-shadow(0 0 1px #ff3d3d); }
   50% { filter: drop-shadow(0 0 14px #ff3d3d) drop-shadow(0 0 6px #fff); }
 }
+/* A live airspace warning, flashing. Same drop-shadow-glow technique as
+   .infra-hot above and deliberately slower -- 2.4s against 1.1s: a hot zone is
+   an incident happening under the camera right now, a CZIB is a standing
+   instruction that has been true for months. Both are "live"; only one is
+   urgent, and the tempo is what says which.
+
+   Only .czib-live, never .czib-active: a bulletin nobody has withdrawn but
+   whose stated review date passed is drawn in the warning colour and left
+   still. Motion on this map means "now" (see decorateCzib). */
+.czib-live .entity-icon-wrap {
+  animation: czib-warn 2.4s ease-in-out infinite;
+}
+@keyframes czib-warn {
+  0%, 100% { filter: drop-shadow(0 0 2px #ff8c00); }
+  50% { filter: drop-shadow(0 0 11px #ff8c00) drop-shadow(0 0 4px #ffcc80); }
+}
+
 .infra-hot-badge {
   display: inline-block;
   font-size: 9px;
@@ -564,6 +581,45 @@ html, body {
   transition: background 0.15s ease;
 }
 .layer-row:hover { background: rgba(var(--accent-rgb), 0.08); }
+
+/* The three states a layer's checkbox can be in -- see LayerCheck.jsx.
+
+   Indeterminate is the default here rather than the exception, because "the
+   scene is deciding this" is where every layer starts and where most of them
+   stay. The accent only appears once someone has overridden it, so a panel
+   nobody has touched reads as one uniform set of dashes and a pinned layer is
+   the thing that stands out. */
+.layer-check { accent-color: var(--text-dim); }
+.layer-check.pinned { accent-color: var(--accent); }
+/* Pinned on but drawing nothing: held back by its own zoom gate. Amber rather
+   than accent, because it is the one state where what was asked for and what is
+   on screen disagree, and that is worth noticing rather than blending in. */
+.layer-check.withheld {
+  accent-color: #ff8c3a;
+  outline: 1px solid rgba(255, 140, 58, 0.55);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* Hands one layer back to the scene. Sits between the label text and the count,
+   pushed there by the count's own `margin-left: auto`. */
+.layer-unpin {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 3px;
+  cursor: pointer;
+  border-radius: 3px;
+  opacity: 0.55;
+}
+.layer-unpin:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.14);
+}
 
 .layer-row .count {
   margin-left: auto;
@@ -979,6 +1035,32 @@ html, body {
 .leaflet-popup-content { margin: 10px 12px; }
 .leaflet-popup-content a { color: var(--accent); }
 .leaflet-popup-content h3 { margin: 0 4px 6px 0; font-size: 13px; color: var(--text-heading); }
+
+/* A popup tall enough to scroll keeps its title on screen.
+
+   Leaflet adds .leaflet-popup-scrolled to the content element once the popup's
+   maxHeight is exceeded, which is the exact condition this rule is for -- the
+   title only needs pinning when there is something to scroll past it, and a
+   sticky element in a container that does not scroll costs nothing.
+
+   The negative margins and matching padding put the title's background across
+   the full width of the scroll box, so the rows travelling underneath it are
+   covered rather than showing through at the edges. `top: -1px` closes the
+   hairline some browsers leave between a sticky element and the top of its
+   scroll container at fractional zoom levels. */
+.leaflet-popup-scrolled {
+  overflow-y: auto;
+  overscroll-behavior: contain; /* stop a popup's scroll from zooming the map underneath */
+}
+.leaflet-popup-scrolled h3:first-child {
+  position: sticky;
+  top: -1px;
+  z-index: 1;
+  margin: -1px -12px 6px;
+  padding: 7px 12px 6px;
+  background: var(--popup-bg);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.22);
+}
 .leaflet-popup-content .meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
 .leaflet-popup-close-button { color: var(--text-secondary) !important; }
 
@@ -1149,20 +1231,30 @@ html, body {
    onCountryPointChange in createMapController.js). Default opens upward
    (anchored by `bottom`, tail on the bottom edge); `.flip` opens downward
    near the top of the screen instead (anchored by `top`, tail on top). */
+/* Header pinned, body scrolls -- the same flex-column shape #adminPanel and
+   #newsBroadcast already use. This card used to scroll as a whole, which took
+   the country's name and its close button off the top of a 44vh box the moment
+   anyone read past the second fold: the one line telling you *which* country
+   you were reading was the first thing to go. */
 #countryInfoCard {
   position: fixed;
   width: 320px;
   max-width: calc(100vw - 28px);
   max-height: 44vh;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* the body owns the scrolling; this clips to the radius */
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
-  padding: 14px 16px;
   animation: popup-in 0.16s ease;
+}
+.country-info-body {
+  overflow-y: auto;
+  padding: 8px 16px 14px;
 }
 .country-info-tail {
   position: absolute;
@@ -2311,6 +2403,7 @@ html, body {
 :root.reduce-motion .notable-pulse,
 :root.reduce-motion .jamming-ping-ring,
 :root.reduce-motion .infra-hot .entity-icon-wrap,
+:root.reduce-motion .czib-live .entity-icon-wrap,
 :root.reduce-motion .country-shape.country-hot {
   animation: none !important;
 }
@@ -2560,6 +2653,75 @@ html, body {
   opacity: 0.65;
 }
 .admin-icon-size-value.modified { color: var(--accent); opacity: 1; }
+/* The zoom picker. Fixed width so forty rows keep one column rather than each
+   one being as wide as its own longest option ("any zoom · layer" against
+   "z7"), and narrow enough that the pin's name still gets the room it needs. */
+.admin-icon-zoom {
+  flex: 0 0 92px;
+  width: 92px;
+  padding: 1px 3px;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.92em;
+  cursor: pointer;
+}
+.admin-icon-zoom.modified { color: var(--accent); border-color: var(--accent); }
+.admin-icon-zoom option { background: var(--panel-bg); color: var(--text-primary); }
+
+/* One layer per row in the stack lists: rank, name, the fade its position
+   produces, and the two moves. Same "only the name may shrink" discipline as
+   .admin-icon-field above. */
+.admin-stack-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+.admin-stack-rank {
+  flex: none;
+  width: 1.6em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.5;
+}
+.admin-stack-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-stack-fade {
+  flex: none;
+  width: 3.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+}
+.admin-stack-row button {
+  flex: none;
+  width: 22px;
+  padding: 0;
+  line-height: 18px;
+}
+.admin-stack-row button:disabled { opacity: 0.3; cursor: default; }
+
+.admin-uneditable {
+  margin-top: 10px;
+  border-top: 1px solid var(--panel-border);
+  padding-top: 6px;
+}
+.admin-uneditable > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: calc(11px * var(--ui-text-scale));
+  padding: 2px 0;
+}
+.admin-uneditable > summary:hover { color: var(--text-secondary); }
 
 .admin-check-field {
   display: flex;
@@ -2570,11 +2732,56 @@ html, body {
 }
 .admin-check-field input { margin-top: 2px; accent-color: var(--accent); }
 
+/* One layer per row, expandable. Twenty-seven layers each carrying three
+   sliders and up to seven pin types is far more than fits in a 340px panel, so
+   the row is shut until asked for and says what it is with a name and its
+   colours. Native <details>, for the reasons Collapsible.jsx gives: keyboard
+   operation, focus handling and the right ARIA semantics, none of them
+   reimplemented. */
 .admin-layer-block {
-  padding: 4px 0 6px;
+  padding: 0;
   border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
 }
 .admin-layer-block:last-child { border-bottom: none; }
+.admin-layer-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  cursor: pointer;
+  list-style: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.admin-layer-summary::-webkit-details-marker { display: none; }
+/* The caret is drawn rather than left to the default marker so it can sit on
+   the left at a fixed width and not shift the name as rows open and shut. */
+.admin-layer-summary::before {
+  content: "▸";
+  flex: none;
+  width: 10px;
+  color: var(--text-dim);
+  font-size: 9px;
+  transition: transform 0.12s ease;
+}
+.admin-layer-block[open] > .admin-layer-summary::before { transform: rotate(90deg); }
+.admin-layer-summary:hover { color: var(--text-bright); }
+.admin-layer-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(11.5px * var(--ui-text-scale));
+}
+.admin-layer-swatches { flex: none; display: flex; gap: 3px; }
+.admin-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+}
+.admin-layer-body { padding: 2px 2px 8px 12px; }
+.admin-shared-colours { padding: 6px 2px 8px; }
 
 .admin-row {
   display: flex;
@@ -2765,9 +2972,11 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: -4px -4px 6px;
-  padding: 2px 2px 6px;
+  padding: 10px 12px 8px 16px;
   border-bottom: 1px solid var(--panel-border);
+  /* Never allowed to shrink or scroll away: it carries the country's name and
+     the only way to close the card. */
+  flex: none;
 }
 .country-info-name {
   flex: 1 1 auto;
@@ -2782,6 +2991,94 @@ html, body {
 /* Once dragged the card is its own window: no tail, and it no longer tracks
    the country's screen position (see CountryInfoCard.jsx). */
 #countryInfoCard.detached { animation: none; }
+
+/* A row in the country card that opens the record behind it. Only the rows that
+   carry an id get this (see openableRow in map/popups.js) -- the rest stay inert
+   rather than looking clickable and doing nothing. */
+.event-row-open {
+  margin: 0 -6px 5px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.event-row-open:hover,
+.event-row-open:focus-visible {
+  background: rgba(var(--accent-rgb), 0.12);
+  outline: none;
+}
+.event-row-open:focus-visible { box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.5); }
+
+/* The record opened from one of those rows. Sits above the country card it came
+   from -- it is a reply to a click in that card, and one that opened behind it
+   would look like nothing happened. Same flex-column shape as every other panel
+   here, so its title bar stays put while the body scrolls. */
+#eventDetailCard {
+  position: fixed;
+  top: 96px;
+  right: 14px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 64vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 22px var(--shadow-color);
+  z-index: 1100;
+  animation: popup-in 0.16s ease;
+}
+.event-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 8px 14px;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+  cursor: move;
+  -webkit-tap-highlight-color: transparent;
+}
+.event-detail-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: calc(12.5px * var(--ui-text-scale));
+  font-weight: 700;
+  color: var(--text-heading);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.event-detail-locate {
+  flex: none;
+  font-size: calc(10.5px * var(--ui-text-scale));
+  padding: 2px 7px;
+}
+.event-detail-close {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.event-detail-close:hover { color: var(--text-bright); }
+.event-detail-body {
+  overflow-y: auto;
+  padding: 10px 14px 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+/* The body is the map's own popup HTML, so it needs the rules that are scoped
+   to .leaflet-popup-content restated for this container -- the same thing
+   #newsBroadcast already does for the news list. */
+.event-detail-body h3 { margin: 0 0 6px; font-size: 13px; color: var(--text-heading); }
+.event-detail-body .meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
+.event-detail-body a { color: var(--accent); }
 
 .country-section { border-bottom: 1px solid rgba(var(--accent-rgb), 0.12); }
 .country-section:last-child { border-bottom: none; }
@@ -2875,4 +3172,88 @@ html, body {
   }
   #countrySelection { bottom: 92px; }
   .country-selection-hint { display: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   Emphasis: clicking a pin recedes every other layer.
+
+   The whole mechanism is this attribute plus the layer-<key> class that
+   createMapController stamps onto each divIcon (see tagIconLayer). It is worth
+   doing in CSS rather than by re-decorating: the class lives on the icon's
+   className, which is *outside* the html string updateMarker diffs to decide
+   whether to rebuild a marker's DOM -- so emphasising a layer repaints nothing
+   at all, at any marker count.
+
+   The Pixi sprites for ships and aircraft cannot be reached from here and are
+   dimmed through setBucketAlpha instead, to the same 0.28.
+   --------------------------------------------------------------------------- */
+#map[data-emphasis] .entity-marker,
+#map[data-emphasis] .leaflet-marker-icon {
+  opacity: 0.28;
+  transition: opacity 0.18s ease;
+}
+#map[data-emphasis="events"] .entity-marker.layer-events,
+#map[data-emphasis="gdelt"] .entity-marker.layer-gdelt,
+#map[data-emphasis="officials"] .entity-marker.layer-officials,
+#map[data-emphasis="conflictHistory"] .entity-marker.layer-conflictHistory,
+#map[data-emphasis="hazards"] .entity-marker.layer-hazards,
+#map[data-emphasis="floods"] .entity-marker.layer-floods,
+#map[data-emphasis="airports"] .entity-marker.layer-airports,
+#map[data-emphasis="darkVessels"] .entity-marker.layer-darkVessels,
+#map[data-emphasis="cableLandings"] .entity-marker.layer-cableLandings,
+#map[data-emphasis="launches"] .entity-marker.layer-launches,
+#map[data-emphasis="osmInfra"] .entity-marker.layer-osmInfra,
+#map[data-emphasis="outagePoints"] .entity-marker.layer-outagePoints,
+#map[data-emphasis="gfwGaps"] .entity-marker.layer-gfwGaps,
+#map[data-emphasis="gfwDetections"] .entity-marker.layer-gfwDetections,
+#map[data-emphasis="czib"] .entity-marker.layer-czib,
+#map[data-emphasis="ports"] .entity-marker.layer-ports,
+#map[data-emphasis="dams"] .entity-marker.layer-dams {
+  opacity: 1;
+}
+
+/* The reader's own pin keeps full weight even while its layer is not the
+   emphasised one -- an open popup pointing at a ghost reads as a bug. */
+#map[data-emphasis] .leaflet-marker-icon.leaflet-popup-anchor,
+#map[data-emphasis] .entity-marker:hover {
+  opacity: 1;
+}
+
+/* Admin Mode's resolver bypass, at the top of the control panel. Boxed off
+   rather than sitting in the layer list, because it changes what every row
+   below it means. */
+.scene-bypass-row {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.07);
+}
+.scene-bypass-row .layer-note { margin: 4px 0 0; }
+
+/* "Separate these pins", inside a collapsed group's popup. Replaces the old
+   "zoom in to separate them" note, which asked the reader to change what they
+   were looking at in order to read what was already under the pointer. */
+.cluster-expand {
+  margin-top: 4px;
+  padding: 3px 9px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
+  border: 1px solid rgba(var(--accent-rgb), 0.4);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cluster-expand:hover { background: rgba(var(--accent-rgb), 0.22); }
+
+/* Two of the six feeds behind the country card's live picture are clipped to a
+   snapped viewport box now (see `scoped` in map/scene.js), so the counts
+   describe what has been loaded rather than what exists -- most visibly for a
+   country that is selected but off-screen. */
+.cstat-note {
+  margin-top: 6px;
+  font-size: 10.5px;
+  line-height: 1.35;
+  opacity: 0.6;
 }

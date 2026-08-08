@@ -1,0 +1,21 @@
+# Loads every dashboard JSON in monitoring/grafana/dashboards as a file-backed
+# dashboard. They are version-controlled, so the files are the source of truth:
+# `allowUiUpdates: false` makes Grafana say so in the UI rather than letting an
+# edit live in the database until the next volume wipe silently reverts it.
+#
+# To change a panel, edit it in Grafana, use "Export -> Save JSON to file", and
+# replace the file here.
+
+apiVersion: 1
+
+providers:
+  - name: osint
+    orgId: 1
+    folder: OSINT
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

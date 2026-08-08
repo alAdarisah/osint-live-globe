@@ -32,10 +32,11 @@ get a working map.
 10. [HTTP API](#http-api)
 11. [Configuration reference](#configuration-reference)
 12. [Persistence](#persistence)
-13. [Tests](#tests)
-14. [Troubleshooting](#troubleshooting)
-15. [Limits, and what this is not](#limits-and-what-this-is-not)
-16. [Attribution](#attribution)
+13. [Monitoring](#monitoring)
+14. [Tests](#tests)
+15. [Troubleshooting](#troubleshooting)
+16. [Limits, and what this is not](#limits-and-what-this-is-not)
+17. [Attribution](#attribution)
 
 ---
 
@@ -164,7 +165,7 @@ three separate mechanisms for it, and none of them discards anything:
 docker compose up -d --build
 ```
 
-Seven containers:
+Ten containers — seven that run the app, three that watch it:
 
 | Service | Role |
 |---|---|
@@ -175,8 +176,12 @@ Seven containers:
 | `backend` | Pure API — fetches nothing, derives nothing |
 | `cache-worker` | Watches the cache and the producers, alerts only |
 | `frontend` | The React app behind nginx, proxying `/api` |
+| `postgres-exporter` | Postgres' statistics views as metrics — see [Monitoring](#monitoring) |
+| `prometheus` | Scrapes and stores those metrics, 15 days |
+| `grafana` | The dashboard that draws them |
 
 - Map: `http://localhost:8080` · API: `http://localhost:8000` · Postgres: `5432`
+- Grafana: `http://localhost:3000` (admin / admin by default) · Prometheus: `9090`
 - Every source writes what it collects to Postgres and reads its own data back
   at startup, so the map is populated from the first second instead of filling
   in over the following minutes — or hours, for the daily sources.
@@ -685,6 +690,7 @@ frontend/src/
 backend/
   app.py               FastAPI routes, ETag/caching, tile + wind proxies
   cache.py             in-memory SourceRegistry; version counter per source
+  metrics.py           /metrics exposition; collectors read live state, no I/O
   config.py            every tunable, all env-overridable
   storage.py           asyncpg pool, five tables, retention sweep
   regions.py           the region registry (camera targets == payload filters)
@@ -809,6 +815,7 @@ All responses are JSON unless noted. Point endpoints accept `?region=<key>`
 | `GET /api/wind?south=&west=&north=&east=` | 9×9 wind velocity grid for a bbox |
 | `GET /api/weather/tile/{layer}/{z}/{x}/{y}.png` | Proxied OWM tile (`clouds_new`, `wind_new`, `precipitation_new`, `temp_new`, `pressure_new`) |
 | `GET`/`PUT /api/admin-config` | The Admin Mode configuration, never cached |
+| `GET /metrics` | Prometheus exposition for this process. Deliberately outside `/api`, so nginx does not proxy it — see [Monitoring](#monitoring) |
 
 ---
 
@@ -861,6 +868,37 @@ live AIS stream would continuously evict a city index refetched once a day.
 | `OFFICIALS_SNAP_REGION` | off | Snap region-level diplomacy geocodes |
 | `PORT` | 8000 | Set by PaaS hosts; its presence switches the bind to `0.0.0.0` and skips auto-opening a browser |
 
+### Egress proxies
+
+Off by default. This exists for one problem only: a source that has blocked or
+throttled *this machine's IP* while the account and key are still good. It does
+nothing for a source that is down for everyone — a different IP reaches the same
+down service — and routing around a block is a decision about an account you own
+and can lose, so read the source's terms before turning it on.
+
+The pool is Proxifly's list (`github.com/proxifly/free-proxy-list`), fetched
+live and only once a direct connection has already failed repeatedly. Traffic is
+TLS to the origin, tunnelled by CONNECT or SOCKS, so a proxy operator sees which
+host was reached and nothing inside it. See `backend/proxypool.py`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROXY_ENABLED` | off | Master switch. Nothing below has any effect while this is off |
+| `PROXY_PROTOCOLS` | `socks5,socks4,http` | Preference order. SOCKS first: it tunnels TCP without interpreting it, where an HTTP proxy has to be willing to `CONNECT` |
+| `PROXY_LIST_BASE` | Proxifly CDN | Point at any list with the same `{base}/{protocol}/data.json` layout |
+| `PROXY_LIST_TTL` | 900 | The list is rebuilt upstream every 5 min; re-reading faster than nodes die gains nothing |
+| `PROXY_POOL_MAX` | 400 | Cap on the pool, sampled at random rather than off the front of the list |
+| `PROXY_CONNECT_TIMEOUT` | 12 | Most free proxies are dead; the cost of learning that is paid per attempt, in series |
+| `PROXY_FAILURE_COOLDOWN` | 1800 | Base bench time after a node fails, multiplied by its failure streak |
+| `AIS_PROXY_AFTER_FAILURES` | 3 | Consecutive failed *direct* connections before a proxy is considered at all |
+| `AIS_PROXY_ATTEMPTS` | 3 | How many proxies one reconnect cycle may try. Not a multiplier on what the source sees: the cycle stops at the first proxy that actually reaches it, so aisstream never sees more than two attempts per cycle |
+
+A direct attempt leads every cycle regardless, so recovery needs no
+reconfiguration — the moment the source answers directly again, that is the path
+in use. Turning this on also makes the ingest log noisier: dead nodes produce
+`EOFError: stream ended` tracebacks from `websockets`/`python-socks` internals,
+logged by asyncio's callback handler rather than raised, and harmless.
+
 ---
 
 ## Persistence
@@ -907,6 +945,146 @@ see [`data/README.md`](data/README.md), which accounts for every file there.
 that collects something without storing it, or stores something without reading
 it back, fails the test suite rather than quietly showing an empty layer after
 every restart.
+
+---
+
+## Monitoring
+
+`/api/health` answers *is this source producing, right now?* — live, per source,
+shaped for the frontend's status panel. Monitoring answers the two questions it
+structurally cannot: *is the database coping?* and *is this over time?* A source
+can be perfectly healthy while Postgres is drowning under the writes, and "this
+source stopped four hours ago" is only visible if something was recording while
+nobody was watching.
+
+Three containers, defined at the bottom of the services block in
+`docker-compose.yml`:
+
+| Container | What it does | Port |
+|---|---|---|
+| `postgres-exporter` | Holds one connection to Postgres and reads its statistics views on each scrape | internal only |
+| `prometheus` | Scrapes the exporter and the backend every 15s, keeps 15 days | `9090` |
+| `grafana` | Draws them, from dashboards provisioned out of this repo | `3000` |
+
+Open `http://localhost:3000` (admin / admin unless `GRAFANA_ADMIN_PASSWORD` is
+set in `.env`) → the **OSINT** folder. Two dashboards:
+
+| Dashboard | Source | Covers |
+|---|---|---|
+| **Postgres — stats and load** | `postgres-exporter` | Throughput, sessions, locks, bloat, size |
+| **Backend — requests and sources** | `backend:8000/metrics` | Request rate and latency by route, source freshness, cache and rate-limit occupancy, pool state |
+
+They observe and change nothing. No application code, schema or collector
+depends on them, so stopping all three costs the graphs and nothing else:
+
+```bash
+docker compose stop prometheus postgres-exporter grafana
+```
+
+### What the Postgres dashboard shows
+
+Top row, at a glance: whether Postgres is up, how much of the connection budget
+is spent, active sessions, buffer cache hit ratio, database size, the age of the
+oldest open transaction, and how many sessions are blocked on a lock.
+
+Below that, over time — transactions per second split commit/rollback; sessions
+by state; tuple and buffer rates; locks by mode; deadlocks and conflicts; temp
+file spill; background-writer activity; sequential versus index scans per table;
+dead tuples per table; database size; and rows written per second per table.
+
+Three of those are worth knowing how to read:
+
+- **Oldest transaction** climbing without falling is the one that turns routine
+  churn into permanent bloat — vacuum cannot reclaim any row still visible to an
+  open transaction, so the dead-tuple table below it will climb with it.
+- **`buffers_backend`** on the background-writer panel means client backends are
+  flushing their own dirty pages because the checkpointer is behind. That is
+  felt directly as API latency.
+- **Rows written per second, by table** is a second, independent view of whether
+  a collector has gone quiet — it shows a stopped source before the map does,
+  and without depending on the source's own health reporting.
+
+### What the backend dashboard shows
+
+Request rate and 5xx share, p50/p95/p99 latency overall and p95 by route,
+responses by status (304 should dominate — that is the ETag path working), the
+Redis payload cache hit ratio, the on-demand upstream proxies, how full the
+token buckets and in-process caches are, asyncpg pool occupancy against its
+max, and per-source freshness, item counts and refresh rate.
+
+- **Source freshness** is the same number `/api/health` reports as
+  `seconds_since_success`, kept as a series. A source that has *never* succeeded
+  in this process is deliberately absent rather than reported as 0 — a zero here
+  would read as "just refreshed" and silence exactly the alert you want.
+- **`osint_source_up`** is 0 whenever the source has an outstanding error, which
+  is the same verdict `/api/health` gives; the two are checked against each other
+  in `backend/tests/test_metrics.py`.
+- **`osint_backend_info{process_token=...}`** changes on every restart. Counters
+  resetting cannot tell you a restart happened (a reset is what they do), so
+  `changes()` over this label is how you count them.
+
+### Adding metrics
+
+`backend/metrics.py` holds two kinds of instrument, and which one to reach for
+is the whole design:
+
+- **Counters and histograms** for events, incremented at the call site
+  (`metrics.upstream_requests.labels(...).inc()`).
+- **A collector** for state that already exists somewhere — the source registry,
+  a cache's length, the pool's own bookkeeping. It is read at scrape time rather
+  than copied on a timer, because a copy is one more thing that can be wrong.
+
+Two rules the module is arranged around, both pinned by tests:
+
+1. **A scrape does no I/O.** Prometheus asks every 15s whether or not the stack
+   is well, so a `/metrics` that queried Postgres would turn a slow database into
+   a scrape timeout — losing the series that would have explained it. The one
+   number that lives in the database (open alerts) is refreshed by a background
+   task and merely read during a scrape.
+2. **Labels stay bounded.** Route labels come from the registered path template,
+   never the request path, and anything matching no route collapses to a single
+   `unmatched`. Otherwise a crawler mints a time series per URL it tries, and
+   Prometheus carries that cost permanently.
+
+Only the backend exposes metrics. `ingest`, `refine` and `cache-worker` serve no
+HTTP at all, so instrumenting them would mean giving each one a port — their
+behaviour is visible instead through `source_health`, the `alerts` table and the
+per-table write rates on the Postgres dashboard.
+
+### Files
+
+```
+monitoring/
+  prometheus/prometheus.yml               scrape config (three jobs)
+  postgres-exporter/queries.yaml          custom queries: sessions by state,
+                                          transaction age, blocked sessions,
+                                          connection budget
+  grafana/provisioning/datasources/       Prometheus, pinned uid
+  grafana/provisioning/dashboards/        file-backed dashboard provider
+  grafana/dashboards/postgres.json        the Postgres dashboard
+  grafana/dashboards/backend.json         the backend dashboard
+
+backend/
+  metrics.py                              the exposition, and everything in it
+  tests/test_metrics.py                   the two rules above, as tests
+```
+
+The dashboard JSON is the source of truth and Grafana is told not to accept UI
+edits (`allowUiUpdates: false`), because an edit saved only to Grafana's
+database silently disappears the next time that volume is reset. To change a
+panel, edit it in the UI, use **Export → Save JSON to file**, and replace
+`monitoring/grafana/dashboards/postgres.json`. The provider re-reads the
+directory every 30 seconds, so the file is live without a restart.
+
+The exporter connects as the same superuser the app uses, which is what lets it
+see every session rather than only its own. That is fine for a stack bound to
+localhost. Anywhere else, give it a dedicated role with `pg_monitor` and no
+write grants, and put a real password on Grafana before publishing port 3000.
+
+`/metrics` is not under `/api`, and `frontend/nginx.conf` proxies `/api/` only —
+so it is reachable on the compose network and from nothing published to the
+host. That boundary is deliberate: the exposition carries route names, source
+names and error counts, which is operational detail rather than map data.
 
 ---
 

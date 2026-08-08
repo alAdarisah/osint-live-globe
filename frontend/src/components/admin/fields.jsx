@@ -58,19 +58,35 @@ export function ColorField({ label, value, defaultValue, onChange }) {
   );
 }
 
+// The zoom levels a pin type can be held back to. Stops at 12 for the same
+// reason the layer sliders do -- 12 is the SITE band floor, and a pin that only
+// appears over one street is a pin nobody will find.
+const PIN_ZOOM_CHOICES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
 /**
- * One kind of pin, on one line: its colour, its name, and how big it is drawn.
+ * One kind of pin, on one line: its colour, its name, how big it is drawn, and
+ * the zoom it starts drawing at.
  *
- * The two controls share a row rather than stacking because there are forty of
- * these -- a separate size row per token would make the section twice as long
- * to scroll and put a pin's two properties a screen apart. `size` is null for
+ * The controls share a row rather than stacking because there are forty of
+ * these -- a separate row per property would make the section three times as
+ * long to scroll and put one pin's properties a screen apart. `size` is null for
  * the few tokens that name a colour with no pin of their own (see
  * COLOUR_ONLY_TOKENS in map/iconTheme.js), and the slider is simply absent
- * there rather than present and inert.
+ * there rather than present and inert; `zoom` is undefined for the same tokens.
+ *
+ * The zoom is a select rather than a third slider on purpose. Its value has a
+ * state no slider position can express -- "follow the layer" -- and that is the
+ * state it is in for every pin type until someone deliberately changes one, so
+ * it has to be the readable default rather than an end stop.
  */
-export function IconField({ label, color, defaultColor, onColorChange, size, onSizeChange }) {
+export function IconField({
+  label, color, defaultColor, onColorChange, size, onSizeChange,
+  zoom, layerZoom, onZoomChange,
+}) {
   const colorModified = color !== defaultColor;
   const sizeModified = size != null && size !== 1;
+  const zoomModified = zoom != null;
+  const inherited = layerZoom == null ? "any zoom" : `z${layerZoom}`;
   return (
     <div className="admin-icon-field">
       <input
@@ -98,14 +114,31 @@ export function IconField({ label, color, defaultColor, onColorChange, size, onS
           </span>
         </>
       )}
-      {(colorModified || sizeModified) && (
+      {zoom !== undefined && (
+        <select
+          className={`admin-icon-zoom${zoomModified ? " modified" : ""}`}
+          value={zoom == null ? "" : String(zoom)}
+          onChange={(e) => onZoomChange(e.target.value === "" ? null : Number(e.target.value))}
+          aria-label={`${label} shows from zoom`}
+          title={`Shows from this zoom. Its layer starts at ${inherited}, and that is the floor -- a kind of pin can be held back past its layer's gate but not brought forward through it.`}
+        >
+          <option value="">{inherited} &middot; layer</option>
+          {PIN_ZOOM_CHOICES.map((z) => (
+            <option key={z} value={z}>
+              z{z}
+            </option>
+          ))}
+        </select>
+      )}
+      {(colorModified || sizeModified || zoomModified) && (
         <button
           type="button"
           className="admin-reset-btn"
-          title="Back to the shipped colour and size"
+          title="Back to the shipped colour, size and zoom"
           onClick={() => {
             if (colorModified) onColorChange(defaultColor);
             if (sizeModified) onSizeChange(1);
+            if (zoomModified) onZoomChange(null);
           }}
         >
           ↺

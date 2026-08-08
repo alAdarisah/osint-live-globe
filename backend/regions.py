@@ -47,6 +47,68 @@ def serialize() -> dict:
     }
 
 
+def parse_bbox(raw: str | None) -> Bounds | None:
+    """Parse a "south,west,north,east" query parameter, or return None.
+
+    None means "no viewport filter", which is the same thing an absent
+    parameter means -- so a malformed box degrades to the full region rather
+    than to an error. That is deliberate: this parameter is an optimisation the
+    client offers, not a request the client makes, and a client that sends a
+    bad one should get a slower correct answer rather than a failure.
+
+    Everything here is validation rather than parsing, because the values reach
+    filter_points, which trusts what it is given. A NaN would compare false
+    against every point and silently empty the layer; a south above its north
+    would do the same; and an unbounded box is just the absent case spelled at
+    length.
+    """
+    if not raw:
+        return None
+    parts = raw.split(",")
+    if len(parts) != 4:
+        return None
+    try:
+        south, west, north, east = (float(p) for p in parts)
+    except ValueError:
+        return None
+    # NaN fails every comparison including its own, so this catches it too.
+    if not all(-90.0 <= v <= 90.0 for v in (south, north)):
+        return None
+    if not all(-180.0 <= v <= 180.0 for v in (west, east)):
+        return None
+    if south > north or west > east:
+        # west > east is a box crossing the antimeridian. Legitimate on a map
+        # with worldCopyJump, and not representable as one
+        # (south, west, north, east) tuple that _in_bounds can test -- so it is
+        # refused here rather than silently returning the empty intersection it
+        # would produce.
+        return None
+    return (south, west, north, east)
+
+
+def intersect(a: Bounds | None, b: Bounds | None) -> Bounds | None:
+    """The overlap of two boxes, or None when either is absent.
+
+    Used to combine a named region with a viewport box: a reader inside a
+    selected zone should get that zone's data clipped to what they can see, and
+    never data from outside the zone they chose. An empty overlap is returned as
+    a degenerate box rather than as None, because None means "no filter" here --
+    returning it for two boxes that do not overlap would hand back the whole
+    world, which is the exact opposite of what was asked.
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    south = max(a[0], b[0])
+    west = max(a[1], b[1])
+    north = min(a[2], b[2])
+    east = min(a[3], b[3])
+    if south > north or west > east:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (south, west, north, east)
+
+
 def _in_bounds(lat: float, lon: float, bounds: Bounds) -> bool:
     south, west, north, east = bounds
     return south <= lat <= north and west <= lon <= east

@@ -27,12 +27,15 @@ export const PALETTE_GROUPS = [
   {
     id: "severity",
     label: "Conflict severity",
-    note: "Colour of a conflict pin, by its severity score.",
+    note: "Colour of a conflict pin, by its severity score. One hue on purpose --"
+      + " violence is red here, and severity is how bright the red is. Orange and yellow"
+      + " are spoken for: an orange pin is a regulator's airspace warning, a yellow one is"
+      + " a navy hull.",
     tokens: [
       { id: "severity.critical", label: "Critical (75+)", value: "#ff1a1a" },
-      { id: "severity.high", label: "High (55-74)", value: "#ff5c2a" },
-      { id: "severity.moderate", label: "Moderate (40-54)", value: "#ff9500" },
-      { id: "severity.low", label: "Low (0-39)", value: "#ffd11a" },
+      { id: "severity.high", label: "High (55-74)", value: "#e03131" },
+      { id: "severity.moderate", label: "Moderate (40-54)", value: "#b02525" },
+      { id: "severity.low", label: "Low (0-39)", value: "#7f1d1d" },
       { id: "event.corroborated", label: "Corroborated", value: "#3ac1ff" },
       { id: "event.history", label: "Verified record (UCDP)", value: "#8f9bb3" },
     ],
@@ -111,7 +114,13 @@ export const PALETTE_GROUPS = [
       // putting it on the shared severity ramp would paint every live advisory
       // the same orange and every withdrawn one yellow, which reads as a mild
       // live warning rather than as a document that has been rescinded.
-      { id: "czib.active", label: "Airspace warning, active (EASA)", value: "#ff4d6d" },
+      // Orange, and the only orange on the map that names a thing rather than a
+      // degree of one. It used to be a pink-red, which put it inside the
+      // conflict layer's colour language while being a different kind of claim
+      // entirely -- a regulator's standing instruction, not an incident. The
+      // severity ramp gave orange up for this (see SEVERITY_BANDS in
+      // severity.js), so a warning is now the only thing on the map drawn in it.
+      { id: "czib.active", label: "Airspace warning, active (EASA)", value: "#ff8c00" },
       { id: "czib.withdrawn", label: "Airspace warning, withdrawn", value: "#7f93a8" },
       // Steel-teal, a sibling of airfield.civil above: the two are the same
       // kind of thing -- a published gazetteer of places traffic goes -- in two
@@ -167,6 +176,145 @@ export const DEFAULT_SIZES = Object.freeze(
   Object.fromEntries(Object.keys(DEFAULT_COLORS).filter(tokenHasSize).map((id) => [id, 1]))
 );
 
+/**
+ * Which layer's gate each kind of pin sits under.
+ *
+ * Needed because a pin type's own "shows from zoom" is applied *on top of* its
+ * layer's -- the later of the two wins (see tokenZoom below and pinZoomGate in
+ * createMapController.js). A token with no entry here is one with no pin of its
+ * own to withhold: the three colour-only tokens, the choropleth ramp, and
+ * outage.country, which names a colour the palette does not offer.
+ *
+ * Deliberately not derived from the palette groups. Those group by subject --
+ * "Air & sea traffic" holds three ship classes and four aircraft classes across
+ * five different layers -- and a layer is not a subject.
+ */
+export const TOKEN_LAYER = Object.freeze({
+  "severity.critical": "events",
+  "severity.high": "events",
+  "severity.moderate": "events",
+  "severity.low": "events",
+  "event.history": "conflictHistory",
+  "news.pin": "gdelt",
+  "officials.cooperative": "officials",
+  "officials.hostile": "officials",
+  "officials.neutral": "officials",
+  "ship.navy": "aisNavy",
+  "ship.tanker": "aisTanker",
+  "ship.other": "aisCivilian",
+  "aircraft.military": "adsbMilitary",
+  "aircraft.helicopter": "adsbCivilian",
+  "aircraft.commercial": "adsbCivilian",
+  "aircraft.other": "adsbCivilian",
+  "dark.gap": "darkVessels",
+  "dark.sts": "darkVessels",
+  "gfw.gap": "gfwGaps",
+  "gfw.unmatched": "gfwDetections",
+  "gfw.matched": "gfwDetections",
+  "city.marker": "cities",
+  "infra.refinery": "infra",
+  "infra.lng_terminal": "infra",
+  "infra.port": "infra",
+  "infra.desalination": "infra",
+  "infra.nuclear": "infra",
+  "infra.fab": "infra",
+  "infra.pipeline": "infra",
+  "satellite.stations": "satellites",
+  "satellite.military": "satellites",
+  "airfield.civil": "airports",
+  "airfield.military": "airports",
+  "cable.landing": "cableLandings",
+  "cable.planned": "cableLandings",
+  "launch.upcoming": "launches",
+  "launch.flown": "launches",
+  "osm.military": "osmInfra",
+  "osm.power": "osmInfra",
+  "osm.border": "osmInfra",
+  "czib.active": "czib",
+  "czib.withdrawn": "czib",
+  "port.wpi": "ports",
+  "dam.barrier": "dams",
+});
+
+// --- the stack -------------------------------------------------------------
+//
+// Which layer draws over which, and how much the ones underneath recede.
+//
+// Two ordered groups, not one, because the map has two drawing mechanisms and
+// they do not interleave. Every pin is a DOM marker in Leaflet's markerPane
+// (z 600); the three washes are canvases in the overlayPane (z 400) below it.
+// A canvas can therefore never be ordered above a pin -- that has always been
+// true of this map -- so the panel offers two lists rather than one list that
+// silently ignores half the moves made in it. Making them interleave would mean
+// a Leaflet pane per layer and a `pane` option threaded through every marker,
+// polyline and canvas renderer on the map, which is a large change to buy an
+// ordering nobody has asked for: pins over washes is the right answer.
+//
+// Order is top-first. Within the pins, the default is an editorial claim and
+// reads as one: violence, then the warnings about it, then the hazards, then
+// what is moving, then the places it is all happening to.
+//
+// This table lives here rather than in a module of its own because iconTheme.js
+// deliberately imports nothing -- that is what lets tests/pinZoom.test.js load
+// it under `node --test` with no bundler -- and the stack is appearance state
+// of exactly the kind this file already owns.
+// Cities sit at the head of the reference block rather than at the foot of the
+// whole list, which is where they started. Two reasons, and the second is the
+// one that made it wrong:
+//
+//   A city is what everything else is read *against*. Drawing it beneath the
+//   ports, dams and airfields whose position it gives meaning to inverts that.
+//
+//   The depth fade compounded with the graduated one the city glyphs already
+//   carry (0.45 for a town up to 1 for a capital, see CITY_TIERS). At the bottom
+//   of the stack that landed a town at 0.45 x 0.55 = 25% and a capital at 55% --
+//   two separate mechanisms both saying "recede", multiplied.
+//
+// The line it now sits on is a coherent one: what happened, then what is
+// inferred or in motion, then the places all of it happened to.
+export const PIN_STACK = [
+  "events", "conflictHistory", "czib", "hazards", "floods", "gdelt", "officials",
+  "darkVessels", "gfwGaps", "gfwDetections", "satellites", "launches",
+  "cities", "infra", "osmInfra", "airports", "ports", "dams", "cables", "outagePoints",
+];
+export const WASH_STACK = ["vehicles", "jamming", "firms"];
+
+/**
+ * Layer keys that ride another key's place in the stack.
+ *
+ * The six WebGL buckets are sprites on one shared canvas (see webglLayer.js), so
+ * they have exactly one position between them -- splitting the canvas to give
+ * each its own would undo the reason it exists. Cable landings are drawn as part
+ * of the cables layer for the same reason its checkbox covers both: a cable and
+ * the place it comes ashore are one fact.
+ */
+export const STACK_ALIAS = Object.freeze({
+  aisNavy: "vehicles", aisTanker: "vehicles", aisCivilian: "vehicles",
+  adsbMilitary: "vehicles", adsbCivilian: "vehicles", adsbFlagged: "vehicles",
+  cableLandings: "cables",
+  firmsPoints: "firms",
+});
+
+export const DEFAULT_STACK = Object.freeze({ pins: [...PIN_STACK], washes: [...WASH_STACK] });
+
+/** How faint the bottom of a group is drawn, before any per-layer opacity. */
+export const DEFAULT_STACK_FADE_FLOOR = 0.55;
+
+/** The tokens that name a drawable pin, and so can be given a zoom of their own. */
+export function tokenHasZoom(token) {
+  return token in TOKEN_LAYER;
+}
+
+/**
+ * Every gateable token at its shipped gate -- which is null, meaning "whenever
+ * the layer draws". Null rather than a number on purpose: a token that stored
+ * its layer's current gate would silently stop following it the moment the
+ * layer's own slider moved.
+ */
+export const DEFAULT_ZOOMS = Object.freeze(
+  Object.fromEntries(Object.keys(TOKEN_LAYER).map((id) => [id, null]))
+);
+
 // Anything else is either a typo or a stale saved config from an older build;
 // both should fall back to the shipped colour rather than paint a marker
 // `undefined`.
@@ -184,12 +332,27 @@ let layerStyles = {};
 // was no way to make navy hulls stand out without also enlarging the civilian
 // traffic they need to stand out from.
 let tokenSizes = {};
+// Per-token minimum zoom, and the set of layers that have at least one. The set
+// is derived rather than asked for, because the renderers consult it once per
+// layer per pass to decide whether the per-pin question is worth asking at all
+// -- almost always it is not, and resolving a token for ten thousand hulls to
+// learn that none of them is gated is exactly the kind of work a render pass
+// cannot afford.
+let tokenZooms = {};
+let layersWithTokenZoom = new Set();
+// The stack, resolved to what the two readers below need: a rank per key within
+// its own group, and the size of that group. Rebuilt on every order change
+// rather than recomputed per lookup -- layerOpacity is called once per marker
+// per render, which is tens of thousands of times a pan.
+let stackRanks = new Map();
+let stackFadeFloor = DEFAULT_STACK_FADE_FLOOR;
 
 /**
  * @param {object} next
  * @param {number} [next.scale]   global size multiplier, 1 == shipped sizes
  * @param {Record<string,string>} [next.colors]  token -> hex override
  * @param {Record<string,number>} [next.sizes]   token -> size multiplier
+ * @param {Record<string,number|null>} [next.zooms]  token -> minimum zoom
  * @param {Record<string,{scale?:number,opacity?:number}>} [next.layers]
  */
 export function setIconTheme(next = {}) {
@@ -208,11 +371,134 @@ export function setIconTheme(next = {}) {
     }
     tokenSizes = merged;
   }
+  if (next.zooms) {
+    const merged = {};
+    const layers = new Set();
+    for (const [token, value] of Object.entries(next.zooms)) {
+      // A null is the ordinary case, not a malformed one: it is how "follow the
+      // layer" is stored, so it drops out here rather than being recorded.
+      if (!tokenHasZoom(token) || !Number.isFinite(value)) continue;
+      merged[token] = clampZoom(value);
+      layers.add(TOKEN_LAYER[token]);
+    }
+    tokenZooms = merged;
+    layersWithTokenZoom = layers;
+  }
   if (next.layers) layerStyles = next.layers;
+  if (next.stack) setStack(next.stack);
+  if (Number.isFinite(next.stackFadeFloor)) {
+    stackFadeFloor = Math.min(Math.max(next.stackFadeFloor, 0.1), 1);
+  }
+}
+
+/**
+ * Resolve a stored order into the rank table the map reads.
+ *
+ * The stored order is merged onto the shipped one rather than trusted as a
+ * whole: a configuration written by an older build is missing whatever layers
+ * have been added since, and a layer that fell out of the stack would be drawn
+ * with no rank at all -- which is to say at full strength, on top, which is the
+ * one outcome a stack is supposed to make impossible. Anything unrecognised is
+ * dropped, anything missing is appended in its shipped order.
+ */
+function setStack(stack = {}) {
+  const ranks = new Map();
+  for (const [group, shipped] of [["pins", PIN_STACK], ["washes", WASH_STACK]]) {
+    // Only the pins are depth-faded. The washes are already the background tier
+    // by construction -- three canvases under every pin on the map -- so fading
+    // them for depth as well is a second mechanism saying what their being
+    // canvases already says, and the two multiply.
+    //
+    // FIRMS is what proved it: the layer ships deliberately faint at 0.3 (a
+    // global thermal feed is mostly agricultural burning, see
+    // FIRMS_HEAT_OPACITY in layers.js), sat at the bottom of the wash stack for
+    // another 0.55, and drew at 0.165 -- close enough to invisible that moving
+    // its opacity slider looked like a control that did nothing. Order still
+    // decides which wash covers which; it just no longer dims them too.
+    const faded = group === "pins";
+    const stored = Array.isArray(stack[group]) ? stack[group] : [];
+    const known = new Set(shipped);
+    const seen = new Set();
+    const order = [];
+    for (const key of stored) {
+      if (known.has(key) && !seen.has(key)) {
+        seen.add(key);
+        order.push(key);
+      }
+    }
+    for (const key of shipped) if (!seen.has(key)) order.push(key);
+    order.forEach((key, index) => ranks.set(key, { index, of: order.length, faded }));
+  }
+  stackRanks = ranks;
+}
+setStack(DEFAULT_STACK);
+
+/** Where a layer sits, resolving the keys that ride another layer's place. */
+function stackEntryFor(layerKey) {
+  return stackRanks.get(STACK_ALIAS[layerKey] || layerKey) || null;
+}
+
+/**
+ * How much a layer is faded for sitting where it does in the stack.
+ *
+ * Linear from 1 at the top of a group to the floor at the bottom, and applied on
+ * top of the layer's own opacity rather than instead of it -- so the order
+ * expresses "how much of the reader's attention is this entitled to" and the
+ * per-layer slider stays an absolute correction on that.
+ *
+ * A key with no place in the stack is not faded. Those are the substrate --
+ * country shapes, districts, the basemap -- which sit under everything by
+ * construction and have nothing to be ranked against.
+ */
+export function stackFade(layerKey) {
+  const entry = stackEntryFor(layerKey);
+  if (!entry || entry.of < 2 || !entry.faded) return 1;
+  return 1 - (1 - stackFadeFloor) * (entry.index / (entry.of - 1));
+}
+
+/**
+ * The z-index offset a layer's markers are drawn with.
+ *
+ * Leaflet orders markers inside one pane by zIndexOffset, which is what makes
+ * this possible without a pane per layer. The stride has to clear the per-icon
+ * term applyStacking already subtracts (an icon size, at most ~120px after a 3x
+ * global scale) or a large icon in one layer would sink below a small one in the
+ * layer beneath it.
+ */
+export function stackZIndex(layerKey) {
+  const entry = stackEntryFor(layerKey);
+  if (!entry) return 0;
+  return (entry.of - entry.index) * 1000;
 }
 
 function clampScale(value) {
   return Math.min(Math.max(value, 0.4), 3);
+}
+
+// Whole levels only. Leaflet reports fractional zooms mid-gesture and every
+// other gate on this map is an integer, so a threshold of 6.35 would be a
+// number no reader could have meant and no comparison could be reasoned about.
+function clampZoom(value) {
+  return Math.min(Math.max(Math.round(value), 0), 18);
+}
+
+/**
+ * The zoom this kind of pin starts drawing at, or null when it has none.
+ *
+ * Applied *on top of* the layer's own gate rather than instead of it: the later
+ * of the two wins. A pin type cannot be made to appear before its layer does,
+ * and that is not a simplification -- a layer below its gate is often not even
+ * fetched (see LAYER_MANIFEST's `fetch` in map/scene.js), so a token allowed to
+ * undercut it would promise pins there is no data for.
+ */
+export function tokenZoom(token) {
+  const value = token ? tokenZooms[token] : null;
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Whether any pin type in this layer carries a zoom of its own. */
+export function layerHasTokenZoom(layerKey) {
+  return layersWithTokenZoom.has(layerKey);
 }
 
 /** The colour for a token, or `fallback` if the token is unknown. */
@@ -255,10 +541,58 @@ export function scaledSize(px, layerKey, token) {
   return Math.max(4, Math.round(px * globalScale * layerScale * tokenScale(token)));
 }
 
-/** A layer's opacity multiplier (1 when it has never been configured). */
+/**
+ * The same multipliers, for a line's weight rather than an icon's box.
+ *
+ * scaledSize is wrong for a polyline in both of its adjustments, and quietly so.
+ * It rounds, because an icon's pixel size is baked into the HTML string
+ * updateMarker diffs and a fractional one would differ between identical
+ * renders -- a line has no such string. And it floors at 4px so an icon can
+ * never shrink to something unclickable -- which would take a submarine cable
+ * from its shipped 1.4px hairline to 4px, nearly tripling the weight of a mesh
+ * of 718 routes the moment it started honouring the dial at all.
+ *
+ * Floored at 0.5px instead: below that a browser stops drawing a stroke
+ * reliably, and a line the dial has made invisible is a line nobody can find
+ * their way back from.
+ */
+/**
+ * One layer's own size multiplier, without the global icon scale on top.
+ *
+ * For the two heat layers, whose "size" is a kernel radius rather than an icon.
+ * The global dial says what it does on the panel -- "scales every marker, and
+ * the spacing the declutter pass reserves for it" -- and a density kernel is
+ * neither a marker nor something the placement pass routes around. Turning the
+ * global dial down to thin a crowded pin field would otherwise also shrink the
+ * fire blobs, which is a change nobody asked for and no label predicts.
+ */
+export function layerScale(layerKey) {
+  const value = layerKey ? layerStyles[layerKey]?.scale : null;
+  return Number.isFinite(value) ? value : 1;
+}
+
+export function scaledWeight(px, layerKey) {
+  if (!Number.isFinite(px)) return px;
+  const layer = layerKey ? layerStyles[layerKey] : null;
+  const layerScale = Number.isFinite(layer?.scale) ? layer.scale : 1;
+  return Math.max(0.5, px * globalScale * layerScale);
+}
+
+/**
+ * A layer's opacity multiplier: its own setting, times its depth in the stack.
+ *
+ * Both, because they answer different questions. The stack fade is a statement
+ * about precedence -- reference material recedes so the layers it is context for
+ * can be read over it -- and the slider is a correction on top of whatever that
+ * produces. Folding the fade in here rather than at each drawing site is what
+ * makes it reach everything: every marker's icon, the two heat canvases, the
+ * WebGL sprite buckets and the city glyphs all resolve opacity through this one
+ * call.
+ */
 export function layerOpacity(layerKey) {
   const value = layerStyles[layerKey]?.opacity;
-  return Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 1;
+  const own = Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 1;
+  return own * stackFade(layerKey);
 }
 
 /**

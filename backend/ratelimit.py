@@ -73,3 +73,18 @@ class TokenBucket:
             self._tokens -= tokens
             return True
         return False
+
+    @property
+    def available(self) -> float:
+        """Tokens take() would find right now, without consuming any.
+
+        Deliberately does not write back the refill it computes: this exists so
+        /metrics can report the bucket (see backend/metrics.py), and a reader
+        that mutated the thing it reads would make the act of scraping change
+        the rate limiting.
+        """
+        return min(self._capacity, self._tokens + (time.monotonic() - self._last) * self._refill)
+
+    @property
+    def capacity(self) -> float:
+        return self._capacity

@@ -18,6 +18,7 @@
 // from, and gets full control over hit-testing as a side benefit (needed
 // for click-to-select/hover anyway).
 import { L } from "./leafletGlobal";
+import { nearestLon } from "../utils/geo";
 
 // Pixi is loaded on demand rather than bundled into the main chunk: it is by
 // far the heaviest dependency here (~13 MB installed, and the dominant share
@@ -196,6 +197,13 @@ const EntityWebglLayer = L.Layer.extend({
     this._visibleBuckets = new Set();
     this._topLeft = L.point(0, 0);
     this._redrawScheduled = false;
+    // Hover hit-test throttle state -- see _onContainerMove.
+    this._moveFrame = null;
+    this._pendingMove = null;
+    // Per-bucket dimming, so a newly created sprite inherits whatever emphasis
+    // is already in force rather than appearing at full opacity in a view that
+    // has receded around it. See setBucketAlpha.
+    this._bucketAlpha = new Map();
     // Sprites created before their style's texture finished rasterizing --
     // ensure()'s onReady only fires once per distinct style (see TextureCache
     // above), so without this, a sprite built during that brief loading
@@ -256,6 +264,13 @@ const EntityWebglLayer = L.Layer.extend({
     this._map.off("zoomanim", this._onAnimZoom);
     this._container.removeEventListener("click", this._onContainerClick, { capture: true });
     this._container.removeEventListener("mousemove", this._onContainerMove);
+    // A queued hover frame outlives the listener that queued it, and it would
+    // run against a destroyed Pixi app.
+    if (this._moveFrame != null) {
+      cancelAnimationFrame(this._moveFrame);
+      this._moveFrame = null;
+    }
+    this._pendingMove = null;
     this._hideTooltip();
     this._textureCache.destroy();
     // `true` tears down the WebGL context along with the view -- without
@@ -295,6 +310,14 @@ const EntityWebglLayer = L.Layer.extend({
     // *next* zoom gesture -- must be refreshed on every real reposition.
     this._animZoom = map.getZoom();
     this._animCenter = map.getCenter();
+    // Every sprite just moved under a pointer that did not, and a wheel-zoom or
+    // a keyboard pan emits no mousemove to correct it -- so without this the
+    // tooltip stays open, at the pane pixel it was written to before the
+    // reprojection, naming a ship that is no longer anywhere near the cursor
+    // (and the cursor stays `pointer` over open water). Re-answered rather than
+    // just hidden, so a tooltip that is still legitimately under the pointer
+    // survives the zoom instead of blinking out.
+    if (this._pendingMove) this._resolveHoverAt(this._pendingMove.x, this._pendingMove.y);
   },
 
   // Cheap bounding-box test against currently visible sprites (a handful to
@@ -305,9 +328,20 @@ const EntityWebglLayer = L.Layer.extend({
   // floor of TOUCH_SLOP_PX so a small sprite is still tappable on a phone.
   // Returns {entry, opts} or null.
   _hitTestAt(clientX, clientY) {
-    const rect = this._canvas.getBoundingClientRect();
-    const x = clientX - rect.left;
-    const y = clientY - rect.top;
+    // Divided by the canvas's live CSS scale, not just offset by its position.
+    // For the ~250ms of every zoom gesture _onAnimZoom below CSS-scales this
+    // canvas to track the basemap, so its bounding rect is in *screen* pixels
+    // while entry.container.position is in unscaled canvas pixels. Subtracting
+    // the rect alone mixes the two: on a single wheel step (scale 2) a click at
+    // the centre of a 1200px viewport hit-tested 600px away from where the
+    // reader was pointing, and at the far edge a full viewport away -- which is
+    // what made a click or hover during a zoom land on an unrelated ship or
+    // aircraft. getScale is Leaflet's own helper for this (rect.width /
+    // offsetWidth, falling back to 1 when the element has no layout), so at rest
+    // this is exactly the old arithmetic.
+    const { x: scaleX, y: scaleY, boundingClientRect: rect } = L.DomUtil.getScale(this._canvas);
+    const x = (clientX - rect.left) / scaleX;
+    const y = (clientY - rect.top) / scaleY;
     let best = null;
     let bestDist = Infinity;
     for (const [bucketKey, entries] of this._buckets) {
@@ -351,8 +385,34 @@ const EntityWebglLayer = L.Layer.extend({
     hit.opts.onSelect(hit.entry.item);
   },
 
+  // rAF-throttled, because _hitTestAt is a linear scan over every visible
+  // sprite in all six buckets and a mousemove fires far faster than the screen
+  // refreshes -- so sweeping the pointer across a busy sea used to run the
+  // whole scan hundreds of times per second to produce, at most, sixty distinct
+  // tooltips. The pointer position is stashed and the newest one wins, which is
+  // the same pattern the country hover uses in createMapController.js.
+  //
+  // Click is deliberately left unthrottled: a click has to hit-test against the
+  // position the reader actually clicked, not the last one a frame happened to
+  // sample.
   _onContainerMove(e) {
-    const hit = this._hitTestAt(e.clientX, e.clientY);
+    this._pendingMove = { x: e.clientX, y: e.clientY };
+    if (this._moveFrame != null) return;
+    this._moveFrame = requestAnimationFrame(() => {
+      this._moveFrame = null;
+      const at = this._pendingMove;
+      // onRemove can land between the frame being queued and it running.
+      if (!at || !this._app) return;
+      this._resolveHoverAt(at.x, at.y);
+    });
+  },
+
+  // What the tooltip and the cursor should say for a pointer at this client
+  // position. Shared with _reset above, which has to re-answer the same question
+  // after a reprojection has moved every sprite out from under a stationary
+  // pointer.
+  _resolveHoverAt(clientX, clientY) {
+    const hit = this._hitTestAt(clientX, clientY);
     if (hit) {
       this._showTooltip(hit.entry, hit.opts.getTooltip(hit.entry.item));
       this._container.style.cursor = "pointer";
@@ -380,8 +440,14 @@ const EntityWebglLayer = L.Layer.extend({
     L.DomUtil.setTransform(this._canvas, topLeftOffset, scale);
   },
 
+  // The stored longitude is shifted onto the copy of the world the camera is
+  // looking at before it is projected. Without it every sprite drew in the
+  // primary copy only, so panning east past the antimeridian left the ships and
+  // aircraft behind on the previous world while the basemap carried on -- the
+  // "empty map" either side. See nearestLon in utils/geo.js.
   _project(lat, lon) {
-    const p = this._map.latLngToLayerPoint([lat, lon]);
+    const refLon = this._map.getCenter().lng;
+    const p = this._map.latLngToLayerPoint([lat, nearestLon(lon, refLon)]);
     return { x: p.x - this._topLeft.x, y: p.y - this._topLeft.y };
   },
 
@@ -428,6 +494,27 @@ const EntityWebglLayer = L.Layer.extend({
     else this._visibleBuckets.delete(bucketKey);
     const entries = this._buckets.get(bucketKey);
     if (entries) for (const entry of entries.values()) entry.container.visible = visible;
+    this._scheduleRender();
+  },
+
+  /**
+   * Dim a whole bucket without hiding it.
+   *
+   * The DOM layers get this for free from a CSS rule keyed on the map
+   * container's data-emphasis attribute, but a sprite has no stylesheet -- so
+   * clicking a conflict pin has to reach the ships and aircraft through here or
+   * they would be the only things on the map that failed to recede. Alpha only:
+   * the sprites stay in place, stay hit-testable and keep their textures, so
+   * this is one property write per entity and nothing is rebuilt.
+   */
+  setBucketAlpha(bucketKey, alpha) {
+    const next = Number.isFinite(alpha) ? alpha : 1;
+    if (this._bucketAlpha.get(bucketKey) === next) return;
+    this._bucketAlpha.set(bucketKey, next);
+    const entries = this._buckets.get(bucketKey);
+    if (entries) {
+      for (const entry of entries.values()) entry.container.alpha = (entry.themeAlpha ?? 1) * next;
+    }
     this._scheduleRender();
   },
 
@@ -482,7 +569,14 @@ const EntityWebglLayer = L.Layer.extend({
       // Per-layer opacity from Admin Mode (see map/iconTheme.js's themedStyle).
       // Set on the container rather than baked into the texture, so turning a
       // layer down does not mint a second texture for every glyph in it.
-      entry.container.alpha = Number.isFinite(style.opacity) ? style.opacity : 1;
+      //
+      // Multiplied by the bucket's emphasis alpha rather than replacing it:
+      // these answer different questions ("how solid should this layer be" and
+      // "is the reader looking at something else right now") and whichever
+      // wrote the property last would otherwise silently win. Kept on the entry
+      // so setBucketAlpha can recombine them without re-reading the style.
+      entry.themeAlpha = Number.isFinite(style.opacity) ? style.opacity : 1;
+      entry.container.alpha = entry.themeAlpha * (this._bucketAlpha.get(bucketKey) ?? 1);
       const heading = opts.heading(item);
       entry.sprite.rotation = Number.isFinite(heading) ? (heading * Math.PI) / 180 : entry.sprite.rotation;
 
@@ -556,6 +650,7 @@ export function createEntityWebglLayer(map) {
   let layer = null;
   const pendingEntities = new Map(); // bucketKey -> [items, opts]
   const pendingVisibility = new Map(); // bucketKey -> boolean
+  const pendingAlpha = new Map(); // bucketKey -> number, same deal as above
 
   loadPixi()
     .then(() => {
@@ -573,8 +668,10 @@ export function createEntityWebglLayer(map) {
       layer = new EntityWebglLayer();
       layer.addTo(map);
       for (const [bucketKey, visible] of pendingVisibility) layer.setVisible(bucketKey, visible);
+      for (const [bucketKey, alpha] of pendingAlpha) layer.setBucketAlpha(bucketKey, alpha);
       for (const [bucketKey, [items, opts]] of pendingEntities) layer.updateEntities(bucketKey, items, opts);
       pendingVisibility.clear();
+      pendingAlpha.clear();
       pendingEntities.clear();
     })
     .catch((err) => {
@@ -588,12 +685,28 @@ export function createEntityWebglLayer(map) {
       if (layer) layer.setVisible(bucketKey, visible);
       else pendingVisibility.set(bucketKey, visible);
     },
+    setBucketAlpha(bucketKey, alpha) {
+      if (layer) layer.setBucketAlpha(bucketKey, alpha);
+      else pendingAlpha.set(bucketKey, alpha);
+    },
     updateEntities(bucketKey, items, opts) {
       if (layer) layer.updateEntities(bucketKey, items, opts);
       else pendingEntities.set(bucketKey, [items, opts]);
     },
     consumeSuppressedClick() {
       return layer ? layer.consumeSuppressedClick() : false;
+    },
+    /**
+     * The sprite canvas, or null before the renderer has finished loading.
+     *
+     * Exposed so the controller can put this layer's stack opacity and order on
+     * it (see applyWashStack in createMapController.js). The six buckets share
+     * this one element, which is exactly why they share one place in the stack.
+     * Null is an ordinary answer rather than an error: Pixi is a dynamic import,
+     * so a render can and does run before it lands.
+     */
+    canvas() {
+      return layer?._canvas || null;
     },
   };
 }

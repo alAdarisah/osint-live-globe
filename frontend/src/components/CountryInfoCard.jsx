@@ -31,7 +31,26 @@ const CARD_MARGIN = 14;
 const DEFAULT_OPEN = { profile: true, conflict: true };
 const STORAGE_KEY = "osint-country-card-accordion";
 
-export default function CountryInfoCard({ country, onClose, borderEdit }) {
+/**
+ * Turn a click anywhere in the card body into "open this record", or nothing.
+ *
+ * Delegated rather than bound per row because the sections are raw HTML strings
+ * (see countryCardSections in map/popups.js) and cannot carry React handlers.
+ * The two data attributes are put there by openableRow in that same file.
+ */
+function recordClickHandler(onOpenRecord) {
+  return (event) => {
+    // A headline in a news row is a real link to the article -- that is the
+    // citation, and it has to keep working as a link, including middle-click and
+    // open-in-new-tab. Only a click that missed it opens the card.
+    if (event.target.closest("a")) return;
+    const row = event.target.closest("[data-event-id]");
+    if (!row) return;
+    onOpenRecord(row.dataset.eventKind, row.dataset.eventId);
+  };
+}
+
+export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRecord }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN, STORAGE_KEY);
   const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel("countryInfoCard");
 
@@ -87,7 +106,18 @@ export default function CountryInfoCard({ country, onClose, borderEdit }) {
         </button>
       </div>
 
-      <div className="country-info-body">
+      {/* Keyboard reaches the rows through their own role="button"/tabindex, so
+          the same delegation answers Enter and Space. */}
+      <div
+        className="country-info-body"
+        onClick={recordClickHandler(onOpenRecord)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          if (!event.target.closest?.("[data-event-id]")) return;
+          event.preventDefault();
+          recordClickHandler(onOpenRecord)(event);
+        }}
+      >
         {country.sections.map((section) => (
           <details
             key={section.id}

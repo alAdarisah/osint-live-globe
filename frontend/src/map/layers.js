@@ -164,6 +164,25 @@ function makeHeatResilient(heatLayer) {
   return heatLayer;
 }
 
+/**
+ * How solid a heat canvas is drawn before Admin Mode's own layer opacity.
+ *
+ * leaflet.heat has no opacity of its own worth the name -- `minOpacity` sets the
+ * floor of the density ramp, not the strength of the whole layer, so turning it
+ * down thins the cold end and leaves every hot cell fully opaque. The lever that
+ * does what a reader means by "opacity" is CSS on the canvas element, applied in
+ * applyWashStack in createMapController.js -- which also sets the kernel radius
+ * from the layer's Size dial, since a heat layer has no glyph to scale.
+ *
+ * FIRMS is deliberately faint. A global thermal feed is mostly agricultural
+ * burning (see the firms entry in map/scene.js), and at full strength that smear
+ * sits on top of the conflict pins this map exists for. Jamming stays at full
+ * strength: it is a few hundred cells rather than a quarter of a million points,
+ * and it is a finding rather than a background.
+ */
+export const FIRMS_HEAT_OPACITY = 0.3;
+export const JAMMING_HEAT_OPACITY = 1;
+
 export function createFirmsLayers(map) {
   // FIRMS runs to 100k+ points globally, which as individual icons is just
   // clutter even when clustered -- a density heatmap is the standard way
@@ -361,6 +380,17 @@ export function createUncertaintyLayer(map) {
 
 export function createCitiesGroup(map) {
   return L.layerGroup().addTo(map);
+}
+
+// The rings that show what a city zone covers (see cityZones.js). Shares the
+// uncertainty pane rather than taking one of its own, and for the same two
+// reasons that pane was created: both are areas drawn around a point to say
+// something about a point, and both must be unclickable -- a 25km disc that
+// could take a click would swallow every pin inside the city it is drawn around,
+// which is exactly the pile-up the zones exist to make readable.
+export function createCityZoneLayer(map) {
+  createUncertaintyLayer(map); // for the pane; the group it returns is not ours
+  return L.layerGroup([], { pane: "uncertaintyPane" }).addTo(map);
 }
 
 // Critical infrastructure is a small curated set (see backend/infrastructure.py)

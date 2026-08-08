@@ -18,11 +18,13 @@ const COUNT_KEYS = [
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
 );
-// eventsCapped is a count rather than a flag -- how many events capBySeverity
-// kept at the current zoom, 0 when it kept everything. See createMapController.
+// `capped` is not a flag but a map of counts -- { [layerKey]: howManyKept } for
+// every layer the band cap is currently thinning. eventsCapped is the same
+// number for events alone, kept because the panel still reads it by name. See
+// capByRank in createMapController.
 const EMPTY_ZOOM_NOTES = {
   adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false,
-  ais: false, jamming: false, officials: false, eventsCapped: 0,
+  ais: false, jamming: false, officials: false, capped: {}, eventsCapped: 0,
   gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
 };
 
@@ -38,6 +40,19 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   const [zoom, setZoom] = useState(null);
   const [ready, setReady] = useState(false);
   const [windStatus, setWindStatus] = useState({ ok: true });
+  // Which layers are actually on the map, and which of those the reader has
+  // pinned. Mirrored out of the controller rather than held here, because the
+  // scene resolver moves layers on and off as the camera moves and a React copy
+  // that only ever changed when a checkbox was clicked would drift out of step
+  // with the map within one pan. `wish` is the tri-state from
+  // createMapController's userLayerWish: a key absent from it is one the
+  // resolver is still deciding, which is what the panel renders as
+  // indeterminate.
+  const [layerState, setLayerState] = useState({ on: {}, wish: {}, bypass: false });
+  // What the reader has singled out: {kind:"country"|"layer", key} or null.
+  // Mirrored because the fetch layer needs it -- a focused country lifts the
+  // fetch gate on that country's feeds however far out the camera is.
+  const [focus, setFocus] = useState(null);
   // The country whose card is open (null when none is), and the full selection
   // behind it -- one country can be read while several stay highlighted, so
   // these are genuinely two pieces of state rather than one derived from the
@@ -94,6 +109,8 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
         onCountryFingerprints: setCountryFingerprints,
         onChoroplethChange: setChoropleth,
         onDistrictsChange: setDistricts,
+        onLayerStateChange: setLayerState,
+        onFocusChange: setFocus,
         onBorderRingCommit: (commits) => onBorderRingCommitRef.current?.(commits),
       }
     );
@@ -126,8 +143,24 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     controllerRef.current?.flyTo(lat, lon, minZoom);
   }, []);
 
+  // `visible === null` clears the reader's pin and hands the key back to the
+  // scene resolver -- see setLayerWish in createMapController.js.
   const setLayerVisible = useCallback((key, visible) => {
     controllerRef.current?.setLayerVisible(key, visible);
+  }, []);
+
+  const setSceneBypass = useCallback((on) => {
+    controllerRef.current?.setSceneBypass(on);
+  }, []);
+
+  // Leaflet caches the container's size, so anything that changes the map's box
+  // without a window resize has to say so. Two callers: opening or closing the
+  // control drawer (320px), and entering or leaving Admin Mode (the same 320px,
+  // because the drawer only exists there). The controller has always exposed
+  // this; it was simply never forwarded, so App's call inside togglePanel's
+  // setTimeout was throwing where nothing surfaced it.
+  const invalidateSize = useCallback(() => {
+    controllerRef.current?.invalidateSize();
   }, []);
 
   const setInfraFilter = useCallback((text) => {
@@ -182,6 +215,23 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     controllerRef.current?.setLayerZoomOverrides(next);
   }, []);
 
+  const setLayerWishes = useCallback((next) => {
+    controllerRef.current?.setLayerWishes(next);
+  }, []);
+
+  const setCityZones = useCallback((next) => {
+    controllerRef.current?.setCityZones(next);
+  }, []);
+
+  // Null when the record is no longer in the feed -- see recordDetail in
+  // createMapController.js. Callers render that as "no longer listed" rather
+  // than as an empty card.
+  const recordDetail = useCallback((kind, id) => controllerRef.current?.recordDetail(kind, id) ?? null, []);
+
+  // By reference, uncopied -- see recordsFor in createMapController.js for why,
+  // and for why the editor's list is a snapshot rather than a live view.
+  const recordsFor = useCallback((key) => controllerRef.current?.recordsFor(key) ?? [], []);
+
   const setImagery = useCallback((key, date) => {
     controllerRef.current?.setImagery(key, date);
   }, []);
@@ -211,9 +261,10 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
 
   return {
     ready, counts, zoomNotes, mapBounds, zoom, windStatus, selectedCountry, countrySelection,
+    layerState, setSceneBypass, invalidateSize, focus,
     applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, setAgeReference,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
-    setIconTheme, setLayerZoomOverrides, setImagery,
+    setIconTheme, setLayerZoomOverrides, setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
     choropleth, setChoroplethMetric,
     districts, setDistrictMetric, setDistrictMonth,
     borderEdit, countryFingerprints,

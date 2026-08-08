@@ -23,7 +23,7 @@ layer that can take the site down is worse than no caching layer.
 import json
 import logging
 
-from backend import config
+from backend import config, metrics
 
 log = logging.getLogger("osint-globe.cachestore")
 
@@ -113,6 +113,9 @@ async def get_payload(kind: str, watermark: str | None):
     whose watermark does not match the one just read from Postgres would show
     data older than the database itself reported a moment earlier.
     """
+    # Not counted as a miss: no cache was configured, so no lookup happened and
+    # a "miss" here would drag the hit ratio down over an entirely deliberate
+    # configuration.
     if _client is None or watermark is None:
         return None
     try:
@@ -120,16 +123,25 @@ async def get_payload(kind: str, watermark: str | None):
         _recovered()
     except Exception as exc:  # noqa: BLE001
         _degrade("read", exc)
+        metrics.cache_operations.labels(operation="get", result="error").inc()
         return None
     if raw is None or cached_watermark is None:
+        metrics.cache_operations.labels(operation="get", result="miss").inc()
         return None
     if cached_watermark.decode() != watermark:
+        # Counted apart from a plain miss: this is an entry that exists and was
+        # superseded, which says the cache is working and the data moved --
+        # whereas a rising miss rate says entries are being evicted.
+        metrics.cache_operations.labels(operation="get", result="stale").inc()
         return None
     try:
-        return json.loads(raw)
+        payload = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 - a corrupt entry is a miss, not a crash
         log.warning("Discarding an unreadable cache entry for %s: %s", kind, exc)
+        metrics.cache_operations.labels(operation="get", result="corrupt").inc()
         return None
+    metrics.cache_operations.labels(operation="get", result="hit").inc()
+    return payload
 
 
 async def set_payload(kind: str, watermark: str | None, payload) -> None:
@@ -145,6 +157,7 @@ async def set_payload(kind: str, watermark: str | None, payload) -> None:
         raw = json.dumps(payload, default=str).encode()
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not serialize %s for the cache: %s", kind, exc)
+        metrics.cache_operations.labels(operation="set", result="unserializable").inc()
         return
     if len(raw) > config.CACHE_MAX_PAYLOAD_BYTES:
         # FIRMS runs to 175k points, and a payload large enough to push Redis
@@ -153,6 +166,7 @@ async def set_payload(kind: str, watermark: str | None, payload) -> None:
         # stays cached. The cache worker reports this rather than leaving it to
         # be inferred from a hit ratio.
         log.debug("Not caching %s: %d bytes exceeds the payload ceiling", kind, len(raw))
+        metrics.cache_operations.labels(operation="set", result="too_large").inc()
         return
     try:
         async with _client.pipeline(transaction=True) as pipe:
@@ -160,5 +174,7 @@ async def set_payload(kind: str, watermark: str | None, payload) -> None:
             pipe.set(watermark_key(kind), watermark, ex=config.CACHE_TTL)
             await pipe.execute()
         _recovered()
+        metrics.cache_operations.labels(operation="set", result="ok").inc()
     except Exception as exc:  # noqa: BLE001
         _degrade("write", exc)
+        metrics.cache_operations.labels(operation="set", result="error").inc()
