@@ -254,27 +254,54 @@ function buildConflictSummary(bounds, raw, escalationZone) {
 // magnitudes differ hugely between countries.
 const SPARK_MONTHS = 12;
 
-function buildSparkline(monthlySeries) {
-  if (!monthlySeries || monthlySeries.length < 2) return "";
-  const recent = monthlySeries.slice(-SPARK_MONTHS);
-  const max = Math.max(...recent.map((m) => m.fatalities || 0), 1);
+// A minimal inline bar chart. Built for ACLED's monthly fatality counts (the
+// defaults below); since Task 8 it is also how the energy section (buildEnergy)
+// draws the 24-hour net-flow series -- same bars, same "accent the newest
+// point" idea, same non-uniform viewBox scaling so the SVG fills whatever
+// width the card gives it, differing only in how many points to plot, how to
+// read a bar's value, and how to caption the chart. `headingOf` is spliced in
+// unescaped (the default has no untrusted data in it; a caller with backend
+// strings to interpolate -- e.g. a unit -- must esc() them itself), while the
+// caption returned by `captionOf` is escaped once here, for both the visible
+// line and the SVG's aria-label, so a caller returns plain text either way.
+//
+// Exported for the sparkline tests: there is no DOM here to poke, only this.
+export function buildSparkline(series, opts = {}) {
+  const {
+    count = SPARK_MONTHS,
+    // Named readValue rather than valueOf: every plain object inherits
+    // Object.prototype.valueOf, so `{ valueOf = default } = opts` never sees
+    // its default when opts is {} -- it silently picks up the built-in
+    // instead, which is not a function of one argument and throws the
+    // moment it is called. readValue has no such collision.
+    readValue = (m) => m.fatalities || 0,
+    headingOf = (recent) => `Fatalities, last ${recent.length} months (HDX/ACLED)`,
+    captionOf = (recent, max) => {
+      const last = recent[recent.length - 1];
+      return last ? `${MONTH_ABBR[last.month]} ${last.year}: ${last.fatalities || 0} killed · peak ${max}` : "";
+    },
+  } = opts;
+  if (!series || series.length < 2) return "";
+  const recent = series.slice(-count);
+  // A floor, not a claim that the smallest chartable value is 1 -- it only
+  // keeps the divide below from being by zero when every point in view is
+  // zero (an all-quiet fatality month, a border with no flow at all).
+  const max = Math.max(...recent.map((m) => Math.abs(readValue(m))), Number.EPSILON);
   const w = 8;
   const gap = 2;
   const h = 26;
   const bars = recent
     .map((m, i) => {
-      const val = m.fatalities || 0;
-      const bh = Math.max(1, Math.round((val / max) * h));
+      const bh = Math.max(1, Math.round((Math.abs(readValue(m)) / max) * h));
       // Newest bar accented so "where are we now" is obvious at a glance.
       const fill = i === recent.length - 1 ? "#ff5c2a" : "rgba(255,140,58,0.55)";
       return `<rect x="${i * (w + gap)}" y="${h - bh}" width="${w}" height="${bh}" fill="${fill}" rx="1"/>`;
     })
     .join("");
-  const last = recent[recent.length - 1];
-  const label = last ? `${MONTH_ABBR[last.month]} ${last.year}: ${last.fatalities || 0} killed` : "";
-  return `<div class="meta">Fatalities, last ${recent.length} months (HDX/ACLED)</div>
+  const label = captionOf(recent, max);
+  return `<div class="meta">${headingOf(recent)}</div>
     <svg class="cspark" viewBox="0 0 ${recent.length * (w + gap)} ${h}" preserveAspectRatio="none" role="img" aria-label="${esc(label)}">${bars}</svg>
-    <div class="meta">${esc(label)} &middot; peak ${max}</div>`;
+    <div class="meta">${esc(label)}</div>`;
 }
 
 /**
@@ -352,6 +379,17 @@ function buildVerifiedRecord(wanted, raw) {
 // Every figure is a country-level aggregate over a reference period of months,
 // so each one states its period. Nothing here is live and none of it is drawn
 // on the map.
+// A bare "2" tells a reader nothing; this says what an admin_level number is
+// a precision claim about. HDX HAPI's own convention (also IPC's): 0 is the
+// whole country, 1/2/... are progressively finer subnational divisions, and
+// which one a given row lands on varies by country and by dataset -- see
+// humanitarian.py's parse_food_security/parse_idps, which each take the
+// deepest level actually present rather than assuming one.
+function adminLevelCaveat(level) {
+  if (level == null) return "";
+  return level === 0 ? "a national figure" : `a subnational figure, reported at admin level ${level}`;
+}
+
 function buildHumanitarian(props, raw) {
   const record = props.iso_a3 ? (raw.humanitarian || {})[props.iso_a3] : null;
   if (!record) return "";
@@ -366,6 +404,12 @@ function buildHumanitarian(props, raw) {
       d.asylum_seekers != null ? `${fmtNumber(d.asylum_seekers)} asylum seekers` : null,
       d.idps != null ? `${fmtNumber(d.idps)} internally displaced` : null,
       d.stateless ? `${fmtNumber(d.stateless)} stateless` : null,
+      // Both new in Task 8: UNHCR reports these alongside refugees/asylum
+      // seekers/stateless for the same country-of-origin row, and != null
+      // (rather than truthy) so a reported zero still shows -- "0 returned
+      // this year" is a fact, not the same as "not reported".
+      d.returned_refugees != null ? `${fmtNumber(d.returned_refugees)} returned refugees` : null,
+      d.others_of_concern != null ? `${fmtNumber(d.others_of_concern)} others of concern` : null,
     ].filter(Boolean);
     if (parts.length) {
       rows.push(`<div>${parts.join(" &middot; ")}</div>
@@ -376,11 +420,15 @@ function buildHumanitarian(props, raw) {
   if (food) {
     rows.push(`<div><b>${fmtNumber(food.population_in_crisis)}</b> in IPC phase 3 or worse (crisis, emergency
       or famine)</div>
-      <div class="meta">IPC via HDX HAPI, analysis period from ${esc((food.reference_period_start || "").slice(0, 10))}.</div>`);
+      <div class="meta">IPC via HDX HAPI, analysis period from ${esc((food.reference_period_start || "").slice(0, 10))}${
+        food.admin_level != null ? ` &mdash; ${adminLevelCaveat(food.admin_level)}` : ""
+      }.</div>`);
   }
   if (idps) {
     rows.push(`<div>${fmtNumber(idps.population)} internally displaced, in-country assessment</div>
-      <div class="meta">HDX HAPI, reporting round from ${esc((idps.reference_period_start || "").slice(0, 10))}.</div>`);
+      <div class="meta">HDX HAPI, reporting round from ${esc((idps.reference_period_start || "").slice(0, 10))}${
+        idps.admin_level != null ? ` &mdash; ${adminLevelCaveat(idps.admin_level)}` : ""
+      }.</div>`);
   }
   if (presence) {
     rows.push(`<div>${fmtNumber(presence.organisations)} aid organisations reported active across
@@ -460,10 +508,31 @@ export function foodRecordFor(props, raw) {
 // `score` is a composite of three detection methods and is unbounded -- it is
 // emphatically not a percentage of the country offline, and this says so rather
 // than dressing it up as one.
+/**
+ * window_start/window_end (outages.py, unix seconds) as the reader's own
+ * clock rather than the bare epoch numbers the payload carries: how many
+ * hours the score covers, and the UTC time it runs up to -- "last 24 hours,
+ * to 14:00 UTC". Reads the actual window rather than assuming it always
+ * matches outages.py's WINDOW_SECONDS constant, since a slow or retried poll
+ * can make it something other than exactly 24h.
+ *
+ * Exported for the test: it is the one piece of arithmetic in this section.
+ */
+export function formatOutageWindow(windowStart, windowEnd) {
+  if (typeof windowStart !== "number" || typeof windowEnd !== "number") return "";
+  const end = new Date(windowEnd * 1000);
+  if (Number.isNaN(end.getTime())) return "";
+  const hours = Math.round((windowEnd - windowStart) / 3600);
+  const hh = String(end.getUTCHours()).padStart(2, "0");
+  const mm = String(end.getUTCMinutes()).padStart(2, "0");
+  return `last ${hours} hour${hours === 1 ? "" : "s"}, to ${hh}:${mm} UTC`;
+}
+
 function buildConnectivity(props, raw) {
   const outage = outageFor(props, raw);
   if (!outage) return "";
   const signals = Object.keys(outage.signals || {});
+  const windowText = formatOutageWindow(outage.window_start, outage.window_end);
   return `
     <div class="outage-block">
       <div class="outage-head">Internet disruption detected</div>
@@ -472,10 +541,10 @@ function buildConnectivity(props, raw) {
       }</div>
       ${signals.length ? `<div class="meta">Seen in: ${signals.map((k) => esc(k.split(".")[0])).join(", ")}</div>` : ""}
     </div>
-    <p class="meta">Over the last 24 hours, from IODA (Georgia Tech), which watches BGP withdrawals, active
-      probing and darknet traffic. The score is a composite that is only meaningful <b>in comparison</b>
-      &mdash; against this country's own normal and against others in the same window. It is not a
-      percentage of the country offline, and it cannot distinguish a shutdown from a cable fault.</p>`;
+    <p class="meta">Over the ${esc(windowText || "reporting window")}, from IODA (Georgia Tech), which watches
+      BGP withdrawals, active probing and darknet traffic. The score is a composite that is only meaningful
+      <b>in comparison</b> &mdash; against this country's own normal and against others in the same window.
+      It is not a percentage of the country offline, and it cannot distinguish a shutdown from a cable fault.</p>`;
 }
 
 // --- cross-border electricity (backend/sources/energy_flows.py) ---------
@@ -504,6 +573,39 @@ function buildEnergy(props, raw) {
   const signed = (v, unit) => `${v > 0 ? "+" : ""}${Number(v).toFixed(2)} ${esc(unit || "GW")}`;
   const counterparts = (physical && physical.counterparts) || [];
   const shown = counterparts.slice(0, ENERGY_COUNTERPART_CAP);
+
+  // available_from/interval_minutes are the publisher's own claim about what
+  // period it offers and at what resolution -- reported, like everything
+  // else in this function, and carried through rather than assumed to always
+  // be "today, 15 minutes" (see energy_flows.py's parse_exchange docstring).
+  const coverageLine = (h) => (h.available_from
+    ? `<div class="meta">Coverage reported: from ${esc(h.available_from)}${
+        h.interval_minutes != null ? ` at ${esc(h.interval_minutes)}-minute intervals` : ""
+      }.</div>`
+    : "");
+
+  // net_series is the same shape on both halves, but the two halves are not
+  // the same kind of evidence -- physical is metered, commercial is a
+  // published schedule -- so the caller says which word applies and the
+  // chart is labelled with that word rather than one label doing for both.
+  // Reuses buildSparkline rather than a second bar-chart renderer; only the
+  // value reader and the two captions differ from the fatalities default.
+  const netFlowSpark = (h, provenanceWord) => {
+    if (!h.net_series || h.net_series.length < 2) return "";
+    const unit = h.unit || "GW";
+    return buildSparkline(h.net_series, {
+      count: Infinity, // the whole reported window, not the last 12 of anything
+      readValue: (pt) => pt.net,
+      headingOf: (recent) => `Net position, ${recent.length} intervals (${esc(unit)}, ${provenanceWord})`,
+      captionOf: (recent, max) => {
+        const last = recent[recent.length - 1];
+        if (!last) return "";
+        const val = `${last.net > 0 ? "+" : ""}${Number(last.net).toFixed(2)} ${unit}`;
+        return `${last.t || "latest"}: ${val} · peak ${max.toFixed(2)} ${unit}`;
+      },
+    });
+  };
+
   return `
     <div class="cstats">
       ${physical && physical.net != null
@@ -519,6 +621,8 @@ function buildEnergy(props, raw) {
       }${h.timezone ? ` (${esc(h.timezone)})` : ""}${
         h.bidding_zone ? ` &middot; bidding zone ${esc(h.bidding_zone)}` : ""
       }</div>
+      ${coverageLine(h)}
+      ${netFlowSpark(h, "measured")}
       ${h.sign_convention
         // Printed verbatim rather than restated. The backend deliberately does
         // not assert which sign means import -- it carries the publisher's own
@@ -541,6 +645,8 @@ function buildEnergy(props, raw) {
         <div class="meta">${esc(h.resolution || "resolution not stated")} resolution${
           h.available_until ? ` &middot; published through ${esc(h.available_until)}` : ""
         }</div>
+        ${coverageLine(h)}
+        ${netFlowSpark(h, "reported")}
         <p class="meta"><b>Not a measurement, and never used as one.</b> This is the day-ahead market's
           intent. The meters above run several hours behind wall clock &mdash; that is ENTSO-E's
           publication lag, not a choice this app makes &mdash; so early in the day the schedule can be
