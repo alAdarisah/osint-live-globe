@@ -1569,7 +1569,153 @@ export const SHIP_STYLE = {
 /** Which layer key a ship class belongs to -- its opacity/scale settings. */
 export const SHIP_LAYER_KEY = { navy: "aisNavy", tanker: "aisTanker", other: "aisCivilian" };
 
-export function decorateAis(d, { selectedMmsi } = {}) {
+// ---------- vessel detail (Task 17: GET /api/vessel/{mmsi}) ----------------
+//
+// Two sections beyond Identity/Voyage/Flags above, fed by a second fetch
+// (createMapController.js's loadVesselDetail) that lands after the ship's
+// popup is already open -- selectShip cannot wait for it, so both sections
+// have to read honestly from every state that fetch can be in: absent or
+// "loading" while it's in flight, "error" if it failed (the brief is
+// explicit that a failure must say "unavailable", never silently vanish),
+// "ready" once /api/vessel/{mmsi} has answered. `vesselDetail` is only ever
+// passed for the selected hull -- see decorateAis below -- so every other
+// ship's popup (built lazily, on its own open) never pays for this.
+
+const CARGO_CLASS_LABEL = {
+  tanker: "Tanker", cargo: "Cargo", fishing: "Fishing", passenger: "Passenger",
+  tug: "Tug / towing", naval: "Naval", other: "Other",
+};
+
+const LADEN_LABEL = { laden: "Laden", ballast: "Ballast", unknown: "Unknown" };
+
+function fmtDraughtM(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)} m` : "n/a";
+}
+
+// port_calls_for/port_calls_at never carry a distance -- only the tier that
+// distance produced (see backend/refine/port_calls.py's _classify, which
+// discards it once the tier is picked). The radius each tier actually means
+// travels on the response instead (app.py's PORT_CALL_CONFIDENCE_KM), so this
+// reads it from there rather than hardcoding the same three numbers again.
+const CONFIDENCE_NOTE = {
+  exact: (km) => `within ${km} km of the charted point`,
+  proximity: (km) => `within ${km} km &mdash; an outer anchorage or approach, not necessarily alongside`,
+  inferred: (km) => `attributed to the nearest known port, up to ${km} km away`,
+};
+
+function confidenceCell(confidence, radii) {
+  const km = radii?.[confidence];
+  const note = km != null && CONFIDENCE_NOTE[confidence] ? CONFIDENCE_NOTE[confidence](km) : null;
+  return `${esc(confidence || "n/a")}${note ? `<div class="meta">${note}</div>` : ""}`;
+}
+
+function fmtDwell(arrivedAt, departedAt) {
+  if (!Number.isFinite(arrivedAt)) return "n/a";
+  if (!Number.isFinite(departedAt)) return "still in port";
+  const hours = (departedAt - arrivedAt) / 3600;
+  if (hours < 1) return `${Math.round(hours * 60)} min`;
+  if (hours < 48) return `${hours.toFixed(1)} h`;
+  return `${(hours / 24).toFixed(1)} d`;
+}
+
+/** The cargo-class/laden-state fold. Opens with the honesty caveat the brief
+ * requires verbatim: AIS never carries cargo, so everything below it is a
+ * guess with its working shown, not a fact. */
+function cargoSection(vesselDetail) {
+  const head = '<div class="csection-h">Cargo (inferred)</div>' +
+    '<p class="meta">AIS does not broadcast cargo. What follows is inferred from vessel class, ' +
+    "draught and port calls &mdash; never a manifest.</p>";
+  if (!vesselDetail || vesselDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (vesselDetail.status === "error") {
+    return `${head}<p class="meta"><b>Cargo inference unavailable</b> &mdash; the vessel-detail request failed.</p>`;
+  }
+  const profile = vesselDetail.data?.profile;
+  if (!profile) {
+    return `${head}<p class="meta">No inferred profile held for this hull yet &mdash; it takes a few
+      AIS movement reports before this app's own vessel-profile job builds one.</p>`;
+  }
+  const cclass = profile.cargo_class ? (CARGO_CLASS_LABEL[profile.cargo_class] || profile.cargo_class) : null;
+  const ladenLabel = LADEN_LABEL[profile.laden_state] || "Unknown";
+  const ladenPct = Math.round((profile.laden_threshold ?? 0) * 100);
+  const ballastPct = Math.round((profile.ballast_threshold ?? 0) * 100);
+  return `
+    ${head}
+    <div>Cargo class: ${cclass
+      ? `<b>${esc(cclass)}</b> <span class="meta">&mdash; derived from the AIS ship-type code</span>`
+      : '<span class="meta">not derivable &mdash; no ship-type code decoded for this hull</span>'}</div>
+    <div class="inferred-block">
+      <div>Laden state: <b>${esc(ladenLabel)}</b>${
+        profile.laden_state_reason === "insufficient_samples"
+          ? ' <span class="meta">(insufficient draught samples)</span>' : ""
+      }</div>
+      <div class="meta">Current draught ${fmtDraughtM(profile.draught_current)}, observed
+        ${fmtDraughtM(profile.draught_min_seen)}&ndash;${fmtDraughtM(profile.draught_max_seen)} over
+        ${esc(profile.sample_count ?? 0)} sample${profile.sample_count === 1 ? "" : "s"} of this hull's
+        own history. Called laden above ${ladenPct}% of the observed maximum, ballast below
+        ${ballastPct}%, and unknown in between or with fewer than
+        ${esc(profile.min_sample_threshold ?? "?")} samples.</div>
+    </div>
+    ${profile.implied_trade ? `<p class="meta">${esc(profile.implied_trade)}</p>` : ""}
+    <div class="meta">Source: this app's own vessel-profile job, over aisstream.io AIS positions and
+      static data &mdash; cargo class <i>derived</i> from the ship-type code, laden state <i>inferred</i>
+      from this hull's own draught history${
+        profile.updated ? ` &middot; last refined ${esc(utcClockFromUnix(profile.updated))}` : ""
+      }</div>`;
+}
+
+function vesselPortCallRow(row, radii) {
+  const port = row.port_name || row.port_id || "Unknown port";
+  return `<tr>
+    <td>${esc(utcClockFromUnix(row.arrived_at))}</td>
+    <td>${esc(port)}</td>
+    <td>${esc(row.port_country || "n/a")}</td>
+    <td>${esc(fmtDwell(row.arrived_at, row.departed_at))}</td>
+    <td>${fmtDraughtM(row.draught_in)} / ${fmtDraughtM(row.draught_out)}</td>
+    <td>${confidenceCell(row.confidence, radii)}</td>
+  </tr>`;
+}
+
+/** The last-ten-port-calls table, plus a standing "currently in port" line
+ * from `open_call` when there is one -- a fact worth stating on its own
+ * rather than making a reader spot it as the one row in the table with no
+ * departure time. */
+function portCallsSection(vesselDetail) {
+  const head = '<div class="csection-h">Port calls</div>';
+  if (!vesselDetail || vesselDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (vesselDetail.status === "error") {
+    return `${head}<p class="meta"><b>Port-call history unavailable</b> &mdash; the vessel-detail request failed.</p>`;
+  }
+  const data = vesselDetail.data || {};
+  const radii = data.confidence_radius_km;
+  const rows = data.port_calls || [];
+  if (!rows.length) {
+    return `${head}<p class="meta">No AIS-inferred port calls recorded for this hull.</p>`;
+  }
+  const openCall = data.open_call;
+  const openNote = openCall
+    ? `<p class="meta"><b>Currently in port:</b> ${esc(openCall.port_name || openCall.port_id || "unknown port")}${
+        openCall.port_country ? `, ${esc(openCall.port_country)}` : ""
+      }, arrived ${esc(utcClockFromUnix(openCall.arrived_at))} &mdash; ${confidenceCell(openCall.confidence, radii)}</p>`
+    : "";
+  return `
+    ${head}
+    ${openNote}
+    <table class="food-estimates port-calls-table">
+      <tr><th>Arrived</th><th>Port</th><th>Country</th><th>Dwell</th><th>Draught in/out</th><th>Confidence</th></tr>
+      ${rows.slice(0, 10).map((r) => vesselPortCallRow(r, radii)).join("")}
+    </table>
+    <p class="meta">Arrival and departure are inferred from AIS speed and position sustained near a
+      charted port &mdash; never a berth confirmation. See each row's confidence for how sure the
+      attribution is.</p>
+    <div class="meta">Source: this app's own port-call job, over aisstream.io AIS position history
+      &mdash; <i>inferred</i>, not a port authority record</div>`;
+}
+
+export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
   const type = classifyShip(d);
   const navy = type === "navy";
   const tanker = type === "tanker";
@@ -1654,7 +1800,9 @@ export function decorateAis(d, { selectedMmsi } = {}) {
       the vessel's own transponder; identity, destination, ETA, draught, dimensions and ship type
       <i>reported</i> by the crew via AIS static data; flag state <i>derived</i> from the MMSI's MID${
         designated ? " &middot; designations: US Treasury OFAC" : ""
-      }</div>`;
+      }</div>
+    ${d.mmsi === selectedMmsi ? cargoSection(vesselDetail) : ""}
+    ${d.mmsi === selectedMmsi ? portCallsSection(vesselDetail) : ""}`;
   const heading = Number.isFinite(d.heading) && d.heading !== 511 ? d.heading : d.course;
   let cls = "ship-marker";
   if (navy) cls += " navy-marker";
@@ -1898,7 +2046,51 @@ export const AIS_COVERAGE_CAVEAT =
   "Vessels layer excludes ship-to-ship candidates near a listed port, and before this " +
   "gazetteer arrived almost every real harbour on earth was open water to that detector.</p>";
 
-export function decoratePort(d, { offset } = {}) {
+function portTrafficRow(row, radii) {
+  const vessel = row.vessel_name || `MMSI ${row.mmsi}`;
+  return `<tr>
+    <td>${esc(utcClockFromUnix(row.arrived_at))}</td>
+    <td>${esc(vessel)}</td>
+    <td>${esc(fmtDwell(row.arrived_at, row.departed_at))}</td>
+    <td>${fmtDraughtM(row.draught_in)} / ${fmtDraughtM(row.draught_out)}</td>
+    <td>${confidenceCell(row.confidence, radii)}</td>
+  </tr>`;
+}
+
+/** The port card's "recent arrivals and departures", fed by a second fetch
+ * (createMapController.js's loadPortTraffic, GET /api/vessel/port/{port_id})
+ * that lands after this popup is already open -- same {status, data}
+ * contract as the ship card's vesselDetail above, for the same reason: the
+ * gazetteer entry itself is reference data (see the caveat below), but
+ * whether AIS has actually seen a vessel call here is not, and has to be
+ * able to say "loading" or "unavailable" rather than silently show nothing. */
+function portTrafficSection(portDetail) {
+  const head = '<div class="csection-h">Recent arrivals and departures</div>';
+  if (!portDetail || portDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (portDetail.status === "error") {
+    return `${head}<p class="meta"><b>Recent traffic unavailable</b> &mdash; the request failed.</p>`;
+  }
+  const rows = portDetail.data?.port_calls || [];
+  const radii = portDetail.data?.confidence_radius_km;
+  if (!rows.length) {
+    return `${head}<p class="meta">No AIS-inferred port calls recorded here.</p>`;
+  }
+  return `
+    ${head}
+    <table class="food-estimates port-calls-table">
+      <tr><th>Arrived</th><th>Vessel</th><th>Dwell</th><th>Draught in/out</th><th>Confidence</th></tr>
+      ${rows.slice(0, 10).map((r) => portTrafficRow(r, radii)).join("")}
+    </table>
+    <p class="meta">Arrival and departure are inferred from AIS speed and position sustained near this
+      charted point &mdash; never a berth confirmation. See each row's confidence for how sure the
+      attribution is.</p>
+    <div class="meta">Source: this app's own port-call job, over aisstream.io AIS position history
+      &mdash; <i>inferred</i>, not a port authority record</div>`;
+}
+
+export function decoratePort(d, { offset, portDetail } = {}) {
   const style = portStyle();
   const name = d.name || "Port";
   const size = d.harbor_size_label || "Harbour size not coded";
@@ -1920,7 +2112,8 @@ export function decoratePort(d, { offset } = {}) {
       news cycle. It would not be acceptable for anything time-sensitive, and this layer makes no
       time-sensitive claim.</p>
     <div class="meta">Source: ${esc(d.publisher || "NGA World Port Index")} &mdash; a curated
-      dataset${d.license ? `, ${esc(d.license)}` : ""}.</div>`;
+      dataset${d.license ? `, ${esc(d.license)}` : ""}.</div>
+    ${d.id != null ? portTrafficSection(portDetail) : ""}`;
   return {
     icon: icon(style, style.color, portIconSize(d), 0, "port-marker", 0.85 * layerOpacity("ports"), "", offset),
     tooltip,

@@ -3669,6 +3669,15 @@ html, body {
 .food-estimates td:first-child { text-align: left; padding-left: 0; }
 .food-estimates td:first-child { color: var(--text-secondary); }
 
+/* Task 17's port-call tables (ship card's Port calls, port card's Recent
+   arrivals and departures) reuse .food-estimates above -- comparing rows is
+   the same shape of table -- but every column here is a date, a name or a
+   confidence note, not a number to right-align against its neighbours the
+   way the food estimates are, so this puts alignment and wrapping back to
+   normal rather than food-estimates' right/nowrap defaults. */
+.port-calls-table th,
+.port-calls-table td { text-align: left; white-space: normal; }
+
 /* --- text size -------------------------------------------------------
    Admin Mode's text scale, applied to the HUD's own type.
    Every size in this stylesheet is an absolute px (the panels are dense,

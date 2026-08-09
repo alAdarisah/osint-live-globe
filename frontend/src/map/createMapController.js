@@ -149,7 +149,7 @@ import {
   nearestLon, unwrapPath, boundsContainsPoint,
   worldCopyOffsets, worldCopyDraws, worldCopyKey, worldCopyPlacer, shiftPathLon,
 } from "../utils/geo";
-import { fetchJson } from "../api";
+import { fetchJson, vesselDetailUrl, portCallsUrl } from "../api";
 
 // A nearby ACLED/GDELT event within this radius flags an infrastructure
 // site as a "hot zone" and triggers its flare animation -- same radius
@@ -662,6 +662,18 @@ export function createMapController(container, initial, callbacks) {
   const militaryTrails = new Map();
   let selectedIcao = null;
   let selectedMmsi = null;
+  // The ship popup selectShip opens, kept so loadVesselDetail can refresh its
+  // content in place once /api/vessel/{mmsi} answers -- that fetch cannot
+  // finish before the popup itself opens (see selectShip), so the popup is
+  // first drawn without the Cargo/Port calls sections and then updated.
+  let shipPopup = null;
+  // port_id -> {status: "loading"|"ready"|"error", data} for the port card's
+  // "recent arrivals and departures" fetch. Unlike the ship card, this is a
+  // real cache -- read back by decorateOptionsFor below on every open, not
+  // just written -- because popups for the "ports" layer are lazy (see
+  // buildMarker) and rebuilt from scratch each time one opens, so without
+  // this a reopened port would forget an answer it already has and re-fetch.
+  const portDetailCache = new Map();
   let countryNameByIso2 = {};
   // The conflict zone currently flown to, or null for World -- read only by the
   // moveend handler, to tell a pan away from a zone from a pan within one.
@@ -2184,6 +2196,30 @@ export function createMapController(container, initial, callbacks) {
     }
   }
 
+  // Fetches /api/vessel/{mmsi} (Task 17) and refreshes the open ship popup
+  // once it lands. Never on the critical path of opening the popup: selectShip
+  // has already drawn Identity/Voyage/Flags synchronously from the live AIS
+  // record by the time this is called, so the Cargo and Port calls sections
+  // arrive a moment later rather than delaying the popup itself.
+  //
+  // Unlike loadRecordedTrack's silent failure (a trail is an enhancement with
+  // an existing line to fall back on), a failure here is recorded as a real
+  // "error" state -- the brief requires the two new sections to say
+  // "unavailable" rather than just not appear, since there is no earlier
+  // render of them to fall back to.
+  async function loadVesselDetail(mmsi, item, stillSelected) {
+    let entry;
+    try {
+      const data = await fetchJson(vesselDetailUrl(mmsi));
+      entry = { status: "ready", data };
+    } catch {
+      entry = { status: "error" };
+    }
+    if (!stillSelected() || !shipPopup) return;
+    const d = decorateAis(item, { selectedMmsi, vesselDetail: entry });
+    shipPopup.setContent(d.detail);
+  }
+
   function selectAircraft(item) {
     selectedIcao = selectedIcao === item.icao24 ? null : item.icao24;
     if (selectedIcao) {
@@ -2214,10 +2250,18 @@ export function createMapController(container, initial, callbacks) {
         "ais", chosen, shipTrails, SHIP_TRAIL_MAX_POINTS,
         () => selectedMmsi === chosen, () => renderMarkerLayer("ais")
       );
-      const d = decorateAis(item, { selectedMmsi });
-      L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+      // vesselDetail is always undefined on this first render, whether or not
+      // this hull's card has been opened before this tab: the brief requires
+      // a real "loading" state on the way in, not a stale answer old enough
+      // to read as current when it may not be (a laden verdict from an hour
+      // ago on a hull that has since discharged, say) -- so this never reuses
+      // a previous fetch, unlike the port card's cache below.
+      const d = decorateAis(item, { selectedMmsi, vesselDetail: undefined });
+      shipPopup = L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+      loadVesselDetail(chosen, item, () => selectedMmsi === chosen);
     } else {
       shipTrails.clear();
+      shipPopup = null;
       map.closePopup();
     }
     renderMarkerLayer("ais");
@@ -2451,7 +2495,37 @@ export function createMapController(container, initial, callbacks) {
       twin: key === "airports" ? osmTwins.airfieldTwinOf.get(String(item.id))
         : key === "dams" ? osmTwins.damTwinOf.get(String(item.id))
         : undefined,
+      // Task 17's "recent arrivals and departures": whatever this port's
+      // GET /api/vessel/port/{port_id} fetch currently knows, or undefined
+      // before that fetch has ever run (see loadPortTraffic, wired to this
+      // layer's popupopen below) -- decoratePort reads undefined as "loading".
+      portDetail: key === "ports" ? portDetailCache.get(String(item.id)) : undefined,
     };
+  }
+
+  // Fetches /api/vessel/port/{port_id} (Task 17) the first time a port's
+  // popup opens, and calls `onUpdate` once it lands so the caller can
+  // re-render whatever is currently showing. Unlike loadVesselDetail's
+  // ship-side sibling, a port's traffic is not cleared and re-fetched on
+  // every open -- a port card is reference data first (see decorators.js's
+  // AIS_COVERAGE_CAVEAT) and its recent-traffic fold is one more read of the
+  // same aisstream.io history on every visit, not a value that goes stale
+  // inside one session -- but a failed fetch is retried on the next open rather
+  // than cached as permanently unavailable, since a dropped request is
+  // exactly the kind of transient failure a reopen ought to just fix.
+  async function loadPortTraffic(portId, onUpdate) {
+    const existing = portDetailCache.get(portId);
+    if (existing && existing.status !== "error") return;
+    portDetailCache.set(portId, { status: "loading" });
+    let entry;
+    try {
+      const data = await fetchJson(portCallsUrl(portId));
+      entry = { status: "ready", data };
+    } catch {
+      entry = { status: "error" };
+    }
+    portDetailCache.set(portId, entry);
+    onUpdate();
   }
 
   /**
@@ -2499,6 +2573,21 @@ export function createMapController(container, initial, callbacks) {
       className: "map-tooltip",
       direction: "top",
     });
+    // Task 17's port-card traffic fold: kicked off on open rather than
+    // fetched for every port up front, since there can be thousands of World
+    // Port Index entries in view and a reader only ever looks at the one
+    // they clicked. lazyOptions() re-reads portDetailCache on the way back
+    // in, so once loadPortTraffic resolves, re-running the same popup
+    // content function it is already bound to (lazyDecorate) picks up the
+    // answer with no separate render path to keep in sync.
+    if (key === "ports") {
+      marker.on("popupopen", () => {
+        loadPortTraffic(String(marker._item.id), () => {
+          const popup = marker.getPopup();
+          if (popup?.isOpen()) popup.setContent(lazyDecorate().detail);
+        });
+      });
+    }
     return marker;
   }
 

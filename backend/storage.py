@@ -1875,6 +1875,26 @@ async def entity_latest(kind: str, order_by_recency: bool = False) -> list[dict]
     return [json.loads(r["payload"]) for r in rows]
 
 
+async def entity_latest_one(kind: str, entity_id: str) -> dict | None:
+    """One entity's current entity_latest payload, or None if it isn't tracked.
+
+    A single lookup on entity_latest's own primary key (kind, entity_id) --
+    see the CREATE TABLE at the top of this module -- rather than the
+    whole-kind scan entity_latest() above does. Task 17's vessel detail
+    endpoint (and its port-card sibling) use this so opening one ship's card,
+    or resolving one port_id to a name, costs one indexed row read rather
+    than a fetch of every contact this map currently holds for that kind.
+    """
+    if _pool is None:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload FROM entity_latest WHERE kind = $1 AND entity_id = $2",
+            kind, str(entity_id),
+        )
+    return json.loads(row["payload"]) if row else None
+
+
 def _deleted_count(status: str) -> int:
     """Row count out of asyncpg's "DELETE n" command tag."""
     try:

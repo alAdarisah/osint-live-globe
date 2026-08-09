@@ -86,3 +86,24 @@ export function urlWithQuery(base, query) {
   const sep = base.includes("?") ? "&" : "?";
   return `${base}${sep}${query}`;
 }
+
+/**
+ * The vessel-card endpoint (Task 17's /api/vessel/{mmsi}): one hull's
+ * identity, inferred cargo/laden profile and recent port calls. A per-entity
+ * route like /api/track, not a filtered source -- there is nothing to share
+ * an ETag with, since it is keyed by a single MMSI a reader just clicked.
+ */
+export function vesselDetailUrl(mmsi) {
+  return `/api/vessel/${encodeURIComponent(mmsi)}`;
+}
+
+/**
+ * The port-card sibling: one port's recent arrivals and departures, read
+ * from the same vessel_port_calls table via storage.port_calls_at rather
+ * than storage.port_calls_for. A separate path from vesselDetailUrl above
+ * because a port_id and an MMSI are different id spaces -- see the report
+ * on Task 17 for why this took its own route instead of a query param.
+ */
+export function portCallsUrl(portId) {
+  return `/api/vessel/port/${encodeURIComponent(portId)}`;
+}

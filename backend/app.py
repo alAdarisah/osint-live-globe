@@ -898,6 +898,134 @@ async def track(kind: str, entity_id: str, points: int = 800):
     }
 
 
+# What a port_calls row's `confidence` tier actually means, in the distance
+# AIS gave no berth for. Mirrors backend/refine/port_calls.py's own
+# PORT_EXACT_RADIUS_KM / PORT_PROXIMITY_RADIUS_KM / PORT_SEARCH_RADIUS_KM --
+# duplicated rather than imported, because that module pulls in the ingest
+# side's ProximityIndex and dark_vessels machinery this request-serving
+# process has no other reason to load, for three numbers that do not change
+# on their own. vessel_port_calls itself stores only the tier, never the
+# distance that produced it (see _classify in port_calls.py), so this is the
+# one place that distance can still reach a card: sent with every response
+# rather than hardcoded a third time in the frontend, so a reader sees the
+# actual radius behind "exact"/"proximity"/"inferred" instead of just the word.
+PORT_CALL_CONFIDENCE_KM = {"exact": 3.0, "proximity": 15.0, "inferred": 50.0}
+
+
+def _curated_port_by_id() -> dict[str, dict]:
+    """The curated harbours in backend/infrastructure.py, keyed by id -- the
+    free half of the port-name lookup below, since these never touch
+    Postgres. Mirrors the same filter backend/refine/vessel_profile.py's own
+    _load_port_labels applies to the same list."""
+    return {
+        str(site.get("id") or site.get("name")): site
+        for site in infrastructure.INFRA_SITES
+        if site.get("type") == "port"
+    }
+
+
+async def _port_labels_for(port_ids: set[str]) -> dict[str, dict]:
+    """port_id -> {"name", "country"} for a small, already-known set of ids.
+
+    Same two sources vessel_profile.py's _load_port_labels combines (the
+    curated list above, plus the World Port Index rows in entity_latest), but
+    scoped to only the ids one card's rows actually name rather than every
+    port this map knows. That module runs on a schedule and can afford
+    entity_latest("ports") whole; this runs on a request path and reads one
+    indexed row per still-unresolved id instead (storage.entity_latest_one).
+    """
+    if not port_ids:
+        return {}
+    curated = _curated_port_by_id()
+    labels: dict[str, dict] = {}
+    missing = []
+    for port_id in port_ids:
+        site = curated.get(port_id)
+        if site:
+            labels[port_id] = {"name": site.get("name") or port_id, "country": site.get("country")}
+        else:
+            missing.append(port_id)
+    if missing:
+        found = await asyncio.gather(*(storage.entity_latest_one("ports", pid) for pid in missing))
+        for port_id, port in zip(missing, found):
+            if port:
+                labels[port_id] = {"name": port.get("name") or port_id, "country": port.get("country")}
+    return labels
+
+
+def _with_port_labels(rows: list[dict], labels: dict[str, dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        label = labels.get(str(row.get("port_id"))) or {}
+        out.append({**row, "port_name": label.get("name"), "port_country": label.get("country")})
+    return out
+
+
+@app.get("/api/vessel/{mmsi}")
+async def vessel_detail(mmsi: str):
+    """One hull's identity, inferred cargo/laden profile and recent port calls.
+
+    Per-entity route, following /api/track's shape above rather than
+    _cached_source_response: no region filter, no ETag machinery, keyed by a
+    single MMSI a reader just clicked, nothing for a second caller to share.
+
+    Reads vessel_profiles (Task 16's refine/vessel_profile.py),
+    vessel_port_calls (Task 15's refine/port_calls.py) and entity_latest --
+    never entity_history. That table is read incrementally, on a schedule, by
+    the two refine jobs above; a request path must never open it directly
+    (see global-constraints.md), and nothing below does.
+    """
+    identity, profiles, port_calls, open_call = await asyncio.gather(
+        storage.entity_latest_one("ais", mmsi),
+        storage.reference("vessel_profiles"),
+        storage.port_calls_for(mmsi, limit=10),
+        storage.open_port_call(mmsi),
+    )
+    profile = profiles.get(mmsi) if isinstance(profiles, dict) else None
+    if identity is None and profile is None and not port_calls and open_call is None:
+        raise HTTPException(status_code=404, detail=f"no record for vessel '{mmsi}'")
+
+    port_ids = {str(r["port_id"]) for r in port_calls if r.get("port_id")}
+    if open_call and open_call.get("port_id"):
+        port_ids.add(str(open_call["port_id"]))
+    labels = await _port_labels_for(port_ids)
+
+    return {
+        "identity": identity,
+        "profile": profile,
+        "port_calls": _with_port_labels(port_calls, labels),
+        "open_call": _with_port_labels([open_call], labels)[0] if open_call else None,
+        "confidence_radius_km": PORT_CALL_CONFIDENCE_KM,
+    }
+
+
+@app.get("/api/vessel/port/{port_id}")
+async def vessel_port_calls(port_id: str):
+    """One port's recent traffic -- the port card's "recent arrivals and
+    departures" section.
+
+    A sibling of vessel_detail above rather than a query-param variant of it:
+    the two live at the same prefix and read the same table
+    (vessel_port_calls), but a port_id and an MMSI are different id spaces,
+    and folding them into one path/shape would make the route's own URL say
+    nothing about which one it expects. Kept in this module (not /api/ports)
+    because it is one more read of the port-call table Task 15's
+    refine/port_calls.py and storage.port_calls_at already define, not a new
+    concern of the World Port Index endpoint's own.
+    """
+    port_calls = await storage.port_calls_at(port_id, limit=10)
+    mmsis = {str(r["mmsi"]) for r in port_calls if r.get("mmsi")}
+    identities = await asyncio.gather(*(storage.entity_latest_one("ais", mmsi) for mmsi in mmsis))
+    names = {mmsi: (identity or {}).get("name") for mmsi, identity in zip(mmsis, identities)}
+    return {
+        "port_id": port_id,
+        "port_calls": [
+            {**row, "vessel_name": names.get(str(row.get("mmsi")))} for row in port_calls
+        ],
+        "confidence_radius_km": PORT_CALL_CONFIDENCE_KM,
+    }
+
+
 @app.get("/api/hazards")
 async def hazards_endpoint(request: Request, region: str | None = None):
     # Earthquakes (USGS, ~5min) and volcanic activity (Smithsonian GVP, weekly)
