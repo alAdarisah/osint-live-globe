@@ -88,14 +88,31 @@ test("buildSparkline -- generalized over net_series as well as its fatalities de
   await t.test("a small-magnitude series (fractional GW) is not floored to a max of 1", () => {
     // The divide-by-zero guard used to be a literal max(..., 1), which is
     // meaningless for a unit where every real value is well under 1 -- it
-    // silently flattened every bar in a normal energy window. peak here must
-    // read back the series' own max (0.4), not the old floor.
+    // compressed every bar in a normal energy window against that floor
+    // instead of scaling them to the series' own true peak. peak here must
+    // read back that true peak (0.4), not the old floor.
     const html = buildSparkline([{ net: 0.1 }, { net: 0.4 }], {
       count: Infinity,
       readValue: (p) => p.net,
       captionOf: (recent, max) => `peak ${max}`,
     });
     assert.match(html, /peak 0\.4/);
+  });
+
+  await t.test("an all-zero series reads back 'peak 0' -- the divide-by-zero guard must not leak into the label", () => {
+    // The zero-guard lives in the bar-height division only (see the
+    // `divisor` local in buildSparkline). A country whose last twelve months
+    // of ACLED fatalities are genuinely all zero -- an ended conflict is the
+    // ordinary case, not an edge case -- must still read "peak 0" through
+    // the *default* caption, not a leaked Number.EPSILON in scientific
+    // notation. This exercises the default captionOf specifically: every
+    // other fatalities test above uses non-zero values.
+    const html = buildSparkline([
+      { month: 6, year: 2026, fatalities: 0 },
+      { month: 7, year: 2026, fatalities: 0 },
+    ]);
+    assert.match(html, /peak 0(?!\.)/, "an integer 0, not 2.220446049250313e-16 or any other non-zero trace");
+    assert.doesNotMatch(html, /e-1[0-9]/i, "no epsilon in exponential notation anywhere in the output");
   });
 
   await t.test("the fatalities default is unchanged by the generalization", () => {
@@ -160,8 +177,10 @@ test("countryCardSections -- humanitarian: returned refugees, others of concern,
     assert.match(humanitarian.html, /a subnational figure, reported at admin level 2/);
   });
 
-  await t.test("idps' admin_level 0 reads as national, not 'admin level 0'", () => {
-    assert.match(humanitarian.html, /a national figure/);
+  await t.test("idps' admin_level 0 reads as national, and still carries its own provenance word", () => {
+    // Same helper as the level-2 case above; the zero branch must not drop
+    // "reported" just because "national" already sounds authoritative.
+    assert.match(humanitarian.html, /a national figure, reported at admin level 0/);
   });
 });
 

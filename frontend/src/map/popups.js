@@ -283,16 +283,21 @@ export function buildSparkline(series, opts = {}) {
   } = opts;
   if (!series || series.length < 2) return "";
   const recent = series.slice(-count);
-  // A floor, not a claim that the smallest chartable value is 1 -- it only
-  // keeps the divide below from being by zero when every point in view is
-  // zero (an all-quiet fatality month, a border with no flow at all).
-  const max = Math.max(...recent.map((m) => Math.abs(readValue(m))), Number.EPSILON);
+  // The real peak -- possibly zero, for a country whose last twelve months
+  // (or a border with no flow at all) are genuinely quiet. This is what
+  // headingOf/captionOf see; a series that is actually all zero must read
+  // back "peak 0", not a leaked implementation constant.
+  const max = Math.max(...recent.map((m) => Math.abs(readValue(m))), 0);
+  // The bar-height divisor is a separate value: never zero, so the division
+  // below is never by zero, but this number itself is never shown -- only
+  // `max` (the real, possibly-zero peak) is passed to the caption.
+  const divisor = max || Number.EPSILON;
   const w = 8;
   const gap = 2;
   const h = 26;
   const bars = recent
     .map((m, i) => {
-      const bh = Math.max(1, Math.round((Math.abs(readValue(m)) / max) * h));
+      const bh = Math.max(1, Math.round((Math.abs(readValue(m)) / divisor) * h));
       // Newest bar accented so "where are we now" is obvious at a glance.
       const fill = i === recent.length - 1 ? "#ff5c2a" : "rgba(255,140,58,0.55)";
       return `<rect x="${i * (w + gap)}" y="${h - bh}" width="${w}" height="${bh}" fill="${fill}" rx="1"/>`;
@@ -387,7 +392,9 @@ function buildVerifiedRecord(wanted, raw) {
 // deepest level actually present rather than assuming one.
 function adminLevelCaveat(level) {
   if (level == null) return "";
-  return level === 0 ? "a national figure" : `a subnational figure, reported at admin level ${level}`;
+  return level === 0
+    ? "a national figure, reported at admin level 0"
+    : `a subnational figure, reported at admin level ${level}`;
 }
 
 function buildHumanitarian(props, raw) {
