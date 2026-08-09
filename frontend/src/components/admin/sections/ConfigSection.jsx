@@ -16,6 +16,15 @@ export const SEARCH_TERMS = [
 
 export default function ConfigSection({ actions, sync, isOpen, onToggle }) {
   const fileRef = useRef(null);
+  // Local, not lifted to AdminPanel -- which does mean it is lost if the
+  // search box filters this section out and back (AdminPanel unmounts a
+  // non-matching section rather than CSS-hiding it, so this state does not
+  // survive that round trip). Left that way on purpose: it is a toast
+  // ("Saved to your downloads.", "Loaded config.json.") confirming an action
+  // just taken in *this* fold, not a setting -- nothing reads it back, and
+  // the search box is not where anyone leaves a config file half-imported
+  // and comes back later. Lifting it to survive a filter round trip would
+  // cost every other section a prop for a message only this one shows.
   const [message, setMessage] = useState(null);
 
   function download() {

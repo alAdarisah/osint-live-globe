@@ -16,7 +16,13 @@ import {
   EXTRA_TOKENS_UNDER, TOKENS_BY_LAYER, perPinDials,
   SharedColours, PinTypesNote,
 } from "./shared";
+import { ALL_TOKEN_LABELS } from "./tokenSearchTerms";
 
+// The four generic dial names, every layer's own name, and every pin type's
+// own label -- a layer row and its pin types are both real controls a search
+// should find. See tokenSearchTerms.js for why the token half comes from
+// there rather than from TOKENS_BY_LAYER/SHARED_TOKENS directly, and
+// frontend/tests/layerSearchTerms.test.js for the regression test.
 export const SEARCH_TERMS = [
   "Layers",
   "Size",
@@ -25,6 +31,7 @@ export const SEARCH_TERMS = [
   "Hides past zoom",
   "Shared colours",
   ...SETTINGS_LAYERS.map((l) => l.label),
+  ...ALL_TOKEN_LABELS,
 ];
 
 // `isOpen`/`onToggle` are the raw pair from AdminPanel's useAccordion, not a

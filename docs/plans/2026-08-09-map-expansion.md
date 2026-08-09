@@ -605,7 +605,7 @@ Derived from the `railways` and `deflock` layers. Ten touch points:
 7. `map/createMapController.js` — group construction `:486`, `layerForKey:1840`, then either `ID_FIELD:218`/`DECORATORS:229`/`ICON_SIZE_FOR_GLYPH:242` for point layers or a `renderX()` plus dispatch in `applyData:5156` and `renderAllLayers:4695` for lines; `counts:2388`/`totals:2410`; `COUNT_KEYS` in `map/useLeafletMap.js:9`.
 8. `settings/defaults.js:37` — a `SETTINGS_LAYERS` row (buys all the admin dials).
 9. `components/controlPanel/LayersSection.jsx:86` — `GROUP_LAYERS` entry and a `LayerCheck` row.
-10. `components/admin/AdminPanel.jsx:271` — `STACK_LABEL` if the stack key differs.
+10. `components/admin/sections/shared.jsx:18` — `STACK_LABEL` if the stack key differs.
 
 # Appendix B — schema additions summary
 
