@@ -27,20 +27,39 @@ registerHooks({
 globalThis.window = { L: { geoJSON: () => ({}) } };
 
 const {
-  countryCardSections, summarizePowerPlants, bucketAirportsByType, bucketPortsBySize,
+  countryCardSections, summarizePowerPlants, bucketAirportsByType, bucketPortsBySize, coverageStateFor,
 } = await import("../src/map/popups.js");
 
 const baseProps = { name: "Testland", iso_a2: "TL", iso_a3: "TST", population: 1_000_000 };
 const bounds = { south: 0, west: 0, north: 10, east: 10 };
 
+// Real apps never leave fetchCoverage empty for long, but a test bag defaults
+// to it -- same as every raw[key] defaulting to [] -- so that omitting it
+// entirely (as most tests below do, for feeds coverage isn't the point of)
+// exercises the "never fetched" path deliberately, not by accident.
 function emptyRaw(overrides = {}) {
   return {
     events: [], gdelt: [], officials: [], conflictStats: {}, escalation: [],
     adsb: [], ais: [], jamming: [], firms: [], infra: [], conflictDistricts: [],
     humanitarian: {}, outages: {}, energyFlows: {}, foodTrade: {},
     osmInfra: [], dams: [], airports: [], ports: [], cableLandings: [],
+    fetchCoverage: {},
     ...overrides,
   };
+}
+
+// A fetchCoverage entry for a feed that has definitely been fetched and
+// definitely covers whatever bbox is being tested -- unscoped, so no bbox
+// comparison even applies. The shape recordCoverageRef writes on a real
+// success (useOsintData.js).
+function fetchedUnscoped(at = Date.now()) {
+  return { status: "fetched", fetchedAt: at, bbox: null, scoped: false };
+}
+
+// The scoped counterpart: fetched, and covering exactly `box` (a
+// "south,west,north,east" bbox cell string, matching bboxCell's own format).
+function fetchedScopedTo(box, at = Date.now()) {
+  return { status: "fetched", fetchedAt: at, bbox: box, scoped: true };
 }
 
 test("summarizePowerPlants -- the tagged-fraction sum, including all-untagged", async (t) => {
@@ -149,12 +168,29 @@ test("countryCardSections -- energy infrastructure: the mandatory OSM tagged-fra
 
   await t.test("Task 8's cross-border 'power' section is untouched by the new 'energy' section", () => {
     const raw = emptyRaw({
-      energyFlows: { TL: { country_code: "TL", physical: { net: 0.4, unit: "GW" } } },
+      energyFlows: {
+        TL: {
+          country_code: "TL",
+          physical: {
+            net: 0.4, unit: "GW", resolution: "PT15M", interval_minutes: 15,
+            available_from: "2026-08-06T00:00:00+00:00", measurement: "measured", counterparts: [],
+            net_series: [{ t: "a", net: 0.1 }, { t: "b", net: 0.4 }],
+          },
+        },
+      },
       osmInfra: [{ id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", output_mw: 10 }],
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
-    assert.ok(sections.find((s) => s.id === "power"), "cross-border flow still gets its own fold");
-    assert.ok(sections.find((s) => s.id === "energy"), "generation infrastructure is a separate fold beside it");
+    const power = sections.find((s) => s.id === "power");
+    const energy = sections.find((s) => s.id === "energy");
+    assert.ok(power, "cross-border flow still gets its own fold");
+    assert.ok(energy, "generation infrastructure is a separate fold beside it");
+    // Not just "the section exists" -- the actual Task 8 content (the
+    // net-flow sparkline and its coverage line) has to still be there,
+    // unchanged, or "untouched" is an unverified claim.
+    assert.match(power.html, /Net position, 2 intervals \(GW, measured\)/, "the net_series sparkline still renders");
+    assert.match(power.html, /Coverage reported: from 2026-08-06T00:00:00\+00:00 at 15-minute intervals/, "the coverage line still renders");
+    assert.doesNotMatch(power.html, /Plant A|power plants \(OSM\)/, "the new infrastructure content stays out of 'power'");
   });
 });
 
@@ -210,44 +246,119 @@ test("countryCardSections -- transport: airports/ports bucketed, oil terminals c
     assert.match(transport.html, /1<\/b> with an oil terminal/);
   });
 
+  await t.test("carries the bbox-load caveat, same as military and live -- airports/ports are itemsInBounds counts too", () => {
+    const raw = emptyRaw({
+      airports: [{ id: "a1", lat: 5, lon: 5, name: "Airport One", type: "large_airport" }],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const transport = sections.find((s) => s.id === "transport");
+    assert.ok(transport);
+    assert.match(transport.html, /Counted within the area currently loaded\./);
+  });
+
   await t.test("nothing in view: the section is dropped", () => {
     const { sections } = countryCardSections(baseProps, emptyRaw(), bounds);
     assert.equal(sections.find((s) => s.id === "transport"), undefined);
   });
 });
 
+test("coverageStateFor -- the three states a feed's coverage can be in", async (t) => {
+  await t.test("no entry in raw.fetchCoverage at all: never fetched", () => {
+    assert.equal(coverageStateFor("ais", bounds, emptyRaw()), "not_loaded");
+  });
+
+  await t.test("an entry with fetchedAt still null (recorded as gated, never yet succeeded): never fetched", () => {
+    const raw = emptyRaw({ fetchCoverage: { ais: { status: "gated", scoped: true } } });
+    assert.equal(coverageStateFor("ais", bounds, raw), "not_loaded");
+  });
+
+  await t.test("fetched, unscoped: checked, regardless of any bbox", () => {
+    const raw = emptyRaw({ fetchCoverage: { events: fetchedUnscoped() } });
+    assert.equal(coverageStateFor("events", bounds, raw), "checked");
+  });
+
+  await t.test("fetched, scoped, but bbox is null (the 'essentially the whole world' case): checked", () => {
+    const raw = emptyRaw({ fetchCoverage: { osmInfra: { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: true } } });
+    assert.equal(coverageStateFor("osmInfra", bounds, raw), "checked");
+  });
+
+  await t.test("fetched, scoped, bbox covers this country: checked", () => {
+    const raw = emptyRaw({ fetchCoverage: { dams: fetchedScopedTo("-5,-5,15,15") } });
+    assert.equal(coverageStateFor("dams", bounds, raw), "checked");
+  });
+
+  await t.test("fetched, scoped, bbox is a different area entirely: scoped_elsewhere, not checked", () => {
+    // This is the exact scenario the Critical review finding described:
+    // dams/airports/ports/osmInfra are all zoom-gated and not promoted by a
+    // country focus, so clicking a country from world view can easily leave
+    // their last fetch scoped to wherever the camera used to be.
+    const raw = emptyRaw({ fetchCoverage: { airports: fetchedScopedTo("40,40,50,50") } });
+    assert.equal(coverageStateFor("airports", bounds, raw), "scoped_elsewhere");
+  });
+
+  await t.test("fetched, scoped, bbox misses by less than the rounding tolerance: still checked", () => {
+    // bboxCell rounds to 2 decimal places (useOsintData.js) -- a fetch scoped
+    // to exactly this country's own bounds must not read as "elsewhere"
+    // purely from that rounding.
+    const raw = emptyRaw({ fetchCoverage: { ports: fetchedScopedTo("0.03,0.03,9.97,9.97") } });
+    assert.equal(coverageStateFor("ports", bounds, raw), "checked");
+  });
+});
+
 test("countryCardSections -- data coverage: the honesty section", async (t) => {
-  await t.test("always present, even with every feed empty", () => {
+  await t.test("always present, even with every feed's coverage unknown", () => {
     const { sections } = countryCardSections(baseProps, emptyRaw(), bounds);
     const coverage = sections.find((s) => s.id === "coverage");
     assert.ok(coverage, "never dropped, unlike every other section");
     assert.equal(sections[sections.length - 1].id, "coverage", "goes last");
   });
 
-  await t.test("'no coverage' path: a feed present as an empty array reads as checked-and-empty", () => {
-    const { sections } = countryCardSections(baseProps, emptyRaw({ ais: [] }), bounds);
-    const coverage = sections.find((s) => s.id === "coverage");
-    assert.match(coverage.html, /AIS vessel tracking[\s\S]*?No coverage here &mdash; checked, nothing found\./);
-  });
-
-  await t.test("'not loaded' path: a feed missing from raw entirely reads as never checked, not empty", () => {
-    const raw = emptyRaw();
-    delete raw.ais;
+  await t.test("'not loaded' path: no fetchCoverage entry reads as never checked -- not as 'checked and empty'", () => {
+    // This is the state the running app is actually in for a gated, scoped
+    // feed (osmInfra/dams/airports/ports) the moment a country is clicked
+    // straight from world view: raw.ais is still `[]` from construction, but
+    // nothing has fetched it yet. The old version of this test used
+    // `delete raw.ais`, a shape the real app can never produce -- fixed per
+    // the Task 9 review.
+    const raw = emptyRaw({ ais: [] }); // present, empty, and never fetched
     const { sections } = countryCardSections(baseProps, raw, bounds);
     const coverage = sections.find((s) => s.id === "coverage");
     assert.match(coverage.html, /AIS vessel tracking[\s\S]*?Not loaded this session &mdash; not checked\./);
     assert.doesNotMatch(coverage.html.match(/AIS vessel tracking[\s\S]*?<\/div><\/div>/)[0], /No coverage here/);
   });
 
-  await t.test("a feed with a match inside bounds reports when it last delivered", () => {
-    const raw = emptyRaw({ ais: [{ mmsi: 1, lat: 5, lon: 5, updated: Date.now() / 1000 - 120 }] });
+  await t.test("'scoped elsewhere' path: fetched, but not for an area covering this country", () => {
+    const raw = emptyRaw({
+      airports: [], // present and empty -- but that is not the point being tested
+      fetchCoverage: { airports: fetchedScopedTo("40,40,50,50") },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const coverage = sections.find((s) => s.id === "coverage");
+    assert.match(coverage.html, /OurAirports gazetteer[\s\S]*?Fetched, but for a different area &mdash; coverage here is unknown, not zero\./);
+  });
+
+  await t.test("'no coverage' path: fetched, covers this country, and nothing is in bounds", () => {
+    const raw = emptyRaw({ ais: [], fetchCoverage: { ais: fetchedUnscoped() } });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const coverage = sections.find((s) => s.id === "coverage");
+    assert.match(coverage.html, /AIS vessel tracking[\s\S]*?No coverage here &mdash; checked, nothing found\./);
+  });
+
+  await t.test("a covered feed with a match inside bounds reports when it last delivered", () => {
+    const raw = emptyRaw({
+      ais: [{ mmsi: 1, lat: 5, lon: 5, updated: Date.now() / 1000 - 120 }],
+      fetchCoverage: { ais: fetchedUnscoped() },
+    });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     const coverage = sections.find((s) => s.id === "coverage");
     assert.match(coverage.html, /AIS vessel tracking[\s\S]*?Last delivered 2m ago/);
   });
 
-  await t.test("a reference gazetteer with no delivery time reports a count, not a fabricated timestamp", () => {
-    const raw = emptyRaw({ dams: [{ id: "gdw:1", lat: 5, lon: 5, name: "Dam One" }] });
+  await t.test("a covered reference gazetteer with no delivery time reports a count, not a fabricated timestamp", () => {
+    const raw = emptyRaw({
+      dams: [{ id: "gdw:1", lat: 5, lon: 5, name: "Dam One" }],
+      fetchCoverage: { dams: fetchedScopedTo("-5,-5,15,15") },
+    });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     const coverage = sections.find((s) => s.id === "coverage");
     assert.match(coverage.html, /Global Dam Watch[\s\S]*?1 on file here, reference data with no delivery time/);
@@ -261,10 +372,19 @@ test("countryCardSections -- data coverage: the honesty section", async (t) => {
     assert.match(coverage.html, /did not look here/);
   });
 
-  await t.test("a point outside the bbox does not count as coverage", () => {
-    const raw = emptyRaw({ ais: [{ mmsi: 1, lat: 50, lon: 50, updated: Date.now() / 1000 }] });
+  await t.test("a covered feed with a point outside the bbox does not count as coverage", () => {
+    const raw = emptyRaw({
+      ais: [{ mmsi: 1, lat: 50, lon: 50, updated: Date.now() / 1000 }],
+      fetchCoverage: { ais: fetchedUnscoped() },
+    });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     const coverage = sections.find((s) => s.id === "coverage");
     assert.match(coverage.html, /AIS vessel tracking[\s\S]*?No coverage here/);
+  });
+
+  await t.test("cableLandings is one of the feeds reported on (Important 3: every feed the card used)", () => {
+    const { sections } = countryCardSections(baseProps, emptyRaw(), bounds);
+    const coverage = sections.find((s) => s.id === "coverage");
+    assert.match(coverage.html, /Submarine cable landings \(TeleGeography\)/);
   });
 });

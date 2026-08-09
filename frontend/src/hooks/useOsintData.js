@@ -349,6 +349,27 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
   const reapplyTransform = useCallback((keys) => reapplyTransformRef.current(keys), []);
 
   /**
+   * Per-feed fetch coverage, threaded into `raw.fetchCoverage` (via
+   * onData("fetchCoverage", ...)) so the country card's honesty section
+   * (buildCoverage, map/popups.js) can tell "checked this country's bbox and
+   * found nothing" apart from "never fetched" and from "fetched, but for a
+   * different area" -- three states a raw array's own emptiness cannot carry,
+   * since `raw[key]` starts as `[]` at construction (see createMapController.js)
+   * and never distinguishes "swept and empty" from "not swept yet".
+   *
+   * `status` is the most recent tick's outcome for `key` ("gated" | "fetched" |
+   * "error"); `fetchedAt`/`bbox` describe the data actually sitting in
+   * `raw[key]` right now and are only touched on a real success, so a gated or
+   * failed tick does not erase what an earlier successful one already proved.
+   * `bbox` is the "south,west,north,east" cell (see bboxCell above) that
+   * fetch was scoped to, or `null` for a source with no bbox restriction at
+   * all (isScoped(key) === false, or the computed cell was "essentially the
+   * whole world" -- both mean the same thing to a reader: nothing was clipped).
+   */
+  const fetchCoverageRef = useRef({});
+  const recordCoverageRef = useRef(() => {});
+
+  /**
    * What scope each source's held payload was fetched under.
    *
    * The URL a poller asks for is a function of more than the endpoint: the
@@ -390,6 +411,18 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
       );
     }
 
+    // Merges `patch` into this key's coverage record and republishes the whole
+    // map. A shallow copy each time -- not a mutation of the object already
+    // sitting in `raw.fetchCoverage` -- so nothing downstream that captured a
+    // reference to a previous snapshot sees it change under it.
+    recordCoverageRef.current = (key, patch) => {
+      fetchCoverageRef.current = {
+        ...fetchCoverageRef.current,
+        [key]: { ...fetchCoverageRef.current[key], ...patch },
+      };
+      onDataRef.current("fetchCoverage", fetchCoverageRef.current);
+    };
+
     function registerPoller(key, url, intervalMs, intervalByBand, onSuccess) {
       let timer = null;
       // Read at schedule time rather than closed over at registration, which is
@@ -428,6 +461,13 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
               bootReported = true;
               markSourceDeferred(key);
             }
+            // Below its gate, this tick is not attempting a fetch at all --
+            // scene.js already knows that, so buildCoverage doesn't have to
+            // guess it from an empty array. fetchedAt/bbox are left alone: if
+            // an earlier fetch (before the reader zoomed back out, say)
+            // already covered some area, that fact is still true of what's
+            // sitting in raw[key] right now.
+            recordCoverageRef.current(key, { status: "gated", scoped: isScoped(key) });
             timer = setTimeout(tick, intervalNow());
             return;
           }
@@ -466,6 +506,18 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
           // deferred, so this upgrades a deferred source once it really loads
           // and is a no-op on every poll after that.
           markSourceLoaded(key, true);
+          // The bbox this request actually carried -- null for an unscoped
+          // source (isScoped(key) === false) or for a scoped one whose
+          // computed cell was "essentially the whole world" (bboxCell's own
+          // guard), both of which mean nothing was clipped. Recorded after
+          // the request completes rather than before, so a bbox that changed
+          // mid-flight is not misattributed to this response.
+          recordCoverageRef.current(key, {
+            status: "fetched",
+            fetchedAt: Date.now(),
+            bbox: isScoped(key) ? bboxCellRef.current : null,
+            scoped: isScoped(key),
+          });
         } catch (err) {
           console.warn(`Failed to fetch ${key}:`, err);
           firstFetchDone = true;
@@ -473,6 +525,9 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
             bootReported = true;
             markSourceLoaded(key, false);
           }
+          // fetchedAt/bbox untouched -- an error says nothing about the data
+          // already sitting in raw[key] from a previous success, if any.
+          recordCoverageRef.current(key, { status: "error", scoped: isScoped(key) });
         } finally {
           if (!cancelled) timer = setTimeout(tick, intervalNow());
         }
@@ -535,6 +590,11 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
         if (cancelled) return;
         onDataRef.current("cables", data?.cables || []);
         onDataRef.current("cableLandings", data?.landings || []);
+        // Whole-world, one-shot, never polled (fetch: FETCH_MANUAL in
+        // scene.js) -- so this is the only moment cableLandings' coverage
+        // ever changes from "not loaded" to "fetched". Not bbox-scoped, so
+        // once this lands it covers every country's card equally.
+        recordCoverageRef.current("cableLandings", { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false });
       })
       .catch((err) => console.warn("Failed to load submarine cables:", err));
 
@@ -570,6 +630,11 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
         const isLegacyArray = Array.isArray(data);
         onDataRef.current("infra", (isLegacyArray ? data : data.sites) || []);
         onDataRef.current("pipelines", (isLegacyArray ? [] : data.pipelines) || []);
+        // Same reasoning as cableLandings above: a whole-world, one-shot,
+        // never-polled fetch (fetch: FETCH_ALWAYS but not in POLL_CONFIG --
+        // see this endpoint's own 24h Cache-Control note), so this is the one
+        // place its coverage record is ever written.
+        recordCoverageRef.current("infra", { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false });
       })
       .catch((err) => console.warn("Failed to load infrastructure sites:", err));
 

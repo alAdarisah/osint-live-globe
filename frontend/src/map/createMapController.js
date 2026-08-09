@@ -305,6 +305,13 @@ const COUNTRY_CARD_FEEDS = new Set([
   // a marketing-year balance sheet is a forecast about a whole state. Both are
   // read only by the country card and the choropleth.
   "energyFlows", "foodTrade", "foodPriceIndex",
+  // Task 9's energy/military/transport sections read these four -- none of
+  // them polls faster than 30 minutes (osmInfra) to 6 hours (dams, ports), so
+  // none of the ais/adsb/firms throttle reasoning above applies. Without this,
+  // a card opened before a gated feed's first fetch for this country landed
+  // would keep showing its own "not loaded" coverage line indefinitely, since
+  // nothing would tell it to look again.
+  "osmInfra", "dams", "airports", "ports",
 ]);
 
 // The water-card counterpart to COUNTRY_CARD_FEEDS above, same reasoning and
@@ -593,6 +600,16 @@ export function createMapController(container, initial, callbacks) {
     // energyFlows is keyed by ISO2 (Energy-Charts' own key), foodTrade by ISO3,
     // and foodPriceIndex is a single global document rather than a country map.
     energyFlows: {}, foodTrade: {}, foodPriceIndex: {},
+    // Per-feed fetch coverage (useOsintData.js's recordCoverageRef), keyed by
+    // the same raw[key] names above: whether each feed's poller last landed a
+    // real fetch, was skipped because its zoom gate hasn't lifted, or errored
+    // -- and, for a bbox-scoped feed, which bbox that fetch actually covered.
+    // Read only by the country card's coverage section (buildCoverage,
+    // map/popups.js), which is the reason it exists: `raw[key]` starting life
+    // as `[]` cannot on its own tell "swept this country's bbox and found
+    // nothing" apart from "never swept at all", and that is exactly the
+    // conflation the coverage section exists to resolve.
+    fetchCoverage: {},
   };
   // ais/aisNavy/aisTanker/adsb/adsbMilitary are no longer here -- their
   // markers live inside entityWebglLayer's own per-bucket entry maps now
@@ -5534,7 +5551,7 @@ export function createMapController(container, initial, callbacks) {
       // to draw. Both surface as a country-card section and a country fill.
       else if (key === "conflictStats" || key === "escalation" || key === "conflictDistricts"
              || key === "humanitarian" || key === "energyFlows" || key === "foodTrade"
-             || key === "foodPriceIndex") {
+             || key === "foodPriceIndex" || key === "fetchCoverage") {
         /* reference data read on demand by popups.js -- no marker layer */
       }
       // Keyed by airfield ident, not a point layer of its own: it re-sizes and

@@ -904,6 +904,12 @@ function buildEnergyInfrastructure(bounds, raw) {
     <div>${damCapacity.length} of ${dams.length} report a reservoir capacity:
       <b>${fmtNumber(Math.round(damCapacityMcm))} million m&sup3;</b> summed over ${damCapacity.length === dams.length ? "all of them" : `just those ${damCapacity.length}`}.</div>
     ` : ""}
+    ${plants.length && dams.length
+      ? `<p class="meta">A hydroelectric facility can be listed both ways -- as an OSM power plant tagged
+          <code>source=hydro</code> and, separately, as a Global Dam Watch dam with its own
+          <code>power_mw</code> -- and the two figures above are never summed against each other. Do not add
+          them together yourself; the same station may be counted in both.</p>`
+      : ""}
     <p class="meta">${OSM_SWEEP_CAVEAT} ${DAM_SWEEP_CAVEAT}</p>
     <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass, <i>reported</i> by its
       mappers and not checked by hand &middot; Global Dam Watch v1.0 (CC BY 4.0), <i>reported</i> by the
@@ -1029,6 +1035,7 @@ function buildTransport(bounds, raw) {
       ${statRow("", "border crossings (OSM)", crossings.length)}
       ${statRow("", "rail stops (OSM)", rail.length)}
     </div>
+    ${BBOX_LOAD_CAVEAT}
     ${airports.length ? `<div class="csection-h">Airports by size</div>
       <div>${AIRFIELD_ORDER.filter((t) => airportBuckets.counts[t]).map((t) => `${esc(AIRFIELD_STYLE[t].label)} (${airportBuckets.counts[t]})`).join(", ")
         || "size not classified by OurAirports"}</div>` : ""}
@@ -1055,14 +1062,32 @@ function buildTransport(bounds, raw) {
 // *why* a fold above is empty, so it has to survive being empty itself. It
 // never returns "" and countryCardSections never gets the chance to drop it.
 //
-// The two things this section refuses to conflate, per feed: "checked this
-// country's bbox against this feed and found nothing there" (a real,
-// positive fact -- this map has coverage here and simply saw nothing) versus
-// "this feed was never loaded this session, so nothing below was checked at
-// all" (not a fact about the country, a fact about this browser tab). A raw
-// bucket that is an empty array is the first case; one that is missing or not
-// an array is the second. Distinguishing them is the entire point of putting
-// this fold on the card.
+// Three things this section refuses to conflate, per feed:
+//
+//  1. "This map never fetched this feed at all" -- raw[key] starts life as
+//     `[]` at construction (see createMapController.js) and stays that shape
+//     whether or not a poll has ever landed, so an empty array on its own
+//     cannot answer this. The real answer lives in raw.fetchCoverage
+//     (written by useOsintData.js's recordCoverageRef): a feed with no entry
+//     there, or one whose `fetchedAt` is still null, has never actually
+//     returned anything to this browser tab -- most often because its own
+//     zoom gate (scene.js) has not lifted yet, which happens routinely for a
+//     country clicked straight from world view.
+//  2. "This map fetched this feed, but for a different area" -- several of
+//     these feeds are bbox-scoped (airports, dams, osmInfra, ports, jamming,
+//     firms -- see scene.js's `scoped` flag), and the last successful fetch's
+//     bbox does not always cover the country whose card is open: the reader
+//     may have clicked a country without panning to it, or the feed simply
+//     has not re-polled since the reader moved. Coverage here is genuinely
+//     unknown, not zero.
+//  3. "This map fetched this feed, scoped to (or covering) this country, and
+//     found nothing there" -- the one case that earns "no coverage here".
+//
+// Collapsing any two of these into one message is the exact failure this
+// section exists to prevent -- see the Task 9 review that caught the first
+// version of this function inferring "never fetched" from `!Array.isArray`,
+// which is true from the very first render for several of these feeds
+// regardless of whether anything was ever fetched.
 function firmsRecordMs(item) {
   if (!item.acq_date) return null;
   const time = String(item.acq_time || "").padStart(4, "0").slice(0, 4);
@@ -1082,9 +1107,9 @@ function eventRecordMs(item) {
 // not by "inside this bbox", so "coverage inside the bbox" is not a claim
 // this section can honestly make about them and they are left out.
 // `whenMs` reads the freshest in-bbox record's own timestamp where the feed
-// carries one; the four reference gazetteers (infra/osmInfra/dams/airports/
-// ports) carry none, and are reported as a count on file rather than a
-// fabricated delivery time.
+// carries one; the reference gazetteers (infra/osmInfra/dams/airports/ports/
+// cableLandings) carry none, and are reported as a count on file rather than
+// a fabricated delivery time.
 const COVERAGE_FEEDS = [
   { key: "events", label: "ACLED conflict events", provenance: "reported", whenMs: eventRecordMs },
   { key: "gdelt", label: "GDELT news", provenance: "reported", whenMs: (r) => parseGdeltDateAdded(r.date_added)?.getTime() ?? null },
@@ -1097,26 +1122,74 @@ const COVERAGE_FEEDS = [
   { key: "dams", label: "Global Dam Watch", provenance: "reported", whenMs: () => null },
   { key: "airports", label: "OurAirports gazetteer", provenance: "reported", whenMs: () => null },
   { key: "ports", label: "NGA World Port Index", provenance: "reported", whenMs: () => null },
+  { key: "cableLandings", label: "Submarine cable landings (TeleGeography)", provenance: "reported", whenMs: () => null },
 ];
 
 function coverageRow(label, body) {
   return `<div class="event-row"><b>${esc(label)}</b><div class="event-meta">${body}</div></div>`;
 }
 
+// Absorbs the rounding bboxCell applies to whatever it fetched (a
+// `toFixed(2)` snap, ~1.1 km) and the coarser grid snap the viewport-based
+// cell itself uses (bboxSnapDegrees, map/scene.js) -- without this, a feed
+// fetched scoped to exactly this country's own bounds (the FOCUS_PROMOTE
+// path in useOsintData.js) could read as "scoped elsewhere" purely from
+// float noise at the edge.
+const BBOX_CELL_TOLERANCE_DEG = 0.05;
+
+/**
+ * Whether the "south,west,north,east" cell a fetch was actually scoped to
+ * (raw.fetchCoverage[key].bbox) fully contains this country's bounds.
+ * `null` means the fetch carried no bbox restriction at all -- either the
+ * feed isn't scoped (see scene.js's `scoped` flag) or the computed cell was
+ * "essentially the whole world" (bboxCell's own guard in useOsintData.js) --
+ * and both mean the same thing here: nothing was clipped, so it covers
+ * everything.
+ */
+function bboxCellCoversCountry(bboxCell, bounds) {
+  if (!bboxCell) return true;
+  const parts = String(bboxCell).split(",").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return true; // unparseable: not this function's failure to report
+  const [south, west, north, east] = parts;
+  return bounds.south >= south - BBOX_CELL_TOLERANCE_DEG
+    && bounds.north <= north + BBOX_CELL_TOLERANCE_DEG
+    && bounds.west >= west - BBOX_CELL_TOLERANCE_DEG
+    && bounds.east <= east + BBOX_CELL_TOLERANCE_DEG;
+}
+
+/**
+ * One of "not_loaded" (never fetched, most often a zoom gate that has not
+ * lifted -- see COVERAGE_FEEDS' own note), "scoped_elsewhere" (fetched, but
+ * not for an area that covers this country) or "checked" (the data sitting
+ * in raw[key] right now genuinely covers this country's bbox, so its own
+ * emptiness or non-emptiness is a real answer). Exported for the test --
+ * this is the one piece of logic the Critical review finding was about.
+ */
+export function coverageStateFor(key, bounds, raw) {
+  const coverage = (raw.fetchCoverage || {})[key];
+  if (!coverage || coverage.fetchedAt == null) return "not_loaded";
+  if (coverage.scoped && !bboxCellCoversCountry(coverage.bbox, bounds)) return "scoped_elsewhere";
+  return "checked";
+}
+
 function buildCoverage(bounds, raw) {
   if (!bounds) {
     // Nothing below can be checked against a country with no bounding box --
     // this is the whole-card version of "did not look", stated once rather
-    // than repeated eleven times with nothing behind it.
+    // than repeated per feed with nothing behind it.
     return '<p class="meta">This country has no bounding box loaded, so none of the feeds below could be '
       + 'checked against it. That is &ldquo;this map did not look here&rdquo;, not &ldquo;this map looked '
       + 'and found nothing&rdquo;.</p>';
   }
   const rows = COVERAGE_FEEDS.map(({ key, label, provenance, whenMs }) => {
-    const feed = raw[key];
-    if (!Array.isArray(feed)) {
+    const state = coverageStateFor(key, bounds, raw);
+    if (state === "not_loaded") {
       return coverageRow(label, "Not loaded this session &mdash; not checked.");
     }
+    if (state === "scoped_elsewhere") {
+      return coverageRow(label, "Fetched, but for a different area &mdash; coverage here is unknown, not zero.");
+    }
+    const feed = Array.isArray(raw[key]) ? raw[key] : [];
     const matches = itemsInBounds(feed, bounds);
     if (!matches.length) {
       return coverageRow(label, "No coverage here &mdash; checked, nothing found.");
@@ -1137,9 +1210,11 @@ function buildCoverage(bounds, raw) {
   }).join("");
   return `<div class="popup-events">${rows}</div>
     <p class="meta">Each line answers one question: has this feed ever put anything inside this country's
-      bounding box. &ldquo;No coverage here&rdquo; means this map checked and came back empty; &ldquo;not
-      loaded this session&rdquo; means it never checked at all. The two look similar and are not the same
-      claim -- this section exists so they are never read as one.</p>`;
+      bounding box. &ldquo;No coverage here&rdquo; means this map fetched data covering this country and
+      came back empty; &ldquo;not loaded this session&rdquo; means it never fetched at all, most often
+      because the feed's own zoom gate has not lifted; &ldquo;fetched, but for a different area&rdquo;
+      means this map has that feed's data in hand right now, just not for anywhere near here. The three
+      look similar and are not the same claim -- this section exists so they are never read as one.</p>`;
 }
 
 export function countryCardSections(props, raw, bounds) {
