@@ -250,9 +250,9 @@ def parse_rivers(payload: dict) -> dict:
 def serialize(collection: dict, provenance: str) -> dict:
     """The stored document, carrying the same honesty payload railways.py
     does: which product this is, that it is public domain, and the 1:10m
-    scale caveat -- this will not sit exactly on a coastline drawn by a higher
-    -resolution source, and the popup a later task adds is expected to say
-    so."""
+    scale caveat -- this will not sit exactly on a coastline drawn by a
+    higher-resolution source, and the popup a later task adds is expected to
+    say so."""
     return {
         "attribution": PUBLISHER,
         "publisher": PUBLISHER,
