@@ -298,9 +298,23 @@ async def run_once() -> dict:
 
     The cursor is advanced to the last row's id *after* everything from this
     batch has been written -- record_port_calls first, then the state
-    document, then the cursor last -- so a crash mid-pass repeats the same
-    (idempotent, upsert-keyed) batch next time instead of silently skipping
-    the rows it didn't finish with.
+    document, then the cursor last -- so a crash *in this function* repeats
+    the same (idempotent, upsert-keyed) batch next time instead of silently
+    skipping the rows it didn't finish with.
+
+    What that ordering does not cover is storage.record_port_calls itself
+    failing without raising, which is how every write in this codebase
+    behaves on purpose (see the module docstring on backend/storage.py): a
+    Postgres hiccup logs and returns rather than taking the poller down. Here
+    that means a batch whose write failed still has its cursor advanced past
+    it, because there is no signal to say otherwise -- so unlike a snapshot
+    source, where the next poll simply re-supplies the same live state, a
+    failed write here loses that batch's calls for good. The alternative --
+    holding the cursor back on any write failure -- would stall this job on
+    the same database outage that is failing every other writer, for no
+    better odds of the retry succeeding. Accepted rather than solved: a
+    vessel that called and left during an outage window is missed, not
+    misreported.
     """
     cursor = await _load_cursor()
     rows = await storage.entity_history_since("ais", cursor, BATCH_LIMIT)
