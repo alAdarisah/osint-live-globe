@@ -21,7 +21,7 @@ Both are *inferences*, and neither is safe to present as a detection:
   the whole feed was quiet over the same window -- but coverage is thin far
   from shore and no guard fixes that.
 - Two ships close together may be passing, rafted for a pilot transfer, or
-  sitting in an anchorage. Ports are excluded (see `_port_index`); anchorages
+  sitting in an anchorage. Ports are excluded (see `port_index`); anchorages
   are not a port index's business, and no list here holds them.
 
 So every record carries `inferred: True`, states its own evidence, and the
@@ -88,7 +88,7 @@ STS_MAX_SPEED_KN = 1.0
 STS_MIN_DURATION_HOURS = 1.0
 # Anywhere within this of a charted port is a port call, not a transfer at sea.
 #
-# Two lists feed it (see `_port_index`): the 40 curated harbours in
+# Two lists feed it (see `port_index`): the 40 curated harbours in
 # backend/infrastructure.py, and every port the NGA World Port Index places
 # inside this map's theatres or AIS watch boxes -- 393 of them, of which 263 sit
 # in watched water against the curated list's 12. That is the difference between
@@ -120,7 +120,7 @@ def _in_watched_waters(lat: float, lon: float) -> bool:
     )
 
 
-def _port_index(wpi_ports: list[dict] | None = None) -> ProximityIndex:
+def port_index(wpi_ports: list[dict] | None = None) -> ProximityIndex:
     """Every port this map knows of, as one exclusion index.
 
     Both lists, not one. The curated entries in backend/infrastructure.py are
@@ -370,7 +370,7 @@ async def _compute() -> list[dict]:
     priors = priors if isinstance(priors, dict) else {}
     return (
         build_gap_records(gaps, ships_by_mmsi, health, priors)
-        + build_sts_records(ships, _port_index(), priors=priors)
+        + build_sts_records(ships, port_index(), priors=priors)
     )
 
 

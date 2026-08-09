@@ -4,7 +4,7 @@ The inverse of dark_vessels.py's ship-to-ship exclusion (see
 backend/sources/dark_vessels.py:328). That detector excludes a candidate
 because it is near a port; this one exists *because* a vessel is near a port,
 and reuses the same port index (curated infrastructure sites plus the NGA
-World Port Index, see dark_vessels._port_index) rather than building a second
+World Port Index, see dark_vessels.port_index) rather than building a second
 one.
 
 **Why this reads entity_history incrementally.** That table is ~11 GB and
@@ -37,6 +37,7 @@ quay. The tier is the whole claim; nothing downstream should read `exact` as
 """
 
 import asyncio
+import copy
 import logging
 
 from backend import config, storage
@@ -78,10 +79,26 @@ PORT_EXACT_RADIUS_KM = 3.0
 # "near", not "at".
 PORT_PROXIMITY_RADIUS_KM = 15.0
 # Past the proximity radius, a dwell is still attributed to whichever port is
-# nearest -- confidence "inferred" -- but only out to here. Beyond it, calling
-# some port "the nearest one" is not honest: a vessel anchored mid-ocean is not
-# calling anywhere, and no port index answers that question by being searched
-# wider.
+# nearest -- confidence "inferred" -- but only out to here.
+#
+# The brief that specified this module places no ceiling on "inferred": it
+# treats recording the distance and leaving the card to state it as guard
+# enough on its own. This module adds one anyway (a ruling, not an oversight
+# -- flagged in the task report): unbounded attribution would record a vessel
+# anchored mid-ocean as *calling* at a port hundreds of km away, which is a
+# stronger and less honest claim than "we could not attribute this" would be.
+#
+# That makes the cap a real trade-off, not a formality, because the index
+# behind `ports` is not exhaustive: dark_vessels.port_index carries 393 ports
+# across the map's watched theatres (40 curated plus the NGA World Port
+# Index, clipped -- see that function's own docstring), not every port on
+# earth. A dwell can land outside this radius because the port it is actually
+# near simply is not in either list -- not because nothing is there. That
+# failure mode is made visible rather than silent: every rejection is counted
+# (see `rejected` in _advance/apply_positions) and carried into this job's own
+# source_health row and log line by run_once/derive_forever, so "nothing
+# happened near a port" and "we saw a dwell we could not attribute" stay
+# distinguishable from outside this module.
 PORT_SEARCH_RADIUS_KM = 50.0
 
 # How long a per-vessel state entry with no active dwell/departure run is kept
@@ -142,11 +159,14 @@ def _call_row(mmsi: str, run: dict, departed_at: float | None, draught_out: floa
     }
 
 
-def _advance(mmsi: str, rows: list[dict], ports: ProximityIndex, entry: dict) -> tuple[dict | None, list[dict]]:
+def _advance(
+    mmsi: str, rows: list[dict], ports: ProximityIndex, entry: dict
+) -> tuple[dict | None, list[dict], int]:
     """Walks one vessel's new positions in order, carrying `entry` (this
     hull's state from the previous pass, or {} the first time it is seen)
     forward. Returns the updated entry (None if there is nothing left worth
-    keeping) and any calls to upsert.
+    keeping), any calls to upsert, and how many dwells this vessel completed
+    that could not be attributed to any port at all (see PORT_SEARCH_RADIUS_KM).
 
     `entry` holds two independent things:
       "last": the most recent row seen for this hull, of any speed -- used as
@@ -159,6 +179,7 @@ def _advance(mmsi: str, rows: list[dict], ports: ProximityIndex, entry: dict) ->
         absent when this hull is neither dwelling nor mid-departure.
     """
     upserts: list[dict] = []
+    rejected = 0
     run = entry.get("run")
 
     for row in rows:
@@ -188,11 +209,16 @@ def _advance(mmsi: str, rows: list[dict], ports: ProximityIndex, entry: dict) ->
             if ts - run["since"] >= DWELL_MIN_SECONDS:
                 found = _classify(run["lat"], run["lon"], ports)
                 if found is None:
-                    # An hour stationary, but nowhere near any indexed port --
-                    # not a port call, whatever else it is. Drop the run; if
-                    # the vessel is still there next pass this simply tries
-                    # again from that later row.
+                    # An hour stationary, but no indexed port within
+                    # PORT_SEARCH_RADIUS_KM -- not attributable, whatever else
+                    # it is (see that constant's comment on why this is a
+                    # ruling, not an oversight). Counted so the job's own
+                    # health row can say a dwell was seen and dropped, rather
+                    # than reporting the same silence as "no dwell at all".
+                    # Drop the run; if the vessel is still there next pass
+                    # this simply tries again from that later row.
                     run = None
+                    rejected += 1
                     continue
                 port, confidence, _distance_km = found
                 run["phase"] = "open"
@@ -224,31 +250,40 @@ def _advance(mmsi: str, rows: list[dict], ports: ProximityIndex, entry: dict) ->
     entry.pop("run", None)
     if run is not None:
         entry["run"] = run
-    return (entry if entry else None), upserts
+    return (entry if entry else None), upserts, rejected
 
 
-def apply_positions(rows: list[dict], ports: ProximityIndex, state: dict) -> tuple[list[dict], dict]:
+def apply_positions(rows: list[dict], ports: ProximityIndex, state: dict) -> tuple[list[dict], dict, int]:
     """One batch of entity_history rows (oldest first, as entity_history_since
-    returns them) -> (calls to upsert, the state to persist for next time).
+    returns them) -> (calls to upsert, the state to persist for next time,
+    how many completed dwells could not be attributed to any port at all).
 
     Pure and DB-free: `state` is a plain dict shaped like the "port_calls_state"
     reference document, not a live connection, which is what makes this
-    testable without a database (see backend/tests/test_port_calls.py).
+    testable without a database (see backend/tests/test_port_calls.py). The
+    input `state` is never mutated -- _advance is handed a deep copy of each
+    vessel's entry, not a reference into the caller's dict, so a caller that
+    retries a batch on `state` it already holds (see run_once) gets back a
+    second, independent result rather than one built on an entry the first
+    attempt already mutated in place.
     """
     by_vessel: dict[str, list[dict]] = {}
     for row in rows:
         by_vessel.setdefault(str(row["entity_id"]), []).append(row)
 
     upserts: list[dict] = []
+    rejected = 0
     new_state = dict(state)
     for mmsi, vessel_rows in by_vessel.items():
-        entry, vessel_upserts = _advance(mmsi, vessel_rows, ports, dict(state.get(mmsi) or {}))
+        prior_entry = copy.deepcopy(state.get(mmsi)) if state.get(mmsi) else {}
+        entry, vessel_upserts, vessel_rejected = _advance(mmsi, vessel_rows, ports, prior_entry)
         if entry:
             new_state[mmsi] = entry
         else:
             new_state.pop(mmsi, None)
         upserts.extend(vessel_upserts)
-    return upserts, new_state
+        rejected += vessel_rejected
+    return upserts, new_state, rejected
 
 
 def _prune_state(state: dict, now_ts: float) -> dict:
@@ -284,52 +319,52 @@ async def _load_state() -> dict:
 
 async def _load_ports() -> ProximityIndex:
     # entity_latest("ports"), not a fetch: backend/sources/ports.py already
-    # collects the World Port Index, and dark_vessels._port_index combines it
+    # collects the World Port Index, and dark_vessels.port_index combines it
     # with the curated harbours in backend/infrastructure.py into the one
     # index this job reuses rather than building a second one (see the module
     # docstring). An empty list here -- before ports.py has landed its first
     # snapshot -- degrades to the curated-only index, same as dark_vessels.
     wpi_ports = await storage.entity_latest("ports")
-    return dark_vessels._port_index(wpi_ports)
+    return dark_vessels.port_index(wpi_ports)
 
 
 async def run_once() -> dict:
-    """One incremental pass. Returns a small summary for logging.
+    """One incremental pass. Returns a small summary for logging and health.
 
-    The cursor is advanced to the last row's id *after* everything from this
-    batch has been written -- record_port_calls first, then the state
-    document, then the cursor last -- so a crash *in this function* repeats
-    the same (idempotent, upsert-keyed) batch next time instead of silently
-    skipping the rows it didn't finish with.
+    The cursor is only ever advanced past rows this pass actually finished
+    writing. storage.record_port_calls follows this codebase's rule that a
+    write never raises -- a Postgres hiccup is logged and the poller carries
+    on (see the module docstring on backend/storage.py) -- but that rule's own
+    justification is that the *next poll* re-supplies the same live state.
+    This job has no next poll for a given row: it consumes entity_history
+    exactly once through an ever-advancing id cursor, and entity_history is
+    pruned at three days, so an id once passed is never read again. "Logged
+    and moved on" would therefore mean "logged and lost" here, not "stale
+    until the next refresh" -- which is why record_port_calls also returns
+    whether the batch is durably written, and this function reads that
+    return value rather than treating "did not raise" as "succeeded".
 
-    What that ordering does not cover is storage.record_port_calls itself
-    failing without raising, which is how every write in this codebase
-    behaves on purpose (see the module docstring on backend/storage.py): a
-    Postgres hiccup logs and returns rather than taking the poller down. Here
-    that means a batch whose write failed still has its cursor advanced past
-    it, because there is no signal to say otherwise -- so unlike a snapshot
-    source, where the next poll simply re-supplies the same live state, a
-    failed write here loses that batch's calls for good. The alternative --
-    holding the cursor back on any write failure -- would stall this job on
-    the same database outage that is failing every other writer, for no
-    better odds of the retry succeeding. Accepted rather than solved: a
-    vessel that called and left during an outage window is missed, not
-    misreported.
+    On a failed write, the state document and cursor are both left exactly
+    where they were, so the same (idempotent, upsert-keyed) batch is read
+    again next pass rather than silently skipped.
     """
     cursor = await _load_cursor()
     rows = await storage.entity_history_since("ais", cursor, BATCH_LIMIT)
     if not rows:
-        return {"read": 0, "calls": 0}
+        return {"read": 0, "calls": 0, "rejected": 0, "ok": True}
 
     state = await _load_state()
     ports = await _load_ports()
-    upserts, new_state = apply_positions(rows, ports, state)
+    upserts, new_state, rejected = apply_positions(rows, ports, state)
 
-    await storage.record_port_calls(upserts)
+    wrote = await storage.record_port_calls(upserts)
+    if not wrote:
+        return {"read": len(rows), "calls": 0, "rejected": rejected, "ok": False}
+
     await storage.record_reference(STATE_NAME, _prune_state(new_state, rows[-1]["ts"]))
     await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
 
-    return {"read": len(rows), "calls": len(upserts)}
+    return {"read": len(rows), "calls": len(upserts), "rejected": rejected, "ok": True}
 
 
 async def derive_forever():
@@ -340,15 +375,44 @@ async def derive_forever():
     more correct by a faster retry after a failure. It still logs and moves on
     rather than raising -- see run_job in backend/refine/__init__.py, which is
     what actually catches a crash of this loop and turns the health row red.
+
+    That leaves this function itself as the one place a *failed write*
+    (run_once's "ok": False, as opposed to an exception) has to be turned into
+    a red health row rather than a quietly-successful one -- run_once did not
+    raise, so nothing upstream of here would otherwise know.
     """
     while True:
         try:
             summary = await run_once()
-            log.info(
-                "Port calls: read %d AIS movement rows, %d calls opened or closed",
-                summary["read"], summary["calls"],
+            rejected_note = (
+                f"{summary['rejected']} dwell(s) this pass had no indexed port "
+                f"within {PORT_SEARCH_RADIUS_KM:g}km and were not recorded"
+                if summary["rejected"]
+                else None
             )
-            await storage.record_source_health(HEALTH_NAME, summary["calls"], True)
+            if summary["ok"]:
+                log.info(
+                    "Port calls: read %d AIS movement rows, %d calls opened or "
+                    "closed, %d dwell(s) unattributable",
+                    summary["read"], summary["calls"], summary["rejected"],
+                )
+                # rejected_note travels in the health row even when ok=True --
+                # it is not a failure, but it is the one place a caller polling
+                # source_health (rather than this container's own logs) can see
+                # that some dwells went unrecorded rather than not happening.
+                await storage.record_source_health(HEALTH_NAME, summary["calls"], True, rejected_note)
+            else:
+                log.warning(
+                    "Port calls: read %d AIS movement rows but the write "
+                    "failed -- the cursor was not advanced, so the same batch "
+                    "is retried next pass",
+                    summary["read"],
+                )
+                await storage.record_source_health(
+                    HEALTH_NAME, None, False,
+                    "record_port_calls failed to write this batch; the cursor "
+                    "was held back and the same rows will be retried next pass",
+                )
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
             log.warning("Port call derivation failed: %s", exc)
             await storage.record_source_health(HEALTH_NAME, None, False, str(exc))

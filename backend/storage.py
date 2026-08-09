@@ -1264,26 +1264,42 @@ def _port_call_row(item: dict) -> tuple | None:
     )
 
 
-async def record_port_calls(rows: list[dict]) -> None:
+async def record_port_calls(rows: list[dict]) -> bool:
     """Upserts a batch of detected vessel port calls.
 
     Keyed on (mmsi, port_id, arrived_at): a second write for the same key --
     typically the same call seen again once a departure is detected -- updates
     the existing row in place, which is what turns an arrival and a departure
     observed hours apart into a single call record instead of two.
+
+    Returns whether the batch is now durably written -- True when there was
+    nothing to write, or the write succeeded; False otherwise, still without
+    raising (every write in this module logs and returns on failure rather
+    than taking its caller down -- see the module docstring). The return
+    value exists for the one caller that cannot treat "did not raise" as
+    "succeeded": backend/refine/port_calls.py reads entity_history exactly
+    once through an ever-advancing id cursor over a table that is pruned at
+    three days, so unlike a snapshot source -- where the next poll simply
+    re-supplies the same live state -- a write this function silently drops
+    would be gone for good rather than merely stale. That caller holds its
+    cursor back on False and retries the same batch next pass.
     """
-    if _pool is None or not rows:
-        return
+    if not rows:
+        return True
     tuples = [t for t in (_port_call_row(r) for r in rows) if t is not None]
     if not tuples:
-        return
+        return True
+    if _pool is None:
+        return False
     try:
         async with _pool.acquire() as conn:
             async with conn.transaction():
                 for start in range(0, len(tuples), _BATCH):
                     await conn.executemany(_UPSERT_PORT_CALL, tuples[start:start + _BATCH])
+        return True
     except Exception:  # noqa: BLE001 - storage must never take a refine job down
         log.exception("Failed to record %d port calls", len(tuples))
+        return False
 
 
 def _port_call_dict(r) -> dict:
