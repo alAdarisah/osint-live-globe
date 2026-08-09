@@ -636,18 +636,21 @@ export default function App() {
           of those answers a question about how the map is behaving rather than
           about the world, which is why they go together and why they go here.
 
-          Part of the event filter still goes with them: the conflict Window
-          (which dates the map's own layer, day-granular) and Show approximate
-          locations both change what the *map* draws, which is this drawer's
-          business. Minimum severity and the verification floor used to be here
-          too, on the argument that severity and verification state are claim-
+          Show approximate locations is what is left of the event filter here:
+          it changes what the *map* draws, which is this drawer's business.
+          Window, Minimum severity and the verification floor used to be here
+          too, on the argument that age/severity/verification state are claim-
           *quality* dimensions an analyst opts into filtering. Task 12 moved
-          both up into IntelPanel's own header -- they are exactly the axes a
-          reader curating "what matters" wants without first finding Admin
-          Mode, and they still write into this same `eventFilter` object, not a
-          second copy, so the map and the panel can never disagree about what
-          "Minimum severity" means. See LayersSection.jsx's own note at the
-          spot the two controls used to sit. */}
+          all three up into IntelPanel's own header -- they are exactly the
+          axes a reader curating "what matters" wants without first finding
+          Admin Mode -- and they still write into this same `eventFilter`
+          object, not a second copy: Window in particular used to be a genuine
+          second control (this drawer's own select set `maxAgeDays` directly,
+          independently of IntelPanel's), which is exactly the two-copies
+          problem this paragraph's last sentence warns about, and is why it
+          moved rather than merely being duplicated up there too. See
+          LayersSection.jsx's own note at the spot the three controls used to
+          sit. */}
       {adminMode && (
         <>
           <PanelToggle open={panelOpen} onToggle={togglePanel} />

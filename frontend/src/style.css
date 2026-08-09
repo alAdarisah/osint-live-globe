@@ -1871,6 +1871,17 @@ html, body {
   color: #0b0d10;
   font-weight: 700;
 }
+/* The Events tab's second chip -- source reliability (severity.js's
+   RELIABILITY_BANDS: Reliable/Mixed/Weak/Unreliable), a different question
+   from the severity chip's "how bad", scored by backend/sources/
+   reliability.py. Left in the row's own Title Case rather than uppercased
+   like the severity chip (EventRow deliberately does not call
+   .toUpperCase() on this one) and slightly lighter-weight, so two chips
+   sitting side by side read as two different kinds of signal rather than as
+   one repeated. */
+.reliability-chip {
+  font-weight: 600;
+}
 /* Section dividers -- used both as group-by headers (IntelPanel.jsx's
    TabList, when a reader groups a tab by country/type/actor/outlet) and,
    historically, to separate an escalation list from an event list in the
@@ -1908,16 +1919,29 @@ html, body {
 .escalation-minibar {
   display: flex;
   align-items: flex-end;
-  gap: 1.5px;
+  gap: 2px;
   height: 20px;
   flex: none;
 }
+/* Six of these seven bars are arithmetic, not a reading (see
+   EscalationMiniBar's own note in IntelPanel.jsx) -- a hatch pattern is the
+   persistent, no-hover-required half of disclosing that (the other half is
+   the caption IntelPanel.jsx prints once above the whole list). Widened from
+   3px so the diagonal stripe is actually legible at this size rather than
+   reading as a slightly-lighter solid fill. */
 .escalation-minibar-bar {
-  width: 3px;
+  width: 4px;
   min-height: 2px;
   border-radius: 1px;
-  background: rgba(var(--accent-rgb), 0.35);
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(var(--accent-rgb), 0.55) 0px,
+    rgba(var(--accent-rgb), 0.55) 1.5px,
+    rgba(var(--accent-rgb), 0.12) 1.5px,
+    rgba(var(--accent-rgb), 0.12) 3px
+  );
 }
+/* The one real number in the group: solid fill, distinct hue, no hatch. */
 .escalation-minibar-bar.today {
   background: #ff5c2a;
 }

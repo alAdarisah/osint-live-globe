@@ -264,15 +264,72 @@ test("selectEventItems applies the floor end to end", async (t) => {
 
   await t.test("at world scope the sub-40 event is dropped", () => {
     const scope = makeIntelScope(SCOPE_WORLD, {});
-    const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER, windowHours: null });
+    const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
     assert.deepEqual(out.map((e) => e.id), ["a"]);
   });
 
   await t.test("a deliberately-scoped country keeps the sub-40 event too", () => {
     const countryScope = { active: true, label: "X", contains: () => true, intersectsBounds: () => true };
     const scope = makeIntelScope(SCOPE_COUNTRY, { countryScope });
-    const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER, windowHours: null });
+    const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
     assert.deepEqual(new Set(out.map((e) => e.id)), new Set(["a", "b"]));
+  });
+});
+
+// Review fix (Minor 5): nothing previously asserted that the verification
+// floor marks a weakly-placed event rather than dropping it -- the whole
+// point of the "dims, doesn't filter" design (see selectEventItems' own
+// docstring), and easy to silently break by swapping a `continue` back in.
+test("selectEventItems marks weaklyPlaced rather than dropping the record", async (t) => {
+  const scope = makeIntelScope(SCOPE_WORLD, {});
+  const events = [
+    { id: "a", severity: 90, date: "2020-01-01", lat: 1, lon: 1, geo_confidence: 10 }, // below the floor
+    { id: "b", severity: 90, date: "2020-01-01", lat: 1, lon: 1, geo_confidence: 90 }, // well-placed
+    { id: "c", severity: 90, date: "2020-01-01", lat: 1, lon: 1 }, // never scored at all
+  ];
+  const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
+  const byId = Object.fromEntries(out.map((e) => [e.id, e]));
+
+  await t.test("a weakly-placed event stays in the list, flagged rather than excluded", () => {
+    assert.ok(byId.a, "event a must not be dropped");
+    assert.equal(byId.a.weaklyPlaced, true);
+  });
+
+  await t.test("a well-placed event is not flagged", () => {
+    assert.equal(byId.b.weaklyPlaced, false);
+  });
+
+  await t.test("an unscored event is not flagged either -- absence is not weakness", () => {
+    assert.equal(byId.c.weaklyPlaced, false);
+  });
+});
+
+// Review fix (Important 3 / Minor 5): there used to be two independent
+// day-count checks inside selectEventItems -- one against
+// eventFilter.maxAgeDays (via passesEventFilter) and one against the panel's
+// own windowHours -- that could disagree. Window is now the only source of
+// eventFilter.maxAgeDays (IntelPanel.jsx pushes it there), and
+// selectEventItems checks nothing else, so this is the one interaction left
+// to assert: that maxAgeDays alone gates the tab correctly at both ends of
+// the control's range.
+test("selectEventItems honours eventFilter.maxAgeDays as the one Window gate", async (t) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const tenDaysAgo = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+  const events = [
+    { id: "today", severity: 90, date: today, lat: 1, lon: 1 },
+    { id: "old", severity: 90, date: tenDaysAgo, lat: 1, lon: 1 },
+  ];
+  const scope = makeIntelScope(SCOPE_WORLD, {});
+
+  await t.test("maxAgeDays: 0 -- Window's 'today only' -- drops the older event", () => {
+    const filter = { ...DEFAULT_EVENT_FILTER, maxAgeDays: 0 };
+    const out = selectEventItems(events, { scope, eventFilter: filter });
+    assert.deepEqual(out.map((e) => e.id), ["today"]);
+  });
+
+  await t.test("maxAgeDays: null -- Window's widest option -- keeps both", () => {
+    const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
+    assert.deepEqual(new Set(out.map((e) => e.id)), new Set(["today", "old"]));
   });
 });
 
@@ -288,8 +345,19 @@ test("windowMaxAgeDays rounds an hour count up to whole days", async (t) => {
     assert.equal(windowMaxAgeDays(72), 2);
   });
 
-  await t.test("7 days keeps a full week", () => {
-    assert.equal(windowMaxAgeDays(168), 6);
+  await t.test("the widest option (7 days) means no cap, not literally 6", () => {
+    // Review fix (Important 3): the widest Window option has to reproduce
+    // DEFAULT_EVENT_FILTER.maxAgeDays' own shipped default (null, "no
+    // window") now that this is the *only* control writing maxAgeDays --
+    // mapping it to a literal 6 would silently narrow the map's Conflict &
+    // Violence layer below what it showed before this control existed.
+    assert.equal(windowMaxAgeDays(168), null);
+    assert.equal(windowMaxAgeDays(500), null);
+  });
+
+  await t.test("a non-finite hour count also means no cap", () => {
+    assert.equal(windowMaxAgeDays(NaN), null);
+    assert.equal(windowMaxAgeDays(undefined), null);
   });
 });
 

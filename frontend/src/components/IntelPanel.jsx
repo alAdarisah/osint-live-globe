@@ -8,13 +8,16 @@
 // (eventsRaw/gdeltRaw already fetched for the map, passesEventFilter already
 // applied to the Conflict & Violence layer) so a list could never disagree
 // with what the map was drawing. This panel keeps that discipline and
-// extends it: Minimum severity and the verification floor used to be two
-// separate admin-only controls in ControlPanel, each editing the same shared
-// `eventFilter` App.jsx also hands to the map -- they still edit that exact
-// object (via `onEventFilterChange`), just from a control a reader can reach
-// without Admin Mode. There is one `eventFilter`, not a panel copy and a map
-// copy that could drift apart; see ControlPanel/LayersSection.jsx's own note
-// on where the controls moved from.
+// extends it: Window, Minimum severity and the verification floor used to be
+// three separate admin-only controls in ControlPanel, each editing the same
+// shared `eventFilter` App.jsx also hands to the map. They still edit that
+// exact object (via `onEventFilterChange`), just from controls a reader can
+// reach without Admin Mode -- and Window is now the *only* place that sets
+// `eventFilter.maxAgeDays`: this panel's own Window control pushes it (see
+// the effect below), and ControlPanel no longer has a competing copy that
+// could disagree with it (Task 12's review, Important 3 -- see
+// LayersSection.jsx's own note where that select used to sit). There is one
+// `eventFilter`, not a panel copy and a map copy that could drift apart.
 //
 // All the pure filtering/scoping/grouping logic lives in intelPanelLogic.js,
 // a plain-JS sibling module, for the same reason placeInfoCardGrouping.js
@@ -24,7 +27,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import LocateIcon from "./icons/LocateIcon";
 import {
-  severityBand, severityColor, DEFAULT_EVENT_FILTER, CONFIDENCE_THRESHOLD,
+  severityBand, severityColor, reliabilityBand, reliabilityColor,
+  DEFAULT_EVENT_FILTER, CONFIDENCE_THRESHOLD,
 } from "../map/severity";
 import { OFFICIALS_KIND_LABEL } from "../map/decorators";
 import { timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
@@ -32,7 +36,7 @@ import { useDraggablePanel, migratePanelPosition } from "../hooks/useDraggablePa
 import {
   SCOPE_OPTIONS, SCOPE_WORLD, SCOPE_VIEWPORT, SCOPE_COUNTRY, SCOPE_REGION, SCOPE_WATER,
   WINDOW_OPTIONS, DEFAULT_WINDOW_HOURS, GROUP_BY_OPTIONS, UNKNOWN_GROUP,
-  makeIntelScope, groupItems, intelPanelIsEmpty,
+  makeIntelScope, groupItems, intelPanelIsEmpty, windowMaxAgeDays,
   selectEscalationZones, selectEventItems, selectNewsItems, selectOfficialsItems,
 } from "./intelPanelLogic";
 
@@ -75,6 +79,18 @@ function groupLabel(key, groupBy, tabKind) {
  * today's, at `current`. It answers the same question a real 7-day chart
  * would ("is today unusual for this place") without claiming to know what any
  * of the other six days actually looked like.
+ *
+ * That claim is disclosed three ways, not just one: the six baseline bars get
+ * a hatched fill and the "today" bar a solid one (CSS, `.escalation-minibar-
+ * bar`/`.today`), the caller prints a persistent one-line caption once above
+ * the whole Escalation list (not per-row, and not only on hover), and this
+ * element's own `title=` repeats the numbers for anyone who does hover it.
+ * The first review pass shipped only the third of these -- `title` needs
+ * hover, which never fires on the touch screens this panel explicitly
+ * supports (`isMobile`) -- so a phone reader saw what looked like a week of
+ * real daily readings and had no way to learn six of the seven were
+ * arithmetic. The pattern and the caption are what fix that; the tooltip is
+ * now only ever a supplement to them, never the only copy of the claim.
  */
 function EscalationMiniBar({ zone }) {
   const baseline = Math.max(0, zone.baseline_per_day || 0);
@@ -127,6 +143,13 @@ function EscalationRow({ zone, onLocate }) {
 function EventRow({ event, onLocate }) {
   const severity = Number.isFinite(event.severity) ? event.severity : 0;
   const band = severityBand(severity);
+  // How much to trust the *report*, as distinct from how bad it is -- scored
+  // by backend/sources/reliability.py and written onto every fused event by
+  // event_fusion.py. Null on a record with no score at all (pre-reliability.py
+  // replay snapshots), guarded the same way decorators.js's own
+  // reliabilityBlock guards it, rather than inventing a band for a record
+  // that was never scored.
+  const trustBand = reliabilityBand(event);
   const sources = (event.corroborated_by && event.corroborated_by.length ? event.corroborated_by : [event.source])
     .filter(Boolean)
     .map((s) => SOURCE_BADGE[s] || s.toUpperCase());
@@ -144,6 +167,15 @@ function EventRow({ event, onLocate }) {
         >
           {band.label.toUpperCase()}
         </span>
+        {trustBand && (
+          <span
+            className="notable-chip reliability-chip"
+            style={{ background: reliabilityColor(trustBand) }}
+            title={`Reliability ${Number.isFinite(event.reliability) ? event.reliability : trustBand.min}/100 — who is behind this report, and how many independent sources`}
+          >
+            {trustBand.label}
+          </span>
+        )}
         <span className="notable-line">{line}</span>
         <button
           type="button"
@@ -161,9 +193,12 @@ function EventRow({ event, onLocate }) {
         {event.date ? ` · ${event.date}` : ""}
         {` · ${sources.join("+")}`}
         {event.corroborated ? " · corroborated" : ""}
-        {/* Reuses the map's own confidenceDimmed rather than a hard filter --
-            see selectEventItems' docstring on why the verification floor
-            marks rather than hides. */}
+        {/* The map marks the same boolean (confidenceDimmed) by desaturating
+            the pin (.weakly-sourced, decorators.js); this tab says it in
+            words instead -- see selectEventItems' own note on why the
+            verification floor marks rather than hides, and on the two being
+            different presentations of one shared computation rather than
+            identical treatments. */}
         {event.weaklyPlaced ? " · weakly placed" : ""}
       </div>
     </div>
@@ -279,6 +314,20 @@ export default function IntelPanel({
   const [windowHours, setWindowHours] = useState(DEFAULT_WINDOW_HOURS);
   const [groupBy, setGroupBy] = useState("none");
 
+  // This is the one Window control now (Task 12 review, Important 3): it
+  // used to sit next to a second, independent Window select in ControlPanel
+  // that set `eventFilter.maxAgeDays` directly, and the two could silently
+  // disagree about how far back the Conflict & Violence layer should look.
+  // Pushing this control's own value into that same field -- rather than
+  // keeping a separate day-granular re-check inside selectEventItems, which
+  // is what this replaced -- makes ControlPanel's old select and this one
+  // structurally incapable of disagreeing, because there is only one of them
+  // left. Runs on mount too, so `eventFilter.maxAgeDays` starts in sync with
+  // this control's own default rather than waiting for the first change.
+  useEffect(() => {
+    onEventFilterChange?.({ maxAgeDays: windowMaxAgeDays(windowHours) });
+  }, [windowHours, onEventFilterChange]);
+
   // Clicking a country is a request to read this whole panel for that
   // country -- opens it (mattering most on mobile, where it starts
   // collapsed) and switches the Scope control to match, the same automatic
@@ -326,9 +375,15 @@ export default function IntelPanel({
     () => selectEscalationZones(escalation, scope),
     [escalation, scope]
   );
+  // No `windowHours` here -- eventFilter.maxAgeDays *is* windowHours now (see
+  // the effect above), and passesEventFilter (called inside selectEventItems)
+  // already checks it. A second local re-check against windowHours directly
+  // was the Important-3 bug: two computations of the same day-count that
+  // could read the same control and still disagree, if either drifted from
+  // the other. There is one now.
   const eventItems = useMemo(
-    () => selectEventItems(eventsRaw, { scope, eventFilter, windowHours }),
-    [eventsRaw, scope, eventFilter, windowHours]
+    () => selectEventItems(eventsRaw, { scope, eventFilter }),
+    [eventsRaw, scope, eventFilter]
   );
   const newsItems = useMemo(
     () => selectNewsItems(gdeltRaw, { scope, windowHours }),
@@ -445,11 +500,19 @@ export default function IntelPanel({
                 ))}
               </select>
             </label>
+            {/* Neither control has anything to act on outside Events: GDELT
+                (News) and officials rows carry no `severity` or
+                `geo_confidence` field at all -- reliability.py and
+                geoverify.py only ever score conflict_events. Disabled here
+                for the same reason Group by is below, so a reader cannot
+                crank a dial that cannot move rather than discovering that by
+                watching nothing happen. */}
             <label>
               Minimum severity
               <select
                 value={eventFilter.minSeverity}
                 onChange={(e) => onEventFilterChange?.({ minSeverity: Number(e.target.value) })}
+                disabled={activeTab !== "events"}
               >
                 <option value="0">Any</option>
                 <option value="40">Moderate and above</option>
@@ -464,6 +527,7 @@ export default function IntelPanel({
                 onChange={(e) => onEventFilterChange?.({
                   minConfidence: e.target.checked ? CONFIDENCE_THRESHOLD : 0,
                 })}
+                disabled={activeTab !== "events"}
               />
               Fade weakly-placed events
             </label>
@@ -484,7 +548,17 @@ export default function IntelPanel({
           <div className="notable-list intel-list">
             {activeTab === "escalation" && (
               escalationZones.length ? (
-                escalationZones.map((z) => <EscalationRow key={z.region} zone={z} onLocate={onLocate} />)
+                <>
+                  {/* Persistent, not just the mini-bar's own title= (which
+                      needs hover, and never fires on a touch screen this
+                      panel explicitly supports -- see EscalationMiniBar's
+                      own note). A reader on a phone reads this once, ahead
+                      of every bar in the tab, rather than never. */}
+                  <div className="notable-section">
+                    Bars: hatched = flat 7-day baseline &middot; solid = last 24h (not a real daily history)
+                  </div>
+                  {escalationZones.map((z) => <EscalationRow key={z.region} zone={z} onLocate={onLocate} />)}
+                </>
               ) : (
                 <div className="notable-empty">
                   {scope.deliberate

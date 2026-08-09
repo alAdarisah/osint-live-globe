@@ -142,18 +142,33 @@ export const WINDOW_OPTIONS = [
 export const DEFAULT_WINDOW_HOURS = 168;
 
 /**
- * The panel's hour-based window, translated into ageDays' whole-day units for
- * the Events tab.
+ * The panel's hour-based window, translated into ageDays' whole-day units --
+ * the same unit `eventFilter.maxAgeDays` already uses, because this is what
+ * IntelPanel.jsx writes into that field. Task 12's review (Important 3)
+ * caught two independent Window controls -- this one and ControlPanel's own
+ * day-granular admin-only select -- that could silently disagree, both
+ * claiming to gate the same Conflict & Violence layer. There is one Window
+ * control now: this one, in the panel's header. ControlPanel no longer has
+ * its own; see LayersSection.jsx's note where that select used to sit.
  *
- * Every conflict source behind that tab dates to the day and nothing finer
- * (see map/severity.js's own note on ageDays), so an hours-based window
- * cannot mean anything finer than that here -- 6h and 24h both round to
- * "today". Ceil-then-subtract-one is what makes the boundary inclusive: a
+ * Every conflict source behind the Events tab dates to the day and nothing
+ * finer (see map/severity.js's own note on ageDays), so an hours-based
+ * window cannot mean anything finer than that here -- 6h and 24h both round
+ * to "today". Ceil-then-subtract-one is what makes the boundary inclusive: a
  * 72h window is meant to keep today, yesterday and the day before (ageDays
  * 0-2), and ceil(72/24)-1 = 2.
+ *
+ * The widest option (7 days, DEFAULT_WINDOW_HOURS) maps to `null` -- "no
+ * cap" -- rather than to 6. That is deliberate, not an off-by-one: `null` is
+ * `DEFAULT_EVENT_FILTER.maxAgeDays`'s own shipped value, chosen there
+ * because the backend already decides what is recent enough to serve and a
+ * client-side cap would silently hide some of what it was just sent (see
+ * that constant's own comment). Mapping the widest window to the same `null`
+ * keeps that guarantee intact at the panel's own default, instead of
+ * quietly reintroducing a cap the map never had before this control existed.
  */
 export function windowMaxAgeDays(hours) {
-  if (!Number.isFinite(hours)) return null;
+  if (!Number.isFinite(hours) || hours >= DEFAULT_WINDOW_HOURS) return null;
   return Math.max(0, Math.ceil(hours / 24) - 1);
 }
 
@@ -319,25 +334,35 @@ export function selectEscalationZones(escalationRaw, scope) {
  *
  * `eventFilter` is the same object the map's Conflict & Violence layer reads
  * (map/severity.js's DEFAULT_EVENT_FILTER) -- Minimum severity is one shared
- * value, not a second copy the panel could disagree with the map about. The
- * verification floor (`eventFilter.minConfidence`) is deliberately NOT
+ * value, not a second copy the panel could disagree with the map about.
+ * `eventFilter.maxAgeDays` is that same sharing applied to the Window
+ * control: IntelPanel.jsx pushes its own Window selection into this field
+ * (via windowMaxAgeDays), so `passesEventFilter` below is the *only* place
+ * this tab's age window is checked -- there used to be a second, independent
+ * day-count re-check here against the panel's own `windowHours`, and Task
+ * 12's review (Important 3) is what caught that the two could disagree
+ * (ControlPanel's admin-only Window select, at the time, was a *third* still
+ * -- see LayersSection.jsx's note on why that one is gone now too).
+ *
+ * The verification floor (`eventFilter.minConfidence`) is deliberately NOT
  * applied as a hard filter here, for the same reason passesEventFilter itself
  * ignores it: most of the corpus scores below the "geocoded to a place" mark,
  * so filtering on it would empty this tab and read as a broken feed rather
  * than as an answer. It is surfaced instead as `weaklyPlaced` on each
- * returned event (via confidenceDimmed), for the caller to mark rather than
- * hide -- the exact treatment the map already gives it.
+ * returned event (via confidenceDimmed, the same function the map's own
+ * dimming reads) -- the map expresses that by desaturating the pin
+ * (`.weakly-sourced`, decorators.js), and this tab expresses the same
+ * boolean as a plain "weakly placed" word in the row's meta line rather than
+ * a style change, which needs no colour or saturation perception to read.
  */
-export function selectEventItems(eventsRaw, { scope, eventFilter, windowHours }) {
+export function selectEventItems(eventsRaw, { scope, eventFilter }) {
   const floor = eventsSeverityFloor(scope);
-  const maxAgeDays = windowMaxAgeDays(windowHours);
   const scored = [];
   for (const e of eventsRaw || []) {
     const severity = Number.isFinite(e.severity) ? e.severity : 0;
     if (severity < floor) continue;
     if (typeof e.lat !== "number" || typeof e.lon !== "number") continue;
     if (!passesEventFilter(e, eventFilter)) continue;
-    if (maxAgeDays != null && Math.floor(daysOld(e.date)) > maxAgeDays) continue;
     if (!scope.contains(e.lat, e.lon)) continue;
     scored.push({ event: e, score: rankScore(e) });
   }

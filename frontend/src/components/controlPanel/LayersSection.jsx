@@ -193,29 +193,9 @@ export default function LayersSection({
           Zoom in to show news
         </div>
 
-        {/* The window/severity selects stay outside the fold: they are controls,
-            not reference, and burying a control is how a panel gets worse. */}
+        {/* The remaining select stays outside the fold: it's a control, not
+            reference, and burying a control is how a panel gets worse. */}
         <div className="event-filters">
-          {/* Whole dates, not hours. Every source behind this layer dates
-              events to the day and nothing finer (see event_fusion.py's
-              _parse_gdelt_dt and _parse_structured_dt), so an hours-based
-              window was a control the data could not honour: "last 6 hours"
-              excluded every ACLED/UCDP event unless the UTC hour happened to
-              be under 6. */}
-          <label>
-            Window
-            <select
-              value={eventFilter.maxAgeDays ?? "all"}
-              onChange={(e) => onEventFilterChange({
-                maxAgeDays: e.target.value === "all" ? null : Number(e.target.value),
-              })}
-            >
-              <option value="0">Today</option>
-              <option value="1">Last 2 days</option>
-              <option value="2">Last 3 days</option>
-              <option value="all">All available</option>
-            </select>
-          </label>
           <label className="event-filter-check">
             <input
               type="checkbox"
@@ -225,20 +205,25 @@ export default function LayersSection({
             Show approximate locations
           </label>
         </div>
-        {/* Minimum severity and the verification floor ("Fade weakly-placed
-            events") used to live here, as two more selects/checkboxes on
-            `eventFilter` gated behind Admin Mode. Task 12 moved both up into
-            IntelPanel's own header, next to its Scope/Window/Group by
-            controls, so a reader can reach them without finding Admin Mode
-            first -- see App.jsx's note by IntelPanel's mount point. They still
-            write into this exact `eventFilter` object (App.jsx holds the one
-            copy; both this drawer and IntelPanel read/write it through the
-            same onEventFilterChange), so raising the floor here would be the
-            same control, just relocated -- there is nothing left to set on
-            this page. */}
+        {/* Window, Minimum severity and the verification floor ("Fade
+            weakly-placed events") all used to live here as three more
+            selects/checkboxes on `eventFilter`, gated behind Admin Mode.
+            Task 12 moved them up into IntelPanel's own header, so a reader
+            can reach them without finding Admin Mode first -- see App.jsx's
+            note by IntelPanel's mount point. Window used to be a genuine
+            second copy (this select set `eventFilter.maxAgeDays` directly,
+            independently of whatever IntelPanel's own Window control was
+            set to), which is exactly the kind of drift map/severity.js's own
+            note on this object warns against -- Task 12's review caught it,
+            and it is why Window moved rather than merely being duplicated up
+            there too. All three still write into this exact `eventFilter`
+            object (App.jsx holds the one copy), so raising any of them from
+            IntelPanel is the same control this page used to have, just
+            relocated -- there is nothing left to set on this page for any
+            of the three. */}
         <div className="sublegend">
-          Minimum severity and the verification floor moved to the Intel panel's own header (bottom-right) --
-          reachable there without Admin Mode.
+          Window, Minimum severity and the verification floor moved to the Intel panel's own header (bottom-right)
+          -- reachable there without Admin Mode.
         </div>
 
         {/* Where each pin's *coordinate* stands, as opposed to how severe or
