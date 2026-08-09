@@ -15,6 +15,37 @@ import {
   resolveScene, fetchZoomFor, isScoped, sourceQueryFor, bboxSnapDegrees, bandFor,
 } from "../map/scene";
 
+/**
+ * The one order that keeps `raw.fetchCoverage` from ever describing a fetch
+ * that `raw[key]` doesn't reflect yet: record coverage first, publish the
+ * data second.
+ *
+ * `onData` (wired to the map controller's `applyData` in App.jsx) runs
+ * synchronously, and for a key in `COUNTRY_CARD_FEEDS` that synchronously
+ * rebuilds an open country card from `raw` -- which reads `raw.fetchCoverage`.
+ * Publishing data before recording coverage left a window, on exactly the
+ * refresh this mechanism exists for (a gated feed's first delivery while a
+ * card is open), where the card rendered fresh data next to a coverage line
+ * still reading "not loaded". Same class of false claim the coverage fix
+ * itself was written to prevent, reintroduced by call order -- see the Task 9
+ * review that caught it.
+ *
+ * Pulled out as its own pure function, with the two publishers passed in
+ * rather than closed over, specifically so this ordering can be asserted by
+ * a test: the hook it's called from is a real React effect with real timers,
+ * which this project's test setup (`node --test`, no jsdom/React harness)
+ * cannot exercise end to end, so the invariant is tested here instead, at the
+ * one seam that is plain JS.
+ *
+ * `dataPublishes` is a list rather than a single [key, data] pair because two
+ * of the three call sites (the cables and infrastructure one-shot fetches)
+ * split one response across two `raw` slots and one coverage record.
+ */
+export function publishFetchOutcome(recordCoverage, onData, coverageKey, coveragePatch, dataPublishes) {
+  recordCoverage(coverageKey, coveragePatch);
+  for (const [key, data] of dataPublishes) onData(key, data);
+}
+
 const BOOT_SOURCES = [
   { key: "countries", label: "Country boundaries" },
   { key: "cities", label: "City index" },
@@ -467,6 +498,11 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
             // an earlier fetch (before the reader zoomed back out, say)
             // already covered some area, that fact is still true of what's
             // sitting in raw[key] right now.
+            //
+            // No publishFetchOutcome ordering concern here: this branch never
+            // calls onDataRef.current at all (no fetch happened, nothing to
+            // publish), so there is no synchronous card rebuild for this
+            // write to race against.
             recordCoverageRef.current(key, { status: "gated", scoped: isScoped(key) });
             timer = setTimeout(tick, intervalNow());
             return;
@@ -499,26 +535,32 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
           fetchedScopeRef.current[key] = signature;
           const data = transformRef.current ? transformRef.current(key, fetched) : fetched;
           onSuccess?.(data);
-          onDataRef.current(key, data);
+          // publishFetchOutcome records coverage before handing the data to
+          // onDataRef.current -- see its own docstring for why the order,
+          // not just the content, of these two writes matters.
+          publishFetchOutcome(recordCoverageRef.current, onDataRef.current, key, {
+            status: "fetched",
+            fetchedAt: Date.now(),
+            // The bbox this request actually carried -- null for an unscoped
+            // source (isScoped(key) === false) or for a scoped one whose
+            // computed cell was "essentially the whole world" (bboxCell's own
+            // guard), both of which mean nothing was clipped.
+            bbox: isScoped(key) ? bboxCellRef.current : null,
+            scoped: isScoped(key),
+          }, [[key, data]]);
           firstFetchDone = true;
           bootReported = true;
           // Unconditional: markSourceLoaded only touches rows still pending or
           // deferred, so this upgrades a deferred source once it really loads
           // and is a no-op on every poll after that.
           markSourceLoaded(key, true);
-          // The bbox this request actually carried -- null for an unscoped
-          // source (isScoped(key) === false) or for a scoped one whose
-          // computed cell was "essentially the whole world" (bboxCell's own
-          // guard), both of which mean nothing was clipped. Recorded after
-          // the request completes rather than before, so a bbox that changed
-          // mid-flight is not misattributed to this response.
-          recordCoverageRef.current(key, {
-            status: "fetched",
-            fetchedAt: Date.now(),
-            bbox: isScoped(key) ? bboxCellRef.current : null,
-            scoped: isScoped(key),
-          });
         } catch (err) {
+          // Pre-existing: unlike the success path above, this branch does not
+          // check `cancelled` before writing. Harmless today -- every write
+          // here is a ref mutation with no React state and no onDataRef.current
+          // call, so there is nothing for a cancelled effect to leave in a bad
+          // state -- but noted rather than fixed as a drive-by, since it is
+          // not part of what this pass was asked to change.
           console.warn(`Failed to fetch ${key}:`, err);
           firstFetchDone = true;
           if (!bootReported) {
@@ -527,6 +569,8 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
           }
           // fetchedAt/bbox untouched -- an error says nothing about the data
           // already sitting in raw[key] from a previous success, if any.
+          // No publishFetchOutcome ordering concern here either: no fetch
+          // landed, so onDataRef.current is never called from this branch.
           recordCoverageRef.current(key, { status: "error", scoped: isScoped(key) });
         } finally {
           if (!cancelled) timer = setTimeout(tick, intervalNow());
@@ -588,13 +632,17 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
     fetchJson("/api/cables")
       .then((data) => {
         if (cancelled) return;
-        onDataRef.current("cables", data?.cables || []);
-        onDataRef.current("cableLandings", data?.landings || []);
         // Whole-world, one-shot, never polled (fetch: FETCH_MANUAL in
         // scene.js) -- so this is the only moment cableLandings' coverage
         // ever changes from "not loaded" to "fetched". Not bbox-scoped, so
         // once this lands it covers every country's card equally.
-        recordCoverageRef.current("cableLandings", { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false });
+        // publishFetchOutcome again, for the same reason as the generic
+        // poller above -- coverage recorded before either onData call.
+        publishFetchOutcome(
+          recordCoverageRef.current, onDataRef.current, "cableLandings",
+          { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false },
+          [["cables", data?.cables || []], ["cableLandings", data?.landings || []]]
+        );
       })
       .catch((err) => console.warn("Failed to load submarine cables:", err));
 
@@ -628,13 +676,16 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
       .then((data) => {
         if (cancelled) return;
         const isLegacyArray = Array.isArray(data);
-        onDataRef.current("infra", (isLegacyArray ? data : data.sites) || []);
-        onDataRef.current("pipelines", (isLegacyArray ? [] : data.pipelines) || []);
         // Same reasoning as cableLandings above: a whole-world, one-shot,
         // never-polled fetch (fetch: FETCH_ALWAYS but not in POLL_CONFIG --
         // see this endpoint's own 24h Cache-Control note), so this is the one
-        // place its coverage record is ever written.
-        recordCoverageRef.current("infra", { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false });
+        // place its coverage record is ever written -- and again, before
+        // either onData call, not after.
+        publishFetchOutcome(
+          recordCoverageRef.current, onDataRef.current, "infra",
+          { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false },
+          [["infra", (isLegacyArray ? data : data.sites) || []], ["pipelines", (isLegacyArray ? [] : data.pipelines) || []]]
+        );
       })
       .catch((err) => console.warn("Failed to load infrastructure sites:", err));
 
