@@ -190,6 +190,27 @@ def test_the_derived_tables_carry_their_documented_indexes(index, table):
     assert match, f"{index} on {table} is missing"
 
 
+def test_decay_lane_cells_casts_its_factor_parameter_explicitly():
+    """A bare, uncast $1 gets its type inferred by Postgres from its *first*
+    use in the statement -- here that would be `transits * $1`, with
+    transits an integer column, so Postgres resolves $1 as integer for the
+    whole statement and silently truncates a fractional decay factor like
+    0.5 to 0 before any multiplication runs. This was caught only by running
+    the real statement against a live Postgres -- no fake-connection test
+    can see a parameter type Postgres itself only infers at plan time -- so
+    this pins the fix in text rather than relying on that check happening
+    again."""
+    sql_only = "\n".join(
+        line for line in storage._DECAY_LANE_CELLS.splitlines() if not line.strip().startswith("--")
+    )
+    uses = re.findall(r"\$1(::\w+)?", sql_only)
+    assert uses, "expected $1 to appear in _DECAY_LANE_CELLS"
+    assert all(cast == "::float8" for cast in uses), (
+        f"every use of the decay factor in _DECAY_LANE_CELLS must be cast to "
+        f"::float8, found: {uses}"
+    )
+
+
 def test_every_index_on_the_derived_tables_has_a_comment_above_it():
     """The house rule (see backend/storage.py and CLAUDE.md): every index names
     the query it serves, right above the CREATE INDEX line."""

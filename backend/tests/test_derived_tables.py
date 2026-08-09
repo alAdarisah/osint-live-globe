@@ -106,6 +106,10 @@ class _LaneCellConn:
                 row["positions"] = max(0, round(row["positions"] * factor))
                 row["mean_sin"] *= factor
                 row["mean_cos"] *= factor
+                by_class = json.loads(row["by_class"])
+                row["by_class"] = json.dumps({
+                    cls: max(0, round(count * factor)) for cls, count in by_class.items()
+                })
             return f"UPDATE {len(self.store)}"
         if stripped.startswith("DELETE FROM lane_cells WHERE transits <"):
             (floor,) = args
@@ -138,7 +142,7 @@ def test_lane_cell_upsert_accumulates_across_two_calls(monkeypatch):
                   mean_sin=0.1, mean_cos=-0.2),
     ]))
 
-    rows = _run(storage.lane_cells(min_transits=1))
+    rows = _run(storage.lane_cells(None, min_transits=1))
     assert len(rows) == 1
     row = rows[0]
     assert row["transits"] == 5
@@ -159,10 +163,27 @@ def test_lane_cell_upsert_merges_duplicate_cell_keys_within_one_call(monkeypatch
         _lane_row(transits=1, positions=1, by_class={"cargo": 1}),
     ]))
 
-    rows = _run(storage.lane_cells(min_transits=1))
+    rows = _run(storage.lane_cells(None, min_transits=1))
     assert len(rows) == 1
     assert rows[0]["transits"] == 2
     assert rows[0]["by_class"] == {"cargo": 2}
+
+
+def test_lane_cell_upsert_skips_a_malformed_row_instead_of_raising(monkeypatch):
+    """A row missing a required field (here: res) must not propagate a
+    KeyError past upsert_lane_cells -- storage must never take a refine job
+    down over one bad row in an otherwise-good batch, the same guarantee
+    _port_call_row/_flight_leg_row already give their callers."""
+    monkeypatch.setattr(storage, "_pool", _Pool(_LaneCellConn()))
+
+    good = _lane_row(cell_key="good", transits=2, positions=2, by_class={"cargo": 2})
+    bad = _lane_row(cell_key="bad")
+    del bad["res"]
+
+    _run(storage.upsert_lane_cells([bad, good]))  # must not raise
+
+    rows = _run(storage.lane_cells(None, min_transits=1))
+    assert [r["cell_key"] for r in rows] == ["good"]
 
 
 def test_mean_sin_cos_round_trips_to_a_circular_mean(monkeypatch):
@@ -182,7 +203,7 @@ def test_mean_sin_cos_round_trips_to_a_circular_mean(monkeypatch):
         _lane_row(transits=1, positions=1, by_class={}, mean_sin=s2, mean_cos=c2),
     ]))
 
-    row = _run(storage.lane_cells(min_transits=1))[0]
+    row = _run(storage.lane_cells(None, min_transits=1))[0]
     mean_course = math.degrees(math.atan2(row["mean_sin"], row["mean_cos"])) % 360
     # 360 and 0 are the same heading; take the short way round the seam
     # rather than asserting a single raw value that floating point drift
@@ -209,10 +230,32 @@ def test_decay_removes_a_cell_that_falls_below_the_floor(monkeypatch):
     assert conn.store["busy"]["transits"] == 5
 
 
+def test_decay_ages_by_class_in_step_with_transits(monkeypatch):
+    """by_class counts transits *per class*, so it has to decay the same
+    factor as transits itself -- otherwise a class breakdown outlives the
+    total it's supposed to sum to, and after enough cycles reports more
+    traffic in one class than the cell has transits at all."""
+    conn = _LaneCellConn(store={
+        "c1": {"lat": 1.0, "lon": 2.0, "res": 0.5, "transits": 10, "positions": 20,
+               "by_class": json.dumps({"cargo": 6, "tanker": 4}),
+               "mean_sin": 1.0, "mean_cos": 1.0, "updated_at": datetime.now(timezone.utc)},
+    })
+    monkeypatch.setattr(storage, "_pool", _Pool(conn))
+
+    _run(storage.decay_lane_cells(factor=0.5, floor=0))
+
+    row = _run(storage.lane_cells(None, min_transits=0))[0]
+    assert row["transits"] == 5
+    assert row["by_class"] == {"cargo": 3, "tanker": 2}
+    assert sum(row["by_class"].values()) == row["transits"], (
+        "a class breakdown must not out-report the total transits it sums to"
+    )
+
+
 def test_lane_cell_helpers_are_no_ops_without_a_pool(monkeypatch):
     monkeypatch.setattr(storage, "_pool", None)
     _run(storage.upsert_lane_cells([_lane_row()]))  # must not raise
-    assert _run(storage.lane_cells()) == []
+    assert _run(storage.lane_cells(None)) == []
     assert _run(storage.decay_lane_cells(0.5, 1)) == 0
 
 
@@ -344,14 +387,16 @@ class _FlightLegConn:
             key = (icao24, departed_at)
             existing = self.store.get(key)
             if existing is None:
-                merged_max_alt, merged_origin, merged_callsign = max_alt_ft, origin_code, callsign
+                merged_max_alt = max_alt_ft
+                merged_origin, merged_dest, merged_callsign = origin_code, dest_code, callsign
             else:
                 merged_max_alt = self._greatest(max_alt_ft, existing["max_alt_ft"])
                 merged_origin = origin_code if origin_code is not None else existing["origin_code"]
+                merged_dest = dest_code if dest_code is not None else existing["dest_code"]
                 merged_callsign = callsign if callsign is not None else existing["callsign"]
             self.store[key] = {
                 "icao24": icao24, "departed_at": departed_at, "arrived_at": arrived_at,
-                "origin_code": merged_origin, "dest_code": dest_code, "callsign": merged_callsign,
+                "origin_code": merged_origin, "dest_code": merged_dest, "callsign": merged_callsign,
                 "max_alt_ft": merged_max_alt, "distance_km": distance_km, "confidence": confidence,
             }
 
@@ -411,6 +456,48 @@ def test_open_flight_leg_and_max_alt_ft_is_a_running_maximum(monkeypatch):
     legs = _run(storage.flight_legs_for("abc123"))
     assert legs[0]["max_alt_ft"] == 35000
     assert legs[0]["arrived_at"] == arrived
+
+
+def test_dest_code_survives_a_later_write_that_does_not_supply_one(monkeypatch):
+    """The closing write in record_flight_legs (see the test above) supplies
+    arrived_at but not dest_code -- exactly the shape that would silently
+    null out a destination a previous write had already resolved if the
+    upsert overwrote it unconditionally instead of preferring the new value
+    only when the new write actually has one."""
+    conn = _FlightLegConn()
+    monkeypatch.setattr(storage, "_pool", _Pool(conn))
+
+    t1 = datetime(2026, 8, 1, 6, 0, tzinfo=timezone.utc).timestamp()
+    _run(storage.record_flight_legs([
+        {"icao24": "abc123", "departed_at": t1, "dest_code": "EGLL", "confidence": "derived"},
+    ]))
+    assert _run(storage.open_flight_leg("abc123"))["dest_code"] == "EGLL"
+
+    arrived = datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc).timestamp()
+    _run(storage.record_flight_legs([
+        {"icao24": "abc123", "departed_at": t1, "arrived_at": arrived, "confidence": "derived"},
+    ]))
+
+    legs = _run(storage.flight_legs_for("abc123"))
+    assert legs[0]["dest_code"] == "EGLL", "a write with no dest_code must not erase one already resolved"
+
+
+def test_dest_code_is_still_overwritten_by_a_write_that_resolves_a_new_one(monkeypatch):
+    """COALESCE only protects against a write that has nothing to say -- a
+    write that *does* resolve a (corrected, or now-confirmed) destination
+    still wins, the same as origin_code and callsign."""
+    conn = _FlightLegConn()
+    monkeypatch.setattr(storage, "_pool", _Pool(conn))
+
+    t1 = datetime(2026, 8, 1, 6, 0, tzinfo=timezone.utc).timestamp()
+    _run(storage.record_flight_legs([
+        {"icao24": "abc123", "departed_at": t1, "dest_code": "EGLL", "confidence": "derived"},
+    ]))
+    _run(storage.record_flight_legs([
+        {"icao24": "abc123", "departed_at": t1, "dest_code": "EHAM", "confidence": "derived"},
+    ]))
+
+    assert _run(storage.open_flight_leg("abc123"))["dest_code"] == "EHAM"
 
 
 def test_flight_leg_rows_missing_a_required_field_are_skipped(monkeypatch):

@@ -1016,6 +1016,33 @@ def _combine_lane_cell(existing: dict | None, incoming: dict) -> dict:
     }
 
 
+def _lane_cell_row(item: dict) -> dict | None:
+    """One incoming cell observation normalized to _combine_lane_cell's
+    shape, or None if it is missing something that can't be defaulted or
+    carries a value that can't be coerced to the type its column needs --
+    mirroring _conflict_row/_port_call_row/_flight_leg_row's reasoning: the
+    write path swallows exceptions by design, so a malformed row is better
+    skipped here than left to raise a KeyError past the caller's try/except."""
+    if not isinstance(item, dict):
+        return None
+    cell_key = item.get("cell_key")
+    if cell_key is None:
+        return None
+    by_class_raw = item.get("by_class") or {}
+    if not isinstance(by_class_raw, dict):
+        return None
+    try:
+        return {
+            "cell_key": str(cell_key), "lat": float(item["lat"]), "lon": float(item["lon"]),
+            "res": float(item["res"]), "transits": int(item["transits"]),
+            "positions": int(item["positions"]),
+            "by_class": {str(k): int(v) for k, v in by_class_raw.items()},
+            "mean_sin": float(item["mean_sin"]), "mean_cos": float(item["mean_cos"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _prepare_lane_cell_rows(rows: list[dict]) -> dict[str, dict]:
     """Normalizes input rows and merges duplicate cell_keys within one call.
 
@@ -1028,15 +1055,10 @@ def _prepare_lane_cell_rows(rows: list[dict]) -> dict[str, dict]:
     """
     combined: dict[str, dict] = {}
     for item in rows:
-        key = str(item["cell_key"])
-        row = {
-            "cell_key": key, "lat": float(item["lat"]), "lon": float(item["lon"]),
-            "res": float(item["res"]), "transits": int(item["transits"]),
-            "positions": int(item["positions"]),
-            "by_class": {str(k): int(v) for k, v in (item.get("by_class") or {}).items()},
-            "mean_sin": float(item["mean_sin"]), "mean_cos": float(item["mean_cos"]),
-        }
-        combined[key] = _combine_lane_cell(combined.get(key), row)
+        row = _lane_cell_row(item)
+        if row is None:
+            continue
+        combined[row["cell_key"]] = _combine_lane_cell(combined.get(row["cell_key"]), row)
     return combined
 
 
@@ -1076,11 +1098,17 @@ async def upsert_lane_cells(rows: list[dict]) -> None:
     """
     if _pool is None or not rows:
         return
-    incoming = _prepare_lane_cell_rows(rows)
-    if not incoming:
-        return
     now = datetime.now(timezone.utc)
     try:
+        # Normalizing/merging happens inside the same try as the write:
+        # _lane_cell_row already skips anything it can't coerce rather than
+        # raising, but this is the same belt-and-suspenders placement
+        # _conflict_row's callers use -- a write path must never propagate a
+        # bad row past its own "storage must never take a refine job down"
+        # guarantee, whatever produces the exception.
+        incoming = _prepare_lane_cell_rows(rows)
+        if not incoming:
+            return
         async with _pool.acquire() as conn:
             async with conn.transaction():
                 keys = list(incoming)
@@ -1113,7 +1141,7 @@ async def upsert_lane_cells(rows: list[dict]) -> None:
         log.exception("Failed to upsert %d lane cells", len(rows))
 
 
-async def lane_cells(bbox: tuple | None = None, min_transits: int = 1) -> list[dict]:
+async def lane_cells(bbox: tuple | None, min_transits: int = 1) -> list[dict]:
     """The stored grid, optionally clipped to a viewport.
 
     `bbox` is (lat_min, lon_min, lat_max, lon_max), the same shape as
@@ -1152,10 +1180,28 @@ async def lane_cells(bbox: tuple | None = None, min_transits: int = 1) -> list[d
 
 _DECAY_LANE_CELLS = """
 UPDATE lane_cells SET
-  transits = GREATEST(0, ROUND(transits * $1))::integer,
-  positions = GREATEST(0, ROUND(positions * $1))::integer,
-  mean_sin = mean_sin * $1,
-  mean_cos = mean_cos * $1
+  -- $1 is cast explicitly everywhere it's used below. Left bare, Postgres
+  -- infers an untyped parameter's type from its *first* use -- here
+  -- `transits * $1` with transits an integer column -- and resolves $1 as
+  -- integer for the whole statement, silently truncating a fractional decay
+  -- factor like 0.5 to 0 before it ever reaches the multiplication. Found by
+  -- running this against a real Postgres: every fake-connection test in
+  -- backend/tests passed regardless, because none of them can see a
+  -- parameter type Postgres itself only infers at plan time.
+  transits = GREATEST(0, ROUND(transits * $1::float8))::integer,
+  positions = GREATEST(0, ROUND(positions * $1::float8))::integer,
+  mean_sin = mean_sin * $1::float8,
+  mean_cos = mean_cos * $1::float8,
+  -- by_class counts transits *per class*, so it has to age down in step
+  -- with transits itself -- leaving it untouched would let the per-class
+  -- breakdown drift above the total it is supposed to sum to after a few
+  -- decay cycles, ending in a class count the cell's own transits column
+  -- can no longer account for.
+  by_class = COALESCE(
+    (SELECT jsonb_object_agg(key, GREATEST(0, ROUND((value #>> '{}')::numeric * $1::float8))::integer)
+       FROM jsonb_each(by_class)),
+    '{}'::jsonb
+  )
 """
 
 
@@ -1291,8 +1337,18 @@ INSERT INTO flight_legs (icao24, departed_at, arrived_at, origin_code, dest_code
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 ON CONFLICT (icao24, departed_at) DO UPDATE SET
   arrived_at = EXCLUDED.arrived_at,
+  -- origin_code/dest_code/callsign are resolved progressively as a leg's
+  -- track fills in, the same way max_alt_ft below is -- a leg is first
+  -- written the moment a departure is detected, before either airport can
+  -- always be resolved (see the schema comment on flight_legs). COALESCE
+  -- keeps whichever write actually resolved a value: a later write that
+  -- hasn't (yet) resolved dest_code -- the closing arrival write in
+  -- record_flight_legs is exactly this shape -- must not erase one a
+  -- previous write already found, and a write that *has* resolved a real
+  -- value still overwrites the old one, so a closing write that does look
+  -- the arrival airport up still corrects an earlier guess.
   origin_code = COALESCE(EXCLUDED.origin_code, flight_legs.origin_code),
-  dest_code = EXCLUDED.dest_code,
+  dest_code = COALESCE(EXCLUDED.dest_code, flight_legs.dest_code),
   callsign = COALESCE(EXCLUDED.callsign, flight_legs.callsign),
   -- The highest altitude seen across every write for this leg, not the
   -- latest one: a leg written once mid-flight and again after landing each
