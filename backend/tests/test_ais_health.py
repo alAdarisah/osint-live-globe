@@ -153,6 +153,110 @@ def test_silence_is_not_reported_as_a_key_problem():
     assert issubclass(ais.StreamRefused, Exception)
 
 
+# --- being told to slow down -------------------------------------------------
+#
+# HTTP 429 on the upgrade is the one failure in this file that is ours to stop
+# causing. It was being treated as an ordinary connection error -- doubled from
+# wherever the schedule happened to be -- so a fresh process met a throttle with
+# attempts 5, 11 and 20 seconds apart and kept it alive. Verified against the
+# real response on 2026-08-09: websockets raises InvalidStatus, status_code 429,
+# and aisstream's envoy sends no Retry-After at all.
+
+
+def _utc(*parts) -> float:
+    """An epoch second from a UTC calendar time, so the date tests below can't
+    disagree with themselves about which day a constant is."""
+    from datetime import datetime, timezone as tz
+
+    return datetime(*parts, tzinfo=tz.utc).timestamp()
+
+
+class _Response:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+class _InvalidStatus(Exception):
+    def __init__(self, response):
+        self.response = response
+
+
+def test_an_ordinary_connection_error_is_not_a_throttle():
+    assert ais.throttle_delay(OSError("connection reset"), NOW) is None
+    assert ais.throttle_delay(_InvalidStatus(_Response(503)), NOW) is None
+
+
+def test_a_429_is_recognised_even_with_no_retry_after():
+    """Which is every 429 aisstream sends: date, content-length, nothing else."""
+    assert ais.throttle_delay(_InvalidStatus(_Response(429)), NOW) == 0.0
+
+
+def test_a_retry_after_in_seconds_is_honoured():
+    exc = _InvalidStatus(_Response(429, {"Retry-After": "120"}))
+    assert ais.throttle_delay(exc, NOW) == 120.0
+
+
+def test_a_retry_after_as_an_http_date_is_honoured():
+    exc = _InvalidStatus(_Response(429, {"Retry-After": "Sun, 09 Aug 2026 10:40:00 GMT"}))
+    assert ais.throttle_delay(exc, _utc(2026, 8, 9, 10, 0)) == pytest.approx(2400.0, abs=1)
+
+
+def test_an_unparseable_retry_after_is_treated_as_absent():
+    exc = _InvalidStatus(_Response(429, {"Retry-After": "soon-ish"}))
+    assert ais.throttle_delay(exc, NOW) == 0.0
+
+
+def test_a_retry_after_in_the_past_does_not_go_negative():
+    exc = _InvalidStatus(_Response(429, {"Retry-After": "Sun, 09 Aug 2026 09:00:00 GMT"}))
+    assert ais.throttle_delay(exc, _utc(2026, 8, 9, 10, 0)) == 0.0
+
+
+def test_an_absurd_retry_after_is_clamped():
+    exc = _InvalidStatus(_Response(429, {"Retry-After": str(30 * 86400)}))
+    assert ais.throttle_delay(exc, NOW) == ais.MAX_RETRY_AFTER
+
+
+def test_the_first_429_goes_straight_to_the_cap():
+    """It does not climb 5, 11, 20. The first 429 already means the schedule it
+    was climbing was too fast."""
+    assert ais.throttled_backoff(1, 0.0) == ais.BACKOFF_CAP
+
+
+def test_a_repeated_429_escalates_past_the_ordinary_cap():
+    """Because the ordinary cap is evidently not slow enough if they are still
+    refusing at it."""
+    delays = [ais.throttled_backoff(n, 0.0) for n in range(1, 6)]
+    assert delays == sorted(delays)
+    assert delays[0] == ais.BACKOFF_CAP
+    assert delays[-1] > ais.BACKOFF_CAP
+    assert all(d <= ais.THROTTLED_BACKOFF_CAP for d in delays)
+
+
+def test_escalation_stops_at_its_own_ceiling():
+    assert ais.throttled_backoff(50, 0.0) == ais.THROTTLED_BACKOFF_CAP
+
+
+def test_a_server_asking_for_longer_than_our_floor_gets_it():
+    assert ais.throttled_backoff(1, 3000.0) == 3000.0
+
+
+def test_a_server_asking_for_less_than_our_floor_does_not_speed_us_up():
+    """Retry-After is a minimum. Ours is the one informed by having earned this."""
+    assert ais.throttled_backoff(1, 30.0) == ais.BACKOFF_CAP
+
+
+def test_a_day_of_throttling_costs_the_service_very_few_attempts():
+    """The point of the whole thing: 429s stop appearing because we stop
+    producing the traffic that causes them."""
+    elapsed, attempts, streak = 0.0, 0, 0
+    while elapsed < 24 * 3600:
+        streak += 1
+        elapsed += ais.throttled_backoff(streak, 0.0)
+        attempts += 1
+    assert attempts <= 10  # against ~85 a day on the ordinary schedule
+
+
 # --- restarts ---------------------------------------------------------------
 #
 # The backoff above is per-process, and this process restarts: rebuilds, crash
@@ -208,6 +312,29 @@ def test_the_remainder_of_the_delay_is_served_before_the_first_attempt():
     newest = series[-1][0]
     _backoff, wait = ais.resume_backoff(series, newest + 3)
     assert wait == pytest.approx(ais.BACKOFF_CAP - 3)
+
+
+def test_a_machine_that_was_off_overnight_does_not_come_back_hammering():
+    """2026-08-09, and the case the first version of this missed.
+
+    The stack was off all night and came up with the outage still running. At a
+    one-hour window there were no rows to find, so it started at 5 seconds,
+    burned three attempts in half a minute and was answered with 429 -- exactly
+    the burst this function exists to prevent, arrived at through a stop rather
+    than a rebuild.
+
+    Two properties are wanted at once, and they are not in tension: the schedule
+    resumes at the cap, *and* the first attempt is immediate, because twelve
+    hours of silence has already served any delay that was owed.
+    """
+    overnight = _failing(60, start=NOW)          # an evening of failing heartbeats
+    morning = overnight[-1][0] + 12 * 3600       # machine off, then back
+
+    backoff, wait = ais.resume_backoff(overnight, morning)
+    assert backoff == ais.BACKOFF_CAP
+    assert wait == 0.0
+    # And the window has to be wide enough to still see those rows at all.
+    assert ais.RESUME_WINDOW >= 12 * 3600
 
 
 def test_a_delay_already_served_is_not_served_twice():

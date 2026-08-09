@@ -3,6 +3,8 @@ import json
 import logging
 import random
 import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 import websockets
 
@@ -544,10 +546,99 @@ def _next_backoff(backoff: float) -> float:
     return min(backoff * 2, BACKOFF_CAP)
 
 
+# --- being told to slow down -------------------------------------------------
+#
+# aisstream answers HTTP 429 on the WebSocket upgrade when it wants fewer
+# connections from an address. That is a different kind of event from the stream
+# breaking, and it was being handled as though it were the same: doubling from
+# whatever the schedule happened to be, so a fresh process met a throttle with
+# attempts five, eleven and twenty seconds apart and kept the throttle alive.
+#
+# A 429 is an instruction. The response to it is to stop for a long time, and to
+# stop for longer each time it is repeated -- past the ordinary cap, because the
+# ordinary cap is evidently not slow enough if they are still saying no at it.
+THROTTLED_BACKOFF_START = BACKOFF_CAP
+THROTTLED_BACKOFF_CAP = 4 * 3600
+
+# aisstream sends no Retry-After today -- their envoy answers 429 with nothing
+# but a date and a content-length, verified 2026-08-09. This is here because the
+# header costs nothing to honour and is the one number that would beat a guess
+# if they ever add it. Clamped, because a server is allowed to say "next week"
+# and this process is not going to sit blind that long without saying so.
+MAX_RETRY_AFTER = 4 * 3600
+
+
+def _retry_after_seconds(raw, now: float) -> float:
+    """A Retry-After header as seconds from now. 0.0 for absent or unparseable.
+
+    Both forms in the RFC: a delay in seconds, and an HTTP-date. Garbage is
+    treated as absent rather than raised on -- this runs inside a failure path,
+    and a malformed header is not worth converting into a second failure.
+    """
+    if raw is None:
+        return 0.0
+    text = str(raw).strip()
+    try:
+        return min(max(float(int(text)), 0.0), MAX_RETRY_AFTER)
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return 0.0
+    if when is None:
+        return 0.0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return min(max(when.timestamp() - now, 0.0), MAX_RETRY_AFTER)
+
+
+def throttle_delay(exc: BaseException, now: float) -> float | None:
+    """Seconds aisstream asked us to wait, or None if this was not a throttle.
+
+    Returns 0.0 for a 429 carrying no usable Retry-After, which is every 429 they
+    send today -- the caller applies its own floor to that. The distinction that
+    matters here is None versus a number, not the size of the number.
+    """
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) != 429:
+        return None
+    headers = getattr(response, "headers", None)
+    raw = None
+    if headers is not None:
+        try:
+            raw = headers.get("Retry-After")
+        except Exception:  # noqa: BLE001 - a header bag that won't be read from
+            raw = None
+    return _retry_after_seconds(raw, now)
+
+
+def throttled_backoff(streak: int, asked_for: float) -> float:
+    """How long to wait after `streak` consecutive 429s, honouring Retry-After.
+
+    Starts at the ordinary cap rather than climbing to it: the first 429 already
+    means the ordinary schedule was too fast. Doubles per repeat up to
+    THROTTLED_BACKOFF_CAP, and never returns less than the server asked for.
+    """
+    ours = THROTTLED_BACKOFF_START * 2 ** min(max(streak - 1, 0), 8)
+    return min(max(ours, asked_for), THROTTLED_BACKOFF_CAP)
+
+
 # How far back a starting process looks to decide whether it is really starting
-# fresh. An hour: long enough to cover a rebuild, a crash loop and a compose
-# restart, short enough that yesterday's outage does not slow down today.
-RESUME_WINDOW = 3600
+# fresh.
+#
+# A day, not an hour. An hour covered the case this was written for -- a rebuild,
+# a crash loop, a compose restart -- and missed the one that actually happened on
+# 2026-08-09: the machine was off overnight, came back with the outage still
+# running, found no health rows in the last hour and started at 5 seconds. Three
+# attempts later aisstream was answering 429 again, which is precisely the burst
+# this function exists to prevent.
+#
+# Nothing is lost by widening it, because the wait below is measured from the
+# last failure rather than fixed: a process that has been away for twelve hours
+# owes nothing, so it attempts immediately and only the *spacing after* that
+# attempt is conservative. Recovery is still noticed on the first try.
+RESUME_WINDOW = 24 * 3600
 
 
 def resume_backoff(series: list[tuple[float, int | None, bool]], now: float) -> tuple[float, float]:
@@ -745,9 +836,14 @@ async def stream_forever():
     # allowed to lean on aisstream, this is whether the path we are leaning on
     # is the problem.
     direct_failures = 0
+    # Consecutive cycles ending in HTTP 429. Separate from direct_failures and
+    # from the backoff because being throttled is not the stream being broken:
+    # it is the one failure here we can actually stop causing.
+    throttle_streak = 0
     while True:
         delivered = False
         fault: str | None = None
+        throttled: float | None = None
         for proxy in await _egresses(direct_failures):
             try:
                 await _consume(state, proxy=proxy)
@@ -761,7 +857,18 @@ async def stream_forever():
             except Exception as exc:  # noqa: BLE001 - keep reconnecting
                 if proxy is None:
                     direct_failures += 1
-                    fault = str(exc)
+                    # Only the direct path's rate is ours to control -- a 429
+                    # through a proxy is that proxy's address being throttled,
+                    # and slowing this loop down would not answer it.
+                    throttled = throttle_delay(exc, time.time())
+                    fault = (
+                        "aisstream is rate limiting this address (HTTP 429). Nothing "
+                        "is wrong with the key or the subscription; the throttle "
+                        "clears on its own once the attempts stop, so this is "
+                        "waiting rather than retrying."
+                        if throttled is not None
+                        else str(exc)
+                    )
                     # Set as we go, not at the end of the cycle: the direct
                     # verdict is the one the source-status panel exists to
                     # show, and a cycle can run for a minute before it ends.
@@ -800,8 +907,25 @@ async def stream_forever():
 
         if fault:
             state.last_error = fault
+
+        if throttled is not None:
+            throttle_streak += 1
+            backoff = throttled_backoff(throttle_streak, throttled)
+        elif throttle_streak:
+            # Accepted again, so the throttle has lifted. Back to the ordinary
+            # schedule -- but at its cap, not at five seconds: the connection
+            # being accepted says nothing about how fast we may now go, and
+            # dropping straight back to a fast retry is how the last one was
+            # earned.
+            throttle_streak = 0
+            backoff = BACKOFF_CAP
+
         delay = _reconnect_delay(backoff)
         log.warning("AIS stream error, reconnecting in %ds: %s", delay, state.last_error)
         await storage.record_source_health("ais", None, False, state.last_error)
         await asyncio.sleep(delay)
-        backoff = _next_backoff(backoff)
+        if throttled is None:
+            # Left alone while throttled: the streak above owns that schedule,
+            # and _next_backoff would clamp it back down to the ordinary cap --
+            # undoing the escalation on the one failure worth escalating for.
+            backoff = _next_backoff(backoff)
