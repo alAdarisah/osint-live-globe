@@ -356,6 +356,14 @@ HISTORY_RETENTION_SECONDS = int(os.getenv("HISTORY_RETENTION_SECONDS", str(3 * 2
 # a window that wide can answer.
 PORT_CALL_RETENTION_DAYS = int(os.getenv("PORT_CALL_RETENTION_DAYS", "180"))
 
+# How often backend/refine/port_calls.py reads the next slice of AIS history.
+# 15 minutes, the same cadence as dark_vessels: a dwell has to run for an hour
+# before it is even a candidate, so nothing about the detection needs a
+# tighter loop, and this is the interval a job that has fallen behind (a
+# restart, the very first run against pre-existing history) catches up at --
+# too tight would just mean more empty passes once it is caught up.
+PORT_CALL_INTERVAL = int(os.getenv("PORT_CALL_INTERVAL", "900"))
+
 # Same reasoning as PORT_CALL_RETENTION_DAYS, at half the window. Flight legs
 # are written far more often than port calls -- ADS-B tracks orders of
 # magnitude more aircraft movements than AIS tracks port-capable ships -- so

@@ -7,17 +7,20 @@ out of the API process: fusion in particular is ~1600 lines of clustering,
 geo-reconciliation and reliability scoring running on GDELT's cadence, and it was
 sharing an event loop with every request the map made.
 
-Three jobs, all self-paced rather than scheduled:
+Several jobs, most self-paced rather than scheduled:
 
   event_fusion  collapses ACLED + UCDP + GDELT into one record per incident
   dark_vessels  derives AIS gaps and ship-to-ship pairs from position history
   escalation    ranks regions running above their own recent baseline
+  port_calls    finds vessel dwells near a port in the AIS movement log
 
 Unlike backend/ingest, there is no scheduler here. Each of these already owns a
 loop that carries real logic -- fusion waits for its inputs and rehydrates a
 3-day accumulator before its first pass, dark_vessels retries sooner after a
-failure than its normal 15 minutes, escalation is a plain interval -- and a
-scheduler would only be a second, weaker copy of pacing they already do
+failure than its normal 15 minutes, escalation and port_calls are a plain
+interval (a dwell has to run an hour before it is even a candidate, so nothing
+about port_calls is made more correct by retrying faster after a failure) --
+and a scheduler would only be a second, weaker copy of pacing they already do
 correctly. APScheduler earns its place in the ingest process, where the
 intervals are fixed metered budgets; it would earn nothing here.
 
@@ -87,6 +90,23 @@ _JOBS = (
         publishes=(),
         health_name="airfield_activity",
         health_every=30 * 60,  # airfield_activity.REFRESH_INTERVAL
+    ),
+    # Writes vessel_port_calls rows rather than an entity_latest kind or a
+    # keyed reference document -- port_calls_for()/port_calls_at() in
+    # backend/storage.py are the read side, queried per vessel or per port
+    # rather than served whole, so there is nothing here for the backend to
+    # mirror either.
+    Job(
+        module="backend.refine.port_calls",
+        entrypoint="derive_forever",
+        publishes=(),
+        # port_calls.HEALTH_NAME, copied rather than imported for the same
+        # reason ingest's job table copies ais.py's HEALTH_INTERVAL: this
+        # table has to be readable without pulling in everything a job module
+        # imports (see test_ingest_jobs.py's
+        # test_stream_health_cadence_matches_the_source_module).
+        health_name="port_calls",
+        health_every=config.PORT_CALL_INTERVAL,
     ),
 )
 

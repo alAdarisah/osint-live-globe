@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS entity_history (
 );
 CREATE INDEX IF NOT EXISTS idx_history_lookup ON entity_history (kind, ts);
 CREATE INDEX IF NOT EXISTS idx_history_entity ON entity_history (kind, entity_id, ts DESC);
+-- Serves entity_history_since()'s cursor read: "every row of this kind past
+-- id N", in id order. id is a BIGSERIAL shared across every kind this table
+-- holds, so a plain PK scan filtered by kind would walk past every adsb/
+-- satellite/etc row sitting between two ais ids before it could apply the
+-- filter -- this index makes the (kind, id) range itself the scan.
+CREATE INDEX IF NOT EXISTS idx_history_kind_id ON entity_history (kind, id);
 
 CREATE TABLE IF NOT EXISTS conflict_events (
   id TEXT PRIMARY KEY,
@@ -1556,6 +1562,48 @@ async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: 
             "to_lat": r["lat"],
             "to_lon": r["lon"],
             "gap_seconds": float(r["gap_seconds"]),
+        }
+        for r in rows
+    ]
+
+
+_HISTORY_SINCE_ID = """
+SELECT id, entity_id, ts, lat, lon, payload
+  FROM entity_history
+ WHERE kind = $1 AND id > $2
+ ORDER BY id
+ LIMIT $3
+"""
+
+
+async def entity_history_since(kind: str, after_id: int, limit: int) -> list[dict]:
+    """Every recorded position for `kind` with id > `after_id`, oldest first.
+
+    The cursor read a refine job takes to derive something from the movement
+    log without ever scanning it whole (see backend/refine/port_calls.py and
+    the global constraint that entity_history -- 11 GB and rising -- is never
+    read on a request path, and never read in one pass either). `id` is the
+    table's own BIGSERIAL, so it is already the arrival order within one kind
+    and a caller can persist the last id it saw as its high-water mark instead
+    of tracking a timestamp, which a concurrent write near the boundary could
+    duplicate or skip.
+
+    `limit` is mandatory rather than defaulted: the caller owns the tradeoff
+    between catching up fast and running one query short of a full scan, and a
+    silent default here would hide which one a given job chose.
+    """
+    if _pool is None:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(_HISTORY_SINCE_ID, kind, int(after_id), int(limit))
+    return [
+        {
+            "id": r["id"],
+            "entity_id": r["entity_id"],
+            "ts": r["ts"].timestamp(),
+            "lat": r["lat"],
+            "lon": r["lon"],
+            "payload": json.loads(r["payload"]),
         }
         for r in rows
     ]

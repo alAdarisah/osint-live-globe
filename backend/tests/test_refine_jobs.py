@@ -35,6 +35,10 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # coordinates are on the airports layer -- so it writes one keyed
         # document and app.py reads that table directly.
         "backend.sources.airfield_activity",
+        # Finds vessel dwells near a port in the AIS movement log. Publishes
+        # no layer either -- it writes vessel_port_calls rows, read per
+        # vessel or per port rather than served whole.
+        "backend.refine.port_calls",
     }
 
 
