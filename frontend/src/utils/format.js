@@ -87,6 +87,45 @@ export function utcClockFromUnix(seconds) {
   return withinADay ? `${iso.slice(11, 19)} UTC` : `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
+const ETA_MONTH_NAMES = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/**
+ * The crew-entered ETA (backend/sources/ais.py's _eta_from_static, kept as
+ * the {month, day, hour, minute} AIS actually sends) as words a reader can
+ * act on, or null if nothing usable survived.
+ *
+ * Never returns anything that reads as a full date: AIS's ETA field carries
+ * no year at all, so a voyage crossing New Year has no honest absolute date
+ * to give, and the caller's job is to say that explicitly rather than let
+ * "Jan 4" be mistaken for a date this formatter invented a year for.
+ *
+ * Re-validates ITU-R M.1371's own "not available" sentinels rather than
+ * trusting the caller to have already dropped them -- month 0 or 13+, day 0,
+ * hour 24 and minute 60 all appear on the wire. ais.py's collector already
+ * filters these before storing, but a formatter that assumed clean input
+ * would print one of them as a date the moment it saw a record from anywhere
+ * else, and this is a pure helper with no way to know where its argument
+ * came from.
+ */
+export function formatAisEta(eta) {
+  if (!eta || typeof eta !== "object") return null;
+  const month = Number(eta.month);
+  const day = Number(eta.day);
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+  if (!Number.isInteger(day) || day < 1 || day > 31) return null;
+  let text = `${ETA_MONTH_NAMES[month - 1]} ${day}`;
+  const hour = Number(eta.hour);
+  const minute = Number(eta.minute);
+  const hasHour = Number.isInteger(hour) && hour >= 0 && hour <= 23;
+  const hasMinute = Number.isInteger(minute) && minute >= 0 && minute <= 59;
+  if (hasHour && hasMinute) {
+    text += `, ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  }
+  return text;
+}
+
 export function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;

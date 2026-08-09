@@ -6,7 +6,8 @@
 
 import { L } from "./leafletGlobal";
 import { SVG, OFFICIALS_KIND_ICON, buildDivIcon } from "./svgIcons";
-import { esc, fmtNumber, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix } from "../utils/format";
+import { esc, fmtNumber, formatAisEta, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix } from "../utils/format";
+import { flagForMmsi } from "../utils/mmsi";
 import {
   severityBand, severityColor, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
   placementDoubtful, positionUncertain, VERDICT_NOTE,
@@ -1485,6 +1486,46 @@ function isFishingVessel(d) {
   return d.ship_type === FISHING_SHIP_TYPE;
 }
 
+// The AIS "Type of ship and cargo type" code, in the reader's words -- the
+// ranges ITU-R M.1371 defines, at the granularity a popup is worth (it
+// further subdivides several of these by hazard category in the last digit,
+// which is more than a reader deciding "is this worth a second look" needs).
+// Deliberately not merged into classifyShip's three-way split above: this is
+// for showing the code the map identified a ship from, so a reader can check
+// it -- the classifier's job is drawing the right icon, not explaining itself.
+const SHIP_TYPE_RANGES = [
+  [20, 29, "Wing in ground (WIG)"],
+  [30, 30, "Fishing"],
+  [31, 32, "Towing"],
+  [33, 33, "Dredging or underwater operations"],
+  [34, 34, "Diving operations"],
+  [35, 35, "Military operations"],
+  [36, 36, "Sailing"],
+  [37, 37, "Pleasure craft"],
+  [40, 49, "High-speed craft"],
+  [50, 50, "Pilot vessel"],
+  [51, 51, "Search and rescue vessel"],
+  [52, 52, "Tug"],
+  [53, 53, "Port tender"],
+  [54, 54, "Anti-pollution equipment"],
+  [55, 55, "Law enforcement"],
+  [56, 57, "Local vessel"],
+  [58, 58, "Medical transport"],
+  [59, 59, "Noncombatant ship (RR Resolution 18)"],
+  [60, 69, "Passenger"],
+  [70, 79, "Cargo"],
+  [80, 89, "Tanker"],
+  [90, 99, "Other type"],
+];
+
+/** The AIS type code's label, or null for a reserved/unassigned code (1-19). */
+function shipTypeLabel(code) {
+  if (typeof code !== "number" || !Number.isInteger(code)) return null;
+  if (code === 0) return null; // AIS's own "not available"
+  const hit = SHIP_TYPE_RANGES.find(([lo, hi]) => code >= lo && code <= hi);
+  return hit ? hit[2] : null;
+}
+
 export function classifyShip(d) {
   if (isNavyVessel(d)) return "navy";
   if (isTanker(d)) return "tanker";
@@ -1539,27 +1580,73 @@ export function decorateAis(d, { selectedMmsi } = {}) {
     `${watchlisted ? `<br/><span class="watchlist-flag">Watchlist: ${esc(WATCHLIST_CLASS_LABEL[watchlisted.evidence] || "listed")}</span>` : ""}` +
     `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn` +
     lastPingTooltip(d.updated);
+
+  // Everything below is stored, and until this task nothing read it back:
+  // length_m/beam_m (ais.py:185,187), the raw eta dict, and the flag a MID
+  // implies. See frontend/src/utils/mmsi.js for why flagForMmsi can return
+  // nothing rather than a wrong country, and utils/format.js's formatAisEta
+  // for why AIS's own ETA never becomes a date with a guessed year.
+  const flag = flagForMmsi(d.mmsi);
+  const shipTypeCode = typeof d.ship_type === "number" ? d.ship_type : null;
+  const shipLabel = shipTypeCode !== null ? shipTypeLabel(shipTypeCode) : null;
+  const etaText = d.eta ? formatAisEta(d.eta) : null;
+  const headingKnown = Number.isFinite(d.heading) && d.heading !== 511; // 511 is AIS's own "not available"
+
   const detail = `
     <h3>${esc(d.name || "Unknown vessel")}</h3>
+
+    <div class="csection-h">Identity</div>
     <div class="meta">MMSI ${esc(d.mmsi)}${d.imo ? ` &middot; IMO ${esc(d.imo)}` : ""}${
       d.callsign ? ` &middot; call sign ${esc(d.callsign)}` : ""
     }</div>
-    ${sanctionDetail(d)}
-    ${watchlistDetail(d)}
-    <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg;</div>
-    <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
+    <div>${flag
+      ? `Flag state: <b>${esc(flag.country)}</b> <span class="meta">&mdash; derived from the MMSI's MID
+          (${esc(flag.mid)}); reassigned if the hull reflags, and not necessarily what it flies today.</span>`
+      : '<span class="meta">Flag state: not derivable from this MMSI</span>'}</div>
+    ${(d.length_m || d.beam_m)
+      ? `<div>Dimensions: ${d.length_m ? `${esc(d.length_m)} m` : "length n/a"} &times; ${
+          d.beam_m ? `${esc(d.beam_m)} m` : "beam n/a"
+        } <span class="meta">(LOA &times; beam) &mdash; derived from the static message's antenna-offset
+          fields, not a measurement of the hull</span></div>`
+      : ""}
+    <div>Ship type: ${shipTypeCode !== null
+      ? `${shipLabel ? esc(shipLabel) : "unclassified"} <span class="meta">(AIS code ${esc(shipTypeCode)})</span>`
+      : '<span class="meta">not stated by AIS</span>'}</div>
+
+    <div class="csection-h">Voyage</div>
     ${d.destination
       ? `<div class="meta">Declared destination: <b>${esc(d.destination)}</b> &mdash; crew-typed free
-        text in AIS, and frequently inaccurate. A declaration, not an observation.</div>`
-      : ""}
+        text in AIS, often not a real port name, and frequently stale. A declaration, not an observation.</div>`
+      : '<div class="meta">Destination: not stated</div>'}
+    ${d.eta
+      ? (etaText
+          ? `<div>Reported ETA: <b>${esc(etaText)}</b> <span class="meta">&mdash; AIS's ETA field carries
+              no year, only month/day (and a time, when broadcast); crew-entered, and as reliable as the
+              destination above.</span></div>`
+          : '<div class="meta">ETA broadcast but encoded as "not available"</div>')
+      : '<div class="meta">ETA: not stated</div>'}
     ${Number.isFinite(Number(d.draught)) && Number(d.draught) > 0
       ? `<div>Reported draught: ${esc(d.draught)} m <span class="meta">&mdash; crew-set in AIS static
         data, not a measurement</span></div>`
       : ""}
+    <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
+    <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg; &middot;
+      Heading: ${headingKnown ? `${esc(d.heading)}&deg;` : "n/a"}</div>
     ${lastPingDetail(d.updated)}
+
+    <div class="csection-h">Flags</div>
+    ${sanctionDetail(d)}
+    ${watchlistDetail(d)}
+    ${gfwPriorDetail(d.gfw_prior)}
+    ${gfwPriorCredit(d.gfw_prior)}
+
     ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS ship-type code (or USS/USNS naming when static data hasn\'t arrived yet). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
     ${tanker ? '<p class="meta">Identified as an oil/chemical tanker from its AIS ship-type code.</p>' : ""}
-    <div class="meta">Source: aisstream.io (AIS)${designated ? " &middot; designations: US Treasury OFAC" : ""}</div>`;
+    <div class="meta">Source: aisstream.io (AIS) &mdash; position, speed, course and heading <i>measured</i> by
+      the vessel's own transponder; identity, destination, ETA, draught, dimensions and ship type
+      <i>reported</i> by the crew via AIS static data; flag state <i>derived</i> from the MMSI's MID${
+        designated ? " &middot; designations: US Treasury OFAC" : ""
+      }</div>`;
   const heading = Number.isFinite(d.heading) && d.heading !== 511 ? d.heading : d.course;
   let cls = "ship-marker";
   if (navy) cls += " navy-marker";
