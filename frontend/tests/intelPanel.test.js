@@ -413,6 +413,91 @@ test("cross-tab consistency: every Window option bounds every tab the same way",
   }
 });
 
+// Review round 3: the test above only asserts a floor (a ten-day-old record
+// is outside every option's span regardless of exactly where that span's
+// edge falls), so an off-by-one -- 168h mapping to 5 instead of 6, say, or
+// any re-divergence between windowMaxAgeDays and withinWindowHours -- would
+// pass it untouched. This asserts the edge itself: a record just inside a
+// window's span is kept by every tab, and one just outside is dropped by
+// every tab, which is what actually proves the two functions describe the
+// same span rather than merely agreeing that ten days is "too old" either
+// way.
+//
+// Scoped to 72h and 168h, matching windowMaxAgeDays' own comment: those are
+// the two options that divide evenly by 24, so ceil(hours/24)-1 reproduces
+// the real hour count exactly. 6h and 24h both collapse to "today" in
+// day-granular terms and cannot be made to agree with an hour-granular
+// cutoff -- ageDays is a calendar-day difference (map/severity.js), so
+// Events can admit a record up to roughly eighteen hours staler than News
+// and Officials would at either of those two options. That gap is inherent
+// to day-granular event data and predates this control entirely; it is
+// excluded here rather than asserted away.
+test("boundary consistency: at the two day-aligned Window options, every tab agrees on the edge", async (t) => {
+  const scope = makeIntelScope(SCOPE_WORLD, {});
+  // 24h divides evenly by 24 too, but it is one of the two options this test
+  // deliberately excludes (see the block comment above) -- "day-aligned" here
+  // means "a whole number of days greater than one", not merely divisible.
+  const DAY_ALIGNED_OPTIONS = WINDOW_OPTIONS.filter((o) => o.hours % 24 === 0 && o.hours > 24);
+  // A guard on the fixture itself: if WINDOW_OPTIONS ever changes shape,
+  // this test should fail loudly rather than silently stop covering
+  // anything.
+  assert.deepEqual(DAY_ALIGNED_OPTIONS.map((o) => o.hours), [72, 168]);
+
+  function daysAgoDateString(days) {
+    const now = new Date();
+    const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - days));
+    return cutoff.toISOString().slice(0, 10);
+  }
+  // Same hand-built GDELT packed format as the test above, for the same
+  // reason (not depending on the formatter this is partly exercising).
+  function gdeltDateAdded(ms) {
+    const d = new Date(ms);
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}` +
+      `${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}${p2(d.getUTCSeconds())}`;
+  }
+
+  for (const { hours, label } of DAY_ALIGNED_OPTIONS) {
+    const maxAgeDays = windowMaxAgeDays(hours);
+    const eventFilter = { ...DEFAULT_EVENT_FILTER, maxAgeDays };
+
+    await t.test(`"${label}": a record just inside the span is kept by Events, News and Officials alike`, () => {
+      // Events: exactly at the day-granular boundary (ageDays === maxAgeDays
+      // is inclusive -- passesEventFilter only drops age > maxAgeDays).
+      const events = [{ id: "in", severity: 90, date: daysAgoDateString(maxAgeDays), lat: 1, lon: 1 }];
+      assert.equal(selectEventItems(events, { scope, eventFilter }).length, 1, `Events must keep it under "${label}"`);
+
+      // News/Officials: one hour short of the real cutoff.
+      const insideMs = Date.now() - (hours - 1) * 3600000;
+      const news = [{ real_title: "x", date_added: gdeltDateAdded(insideMs), source_url: "u", lat: 1, lon: 1 }];
+      assert.equal(selectNewsItems(news, { scope, windowHours: hours }).length, 1, `News must keep it under "${label}"`);
+
+      const officials = [{ id: "o", kind: "meeting", published_at: Math.floor(insideMs / 1000), lat: 1, lon: 1 }];
+      assert.equal(
+        selectOfficialsItems(officials, { scope, windowHours: hours }).length, 1,
+        `Officials must keep it under "${label}"`
+      );
+    });
+
+    await t.test(`"${label}": a record just outside the span is dropped by Events, News and Officials alike`, () => {
+      // Events: one calendar day past the boundary.
+      const events = [{ id: "out", severity: 90, date: daysAgoDateString(maxAgeDays + 1), lat: 1, lon: 1 }];
+      assert.equal(selectEventItems(events, { scope, eventFilter }).length, 0, `Events must drop it under "${label}"`);
+
+      // News/Officials: one hour past the real cutoff.
+      const outsideMs = Date.now() - (hours + 1) * 3600000;
+      const news = [{ real_title: "x", date_added: gdeltDateAdded(outsideMs), source_url: "u", lat: 1, lon: 1 }];
+      assert.equal(selectNewsItems(news, { scope, windowHours: hours }).length, 0, `News must drop it under "${label}"`);
+
+      const officials = [{ id: "o", kind: "meeting", published_at: Math.floor(outsideMs / 1000), lat: 1, lon: 1 }];
+      assert.equal(
+        selectOfficialsItems(officials, { scope, windowHours: hours }).length, 0,
+        `Officials must drop it under "${label}"`
+      );
+    });
+  }
+});
+
 test("withinWindowHours keeps a record this app cannot date", async (t) => {
   await t.test("NaN age passes rather than being silently dropped", () => {
     assert.equal(withinWindowHours(NaN, 24), true);
