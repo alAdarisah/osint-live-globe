@@ -413,8 +413,8 @@ function buildHumanitarian(props, raw) {
     ].filter(Boolean);
     if (parts.length) {
       rows.push(`<div>${parts.join(" &middot; ")}</div>
-        <div class="meta">UNHCR, ${esc(d.year)} &mdash; counted by country of <b>origin</b>: people this
-          country's situation has displaced, wherever they are now.</div>`);
+        <div class="meta">Reported by UNHCR for ${esc(d.year)} &mdash; counted by country of <b>origin</b>: people
+          this country's situation has displaced, wherever they are now.</div>`);
     }
   }
   if (food) {
@@ -541,7 +541,7 @@ function buildConnectivity(props, raw) {
       }</div>
       ${signals.length ? `<div class="meta">Seen in: ${signals.map((k) => esc(k.split(".")[0])).join(", ")}</div>` : ""}
     </div>
-    <p class="meta">Over the ${esc(windowText || "reporting window")}, from IODA (Georgia Tech), which watches
+    <p class="meta">Over the ${esc(windowText || "reporting window")}, reported by IODA (Georgia Tech), which watches
       BGP withdrawals, active probing and darknet traffic. The score is a composite that is only meaningful
       <b>in comparison</b> &mdash; against this country's own normal and against others in the same window.
       It is not a percentage of the country offline, and it cannot distinguish a shutdown from a cable fault.</p>`;
