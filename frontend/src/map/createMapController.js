@@ -130,6 +130,7 @@ import {
   countryCardSections, waterCardSections, subdivisionCardSections, districtCardSections,
   cityPopupHtml, normalizeCountryName,
 } from "./popups";
+import { buildEventDetailHtml } from "./eventDetail";
 import { buildChoropleth } from "./choropleth";
 import {
   createDistrictOutlineLayer, indexDistrictCounts,
@@ -6004,7 +6005,13 @@ export function createMapController(container, initial, callbacks) {
       const item = (raw[kind] || []).find((record) => String(record[idField]) === String(id));
       if (!item) return null;
       const d = decorate(item, decorateOptionsFor(kind, item, id));
-      return { title: d.title || null, html: d.detail, lat: item.lat, lon: item.lon };
+      // Fused conflict/violence records get the real card (see map/eventDetail.js):
+      // six blocks built straight off the record's own fields, each with its own
+      // provenance line, instead of the summary decorateEvent wrote for a hover
+      // popup. Every other kind is untouched -- same decorator output as always,
+      // so nothing that already opened through this card regresses.
+      const html = kind === "events" ? buildEventDetailHtml(item, raw) : d.detail;
+      return { title: d.title || null, html, kind, lat: item.lat, lon: item.lon };
     },
 
     /**

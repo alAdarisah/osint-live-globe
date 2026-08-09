@@ -160,7 +160,12 @@ function buildEventsSection(eventItems, gdeltItems, { heading = true } = {}) {
 // below is itemsInBounds(...).length, kept as its own name because most call
 // sites only ever want the number. Tasks 9's new sections need the records
 // (to list them, to sum a field on them), so this is the one both build on.
-function itemsInBounds(items, bounds, predicate) {
+// Exported (Task 13's brief names these alongside bboxesOverlap as reusable
+// rather than reinventable) even though most call sites in this file stay
+// local -- map/eventDetail.js's Nearby block needs a *radius*, not a bbox,
+// so it filters with haversineKm directly instead; these two stay the right
+// tool for every bbox-scoped section on this page.
+export function itemsInBounds(items, bounds, predicate) {
   if (!bounds || !items) return [];
   const out = [];
   for (const item of items) {
@@ -172,7 +177,7 @@ function itemsInBounds(items, bounds, predicate) {
   return out;
 }
 
-function countInBounds(items, bounds, predicate) {
+export function countInBounds(items, bounds, predicate) {
   return itemsInBounds(items, bounds, predicate).length;
 }
 

@@ -3470,6 +3470,73 @@ html, body {
 .event-detail-body .meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
 .event-detail-body a { color: var(--accent); }
 
+/* Task 13: the six-block fused-event card (map/eventDetail.js), rendered
+   into the same .event-detail-body container as every other kind but with
+   its own class so the blocks get visible separation -- unlike the map's own
+   hover popup, this card is opened specifically to look something up, and a
+   wall of unbroken text is the wrong shape for that. Restates the popup's own
+   .sev-bar/.sev-reasons/.coverage-list/.rel-block rules for this container,
+   same reasoning as the h3/meta/a restatement immediately above. */
+.event-detail-body-rich .event-detail-block {
+  margin: 8px 0;
+  padding: 7px 8px;
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.12));
+  border-radius: 4px;
+}
+.event-detail-body-rich .event-detail-block:first-child { margin-top: 0; }
+.event-detail-body-rich .event-detail-block > h4 {
+  margin: 0 0 5px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.event-detail-body-rich .sev-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.25);
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+.event-detail-body-rich .sev-bar span { display: block; height: 100%; }
+.event-detail-body-rich .sev-reasons {
+  margin: 4px 0 0;
+  padding-left: 15px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.event-detail-body-rich .sev-reasons li { margin-bottom: 1px; }
+/* Same tint rule the popup's reliability block uses (style.css's own
+   .leaflet-popup-content .rel-block.rel-low/.rel-very_low): a reader who
+   opens this card should see within a glance whether a newsroom stands
+   behind it, before reading a word. */
+.event-detail-body-rich .rel-block.rel-low { border-color: rgba(255, 149, 0, 0.55); }
+.event-detail-body-rich .rel-block.rel-very_low {
+  border-color: rgba(255, 77, 77, 0.65);
+  background: rgba(255, 77, 77, 0.06);
+}
+.event-detail-body-rich .coverage-list { margin: 4px 0 0; padding: 0; list-style: none; max-height: 168px; overflow-y: auto; }
+.event-detail-body-rich .coverage-list li { margin: 0 0 6px; line-height: 1.35; }
+.event-detail-body-rich .coverage-list li:last-child { margin-bottom: 0; }
+.event-detail-body-rich .coverage-meta { display: block; font-size: 10px; color: var(--text-dim); }
+.event-detail-body-rich .event-nearby-list { margin: 4px 0 0; padding-left: 15px; font-size: 11px; color: var(--text-secondary); }
+.event-detail-body-rich .event-nearby-list li { margin-bottom: 2px; }
+/* The one line every block ends on: which of the app's four provenance words
+   applies. Dashed rule to read as a footnote to the block above it, not as
+   another fact in the same list -- same visual register as the popup's own
+   .placement-reason (style.css, near the geolocation rules). */
+.event-detail-body-rich .provenance-line {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--panel-border, rgba(255, 255, 255, 0.14));
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.event-detail-body-rich .provenance-line b { text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
+/* The one thing that can make the pin's own position wrong, said in the same
+   amber the map's placement-doubted note and imprecise-note use elsewhere. */
+.event-detail-body-rich .moved-note { color: #ffb454; }
+
 /* Task 10: the summary strip -- seven compact stat tiles above the folds
    (summaryTiles, map/popups.js), the reader's first read of a country
    before opening anything. Wraps rather than scrolling: the card is 320px
