@@ -156,19 +156,28 @@ export const DEFAULT_WINDOW_HOURS = 168;
  * window cannot mean anything finer than that here -- 6h and 24h both round
  * to "today". Ceil-then-subtract-one is what makes the boundary inclusive: a
  * 72h window is meant to keep today, yesterday and the day before (ageDays
- * 0-2), and ceil(72/24)-1 = 2.
+ * 0-2), and ceil(72/24)-1 = 2. For the two day-aligned options this is exact:
+ * 72h -> 2 (a 3-day span) and 168h -> 6 (a 7-day span) both reproduce their
+ * hour count divided by 24, so "7d" bounds a real 7 days here the same way
+ * `withinWindowHours` bounds a real 168 hours for News and Officials.
  *
- * The widest option (7 days, DEFAULT_WINDOW_HOURS) maps to `null` -- "no
- * cap" -- rather than to 6. That is deliberate, not an off-by-one: `null` is
- * `DEFAULT_EVENT_FILTER.maxAgeDays`'s own shipped value, chosen there
- * because the backend already decides what is recent enough to serve and a
- * client-side cap would silently hide some of what it was just sent (see
- * that constant's own comment). Mapping the widest window to the same `null`
- * keeps that guarantee intact at the panel's own default, instead of
- * quietly reintroducing a cap the map never had before this control existed.
+ * A second review round (Important, round 2) caught this function returning
+ * `null` -- "no cap" -- for the widest option, on the reasoning that `null`
+ * is DEFAULT_EVENT_FILTER.maxAgeDays' own shipped default and the widest
+ * Window choice should reproduce it. That reasoning traded one problem for a
+ * worse one: `withinWindowHours` has no equivalent "the widest option means
+ * unbounded" rule -- it always enforces a hard `hours` cutoff -- so the same
+ * "7d" label meant a real 7 days in News and Officials and an unbounded
+ * lookback (capped only by the backend's own multi-month retention) in
+ * Events, silently, in the panel's own default state. One label has to mean
+ * one span across every tab this control now governs; consistency wins over
+ * matching a default this control did not exist to preserve in the first
+ * place. If a genuinely unbounded option is wanted later, it needs its own
+ * entry in WINDOW_OPTIONS (an "All available" alongside 6h/24h/72h/7d) rather
+ * than being smuggled into what "7d" means.
  */
 export function windowMaxAgeDays(hours) {
-  if (!Number.isFinite(hours) || hours >= DEFAULT_WINDOW_HOURS) return null;
+  if (!Number.isFinite(hours)) return null;
   return Math.max(0, Math.ceil(hours / 24) - 1);
 }
 

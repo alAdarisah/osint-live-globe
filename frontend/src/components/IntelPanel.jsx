@@ -492,9 +492,23 @@ export default function IntelPanel({
                 ))}
               </select>
             </label>
+            {/* selectEscalationZones never reads windowHours -- a zone is a
+                fixed 24h-vs-7-day-baseline computation from the backend, not
+                a record with its own timestamp to window (see that
+                function's own comment). Disabled here for the same reason
+                Minimum severity/verification are disabled outside Events:
+                unlike those two, Window still has a real job while parked on
+                Escalation (it keeps driving eventFilter.maxAgeDays, which the
+                map's Conflict & Violence layer reads regardless of which tab
+                is open), so only Escalation itself is excluded, not every
+                non-Events tab. */}
             <label>
               Window
-              <select value={windowHours} onChange={(e) => setWindowHours(Number(e.target.value))}>
+              <select
+                value={windowHours}
+                onChange={(e) => setWindowHours(Number(e.target.value))}
+                disabled={activeTab === "escalation"}
+              >
                 {WINDOW_OPTIONS.map((opt) => (
                   <option key={opt.hours} value={opt.hours}>{opt.label}</option>
                 ))}

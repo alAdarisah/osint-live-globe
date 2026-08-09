@@ -32,7 +32,7 @@ const {
   makeIntelScope, SCOPE_WORLD, SCOPE_VIEWPORT, SCOPE_COUNTRY, SCOPE_REGION, SCOPE_WATER,
   groupItems, groupKeyFor, UNKNOWN_GROUP,
   intelPanelIsEmpty,
-  eventsSeverityFloor, windowMaxAgeDays, withinWindowHours,
+  eventsSeverityFloor, windowMaxAgeDays, withinWindowHours, WINDOW_OPTIONS,
   selectEventItems, selectEscalationZones, selectNewsItems, selectOfficialsItems,
 } = await import("../src/components/intelPanelLogic.js");
 
@@ -327,7 +327,13 @@ test("selectEventItems honours eventFilter.maxAgeDays as the one Window gate", a
     assert.deepEqual(out.map((e) => e.id), ["today"]);
   });
 
-  await t.test("maxAgeDays: null -- Window's widest option -- keeps both", () => {
+  // maxAgeDays: null is passesEventFilter's own "no window" value -- it is
+  // not what any WINDOW_OPTIONS entry produces any more (see the
+  // "cross-tab consistency" test below and windowMaxAgeDays' own note), but
+  // it is still a real, reachable eventFilter state (DEFAULT_EVENT_FILTER's
+  // own shipped default, before IntelPanel's mount effect overwrites it) and
+  // this asserts what it does when it occurs.
+  await t.test("maxAgeDays: null keeps both -- DEFAULT_EVENT_FILTER's own 'no window' value", () => {
     const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
     assert.deepEqual(new Set(out.map((e) => e.id)), new Set(["today", "old"]));
   });
@@ -345,20 +351,66 @@ test("windowMaxAgeDays rounds an hour count up to whole days", async (t) => {
     assert.equal(windowMaxAgeDays(72), 2);
   });
 
-  await t.test("the widest option (7 days) means no cap, not literally 6", () => {
-    // Review fix (Important 3): the widest Window option has to reproduce
-    // DEFAULT_EVENT_FILTER.maxAgeDays' own shipped default (null, "no
-    // window") now that this is the *only* control writing maxAgeDays --
-    // mapping it to a literal 6 would silently narrow the map's Conflict &
-    // Violence layer below what it showed before this control existed.
-    assert.equal(windowMaxAgeDays(168), null);
-    assert.equal(windowMaxAgeDays(500), null);
+  await t.test("7 days is a real 7-day span, not unbounded", () => {
+    // Review round 2 (Important): a round-1 fix mapped the widest option to
+    // null ("no cap") so it would reproduce DEFAULT_EVENT_FILTER.maxAgeDays'
+    // own shipped default -- but withinWindowHours (News/Officials) has no
+    // "widest option means unbounded" rule of its own, so that made "7d"
+    // mean a real 7 days in two tabs and an unbounded lookback in the third,
+    // silently, in the panel's own default state. One label, one span,
+    // everywhere -- see this function's own note on why null is gone.
+    assert.equal(windowMaxAgeDays(168), 6);
   });
 
-  await t.test("a non-finite hour count also means no cap", () => {
+  await t.test("a non-finite hour count still means no cap -- there is no hours value to round", () => {
     assert.equal(windowMaxAgeDays(NaN), null);
     assert.equal(windowMaxAgeDays(undefined), null);
   });
+});
+
+// Review round 2's own suggestion: "for each Window option, the cutoff the
+// Events tab applies and the cutoff News and Officials apply describe the
+// same span" -- this is the test that would have caught the null-at-168 bug,
+// end to end through the real select* functions rather than only through
+// windowMaxAgeDays in isolation.
+test("cross-tab consistency: every Window option bounds every tab the same way", async (t) => {
+  const scope = makeIntelScope(SCOPE_WORLD, {});
+  const tenDaysAgoMs = Date.now() - 10 * 86400000;
+  const tenDaysAgoDate = new Date(tenDaysAgoMs).toISOString().slice(0, 10);
+  // GDELT's own "YYYYMMDDHHMMSS" packed format (see utils/format.js's
+  // parseGdeltDateAdded), built by hand here rather than imported so this
+  // test does not depend on the formatter it is partly exercising.
+  function gdeltDateAdded(ms) {
+    const d = new Date(ms);
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}` +
+      `${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}${p2(d.getUTCSeconds())}`;
+  }
+
+  for (const { hours, label } of WINDOW_OPTIONS) {
+    await t.test(`"${label}" excludes a ten-day-old record in every tab -- none of the four means unbounded`, () => {
+      const maxAgeDays = windowMaxAgeDays(hours);
+      // The regression this test exists to catch, made explicit: a
+      // WINDOW_OPTIONS entry is never allowed to translate to "no day cap at
+      // all" for the Events tab, because none of them means that for the
+      // other two.
+      assert.ok(Number.isFinite(maxAgeDays), `"${label}" must be a real, finite day cap`);
+
+      const events = [{ id: "old", severity: 90, date: tenDaysAgoDate, lat: 1, lon: 1 }];
+      const eventsOut = selectEventItems(events, {
+        scope, eventFilter: { ...DEFAULT_EVENT_FILTER, maxAgeDays },
+      });
+      assert.equal(eventsOut.length, 0, `Events must drop a 10-day-old record under "${label}"`);
+
+      const news = [{ real_title: "x", date_added: gdeltDateAdded(tenDaysAgoMs), source_url: "u", lat: 1, lon: 1 }];
+      const newsOut = selectNewsItems(news, { scope, windowHours: hours });
+      assert.equal(newsOut.length, 0, `News must drop a 10-day-old record under "${label}"`);
+
+      const officials = [{ id: "o", kind: "meeting", published_at: Math.floor(tenDaysAgoMs / 1000), lat: 1, lon: 1 }];
+      const officialsOut = selectOfficialsItems(officials, { scope, windowHours: hours });
+      assert.equal(officialsOut.length, 0, `Officials must drop a 10-day-old record under "${label}"`);
+    });
+  }
 });
 
 test("withinWindowHours keeps a record this app cannot date", async (t) => {
