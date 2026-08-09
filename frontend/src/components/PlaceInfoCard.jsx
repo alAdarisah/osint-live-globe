@@ -27,6 +27,53 @@
 import { useAccordion } from "../hooks/useAccordion";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import { computeAnchorLayout } from "./placeInfoCardLayout";
+import { groupSections } from "./placeInfoCardGrouping";
+
+// The accordion-id namespace a super-fold's own open/closed state is stored
+// under (see useAccordion.js) -- exported so a caller supplying `groups` can
+// mark a super-fold open by default (defaultOpen) using the same key this
+// component reads back. Section ids are always plain words (see
+// countryCardSections/waterCardSections in map/popups.js), so this prefix can
+// never collide with one.
+export const GROUP_ACCORDION_PREFIX = "group:";
+
+// One <details> fold for one section, however it got here -- flat, or nested
+// inside a super-fold's own <details>. Pulled out to a module-scope function
+// (rather than inlined at each of the three call sites this component ends
+// up needing it from) so the no-groups branch below produces the exact same
+// JSX tree it always has: `groups` and `summary` are both optional, and
+// without them this component renders exactly as it did before either prop
+// existed -- see this file's own note on `panelId` for the precedent.
+function renderSectionFold(section, isOpen, setOpen) {
+  return (
+    <details
+      key={section.id}
+      className="country-section"
+      open={isOpen(section.id)}
+      onToggle={(e) => setOpen(section.id, e.currentTarget.open)}
+    >
+      <summary>{section.title}</summary>
+      <div className="country-section-body" dangerouslySetInnerHTML={{ __html: section.html }} />
+    </details>
+  );
+}
+
+// One stat chip in the summary strip. `tile.unavailable` tiles show a dash
+// rather than a fabricated zero, with the reason in the same `title`
+// attribute a native tooltip already reads on hover -- see summaryTiles in
+// map/popups.js for how each tile decides which it is.
+function renderSummaryTile(tileData) {
+  return (
+    <span
+      key={tileData.key}
+      className={`csummary-tile${tileData.unavailable ? " unavailable" : ""}`}
+      title={tileData.unavailable ? tileData.tooltip : undefined}
+    >
+      <span className="csummary-v">{tileData.unavailable ? "—" : tileData.value}</span>
+      <span className="csummary-l">{tileData.label}</span>
+    </span>
+  );
+}
 
 /**
  * Turn a click anywhere in the card body into "open this record", or nothing.
@@ -69,6 +116,16 @@ function recordClickHandler(onOpenRecord) {
  *   key would make dragging one card silently move the other's stored
  *   position too. The visual rules stay shared rather than forked -- see
  *   style.css's own note where `#countryInfoCard, #waterInfoCard` appears.
+ * @param {Array<{key, label, value, unavailable, tooltip}>} [props.summary]
+ *   compact stat tiles rendered above the folds (Task 10's summaryTiles,
+ *   map/popups.js). Optional, following the same rule panelId set: omitted
+ *   entirely, nothing renders where the strip would go, so WaterInfoCard
+ *   (which supplies no summary) is unaffected by its addition.
+ * @param {Array<{id, title, sectionIds: string[]}>} [props.groups]  folds
+ *   `sections` into super-folds instead of one flat list (Task 10). Optional,
+ *   same rule again: without it this component renders every section flat,
+ *   exactly as it always has -- see groupSections in placeInfoCardGrouping.js
+ *   for what happens to a section id no group claims.
  */
 export default function PlaceInfoCard({
   place,
@@ -79,6 +136,8 @@ export default function PlaceInfoCard({
   footer,
   headerExtra,
   panelId = "countryInfoCard",
+  summary,
+  groups,
 }) {
   const { isOpen, setOpen } = useAccordion(defaultOpen, accordionKey);
   const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel(panelId);
@@ -129,17 +188,32 @@ export default function PlaceInfoCard({
           recordClickHandler(onOpenRecord)(event);
         }}
       >
-        {place.sections.map((section) => (
-          <details
-            key={section.id}
-            className="country-section"
-            open={isOpen(section.id)}
-            onToggle={(e) => setOpen(section.id, e.currentTarget.open)}
-          >
-            <summary>{section.title}</summary>
-            <div className="country-section-body" dangerouslySetInnerHTML={{ __html: section.html }} />
-          </details>
-        ))}
+        {summary && summary.length > 0 && (
+          <div className="country-info-summary">{summary.map(renderSummaryTile)}</div>
+        )}
+
+        {groups && groups.length > 0
+          ? groupSections(place.sections, groups).map((item) => (
+              item.kind === "group" ? (
+                // Namespaced under GROUP_ACCORDION_PREFIX so this can never
+                // collide with a section id in the same accordionKey's stored
+                // state -- see that constant's own note above.
+                <details
+                  key={item.id}
+                  className="country-super-fold"
+                  open={isOpen(`${GROUP_ACCORDION_PREFIX}${item.id}`)}
+                  onToggle={(e) => setOpen(`${GROUP_ACCORDION_PREFIX}${item.id}`, e.currentTarget.open)}
+                >
+                  <summary>{item.title}</summary>
+                  <div className="country-super-fold-body">
+                    {item.sections.map((section) => renderSectionFold(section, isOpen, setOpen))}
+                  </div>
+                </details>
+              ) : (
+                renderSectionFold(item.section, isOpen, setOpen)
+              )
+            ))
+          : place.sections.map((section) => renderSectionFold(section, isOpen, setOpen))}
       </div>
 
       {footer}

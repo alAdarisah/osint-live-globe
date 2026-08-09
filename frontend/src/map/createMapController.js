@@ -1690,7 +1690,7 @@ export function createMapController(container, initial, callbacks) {
     const layer = countryLayerFor(entry.key);
     // The country's own bbox drives every "inside this country" count in the
     // card (see popups.js).
-    const { sections } = countryCardSections(
+    const { sections, summary, groups } = countryCardSections(
       entry.props,
       raw,
       layer ? boundsToPlainObject(layer.getBounds()) : null
@@ -1700,6 +1700,13 @@ export function createMapController(container, initial, callbacks) {
       iso: entry.iso,
       name: entry.name,
       sections,
+      // Task 10: the summary strip's seven tiles and the table PlaceInfoCard
+      // groups `sections` by -- both optional on the card payload the same
+      // way they are optional on PlaceInfoCard itself, so nothing downstream
+      // that only ever reads `.sections` (e.g. the search index) needs to
+      // change for either to exist.
+      summary,
+      groups,
       point: layer ? countryAnchorPoint(layer) : null,
     };
   }

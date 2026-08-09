@@ -191,6 +191,21 @@ test("waterCardSections -- section shape and empty-section dropping", async (t) 
     assert.ok(!ids.includes("infrastructure"), "no cables/landings/ports -- dropped, not empty");
   });
 
+  await t.test("carries no `summary` or `groups` keys -- Task 10's strip and super-folds are a country-card-only addition", () => {
+    // PlaceInfoCard treats both props as optional and renders flat with no
+    // strip when they are absent (see PlaceInfoCard.jsx and
+    // placeInfoCardGrouping.js). WaterInfoCard.jsx passes neither through, so
+    // this is what actually keeps the water card's own render path
+    // byte-identical to what it was before Task 10 -- PlaceInfoCard.jsx
+    // itself is JSX and cannot be rendered by this headless suite (see
+    // placeInfoCard.test.js's own note), so this is the closest this suite
+    // can get to proving it directly.
+    const sea = makeSea();
+    const result = waterCardSections(sea, emptyRaw(), null);
+    assert.equal(result.summary, undefined);
+    assert.equal(result.groups, undefined);
+  });
+
   await t.test("an unnamed feature falls back to its class label as the title", () => {
     const [gulf] = buildWaterIndex([
       feature({ id: "marine:2", name: "", class: "gulf", bbox: [0, 0, 1, 1] }, square(0, 0, 1, 1)),

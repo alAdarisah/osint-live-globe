@@ -10,11 +10,23 @@
 // click handler for why this replaced the old Leaflet popup in the first
 // place: the map keeps panning/zooming freely while it's open, instead of
 // the popup auto-closing/panning on every interaction.
-import PlaceInfoCard from "./PlaceInfoCard";
+import PlaceInfoCard, { GROUP_ACCORDION_PREFIX } from "./PlaceInfoCard";
 
 // Identity and the live conflict tally open by default; everything else starts
 // shut. Section ids come from countryCardSections in map/popups.js.
-const DEFAULT_OPEN = { profile: true, conflict: true };
+//
+// The "situation"/"country" super-folds (COUNTRY_CARD_GROUPS, same module)
+// also start open, because each one wraps a section already listed above --
+// leaving a super-fold's own default closed would hide profile/conflict
+// behind a second click nobody asked for, the moment Task 10 wrapped them.
+// "meta" wraps none of the sections defaulted open here, so it starts closed
+// like every plain section does.
+const DEFAULT_OPEN = {
+  profile: true,
+  conflict: true,
+  [`${GROUP_ACCORDION_PREFIX}situation`]: true,
+  [`${GROUP_ACCORDION_PREFIX}country`]: true,
+};
 const STORAGE_KEY = "osint-country-card-accordion";
 
 export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRecord }) {
@@ -45,6 +57,8 @@ export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRe
       accordionKey={STORAGE_KEY}
       defaultOpen={DEFAULT_OPEN}
       headerExtra={headerExtra}
+      summary={country?.summary}
+      groups={country?.groups}
     />
   );
 }

@@ -3397,6 +3397,79 @@ html, body {
 .event-detail-body .meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
 .event-detail-body a { color: var(--accent); }
 
+/* Task 10: the summary strip -- seven compact stat tiles above the folds
+   (summaryTiles, map/popups.js), the reader's first read of a country
+   before opening anything. Wraps rather than scrolling: the card is 320px
+   wide, and a horizontal scrollbar inside a floating panel is worse than a
+   second row of tiles. */
+.country-info-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.csummary-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 62px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(var(--accent-rgb), 0.06);
+}
+.csummary-v {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.csummary-l {
+  font-size: calc(9px * var(--ui-text-scale));
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+/* A dash standing in for a value this map has not checked, never a
+   fabricated zero (see summaryTiles' own note on the project rule this
+   follows) -- dimmer than a real figure, with the reason in the tile's own
+   `title` attribute (a native tooltip) rather than spent as card space. */
+.csummary-tile.unavailable { cursor: help; opacity: 0.55; }
+.csummary-tile.unavailable .csummary-v { color: var(--text-dim); font-weight: 400; }
+
+/* Task 10: super-folds -- PlaceInfoCard's optional `groups` prop nests
+   several .country-section folds inside one outer <details>, grouping
+   fifteen-plus sections into the three questions a reader actually asks
+   (see COUNTRY_CARD_GROUPS in map/popups.js). Same collapse mechanics as
+   .country-section below, styled a size up so the two nesting levels read
+   as nesting rather than as one flat list with odd indentation. */
+.country-super-fold { border-bottom: 1px solid var(--panel-border); }
+.country-super-fold:last-child { border-bottom: none; }
+.country-super-fold > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 2px 6px 16px;
+  position: relative;
+  font-size: calc(11.5px * var(--ui-text-scale));
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-heading);
+}
+.country-super-fold > summary::-webkit-details-marker { display: none; }
+.country-super-fold > summary:hover { background: rgba(var(--accent-rgb), 0.08); }
+.country-super-fold > summary:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.country-super-fold > summary::before {
+  content: "\25B8";
+  position: absolute;
+  left: 2px;
+  transition: transform 0.15s ease;
+  display: inline-block;
+  color: var(--accent);
+}
+.country-super-fold[open] > summary::before { transform: rotate(90deg); }
+.country-super-fold-body { padding-left: 8px; }
+
 .country-section { border-bottom: 1px solid rgba(var(--accent-rgb), 0.12); }
 .country-section:last-child { border-bottom: none; }
 .country-section > summary {

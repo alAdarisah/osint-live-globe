@@ -227,7 +227,13 @@ function buildLivePicture(bounds, raw) {
 // that separate a confirmed massacre from a single unverified report.
 const RECENT_WINDOW_MS = 72 * 3600 * 1000;
 
-function buildConflictSummary(bounds, raw, escalationZone) {
+// Pulled out of buildConflictSummary so the summary strip's own events/
+// fatalities tiles (Task 10's summaryTiles, below) count the exact same
+// window the same way -- two independent loops re-deriving "recent events in
+// this bbox" could quietly disagree about the cutoff or the bounds check,
+// which is exactly the kind of drift the strip and its own fold must never
+// show.
+function recentConflictStats(bounds, raw) {
   const cutoff = Date.now() - RECENT_WINDOW_MS;
   let count = 0;
   let fatalities = 0;
@@ -245,6 +251,11 @@ function buildConflictSummary(bounds, raw, escalationZone) {
     if (e.corroborated) corroborated += 1;
     if (!worst || (e.severity || 0) > (worst.severity || 0)) worst = e;
   }
+  return { count, fatalities, corroborated, worst };
+}
+
+function buildConflictSummary(bounds, raw, escalationZone) {
+  const { count, fatalities, corroborated, worst } = recentConflictStats(bounds, raw);
 
   const badge = escalationZone
     ? `<div class="cescalating">ESCALATING &middot; ${escalationZone.ratio}&times; its own baseline (${esc(escalationZone.label)})</div>`
@@ -393,7 +404,8 @@ function buildVerifiedRecord(wanted, raw) {
  * @param bounds  the country's own bounding box {south,west,north,east}, used
  *                for every "inside this country" count. Optional -- the card
  *                degrades to the name-matched sections without it.
- * @returns {{title: string, sections: Array<{id, title, html, defaultOpen}>}}
+ * @returns {{title: string, sections: Array<{id, title, html, defaultOpen}>,
+ *   summary: Array<object>, groups: Array<{id, title, sectionIds}>}}
  */
 // Displacement and food security (backend/sources/humanitarian.py). Keyed on
 // ISO3, which is what both UNHCR and HAPI use -- and which the country features
@@ -1172,6 +1184,162 @@ export function coverageStateFor(key, bounds, raw) {
   return "checked";
 }
 
+// ---------- Task 10: the summary strip ----------
+//
+// Seven compact tiles above the folds -- population, events/fatalities in the
+// last 72h, an internet-connectivity score, refugees, cross-border net power
+// and military aircraft. Each one already has a fold behind it somewhere in
+// this file (buildConflictSummary, buildConnectivity, buildHumanitarian,
+// buildEnergy, buildLivePicture) and this is deliberately not a second source
+// of truth for any of them: it reads the same raw buckets those folds read,
+// and reuses coverageStateFor for exactly the reason buildCoverage does --
+// so a tile's dash and its own fold's "why is this empty" line can never
+// disagree about what happened.
+//
+// The project rule this whole card follows: a value we did not receive from
+// a source is never shown as zero. A tile with nothing to show renders a dash
+// and a tooltip saying why -- never fetched, fetched for a different area, or
+// fetched and genuinely nothing to report (no ISO3 to match on, no bidding
+// zone, no anomaly this window). Only a real, checked figure -- including a
+// real, checked zero -- is ever printed as a number.
+const NO_BOUNDS_REASON = "This country has no bounding box loaded, so this could not be checked.";
+
+/** The same wording buildCoverage's own rows use for these two states, so the
+ * strip and the Data Coverage fold never tell two different stories about the
+ * same feed. `null` means "checked" -- the caller has a real answer to show. */
+function coverageReason(key, bounds, raw) {
+  const state = coverageStateFor(key, bounds, raw);
+  if (state === "not_loaded") {
+    return "Not loaded this session yet — most often because this feed's own zoom gate has not lifted.";
+  }
+  if (state === "scoped_elsewhere") {
+    return "Fetched, but for a different area — coverage here is unknown, not zero.";
+  }
+  return null;
+}
+
+function tile(key, label, value, reason) {
+  return value != null
+    ? { key, label, value, unavailable: false, tooltip: null }
+    : { key, label, value: null, unavailable: true, tooltip: reason };
+}
+
+function populationTile(props) {
+  return tile(
+    "population", "Population",
+    props.population != null ? fmtNumber(props.population) : null,
+    "Not published for this country (World Bank)."
+  );
+}
+
+// Events and fatalities read the same raw.events feed (coverage key
+// "events"), so one coverage check and one pass over recentConflictStats
+// answers both tiles together rather than repeating either.
+function boundedConflictTiles(bounds, raw) {
+  if (!bounds) {
+    return [
+      tile("events72h", "Events, 72h", null, NO_BOUNDS_REASON),
+      tile("fatalities72h", "Fatalities, 72h", null, NO_BOUNDS_REASON),
+    ];
+  }
+  const reason = coverageReason("events", bounds, raw);
+  if (reason) {
+    return [
+      tile("events72h", "Events, 72h", null, reason),
+      tile("fatalities72h", "Fatalities, 72h", null, reason),
+    ];
+  }
+  const { count, fatalities } = recentConflictStats(bounds, raw);
+  return [
+    tile("events72h", "Events, 72h", fmtNumber(count), null),
+    tile("fatalities72h", "Fatalities, 72h", fmtNumber(fatalities), null),
+  ];
+}
+
+// IODA's outages dict (backend/sources/outages.py) carries only countries
+// above its own anomaly floor -- a country's absence from it is a real,
+// checked "no disruption detected", not a missing fetch. That is a different
+// reason from the coverage-vocabulary ones above, and this tile says so
+// rather than borrowing wording that would claim the feed itself was never
+// loaded.
+function connectivityTile(props, raw) {
+  const reason = coverageReason("outages", null, raw); // unscoped: never bbox-limited, so no bounds to check
+  if (reason) return tile("connectivity", "Connectivity", null, reason);
+  const outage = outageFor(props, raw);
+  if (!outage) {
+    return tile("connectivity", "Connectivity", null,
+      "No disruption detected this window — IODA reports only countries above its own anomaly floor.");
+  }
+  return tile("connectivity", "Connectivity", fmtNumber(Math.round(outage.score)), null);
+}
+
+function refugeesTile(props, raw) {
+  if (!props.iso_a3) {
+    return tile("refugees", "Refugees", null, "This shape carries no ISO3 code to match against UNHCR's country keys.");
+  }
+  const reason = coverageReason("humanitarian", null, raw); // unscoped, same as outages above
+  if (reason) return tile("refugees", "Refugees", null, reason);
+  const refugees = (raw.humanitarian || {})[props.iso_a3]?.displacement?.refugees;
+  if (refugees == null) {
+    return tile("refugees", "Refugees", null, "UNHCR has not reported a refugee figure for this country.");
+  }
+  return tile("refugees", "Refugees", fmtNumber(refugees), null);
+}
+
+// v > 0 keeps a genuinely reported 0.00 GW readable as "0.00", not "-0.00" or
+// a bare "+0" -- mirrors buildEnergy's own `signed` helper (kept separate
+// rather than shared: that one escapes its unit for an HTML context, this one
+// feeds a React text node and must not).
+function formatSignedPower(value, unit) {
+  return `${value > 0 ? "+" : ""}${Number(value).toFixed(2)} ${unit || "GW"}`;
+}
+
+function netPowerTile(props, raw) {
+  const reason = coverageReason("energyFlows", null, raw); // unscoped, same as outages/humanitarian above
+  if (reason) return tile("netPower", "Net power", null, reason);
+  const record = energyRecordFor(props, raw);
+  const physical = record?.physical;
+  const commercial = record?.commercial;
+  if (physical?.net != null) {
+    return tile("netPower", "Net power", `${formatSignedPower(physical.net, physical.unit)}, measured`, null);
+  }
+  if (commercial?.net != null) {
+    return tile("netPower", "Net power", `${formatSignedPower(commercial.net, commercial.unit)}, scheduled`, null);
+  }
+  return tile("netPower", "Net power", null,
+    "No cross-border flow published for this country's bidding zone (Energy-Charts).");
+}
+
+function militaryAircraftTile(bounds, raw) {
+  if (!bounds) return tile("militaryAircraft", "Military aircraft", null, NO_BOUNDS_REASON);
+  const reason = coverageReason("adsb", bounds, raw);
+  if (reason) return tile("militaryAircraft", "Military aircraft", null, reason);
+  const count = countInBounds(raw.adsb, bounds, (a) => classifyAircraft(a) === "military");
+  return tile("militaryAircraft", "Military aircraft", fmtNumber(count), null);
+}
+
+/**
+ * The seven summary-strip tiles, in the order the strip shows them.
+ *
+ * @param props   the GeoJSON feature's properties, same as countryCardSections
+ * @param raw     the map controller's live data buckets
+ * @param bounds  the country's own bounding box, or null
+ * @returns {Array<{key: string, label: string, value: string|null,
+ *   unavailable: boolean, tooltip: string|null}>}
+ */
+export function summaryTiles(props, raw, bounds) {
+  const [events72h, fatalities72h] = boundedConflictTiles(bounds, raw);
+  return [
+    populationTile(props),
+    events72h,
+    fatalities72h,
+    connectivityTile(props, raw),
+    refugeesTile(props, raw),
+    netPowerTile(props, raw),
+    militaryAircraftTile(bounds, raw),
+  ];
+}
+
 function buildCoverage(bounds, raw) {
   if (!bounds) {
     // Nothing below can be checked against a country with no bounding box --
@@ -1216,6 +1384,33 @@ function buildCoverage(bounds, raw) {
       means this map has that feed's data in hand right now, just not for anywhere near here. The three
       look similar and are not the same claim -- this section exists so they are never read as one.</p>`;
 }
+
+// Task 10: fifteen sections is too many to scan at once, so PlaceInfoCard's
+// optional `groups` prop folds them into three questions a reader actually
+// asks -- what is happening right now (Situation), what does this country
+// look like structurally (Country), and what does this map itself know or
+// not know about its own coverage (Meta). A section id that shows up in none
+// of these still renders, standalone, after all three -- see
+// placeInfoCardGrouping.js's groupSections, which is what protects a section
+// added later and never added to this table from silently vanishing instead
+// of just looking mis-sorted.
+export const COUNTRY_CARD_GROUPS = [
+  {
+    id: "situation", title: "Situation",
+    sectionIds: ["conflict", "live", "connectivity", "events", "verified", "trend"],
+  },
+  {
+    id: "country", title: "Country",
+    sectionIds: ["profile", "humanitarian", "power", "energy", "transport", "military", "food"],
+  },
+  // "sanctions" is not a section id this card produces -- Task 9 folded
+  // sanctioned hulls/tails into "military" rather than giving them their own
+  // fold -- so it never matches anything here. Left in rather than trimmed:
+  // it costs nothing (groupSections drops an id with no matching section) and
+  // documents that sanctions belong with Meta's honesty-and-provenance folds
+  // if a later task ever does split them out on their own.
+  { id: "meta", title: "Meta", sectionIds: ["sanctions", "sources", "coverage"] },
+];
 
 export function countryCardSections(props, raw, bounds) {
   const name = props.name || "Unknown";
@@ -1299,7 +1494,16 @@ export function countryCardSections(props, raw, bounds) {
     { id: "coverage", title: "Data coverage", html: buildCoverage(bounds, raw) },
   ];
 
-  return { title: name, sections: sections.filter((s) => s.html && s.html.trim()) };
+  return {
+    title: name,
+    sections: sections.filter((s) => s.html && s.html.trim()),
+    // Task 10: the summary strip above the folds, and the table that groups
+    // the folds themselves into super-folds. Both are optional on
+    // PlaceInfoCard -- waterCardSections below supplies neither, so the water
+    // card is unaffected.
+    summary: summaryTiles(props, raw, bounds),
+    groups: COUNTRY_CARD_GROUPS,
+  };
 }
 
 // ---------- water body card (Task 7) ----------
