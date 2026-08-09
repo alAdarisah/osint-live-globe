@@ -73,6 +73,13 @@ DIGITRAFFIC_RAIL_STATIONS_INTERVAL = int(os.getenv("DIGITRAFFIC_RAIL_STATIONS_IN
 #     hourly poll re-reads it exactly as often as it moves.
 DIGITRAFFIC_WEATHERCAM_POLL_INTERVAL = int(os.getenv("DIGITRAFFIC_WEATHERCAM_POLL_INTERVAL", "3600"))
 
+# Natural Earth's seas/lakes/rivers (see backend/sources/water_bodies.py),
+# mirrored from the same nvkelso GeoJSON source as railways.py and
+# admin1_boundaries.py, on the same weekly cadence: the file is static between
+# Natural Earth releases, so a week is about being a good citizen of GitHub's
+# raw CDN rather than about freshness.
+WATER_POLL_INTERVAL = int(os.getenv("WATER_POLL_INTERVAL", str(7 * 86400)))
+
 # event_fusion.py doesn't fetch anything itself -- it re-derives from
 # acled.py's (ACLED + UCDP rows) and gdelt.py's already-fetched state.data,
 # so it has no interval of its own to configure, only how long its local

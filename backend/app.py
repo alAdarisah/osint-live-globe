@@ -89,6 +89,9 @@ _SOURCE_MODULES = (
     # Also weekly: states and provinces, drawn when a country that has them is
     # selected. Nine federations, one 2.3 MB file.
     "admin1_boundaries",
+    # Also weekly, same mirror: seas, lakes and river centrelines -- the first
+    # real water geometry on this map (see backend/sources/water_bodies.py).
+    "water_bodies",
 )
 
 # Everything this process serves but does not produce: the ingest process's
