@@ -1,137 +1,50 @@
-// Persistent country details panel -- replaces the old Leaflet popup on
-// country click (see createMapController.js's countriesLayer click
-// handler) so the map keeps panning/zooming freely while it's open, instead
-// of the popup auto-closing/panning on every interaction.
+// The country-specific configuration for PlaceInfoCard: which accordion
+// storage key this surface persists its folds under, which sections start
+// open, and the one piece of header UI that is genuinely country-only (the
+// border-edit button, offered only in Admin Mode -- see AdminPanel.jsx).
 //
-// Two things about how it is positioned:
-//
-//  * Until it is dragged it is a widget popping out of the clicked country --
-//    `country.point` is that country's current on-screen pixel (kept live
-//    across pan/zoom by onCountryPointChange, see useLeafletMap.js), and the
-//    card centres itself above that point with a CSS arrow pointing back down
-//    at it, clamped so a country near an edge doesn't push it off-screen.
-//  * Once dragged it detaches: the reader has said where they want it, and a
-//    card that crawled back over the map on the next pan would be fighting
-//    them. The tail goes away with the anchoring, because it would then be
-//    pointing at nothing.
-//
-// The body is a set of folds rather than one column of HTML (see
-// countryCardSections in map/popups.js). Six subjects in a 320px card is more
-// than fits on screen at once, and which of them matters is the reader's
-// question, not ours -- so each one collapses on its own and the choice is
-// remembered across countries and reloads.
-import { useAccordion } from "../hooks/useAccordion";
-import { useDraggablePanel } from "../hooks/useDraggablePanel";
-
-const CARD_WIDTH = 320;
-const CARD_MARGIN = 14;
+// Everything else -- the drag/anchor behaviour, the accordion mechanics, the
+// delegated row-click handler, the close button, Escape-to-close -- lives in
+// PlaceInfoCard now, shared with the water-body, admin-1 state and admin-2
+// district cards still to come. See createMapController.js's countriesLayer
+// click handler for why this replaced the old Leaflet popup in the first
+// place: the map keeps panning/zooming freely while it's open, instead of
+// the popup auto-closing/panning on every interaction.
+import PlaceInfoCard from "./PlaceInfoCard";
 
 // Identity and the live conflict tally open by default; everything else starts
-// shut. Section ids come from countryCardSections.
+// shut. Section ids come from countryCardSections in map/popups.js.
 const DEFAULT_OPEN = { profile: true, conflict: true };
 const STORAGE_KEY = "osint-country-card-accordion";
 
-/**
- * Turn a click anywhere in the card body into "open this record", or nothing.
- *
- * Delegated rather than bound per row because the sections are raw HTML strings
- * (see countryCardSections in map/popups.js) and cannot carry React handlers.
- * The two data attributes are put there by openableRow in that same file.
- */
-function recordClickHandler(onOpenRecord) {
-  return (event) => {
-    // A headline in a news row is a real link to the article -- that is the
-    // citation, and it has to keep working as a link, including middle-click and
-    // open-in-new-tab. Only a click that missed it opens the card.
-    if (event.target.closest("a")) return;
-    const row = event.target.closest("[data-event-id]");
-    if (!row) return;
-    onOpenRecord(row.dataset.eventKind, row.dataset.eventId);
-  };
-}
-
 export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRecord }) {
-  const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN, STORAGE_KEY);
-  const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel("countryInfoCard");
+  // `place` is recomputed every render rather than memoised: it is a cheap
+  // object literal, and memoising it would need a dependency list that is
+  // just `country` anyway, since that's the only thing it's built from.
+  const place = country
+    ? { id: country.key, title: country.name, subtitle: null, point: country.point, sections: country.sections }
+    : null;
 
-  if (!country) return null;
-
-  // Anchored positioning is only computed while the card still belongs to its
-  // country. `point` can also be briefly absent (a country whose shape has not
-  // been re-added after a boundary refresh), in which case the card falls back
-  // to sitting where CSS puts it rather than vanishing.
-  let anchorStyle;
-  let flip = false;
-  let tailLeft = null;
-  if (!moved && country.point) {
-    const { x, y } = country.point;
-    const left = Math.min(
-      Math.max(x - CARD_WIDTH / 2, CARD_MARGIN),
-      window.innerWidth - CARD_WIDTH - CARD_MARGIN
-    );
-    tailLeft = Math.min(Math.max(x - left, 16), CARD_WIDTH - 16); // stays under the real anchor even after clamping
-    flip = y < 220; // not enough room above the anchor near the top edge -- open downward instead
-    anchorStyle = flip ? { left, top: y + 18 } : { left, bottom: window.innerHeight - y + 18 };
-  }
+  const headerExtra = borderEdit?.offered && (
+    <button
+      type="button"
+      className={`country-info-edit${borderEdit.active ? " active" : ""}`}
+      onClick={borderEdit.active ? borderEdit.onEnd : borderEdit.onBegin}
+      disabled={!borderEdit.active && !!borderEdit.blockedReason}
+      title={borderEdit.blockedReason || "Drag this country's boundary"}
+    >
+      {borderEdit.active ? "Done" : "Edit border"}
+    </button>
+  );
 
   return (
-    <aside
-      id="countryInfoCard"
-      ref={panelRef}
-      className={`${flip ? "flip" : ""}${moved ? " detached" : ""}`}
-      style={dragStyle || anchorStyle}
-    >
-      {/* handleProps carries its own className, so it is spread first and the
-          two are merged by hand -- spreading it after `className` silently
-          replaces the header's own class. */}
-      <div {...handleProps} className={`country-info-header ${handleProps.className || ""}`}>
-        <span className="country-info-name">{country.name}</span>
-        {/* Deliberately inside the drag handle but with its own pointerdown
-            guard: useDraggablePanel already ignores a press that starts on a
-            button (its escape hatch lists button/a/input/select/textarea), so
-            this stays clickable while the rest of the header still drags. */}
-        {borderEdit?.offered && (
-          <button
-            type="button"
-            className={`country-info-edit${borderEdit.active ? " active" : ""}`}
-            onClick={borderEdit.active ? borderEdit.onEnd : borderEdit.onBegin}
-            disabled={!borderEdit.active && !!borderEdit.blockedReason}
-            title={borderEdit.blockedReason || "Drag this country's boundary"}
-          >
-            {borderEdit.active ? "Done" : "Edit border"}
-          </button>
-        )}
-        <button type="button" className="country-info-close" onClick={onClose} aria-label="Close">
-          &times;
-        </button>
-      </div>
-
-      {/* Keyboard reaches the rows through their own role="button"/tabindex, so
-          the same delegation answers Enter and Space. */}
-      <div
-        className="country-info-body"
-        onClick={recordClickHandler(onOpenRecord)}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" && event.key !== " ") return;
-          if (!event.target.closest?.("[data-event-id]")) return;
-          event.preventDefault();
-          recordClickHandler(onOpenRecord)(event);
-        }}
-      >
-        {country.sections.map((section) => (
-          <details
-            key={section.id}
-            className="country-section"
-            open={isOpen(section.id)}
-            onToggle={(e) => setOpen(section.id, e.currentTarget.open)}
-          >
-            <summary>{section.title}</summary>
-            <div className="country-section-body" dangerouslySetInnerHTML={{ __html: section.html }} />
-          </details>
-        ))}
-      </div>
-
-      {tailLeft != null && <div className="country-info-tail" style={{ left: tailLeft }} />}
-    </aside>
+    <PlaceInfoCard
+      place={place}
+      onClose={onClose}
+      onOpenRecord={onOpenRecord}
+      accordionKey={STORAGE_KEY}
+      defaultOpen={DEFAULT_OPEN}
+      headerExtra={headerExtra}
+    />
   );
 }
