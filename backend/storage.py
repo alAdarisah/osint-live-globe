@@ -231,6 +231,112 @@ CREATE TABLE IF NOT EXISTS alerts (
   PRIMARY KEY (subject, condition)
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (resolved_at, last_seen DESC);
+
+-- Grid-cell accumulator for the AIS lane-density refine job. Schema only in
+-- this task -- nothing writes here yet. entity_history holds the raw
+-- movement log (11 GB and rising with a global AIS subscription), and no
+-- request path may scan it (see backend/tests -- global project constraint);
+-- this compact table is what a future /api/lanes actually reads.
+--
+-- cell_key is the caller's own grid quantization (lat/lon rounded to `res`
+-- degrees, encoded as text) -- computed by the refine job, not derived here,
+-- since only it knows the resolution a given sweep used. One row per cell,
+-- accumulated across every sweep rather than replaced by the newest one, so
+-- the layer represents traffic over time rather than one snapshot.
+--
+-- by_class counts transits per vessel class (cargo, tanker, fishing, ...) so
+-- the layer can be filtered without a join back to entity_history.
+CREATE TABLE IF NOT EXISTS lane_cells (
+  cell_key    TEXT PRIMARY KEY,
+  lat         DOUBLE PRECISION NOT NULL,
+  lon         DOUBLE PRECISION NOT NULL,
+  res         DOUBLE PRECISION NOT NULL,
+  transits    INTEGER NOT NULL,
+  positions   INTEGER NOT NULL,
+  by_class    JSONB NOT NULL,
+  -- Summed sin/cos of every transit's course, not a mean bearing -- courses
+  -- are angles, and averaging degrees across the 0/360 seam gives nonsense
+  -- (a cell split evenly between 359deg and 1deg would average to 180deg,
+  -- the opposite direction). Store the unit-vector sum and let the reader
+  -- take atan2(mean_sin, mean_cos).
+  mean_sin    DOUBLE PRECISION NOT NULL,
+  mean_cos    DOUBLE PRECISION NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL
+);
+-- Serves lane_cells()'s bbox filter -- a viewport query against a global grid.
+CREATE INDEX IF NOT EXISTS idx_lane_cells_bbox ON lane_cells (lat, lon);
+-- Serves any future "how stale is the grid" read. Not exercised by this
+-- task's own helpers, but updated_at is otherwise unindexed and freshness is
+-- exactly the question an operator asks about an accumulator that has no
+-- per-row timestamp of its own.
+CREATE INDEX IF NOT EXISTS idx_lane_cells_updated ON lane_cells (updated_at);
+
+-- One row per vessel visit to a port, derived from the AIS movement log by a
+-- future port-call detection refine job (schema only in this task). Kept
+-- separate from entity_history for the same reason lane_cells is: a call is
+-- a single fact -- one arrival, maybe one departure -- and deriving "when did
+-- this hull last call here" from the raw log on a request would mean
+-- scanning the 11 GB table live.
+--
+-- (mmsi, port_id, arrived_at) as the key rather than a surrogate id: a hull
+-- can only be arriving at a given port once at a given moment, and this
+-- shape is what makes record_port_calls's upsert -- a departure observed
+-- later overwriting the same open call -- a plain ON CONFLICT rather than a
+-- lookup-then-update.
+--
+-- draught_in/draught_out are the vessel's reported draught on arrival and
+-- departure; a laden ship that leaves lighter than it arrived took on cargo,
+-- and the reverse discharged it -- the detail that makes a port call more
+-- than a dwell time.
+--
+-- confidence is the detector's own judgement of how sure this call really
+-- is -- moored-at-anchor and slow-passage-nearby both look similar in a raw
+-- movement log -- so this stays a plain text tier rather than a boolean
+-- until the detector that populates it (a later task) settles its own
+-- vocabulary.
+CREATE TABLE IF NOT EXISTS vessel_port_calls (
+  mmsi        TEXT NOT NULL,
+  port_id     TEXT NOT NULL,
+  arrived_at  TIMESTAMPTZ NOT NULL,
+  departed_at TIMESTAMPTZ,
+  draught_in  DOUBLE PRECISION,
+  draught_out DOUBLE PRECISION,
+  confidence  TEXT NOT NULL,
+  PRIMARY KEY (mmsi, port_id, arrived_at)
+);
+-- Serves port_calls_for(): one vessel's recent calls, newest first.
+CREATE INDEX IF NOT EXISTS idx_port_calls_mmsi ON vessel_port_calls (mmsi, arrived_at DESC);
+-- Serves port_calls_at(): one port's recent traffic, newest first.
+CREATE INDEX IF NOT EXISTS idx_port_calls_port ON vessel_port_calls (port_id, arrived_at DESC);
+
+-- One row per aircraft flight leg, derived from the ADS-B movement log the
+-- same way vessel_port_calls is derived from AIS -- schema only in this
+-- task, and the same reasoning: entity_history is not something a request
+-- path may scan, so a future flight-leg detection refine job writes the
+-- compact summary here instead.
+--
+-- (icao24, departed_at) as the key: one aircraft can only depart once at a
+-- given moment. origin_code/dest_code are nullable because a leg is first
+-- recorded when a departure is detected, before an airport can always be
+-- resolved from the track.
+--
+-- max_alt_ft and distance_km are what the raw log can't answer without a
+-- scan of its own: how high the flight actually got, and how far it flew --
+-- both used to tell a training circuit from a genuine transit.
+CREATE TABLE IF NOT EXISTS flight_legs (
+  icao24       TEXT NOT NULL,
+  departed_at  TIMESTAMPTZ NOT NULL,
+  arrived_at   TIMESTAMPTZ,
+  origin_code  TEXT,
+  dest_code    TEXT,
+  callsign     TEXT,
+  max_alt_ft   INTEGER,
+  distance_km  DOUBLE PRECISION,
+  confidence   TEXT NOT NULL,
+  PRIMARY KEY (icao24, departed_at)
+);
+-- Serves flight_legs_for(): one aircraft's recent legs, newest first.
+CREATE INDEX IF NOT EXISTS idx_flight_legs_icao ON flight_legs (icao24, departed_at DESC);
 """
 
 
@@ -868,6 +974,415 @@ async def active_alerts() -> list[dict]:
         return []
 
 
+# --- lane_cells, vessel_port_calls, flight_legs ----------------------------
+#
+# The compact tables behind three not-yet-built refine jobs (lane density,
+# port-call detection, flight-leg detection). Nothing calls these helpers yet
+# -- see the schema comments above for why each table exists and is shaped
+# the way it is. They land now so those jobs build on a settled schema rather
+# than each inventing its own.
+
+
+def _sum_by_class(a: dict, b: dict) -> dict:
+    """Key-wise sum of two by_class counts, e.g. {"cargo": 4} + {"cargo": 1,
+    "tanker": 2} -> {"cargo": 5, "tanker": 2}. Never replaces a key that only
+    one side has."""
+    out = dict(a)
+    for cls, count in b.items():
+        out[cls] = out.get(cls, 0) + count
+    return out
+
+
+def _combine_lane_cell(existing: dict | None, incoming: dict) -> dict:
+    """One cell's totals after adding one more observation to them.
+
+    `existing` is the row already in lane_cells (or None for a cell seen for
+    the first time this sweep); `incoming` is what this sweep itself
+    observed for the same cell_key. transits/positions/mean_sin/mean_cos add;
+    by_class merges key-wise rather than being replaced -- a sweep reports
+    only the traffic *it* saw, and replacing would forget every class the
+    cell had accumulated before it.
+    """
+    if existing is None:
+        return dict(incoming)
+    return {
+        "cell_key": incoming["cell_key"],
+        "lat": incoming["lat"], "lon": incoming["lon"], "res": incoming["res"],
+        "transits": existing["transits"] + incoming["transits"],
+        "positions": existing["positions"] + incoming["positions"],
+        "by_class": _sum_by_class(existing["by_class"], incoming["by_class"]),
+        "mean_sin": existing["mean_sin"] + incoming["mean_sin"],
+        "mean_cos": existing["mean_cos"] + incoming["mean_cos"],
+    }
+
+
+def _prepare_lane_cell_rows(rows: list[dict]) -> dict[str, dict]:
+    """Normalizes input rows and merges duplicate cell_keys within one call.
+
+    A single sweep can legitimately report the same cell twice -- adjoining
+    tiles of its own scan overlapping, for instance -- and merging here first
+    is what keeps the batched statement in upsert_lane_cells from touching
+    the same cell_key twice in one INSERT, which Postgres rejects the same
+    way _rows_for's dedup exists for entity_latest ("cannot affect row a
+    second time").
+    """
+    combined: dict[str, dict] = {}
+    for item in rows:
+        key = str(item["cell_key"])
+        row = {
+            "cell_key": key, "lat": float(item["lat"]), "lon": float(item["lon"]),
+            "res": float(item["res"]), "transits": int(item["transits"]),
+            "positions": int(item["positions"]),
+            "by_class": {str(k): int(v) for k, v in (item.get("by_class") or {}).items()},
+            "mean_sin": float(item["mean_sin"]), "mean_cos": float(item["mean_cos"]),
+        }
+        combined[key] = _combine_lane_cell(combined.get(key), row)
+    return combined
+
+
+_SELECT_LANE_CELLS_EXISTING = """
+SELECT cell_key, transits, positions, by_class, mean_sin, mean_cos
+  FROM lane_cells WHERE cell_key = ANY($1::text[])
+"""
+
+_UPSERT_LANE_CELLS = """
+INSERT INTO lane_cells (cell_key, lat, lon, res, transits, positions, by_class, mean_sin, mean_cos, updated_at)
+SELECT u.cell_key, u.lat, u.lon, u.res, u.transits, u.positions, u.by_class::jsonb, u.mean_sin, u.mean_cos, $10
+  FROM unnest($1::text[], $2::float8[], $3::float8[], $4::float8[], $5::int[], $6::int[], $7::text[], $8::float8[], $9::float8[])
+       AS u(cell_key, lat, lon, res, transits, positions, by_class, mean_sin, mean_cos)
+ON CONFLICT (cell_key) DO UPDATE SET
+  lat = EXCLUDED.lat, lon = EXCLUDED.lon, res = EXCLUDED.res,
+  transits = EXCLUDED.transits, positions = EXCLUDED.positions,
+  by_class = EXCLUDED.by_class, mean_sin = EXCLUDED.mean_sin, mean_cos = EXCLUDED.mean_cos,
+  updated_at = EXCLUDED.updated_at
+"""
+
+
+async def upsert_lane_cells(rows: list[dict]) -> None:
+    """Adds one refine sweep's grid cells to the running lane-density totals.
+
+    Read-merge-write rather than arithmetic in the UPSERT's SET clause (the
+    way _UPSERT_LATEST tests movement), so the accumulation lives in
+    _combine_lane_cell where it can be tested without a database. That
+    assumes at most one sweep is ever writing at a time -- true of a single
+    scheduled refine job, the only writer this table has today -- and would
+    need to move into the statement itself if a second concurrent writer
+    were ever added, the same way a concurrent entity_latest writer would
+    need to.
+
+    Batched at _BATCH for the same reason record_snapshot is: a full-planet
+    sweep can be many thousand cells, and this keeps both the existing-row
+    lookup and the write's parameter arrays bounded.
+    """
+    if _pool is None or not rows:
+        return
+    incoming = _prepare_lane_cell_rows(rows)
+    if not incoming:
+        return
+    now = datetime.now(timezone.utc)
+    try:
+        async with _pool.acquire() as conn:
+            async with conn.transaction():
+                keys = list(incoming)
+                for start in range(0, len(keys), _BATCH):
+                    chunk = keys[start:start + _BATCH]
+                    existing_rows = await conn.fetch(_SELECT_LANE_CELLS_EXISTING, chunk)
+                    existing = {
+                        r["cell_key"]: {
+                            "transits": r["transits"], "positions": r["positions"],
+                            "by_class": json.loads(r["by_class"]),
+                            "mean_sin": r["mean_sin"], "mean_cos": r["mean_cos"],
+                        }
+                        for r in existing_rows
+                    }
+                    final = [_combine_lane_cell(existing.get(key), incoming[key]) for key in chunk]
+                    await conn.execute(
+                        _UPSERT_LANE_CELLS,
+                        [f["cell_key"] for f in final],
+                        [f["lat"] for f in final],
+                        [f["lon"] for f in final],
+                        [f["res"] for f in final],
+                        [f["transits"] for f in final],
+                        [f["positions"] for f in final],
+                        [json.dumps(f["by_class"]) for f in final],
+                        [f["mean_sin"] for f in final],
+                        [f["mean_cos"] for f in final],
+                        now,
+                    )
+    except Exception:  # noqa: BLE001 - storage must never take a refine job down
+        log.exception("Failed to upsert %d lane cells", len(rows))
+
+
+async def lane_cells(bbox: tuple | None = None, min_transits: int = 1) -> list[dict]:
+    """The stored grid, optionally clipped to a viewport.
+
+    `bbox` is (lat_min, lon_min, lat_max, lon_max), the same shape as
+    config.WATCHED_WATERS, filtered on the plain lat/lon columns -- there is
+    no PostGIS here, so a viewport query is exactly the range predicate
+    idx_lane_cells_bbox serves.
+    """
+    if _pool is None:
+        return []
+    if bbox is not None:
+        lat_min, lon_min, lat_max, lon_max = bbox
+        query = (
+            "SELECT cell_key, lat, lon, res, transits, positions, by_class, mean_sin, mean_cos, updated_at"
+            " FROM lane_cells WHERE transits >= $1 AND lat >= $2 AND lat <= $3 AND lon >= $4 AND lon <= $5"
+        )
+        args = [int(min_transits), float(lat_min), float(lat_max), float(lon_min), float(lon_max)]
+    else:
+        query = (
+            "SELECT cell_key, lat, lon, res, transits, positions, by_class, mean_sin, mean_cos, updated_at"
+            " FROM lane_cells WHERE transits >= $1"
+        )
+        args = [int(min_transits)]
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(query, *args)
+    return [
+        {
+            "cell_key": r["cell_key"], "lat": r["lat"], "lon": r["lon"], "res": r["res"],
+            "transits": r["transits"], "positions": r["positions"],
+            "by_class": json.loads(r["by_class"]),
+            "mean_sin": r["mean_sin"], "mean_cos": r["mean_cos"],
+            "updated_at": r["updated_at"].timestamp(),
+        }
+        for r in rows
+    ]
+
+
+_DECAY_LANE_CELLS = """
+UPDATE lane_cells SET
+  transits = GREATEST(0, ROUND(transits * $1))::integer,
+  positions = GREATEST(0, ROUND(positions * $1))::integer,
+  mean_sin = mean_sin * $1,
+  mean_cos = mean_cos * $1
+"""
+
+
+async def decay_lane_cells(factor: float, floor: int) -> int:
+    """Ages every cell down by `factor` and drops what falls below `floor`.
+
+    This *is* lane_cells' pruning -- unlike every other table here it gets no
+    entry in retention_sweep_loop, because a cell's relevance isn't a
+    function of when it was last touched but of how much traffic it still
+    represents. A quiet cell that hasn't decayed below the floor is still
+    worth showing; a once-busy cell that hasn't been reinforced decays out on
+    its own schedule. Called by its own job (not yet built) on its own
+    cadence.
+    """
+    if _pool is None:
+        return 0
+    try:
+        async with _pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(_DECAY_LANE_CELLS, float(factor))
+                status = await conn.execute(
+                    "DELETE FROM lane_cells WHERE transits < $1", int(floor)
+                )
+        return _deleted_count(status)
+    except Exception:  # noqa: BLE001 - storage must never take the decay job down
+        log.exception("Failed to decay lane cells (factor=%s floor=%s)", factor, floor)
+        return 0
+
+
+_UPSERT_PORT_CALL = """
+INSERT INTO vessel_port_calls (mmsi, port_id, arrived_at, departed_at, draught_in, draught_out, confidence)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT (mmsi, port_id, arrived_at) DO UPDATE SET
+  departed_at = EXCLUDED.departed_at,
+  draught_in = COALESCE(vessel_port_calls.draught_in, EXCLUDED.draught_in),
+  draught_out = EXCLUDED.draught_out,
+  confidence = EXCLUDED.confidence
+"""
+
+
+def _port_call_row(item: dict) -> tuple | None:
+    """One detected call as the bind tuple _UPSERT_PORT_CALL expects, or None
+    if the row is missing something that can't be defaulted -- mirroring
+    _conflict_row's reasoning: the write path swallows exceptions by design,
+    so a malformed row is better skipped here than bound and failing silently."""
+    mmsi, port_id, confidence = item.get("mmsi"), item.get("port_id"), item.get("confidence")
+    arrived_at = _to_timestamp(item.get("arrived_at"))
+    if mmsi is None or port_id is None or arrived_at is None or confidence is None:
+        return None
+    return (
+        str(mmsi), str(port_id), arrived_at,
+        _to_timestamp(item.get("departed_at")),
+        item.get("draught_in"), item.get("draught_out"), str(confidence),
+    )
+
+
+async def record_port_calls(rows: list[dict]) -> None:
+    """Upserts a batch of detected vessel port calls.
+
+    Keyed on (mmsi, port_id, arrived_at): a second write for the same key --
+    typically the same call seen again once a departure is detected -- updates
+    the existing row in place, which is what turns an arrival and a departure
+    observed hours apart into a single call record instead of two.
+    """
+    if _pool is None or not rows:
+        return
+    tuples = [t for t in (_port_call_row(r) for r in rows) if t is not None]
+    if not tuples:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            async with conn.transaction():
+                for start in range(0, len(tuples), _BATCH):
+                    await conn.executemany(_UPSERT_PORT_CALL, tuples[start:start + _BATCH])
+    except Exception:  # noqa: BLE001 - storage must never take a refine job down
+        log.exception("Failed to record %d port calls", len(tuples))
+
+
+def _port_call_dict(r) -> dict:
+    return {
+        "mmsi": r["mmsi"], "port_id": r["port_id"],
+        "arrived_at": r["arrived_at"].timestamp(),
+        "departed_at": r["departed_at"].timestamp() if r["departed_at"] else None,
+        "draught_in": r["draught_in"], "draught_out": r["draught_out"],
+        "confidence": r["confidence"],
+    }
+
+
+_PORT_CALL_COLUMNS = "mmsi, port_id, arrived_at, departed_at, draught_in, draught_out, confidence"
+
+
+async def port_calls_for(mmsi: str, limit: int = 20) -> list[dict]:
+    """One vessel's most recent port calls, newest arrival first."""
+    if _pool is None:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT {_PORT_CALL_COLUMNS} FROM vessel_port_calls WHERE mmsi = $1"
+            f" ORDER BY arrived_at DESC LIMIT $2",
+            str(mmsi), int(limit),
+        )
+    return [_port_call_dict(r) for r in rows]
+
+
+async def port_calls_at(port_id: str, limit: int = 50) -> list[dict]:
+    """One port's most recent traffic, newest arrival first."""
+    if _pool is None:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT {_PORT_CALL_COLUMNS} FROM vessel_port_calls WHERE port_id = $1"
+            f" ORDER BY arrived_at DESC LIMIT $2",
+            str(port_id), int(limit),
+        )
+    return [_port_call_dict(r) for r in rows]
+
+
+async def open_port_call(mmsi: str) -> dict | None:
+    """The vessel's current call, if it hasn't been seen to depart -- or None."""
+    if _pool is None:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"SELECT {_PORT_CALL_COLUMNS} FROM vessel_port_calls"
+            f" WHERE mmsi = $1 AND departed_at IS NULL ORDER BY arrived_at DESC LIMIT 1",
+            str(mmsi),
+        )
+    return _port_call_dict(row) if row else None
+
+
+_UPSERT_FLIGHT_LEG = """
+INSERT INTO flight_legs (icao24, departed_at, arrived_at, origin_code, dest_code, callsign, max_alt_ft, distance_km, confidence)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ON CONFLICT (icao24, departed_at) DO UPDATE SET
+  arrived_at = EXCLUDED.arrived_at,
+  origin_code = COALESCE(EXCLUDED.origin_code, flight_legs.origin_code),
+  dest_code = EXCLUDED.dest_code,
+  callsign = COALESCE(EXCLUDED.callsign, flight_legs.callsign),
+  -- The highest altitude seen across every write for this leg, not the
+  -- latest one: a leg written once mid-flight and again after landing each
+  -- saw only part of its altitude profile, and GREATEST ignores a NULL side
+  -- rather than propagating it, so a leg with no altitude yet doesn't erase
+  -- one already recorded.
+  max_alt_ft = GREATEST(EXCLUDED.max_alt_ft, flight_legs.max_alt_ft),
+  distance_km = EXCLUDED.distance_km,
+  confidence = EXCLUDED.confidence
+"""
+
+
+def _flight_leg_row(item: dict) -> tuple | None:
+    """One detected leg as the bind tuple _UPSERT_FLIGHT_LEG expects, or None
+    if the row is missing something that can't be defaulted."""
+    icao24, confidence = item.get("icao24"), item.get("confidence")
+    departed_at = _to_timestamp(item.get("departed_at"))
+    if icao24 is None or departed_at is None or confidence is None:
+        return None
+    return (
+        str(icao24), departed_at,
+        _to_timestamp(item.get("arrived_at")),
+        item.get("origin_code"), item.get("dest_code"), item.get("callsign"),
+        int(item["max_alt_ft"]) if item.get("max_alt_ft") is not None else None,
+        item.get("distance_km"), str(confidence),
+    )
+
+
+async def record_flight_legs(rows: list[dict]) -> None:
+    """Upserts a batch of detected flight legs.
+
+    Keyed on (icao24, departed_at): a later write for the same key -- the
+    same leg tracked further, with an arrival now resolved -- updates the row
+    in place rather than creating a second one.
+    """
+    if _pool is None or not rows:
+        return
+    tuples = [t for t in (_flight_leg_row(r) for r in rows) if t is not None]
+    if not tuples:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            async with conn.transaction():
+                for start in range(0, len(tuples), _BATCH):
+                    await conn.executemany(_UPSERT_FLIGHT_LEG, tuples[start:start + _BATCH])
+    except Exception:  # noqa: BLE001 - storage must never take a refine job down
+        log.exception("Failed to record %d flight legs", len(tuples))
+
+
+def _flight_leg_dict(r) -> dict:
+    return {
+        "icao24": r["icao24"],
+        "departed_at": r["departed_at"].timestamp(),
+        "arrived_at": r["arrived_at"].timestamp() if r["arrived_at"] else None,
+        "origin_code": r["origin_code"], "dest_code": r["dest_code"], "callsign": r["callsign"],
+        "max_alt_ft": r["max_alt_ft"], "distance_km": r["distance_km"], "confidence": r["confidence"],
+    }
+
+
+_FLIGHT_LEG_COLUMNS = (
+    "icao24, departed_at, arrived_at, origin_code, dest_code, callsign, max_alt_ft, distance_km, confidence"
+)
+
+
+async def flight_legs_for(icao24: str, limit: int = 20) -> list[dict]:
+    """One aircraft's most recent legs, newest departure first."""
+    if _pool is None:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT {_FLIGHT_LEG_COLUMNS} FROM flight_legs WHERE icao24 = $1"
+            f" ORDER BY departed_at DESC LIMIT $2",
+            str(icao24), int(limit),
+        )
+    return [_flight_leg_dict(r) for r in rows]
+
+
+async def open_flight_leg(icao24: str) -> dict | None:
+    """The aircraft's current leg, if it hasn't been seen to land -- or None."""
+    if _pool is None:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"SELECT {_FLIGHT_LEG_COLUMNS} FROM flight_legs"
+            f" WHERE icao24 = $1 AND arrived_at IS NULL ORDER BY departed_at DESC LIMIT 1",
+            str(icao24),
+        )
+    return _flight_leg_dict(row) if row else None
+
+
 # Positions as of one moment, measured from the last time we actually looked
 # rather than from the moment asked for. `anchor` is that look: the newest
 # recorded timestamp at or before `at`. Everything then hangs off it, which is
@@ -1306,6 +1821,18 @@ async def retention_sweep_loop() -> None:
                     "DELETE FROM source_health WHERE ts < $1",
                     now - timedelta(days=config.SOURCE_HEALTH_RETENTION_DAYS),
                 )
+                await conn.execute(
+                    "DELETE FROM vessel_port_calls WHERE arrived_at < $1",
+                    now - timedelta(days=config.PORT_CALL_RETENTION_DAYS),
+                )
+                await conn.execute(
+                    "DELETE FROM flight_legs WHERE departed_at < $1",
+                    now - timedelta(days=config.FLIGHT_LEG_RETENTION_DAYS),
+                )
+                # lane_cells is not time-pruned here: its own decay job (not
+                # yet built) is what governs it, since a cell's relevance is a
+                # function of how much traffic it still represents, not of
+                # when it was last touched. See decay_lane_cells.
                 evicted = await sweep_stale_entities(conn, now)
             if evicted:
                 # Logged rather than silent: rows disappearing from a layer is

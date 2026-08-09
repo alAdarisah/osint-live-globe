@@ -120,3 +120,85 @@ def test_geo_fields_are_either_persisted_or_deliberately_derived(field):
     serve time is a field the frontend can read and the archive cannot."""
     derived_at_serve_time = {"geo_place_id", "geo_reason"}
     assert field in set(_insert_columns()) or field in derived_at_serve_time
+
+
+# --- the three derived-product tables (schema only, no consumer yet) -------
+#
+# lane_cells, vessel_port_calls and flight_legs exist so three future refine
+# jobs (lane density, port-call detection, flight-leg detection) land on a
+# settled schema. These tests just hold the DDL to its own stated shape --
+# table, primary key and every index the module's helpers rely on.
+
+
+@pytest.mark.parametrize(
+    "table,columns",
+    [
+        (
+            "lane_cells",
+            ["cell_key", "lat", "lon", "res", "transits", "positions",
+             "by_class", "mean_sin", "mean_cos", "updated_at"],
+        ),
+        (
+            "vessel_port_calls",
+            ["mmsi", "port_id", "arrived_at", "departed_at", "draught_in",
+             "draught_out", "confidence"],
+        ),
+        (
+            "flight_legs",
+            ["icao24", "departed_at", "arrived_at", "origin_code", "dest_code",
+             "callsign", "max_alt_ft", "distance_km", "confidence"],
+        ),
+    ],
+)
+def test_the_derived_tables_declare_every_column_their_helpers_use(table, columns):
+    match = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\n\);", storage._SCHEMA, re.S)
+    assert match, f"{table} is not in the schema"
+    body = match.group(1)
+    for column in columns:
+        assert re.search(rf"^\s*{column} ", body, re.M), f"{table} is missing column {column!r}"
+
+
+def test_lane_cells_is_keyed_on_cell_key():
+    """A synthetic PK here would let the same grid cell exist twice, which is
+    exactly what upsert_lane_cells's accumulation depends on not happening."""
+    match = re.search(r"CREATE TABLE IF NOT EXISTS lane_cells \((.*?)\n\);", storage._SCHEMA, re.S)
+    assert "cell_key    TEXT PRIMARY KEY" in match.group(1)
+
+
+def test_port_calls_and_flight_legs_are_keyed_so_a_second_write_updates_in_place():
+    """(mmsi, port_id, arrived_at) and (icao24, departed_at) are what make
+    record_port_calls/record_flight_legs's ON CONFLICT upserts -- a departure
+    or arrival observed later closing out the same row -- possible at all."""
+    assert "PRIMARY KEY (mmsi, port_id, arrived_at)" in storage._SCHEMA
+    assert "PRIMARY KEY (icao24, departed_at)" in storage._SCHEMA
+
+
+@pytest.mark.parametrize(
+    "index,table",
+    [
+        ("idx_lane_cells_bbox", "lane_cells"),
+        ("idx_lane_cells_updated", "lane_cells"),
+        ("idx_port_calls_mmsi", "vessel_port_calls"),
+        ("idx_port_calls_port", "vessel_port_calls"),
+        ("idx_flight_legs_icao", "flight_legs"),
+    ],
+)
+def test_the_derived_tables_carry_their_documented_indexes(index, table):
+    match = re.search(
+        rf"CREATE INDEX IF NOT EXISTS {index} ON {table} \(([^)]*)\);", storage._SCHEMA
+    )
+    assert match, f"{index} on {table} is missing"
+
+
+def test_every_index_on_the_derived_tables_has_a_comment_above_it():
+    """The house rule (see backend/storage.py and CLAUDE.md): every index names
+    the query it serves, right above the CREATE INDEX line."""
+    for index in (
+        "idx_lane_cells_bbox", "idx_lane_cells_updated",
+        "idx_port_calls_mmsi", "idx_port_calls_port", "idx_flight_legs_icao",
+    ):
+        before = storage._SCHEMA.split(f"CREATE INDEX IF NOT EXISTS {index}")[0]
+        last_lines = [line.strip() for line in before.strip().splitlines()[-3:]]
+        assert any(line.startswith("--") for line in last_lines), (
+            f"{index} has no comment explaining what it serves"
+        )

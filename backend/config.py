@@ -341,6 +341,21 @@ SOURCE_HEALTH_RETENTION_DAYS = int(os.getenv("SOURCE_HEALTH_RETENTION_DAYS", "14
 # replay range can't use anyway.
 HISTORY_RETENTION_SECONDS = int(os.getenv("HISTORY_RETENTION_SECONDS", str(3 * 24 * 3600)))
 
+# How long storage.py's vessel_port_calls rows are kept. Far longer than
+# HISTORY_RETENTION_SECONDS's 3 days on purpose: a port call is already the
+# compact, one-row-per-visit derivative of the raw movement log, so keeping
+# six months of them costs nothing like keeping six months of position
+# history would, and "how often does this hull call here" is only a question
+# a window that wide can answer.
+PORT_CALL_RETENTION_DAYS = int(os.getenv("PORT_CALL_RETENTION_DAYS", "180"))
+
+# Same reasoning as PORT_CALL_RETENTION_DAYS, at half the window. Flight legs
+# are written far more often than port calls -- ADS-B tracks orders of
+# magnitude more aircraft movements than AIS tracks port-capable ships -- so
+# the same "cheap to keep" argument holds at a shorter retention before the
+# table's own row count becomes the thing worth pruning.
+FLIGHT_LEG_RETENTION_DAYS = int(os.getenv("FLIGHT_LEG_RETENTION_DAYS", "90"))
+
 # The waters this map *claims* as watched, as "lat_min,lon_min,lat_max,lon_max"
 # boxes separated by ";". High-interest maritime chokepoints and conflict water.
 #
