@@ -1452,7 +1452,11 @@ html, body {
    the country's name and its close button off the top of a 44vh box the moment
    anyone read past the second fold: the one line telling you *which* country
    you were reading was the first thing to go. */
-#countryInfoCard {
+/* #waterInfoCard rides along on every rule below: PlaceInfoCard.jsx's
+   `panelId` prop is what tells the two apart (own DOM id, own drag-position
+   storage key), but they are the same floating-card look, so nothing here
+   needed forking -- see PlaceInfoCard.jsx's own note on why panelId exists. */
+#countryInfoCard, #waterInfoCard {
   position: fixed;
   width: 320px;
   max-width: calc(100vw - 28px);
@@ -1484,12 +1488,12 @@ html, body {
 /* Default (opens upward): tail sits on the bottom edge, pointing down at
    the country. Only the bottom-right two edges get a border so it reads as
    part of the card's outline rather than a floating diamond. */
-#countryInfoCard:not(.flip) .country-info-tail {
+#countryInfoCard:not(.flip) .country-info-tail, #waterInfoCard:not(.flip) .country-info-tail {
   bottom: -7.5px;
   border-top: none;
   border-left: none;
 }
-#countryInfoCard.flip .country-info-tail {
+#countryInfoCard.flip .country-info-tail, #waterInfoCard.flip .country-info-tail {
   top: -7.5px;
   border-bottom: none;
   border-right: none;
@@ -3289,8 +3293,9 @@ html, body {
   white-space: nowrap;
 }
 /* Once dragged the card is its own window: no tail, and it no longer tracks
-   the country's screen position (see CountryInfoCard.jsx). */
-#countryInfoCard.detached { animation: none; }
+   the country's (or water body's) screen position (see CountryInfoCard.jsx
+   and WaterInfoCard.jsx). */
+#countryInfoCard.detached, #waterInfoCard.detached { animation: none; }
 
 /* A row in the country card that opens the record behind it. Only the rows that
    carry an id get this (see openableRow in map/popups.js) -- the rest stay inert

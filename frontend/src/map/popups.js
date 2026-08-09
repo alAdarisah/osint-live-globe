@@ -3,9 +3,11 @@
 // events/gdelt arrays passed in by the caller (see useLeafletMap) rather than
 // holding its own copy, so it's always working off the latest poll.
 
-import { esc, fmtNumber, haversineKm, timeAgoFromDateAdded } from "../utils/format";
+import { esc, fmtNumber, haversineKm, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
 import { boundsContainsPoint } from "../utils/geo";
-import { classifyAircraft, classifyShip } from "./decorators";
+import { classifyAircraft, classifyShip, classifyVesselTraffic, AIS_COVERAGE_CAVEAT, EMPTY_WATER_HEADLINE } from "./decorators";
+import { countryContainsPoint } from "./countryHitTest";
+import { CLASS_LABEL as WATER_CLASS_LABEL, WATER_SCALE_CAVEAT } from "./water";
 
 // ACLED/GDELT country names don't always match Natural Earth's ADMIN name
 // (e.g. "Russian Federation" vs "Russia") -- this covers the common cases.
@@ -718,6 +720,319 @@ export function countryCardSections(props, raw, bounds) {
   ];
 
   return { title: name, sections: sections.filter((s) => s.html && s.html.trim()) };
+}
+
+// ---------- water body card (Task 7) ----------
+//
+// The sibling of countryCardSections above, for the water layer Task 6 made
+// selectable. Same shape ({title, sections}), same empty-section dropping,
+// same openableRow convention for a row that opens a record's own detail --
+// see that function's own docstring for the reasoning this one shares.
+//
+// One real difference from the country card throughout: `feature` here is not
+// just the GeoJSON properties, it is a buildWaterIndex entry (map/water.js),
+// carrying `polygons`/`bbox` (the hit-test geometry) and `rawBbox` (the
+// feature's own stored [south,west,north,east], antimeridian-aware) alongside
+// id/name/class. The country card settles for "inside this country's bounding
+// box" because a true polygon test over every AIS/ADS-B contact on Earth is
+// not affordable at that scale (see buildLivePicture's own note). A water
+// body does not get that luxury: a strait or a channel is long and thin, and
+// its bounding box can cover as much land as water -- so every "inside this
+// water body" test below is a real point-in-polygon test, not a box.
+
+/**
+ * True containment inside a water feature's actual polygon, not its bounding
+ * box. `bounds`, when given, is a cheap pre-filter -- the feature's own
+ * client-computed bbox (see buildWaterIndex) -- that skips the ray-cast for a
+ * point obviously outside. It can only ever be as large as or larger than the
+ * true shape (it is that shape's own bounding envelope), so it is never a
+ * source of a false negative, only of a skipped optimisation for the handful
+ * of antimeridian-wrapping marine features where it is closer to the whole
+ * globe than to the feature.
+ */
+function insideWaterFeature(feature, bounds, lat, lon) {
+  if (typeof lat !== "number" || typeof lon !== "number") return false;
+  if (bounds && !boundsContainsPoint(bounds, lat, lon)) return false;
+  return countryContainsPoint(feature, lat, lon);
+}
+
+const VESSEL_TRAFFIC_ORDER = ["tanker", "cargo", "navy", "fishing", "other"];
+const VESSEL_TRAFFIC_LABEL = {
+  tanker: "tankers", cargo: "cargo", navy: "navy", fishing: "fishing", other: "other",
+};
+
+/**
+ * Vessel counts inside this water body, by classifyVesselTraffic's five-way
+ * split. Exported on its own -- rather than only reachable through
+ * buildWaterTraffic -- so the class-counting logic can be tested headlessly,
+ * without building a whole card or a DOM.
+ */
+export function countVesselsByClass(ships, feature, bounds) {
+  const counts = { tanker: 0, cargo: 0, navy: 0, fishing: 0, other: 0 };
+  let total = 0;
+  for (const ship of ships || []) {
+    if (!insideWaterFeature(feature, bounds, ship.lat, ship.lon)) continue;
+    counts[classifyVesselTraffic(ship)] += 1;
+    total += 1;
+  }
+  return { counts, total };
+}
+
+function buildWaterTraffic(feature, raw, bounds) {
+  const { counts, total } = countVesselsByClass(raw.ais, feature, bounds);
+  if (!total) return "";
+  const rows = VESSEL_TRAFFIC_ORDER.map((k) => statRow("", VESSEL_TRAFFIC_LABEL[k], counts[k])).join("");
+  return `<div class="cstats">${rows}${statRow("", "total", total, "hot")}</div>
+    ${AIS_COVERAGE_CAVEAT}`;
+}
+
+/**
+ * Rectangle overlap between two [south, west, north, east] boxes, either of
+ * which may wrap the antimeridian (west > east -- water_bodies.py's _bbox
+ * docstring, and buildWaterIndex's own note on `rawBbox`). Both sides get the
+ * same two-range treatment: a marine feature can wrap (the Bering Sea, the
+ * Pacific...) so there is no side this can assume is the simple one.
+ * Exported so the bordering-country matcher's own overlap prefilter can be
+ * tested directly.
+ */
+export function bboxesOverlap(a, b) {
+  const [aS, aW, aN, aE] = a;
+  const [bS, bW, bN, bE] = b;
+  if (aS > bN || bS > aN) return false;
+  const aRanges = aW <= aE ? [[aW, aE]] : [[aW, 180], [-180, aE]];
+  const bRanges = bW <= bE ? [[bW, bE]] : [[bW, 180], [-180, bE]];
+  return aRanges.some(([w1, e1]) => bRanges.some(([w2, e2]) => w1 <= e2 && w2 <= e1));
+}
+
+const BORDER_COUNTRY_CAP = 10;
+
+/**
+ * Countries this water body borders: a country index entry (buildCountryIndex,
+ * map/countryHitTest.js) survives if its own bbox overlaps the water
+ * feature's stored bbox, and then only if it actually contains a point on the
+ * water body's own boundary -- the bbox overlap alone is not enough, since two
+ * rectangles can overlap with the shapes inside them nowhere near touching.
+ *
+ * Every ring vertex is tested rather than a sample: this app's 1:10m water
+ * geometry is already thinned (COORD_PRECISION in water_bodies.py), this runs
+ * once per click, and the bbox prefilter above is what keeps the candidate
+ * country list small before any ray-casting happens at all.
+ *
+ * Exported so the matcher can be tested directly, headlessly.
+ */
+export function waterBorderingCountries(feature, countryIndex) {
+  if (!Array.isArray(feature?.rawBbox) || !countryIndex?.length) return [];
+  const names = [];
+  for (const country of countryIndex) {
+    if (!country?.bbox) continue;
+    const countryBox = [country.bbox.minLat, country.bbox.minLon, country.bbox.maxLat, country.bbox.maxLon];
+    if (!bboxesOverlap(feature.rawBbox, countryBox)) continue;
+    const touches = (feature.polygons || []).some((rings) =>
+      (rings[0] || []).some(([lon, lat]) => countryContainsPoint(country, lat, lon))
+    );
+    if (touches) names.push(country.name);
+  }
+  return names.sort((a, b) => a.localeCompare(b));
+}
+
+function buildWaterProfile(feature, raw) {
+  const label = WATER_CLASS_LABEL[feature.class] || "Water";
+  const borders = waterBorderingCountries(feature, raw.countryIndex);
+  const shown = borders.slice(0, BORDER_COUNTRY_CAP);
+  return `
+    <div class="meta">${esc(label)}</div>
+    ${borders.length ? `<div>Borders: ${shown.map(esc).join(", ")}${
+      borders.length > shown.length ? ` &middot; +${esc(borders.length - shown.length)} more` : ""
+    }</div>` : ""}
+    ${WATER_SCALE_CAVEAT}`;
+}
+
+const DARK_RECENT_CAP = 3;
+
+// AIS gaps (this app's own inference) and STS pairs (also this app's own
+// inference) from raw.darkVessels, plus Global Fishing Watch's own published
+// AIS-disabling events from raw.gfwGaps -- three counts, never merged into
+// one, because they are three different organisations' claims (see
+// dark_vessels.py and gfw_gaps.py). STS pairs carry no detection time of
+// their own (dark_vessels.py's pairing is a snapshot, not a dated event), so
+// they are counted but left out of the time-sorted "most recent" list rather
+// than given a fabricated ordering.
+function buildWaterDark(feature, raw, bounds) {
+  const inside = (item) => insideWaterFeature(feature, bounds, item.lat, item.lon);
+  const wentDark = (raw.darkVessels || []).filter((d) => d.kind === "ais_gap" && inside(d));
+  const stsPairs = (raw.darkVessels || []).filter((d) => d.kind === "sts_pair" && inside(d));
+  const gfwGaps = (raw.gfwGaps || []).filter(inside);
+  const total = wentDark.length + stsPairs.length + gfwGaps.length;
+  if (!total) return "";
+
+  const timed = [
+    ...wentDark.map((d) => ({
+      kind: "darkVessels", id: d.id, label: d.name || `MMSI ${d.mmsi}`, sub: "Went dark", when: d.went_dark_at,
+    })),
+    ...gfwGaps.map((d) => ({
+      kind: "gfwGaps", id: d.id, label: d.name || `MMSI ${d.mmsi}`, sub: "GFW AIS disabling", when: d.went_dark_at,
+    })),
+  ]
+    .filter((r) => Number.isFinite(r.when))
+    .sort((a, b) => b.when - a.when)
+    .slice(0, DARK_RECENT_CAP);
+
+  const rows = timed.map((r) => {
+    const open = openableRow(r.kind, r.id);
+    return `<div${open || ' class="event-row"'}><b>${esc(r.label)}</b>
+      <div class="event-meta">${esc(r.sub)} &middot; ${esc(timeAgoFromUnix(r.when))}</div></div>`;
+  }).join("");
+
+  return `<div class="cstats">
+      ${statRow("", "went dark", wentDark.length, "hot")}
+      ${statRow("", "ship-to-ship", stsPairs.length, "hot")}
+      ${statRow("", "GFW AIS disabling", gfwGaps.length)}
+    </div>
+    ${rows ? `<div class="popup-events">${rows}</div>` : ""}
+    ${stsPairs.length && !timed.length
+      ? '<p class="meta">Ship-to-ship pairs carry no detection time of their own -- each is a snapshot of '
+        + "two hulls found close together, not a dated event -- so none are listed above by recency.</p>"
+      : ""}
+    <p class="meta">Every pin here is an inference from an absence or a proximity, not a detection. Treat
+      each as worth a look, never as a finding.</p>`;
+}
+
+// A hand-kept mirror of backend/config.py's WATCHED_WATERS default (the eight
+// boxes the Dark Vessels layer's "went dark" inference is willing to draw a
+// conclusion from -- see dark_vessels.py's REQUIRE_CHOKEPOINT). There is no
+// endpoint serving this list, and it changes only when someone edits the
+// shipped default in config.py, so a small manually-synced copy here -- the
+// same discipline this module's own COUNTRY_ALIASES table already follows --
+// is the whole of it, rather than a network round trip for eight boxes that
+// move once in a while. [south, west, north, east]; none of the eight wrap
+// the antimeridian.
+const WATCHED_WATERS = [
+  { label: "Black Sea", box: [40, 27, 47, 42] },
+  { label: "Red Sea", box: [12, 32, 30, 43] },
+  { label: "Gulf of Aden / Bab-el-Mandeb approach", box: [10, 43, 15, 52] },
+  { label: "Strait of Hormuz / Persian Gulf", box: [24, 48, 30, 57] },
+  { label: "Taiwan Strait", box: [21, 117, 26, 123] },
+  { label: "South China Sea", box: [0, 105, 23, 121] },
+  { label: "Eastern Mediterranean", box: [31, 20, 37, 36] },
+  { label: "Suez Canal", box: [29.5, 32.0, 31.5, 33.0] },
+];
+
+function watchedWaterOverlap(feature) {
+  if (!Array.isArray(feature?.rawBbox)) return null;
+  return WATCHED_WATERS.find((w) => bboxesOverlap(feature.rawBbox, w.box)) || null;
+}
+
+// Whether this water body overlaps one of the eight chokepoint boxes, and
+// what that does and does not mean for the Dark Vessels layer -- always
+// answerable, so unlike every other fold this one never drops itself.
+function buildWaterChokepoint(feature) {
+  const hit = watchedWaterOverlap(feature);
+  if (hit) {
+    return `<div>Inside <b>${esc(hit.label)}</b>, one of the eight theatres the Dark Vessels layer is
+        willing to draw a &ldquo;went dark&rdquo; conclusion from.</div>
+      <p class="meta">Its ship-to-ship pairing and Global Fishing Watch's own AIS-disabling findings are
+        not scoped this way &mdash; both run wherever AIS reaches, chokepoint or not.</p>`;
+  }
+  return `<div>Outside every chokepoint the Dark Vessels layer is scoped to.</div>
+    <p class="meta">Its &ldquo;went dark&rdquo; inference will not draw a conclusion here even where a real
+      gap exists &mdash; that is a limit on what the layer is willing to claim, not a report that nothing
+      happens here. Ship-to-ship pairing and Global Fishing Watch's own AIS-disabling findings are
+      unaffected and still run here.</p>`;
+}
+
+const INFRA_LIST_CAP = 6;
+
+function infraListRows(items, kind, nameOf) {
+  const rows = items.slice(0, INFRA_LIST_CAP).map((item) => {
+    const open = kind ? openableRow(kind, item.id) : "";
+    return `<div${open || ' class="event-row"'}>${esc(nameOf(item))}</div>`;
+  }).join("");
+  const more = items.length > INFRA_LIST_CAP
+    ? `<div class="meta">+${esc(items.length - INFRA_LIST_CAP)} more</div>`
+    : "";
+  return rows + more;
+}
+
+// Cable routes (lines, tested by whether any drawn point falls inside the
+// polygon -- there is no honest "crosses" test finer than that for a route
+// drawn schematically to begin with), landing points and ports, all read
+// straight off what the map has already fetched for its own layers.
+function buildWaterInfrastructure(feature, raw, bounds) {
+  const crossing = (raw.cables || []).filter((cable) =>
+    (cable.paths || []).some((path) => path.some(([lat, lon]) => insideWaterFeature(feature, bounds, lat, lon)))
+  );
+  const landings = (raw.cableLandings || []).filter((p) => insideWaterFeature(feature, bounds, p.lat, p.lon));
+  const shorePorts = (raw.ports || []).filter((p) => insideWaterFeature(feature, bounds, p.lat, p.lon));
+  if (!crossing.length && !landings.length && !shorePorts.length) return "";
+
+  return `
+    <div class="cstats">
+      ${statRow("", "cables crossing", crossing.length)}
+      ${statRow("", "cable landings", landings.length)}
+      ${statRow("", "ports", shorePorts.length)}
+    </div>
+    ${crossing.length ? `<div class="csection-h">Cable routes</div>${infraListRows(crossing, null, (c) => c.name)}` : ""}
+    ${landings.length ? `<div class="csection-h">Landing points</div>${infraListRows(landings, "cableLandings", (p) => p.name)}` : ""}
+    ${shorePorts.length ? `<div class="csection-h">Ports</div>${infraListRows(shorePorts, "ports", (p) => p.name)}` : ""}
+    <p class="meta">Cable routes are drawn schematically; &ldquo;crossing&rdquo; here means the drawn path
+      has a point inside this water body's polygon, not a survey of what the cable actually crosses on the
+      seabed.</p>`;
+}
+
+// Same matching as countryCardSections's own events/gdelt handling, scoped by
+// true polygon containment rather than a country's bounding box -- see this
+// section's module note on why water gets the more expensive test.
+function buildWaterIncidents(feature, raw, bounds) {
+  const inside = (item) => insideWaterFeature(feature, bounds, item.lat, item.lon);
+  const eventMatches = (raw.events || []).filter(inside).slice(0, 3);
+  const merged = mergedNewsIdsIn(raw);
+  const gdeltMatches = (raw.gdelt || [])
+    .filter((e) => !merged.has(e.event_id) && inside(e))
+    .slice(0, 3);
+  return buildEventsSection(eventMatches, gdeltMatches, { heading: false });
+}
+
+function buildWaterSources() {
+  return `
+    <p class="meta">Boundary: Natural Earth 1:10m, public domain (CC0). Traffic: aisstream.io AIS, live.
+      Dark activity: this app's own AIS-gap and ship-to-ship inference over aisstream.io history, plus
+      Global Fishing Watch's AIS-disabling events (CC BY-NC 4.0, five or more days behind). Chokepoint
+      watch: this app's own watched-water boxes, not a published source. Infrastructure: TeleGeography
+      submarine cables and the NGA World Port Index (both curated gazetteers, not feeds). Incidents:
+      ACLED and GDELT, matched by location.</p>
+    <p class="meta">${EMPTY_WATER_HEADLINE} A fold above with nothing in it can mean nothing happened here,
+      or it can mean this map has no coverage here &mdash; AIS reception, satellite imagery and news
+      coverage all vary by place, and a quiet fold is not proof of a quiet sea.</p>`;
+}
+
+/**
+ * The water body card, as a list of independently foldable sections -- the
+ * sibling of countryCardSections above, same {title, sections} shape.
+ *
+ * @param feature  a buildWaterIndex entry (map/water.js): id/name/class plus
+ *                 the hit-test geometry (`polygons`/`bbox`) and the feature's
+ *                 own stored `rawBbox`.
+ * @param raw      the map controller's live data buckets, plus `countryIndex`
+ *                 (buildCountryIndex's own output, cached there for the
+ *                 bordering-country match -- see createMapController.js).
+ * @param bounds   the feature's own {south,west,north,east} bbox, used only
+ *                 as a cheap pre-filter ahead of the real polygon tests
+ *                 below. Optional -- the card still works without it, just
+ *                 slower.
+ * @returns {{title: string, sections: Array<{id, title, html, defaultOpen}>}}
+ */
+export function waterCardSections(feature, raw, bounds) {
+  const label = WATER_CLASS_LABEL[feature.class] || "Water";
+  const sections = [
+    { id: "profile", title: "Water body", defaultOpen: true, html: buildWaterProfile(feature, raw) },
+    { id: "traffic", title: "Traffic now", html: buildWaterTraffic(feature, raw, bounds) },
+    { id: "dark", title: "Dark activity", html: buildWaterDark(feature, raw, bounds) },
+    { id: "chokepoint", title: "Chokepoint watch", html: buildWaterChokepoint(feature) },
+    { id: "infrastructure", title: "Infrastructure", html: buildWaterInfrastructure(feature, raw, bounds) },
+    { id: "incidents", title: "Incidents", html: buildWaterIncidents(feature, raw, bounds) },
+    { id: "sources", title: "Sources & caveats", html: buildWaterSources() },
+  ];
+  return { title: feature.name || label, sections: sections.filter((s) => s.html && s.html.trim()) };
 }
 
 export function cityPopupHtml(city, raw, countryNameByIso2) {

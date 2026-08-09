@@ -126,7 +126,7 @@ import { profileViewport } from "./viewportProfile";
 import { buildCountryIndex, findCountryAt, representativePointOf } from "./countryHitTest";
 import { createBorderEditor } from "./borderEdit";
 import { countryFingerprints } from "../settings/borderOverrides";
-import { countryCardSections, cityPopupHtml, normalizeCountryName } from "./popups";
+import { countryCardSections, waterCardSections, cityPopupHtml, normalizeCountryName } from "./popups";
 import { buildChoropleth } from "./choropleth";
 import {
   createDistrictOutlineLayer, indexDistrictCounts,
@@ -136,7 +136,7 @@ import {
   createSubdivisionsLayer, buildSubdivisionIndex, findSubdivisionAt, subdivisionPopupHtml,
   subdivisionKeyOf,
 } from "./subdivisions";
-import { createWaterLayer, syncWater, buildWaterIndex, findWaterAt, waterPopupHtml } from "./water";
+import { createWaterLayer, syncWater, buildWaterIndex, findWaterAt } from "./water";
 import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { createEntityWebglLayer } from "./webglLayer";
@@ -512,6 +512,13 @@ export function createMapController(container, initial, callbacks) {
   const raw = {
     events: [], firms: [], ais: [], gdelt: [], adsb: [], officials: [],
     countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
+    // buildCountryIndex's own output, cached here (not just in the `countryIndex`
+    // local below) so the water body card's bordering-country match
+    // (map/popups.js's waterBorderingCountries) can reach it through the same
+    // `raw` bag every other section builder reads, without a fourth parameter
+    // threaded through waterCardSections just for this one lookup. Kept in step
+    // wherever `countryIndex` itself is rebuilt.
+    countryIndex: [],
     conflictStats: {},
     // Not live: UCDP's reviewed record (a month or more behind) and ACLED's
     // district-level monthly counts. Held here so country cards can show the
@@ -1606,6 +1613,7 @@ export function createMapController(container, initial, callbacks) {
     // outage pins, which are positioned from the country's own geometry.
     onGeometryChanged: () => {
       countryIndex = buildCountryIndex(raw.countries);
+      raw.countryIndex = countryIndex;
       focusedCountryLayer = countryLayerFor(focusedCountryKey);
       reportCountrySelection();
       rebuildOutagePoints();
@@ -4142,6 +4150,7 @@ export function createMapController(container, initial, callbacks) {
       // captured layer reference, so a boundary refresh can't strand the
       // selected country on a detached layer.
       countryIndex = buildCountryIndex(raw.countries);
+      raw.countryIndex = countryIndex;
       layerByCountryKey = new Map();
       countriesLayer.eachLayer((layer) => {
         const props = layer.feature?.properties || {};
@@ -4712,9 +4721,12 @@ export function createMapController(container, initial, callbacks) {
   let waterIndex = [];
   let selectedWaterId = null;
   let hoveredWaterId = null;
-  // The popup a water click opened, tracked only so a stale reference is never
-  // read -- nothing here rewrites it in place the way the district card does.
-  let waterPopup = null;
+  // The Leaflet layer backing the currently-open water card, tracked the same
+  // way focusedCountryLayer is: renderWater rebuilds the whole layer wholesale
+  // (clearLayers + addData, see its own docstring), which invalidates any
+  // reference to a previous instance, so this is re-resolved by feature id
+  // after every rebuild rather than trusted to survive one.
+  let focusedWaterLayer = null;
 
   /**
    * Rebuild the water layer and its hit-test index from whatever is currently
@@ -4733,12 +4745,21 @@ export function createMapController(container, initial, callbacks) {
     ];
     syncWater(waterLayer, features);
     waterIndex = buildWaterIndex(features);
-    // A feature dropped out from under an open selection/popup (its sub-toggle
-    // was switched back off) should not go on claiming to be selected.
+    // A feature dropped out from under an open selection (its sub-toggle was
+    // switched back off) should not go on claiming to be selected.
     if (selectedWaterId != null && !waterIndex.some((e) => e.id === selectedWaterId)) {
       selectedWaterId = null;
-      waterPopup = null;
-      map.closePopup();
+      focusedWaterLayer = null;
+      reportWaterSelection();
+    } else if (selectedWaterId != null) {
+      // The card is still open on a feature that is still in the synced
+      // document, but syncWater just tore down and rebuilt every Leaflet layer
+      // instance (clearLayers + addData) -- the old focusedWaterLayer reference
+      // points at a layer no longer on the map, so the on-screen anchor has to
+      // be re-resolved against the new one or the card would drift to wherever
+      // the stale instance's last position was.
+      focusedWaterLayer = waterLayerFor(selectedWaterId);
+      if (focusedWaterLayer) callbacks.onWaterPointChange?.(waterAnchorPoint(focusedWaterLayer));
     }
     updateWaterHighlights();
     // Per feature in the synced document, the same "counts equal totals" rule
@@ -4817,12 +4838,71 @@ export function createMapController(container, initial, callbacks) {
     fetchRivers();
   }
 
+  /** The Leaflet layer instance currently backing one water feature id, found
+   *  by scanning the live layer group -- there is no persistent per-feature
+   *  map the way layerByCountryKey is, since water has no border editor or
+   *  any other reason to keep one. */
+  function waterLayerFor(id) {
+    if (id == null) return null;
+    let found = null;
+    waterLayer.eachLayer((layer) => {
+      if (!found && layer.feature?.properties?.id === id) found = layer;
+    });
+    return found;
+  }
+
+  /** Viewport-pixel anchor for the water info card -- same arithmetic as
+   *  countryAnchorPoint, over whichever Leaflet layer is currently backing
+   *  the selected feature. */
+  function waterAnchorPoint(layer) {
+    const center = layer.getBounds().getCenter();
+    const pt = map.latLngToContainerPoint(center);
+    const rect = container.getBoundingClientRect();
+    return { x: rect.left + pt.x, y: rect.top + pt.y };
+  }
+
+  function waterEntryFor(id) {
+    return id == null ? null : waterIndex.find((e) => e.id === id) || null;
+  }
+
+  /** The card payload for one water index entry, built from current data --
+   *  the water-body counterpart to countryCardFor above. `bounds` is the
+   *  feature's own client bbox (not the Leaflet layer's), converted to the
+   *  {south,west,north,east} shape waterCardSections' section builders share
+   *  with countryCardSections -- see that function's own docstring on what
+   *  it is for (a cheap pre-filter, not the containment test itself). */
+  function waterCardFor(entry) {
+    const bounds = entry.bbox
+      ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
+      : null;
+    const { sections } = waterCardSections(entry, raw, bounds);
+    const layer = waterLayerFor(entry.id);
+    return {
+      id: entry.id,
+      name: entry.name,
+      sections,
+      point: layer ? waterAnchorPoint(layer) : null,
+    };
+  }
+
+  /** Tell React which water body's card is open, or that none is -- the
+   *  water-body counterpart to reportCountrySelection above. There is no
+   *  multi-selection to report alongside it: unlike countries, a water body
+   *  has no chips, no highlight that outlives its card, so one id is the
+   *  whole of this layer's selection state. */
+  function reportWaterSelection() {
+    const entry = waterEntryFor(selectedWaterId);
+    callbacks.onWaterSelect?.(entry ? waterCardFor(entry) : null);
+  }
+
   /** Clicking the already-selected water body deselects it -- same gesture
    *  the district/subdivision drill-down and country selection both use. */
   function selectWater(id) {
     if (id === selectedWaterId) return;
     selectedWaterId = id;
+    focusedWaterLayer = waterLayerFor(id);
     updateWaterHighlights();
+    reportWaterSelection();
   }
 
   function setHoveredWater(id) {
@@ -5078,6 +5158,9 @@ export function createMapController(container, initial, callbacks) {
   // drag or zoom gesture.
   map.on("move zoom", () => {
     if (focusedCountryLayer) callbacks.onCountryPointChange?.(countryAnchorPoint(focusedCountryLayer));
+    // Water info card, same reasoning: glued to its feature's on-screen
+    // position through a pan or zoom gesture rather than left to drift.
+    if (focusedWaterLayer) callbacks.onWaterPointChange?.(waterAnchorPoint(focusedWaterLayer));
   });
 
   // No separate zoomend handler: Leaflet always fires moveend right after
@@ -5184,17 +5267,11 @@ export function createMapController(container, initial, callbacks) {
       if (waterEntry) {
         // Clicking the already-selected water body deselects it, same gesture
         // as the subdivision drill-down above and country selection below.
+        // selectWater reports the open/closed card to React itself (see
+        // reportWaterSelection) -- this used to also open a plain Leaflet
+        // popup here, superseded by the full card Task 7 adds.
         const wasSelected = waterEntry.id === selectedWaterId;
         selectWater(wasSelected ? null : waterEntry.id);
-        if (!wasSelected) {
-          waterPopup = L.popup({ ...popupOptions(280), autoPan: false })
-            .setLatLng(e.latlng)
-            .setContent(waterPopupHtml(waterEntry))
-            .openOn(map);
-        } else {
-          waterPopup = null;
-          map.closePopup();
-        }
         return;
       }
     }
@@ -5224,11 +5301,9 @@ export function createMapController(container, initial, callbacks) {
     // parent selection to fall out of step with (unlike a subdivision, which
     // is only ever drawn under a selected country and so is cleared when that
     // country is), so a genuinely empty click is the only gesture that can
-    // mean "and put the sea away as well".
-    if (selectedWaterId != null) {
-      selectWater(null);
-      waterPopup = null;
-    }
+    // mean "and put the sea away as well". selectWater is a no-op when
+    // nothing is selected, so this costs nothing on the common empty click.
+    selectWater(null);
     clearCountrySelection();
     setFocus(null);
   });
@@ -5494,6 +5569,14 @@ export function createMapController(container, initial, callbacks) {
     // glance: shutting a card is not the same gesture as deselecting.
     closeCountryCard() {
       focusCountry(null);
+    },
+
+    // Water has no separate "selected but not focused" state the way a
+    // country does (no chips, no highlight that outlives its card -- see
+    // reportWaterSelection), so closing its card and deselecting it are the
+    // same gesture, unlike closeCountryCard above.
+    closeWaterCard() {
+      selectWater(null);
     },
 
     /** Open the card on an already-selected country (the selection chips). */

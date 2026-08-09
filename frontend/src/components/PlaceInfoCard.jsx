@@ -58,6 +58,17 @@ function recordClickHandler(onOpenRecord) {
  * @param {Record<string, boolean>} props.defaultOpen  section id -> open when nothing is stored
  * @param {import("react").ReactNode} [props.footer]       rendered below the sections, above the tail
  * @param {import("react").ReactNode} [props.headerExtra]  rendered in the header, before the close button
+ * @param {string} [props.panelId]  the DOM id and drag-position storage key
+ *   (useDraggablePanel) this instance uses. Defaults to "countryInfoCard",
+ *   the id this panel has always used, so CountryInfoCard -- the one caller
+ *   that predates this prop -- is unaffected by its addition. Task 7 (the
+ *   water body card) is the second real place kind this component grew to
+ *   serve, and two of them can genuinely be open at once (a country selected
+ *   and a nearby sea also clicked), so each surface needs its own id: one DOM
+ *   element cannot legally carry the same id twice, and sharing a drag-storage
+ *   key would make dragging one card silently move the other's stored
+ *   position too. The visual rules stay shared rather than forked -- see
+ *   style.css's own note where `#countryInfoCard, #waterInfoCard` appears.
  */
 export default function PlaceInfoCard({
   place,
@@ -67,19 +78,10 @@ export default function PlaceInfoCard({
   defaultOpen,
   footer,
   headerExtra,
+  panelId = "countryInfoCard",
 }) {
   const { isOpen, setOpen } = useAccordion(defaultOpen, accordionKey);
-  // "countryInfoCard" is the DOM id and drag-position storage key this panel
-  // has always used, kept literally rather than derived from `place` so this
-  // extraction is a pure move with no visible or stored-state change for the
-  // one caller that exists today (CountryInfoCard). It is also the id every
-  // `#countryInfoCard`/`.country-info-*`/`.country-section*` rule in
-  // style.css targets -- renaming it here without a matching CSS pass would
-  // silently break the card's whole layout. When a second real place kind
-  // (water body, state, district) needs its own look, that task should
-  // decide the naming scheme for all of them together, CSS included, rather
-  // than this one guessing at it now.
-  const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel("countryInfoCard");
+  const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel(panelId);
 
   if (!place) return null;
 
@@ -94,7 +96,7 @@ export default function PlaceInfoCard({
 
   return (
     <aside
-      id="countryInfoCard"
+      id={panelId}
       ref={panelRef}
       className={`${flip ? "flip" : ""}${moved ? " detached" : ""}`}
       style={dragStyle || anchorStyle}

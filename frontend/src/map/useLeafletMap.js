@@ -59,6 +59,12 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // other. See createMapController's selectCountryEntry.
   const [selectedCountry, setSelectedCountry] = useState(null);
   const [countrySelection, setCountrySelection] = useState([]);
+  // The water body whose card is open, or null -- the water-body counterpart
+  // to selectedCountry above. No selection array alongside it: unlike a
+  // country, a water body has no chips and no highlight that outlives its
+  // card (see createMapController's reportWaterSelection), so one piece of
+  // state is the whole of it.
+  const [selectedWater, setSelectedWater] = useState(null);
   // What the boundary editor is doing, for the controls that drive it: whether
   // a session is open, on which country, how many handles are drawn and whether
   // there is anything to undo. See map/borderEdit.js.
@@ -100,6 +106,8 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
         onCountrySelect: setSelectedCountry,
         onCountrySelectionChange: setCountrySelection,
         onCountryPointChange: (point) => setSelectedCountry((prev) => (prev ? { ...prev, point } : prev)),
+        onWaterSelect: setSelectedWater,
+        onWaterPointChange: (point) => setSelectedWater((prev) => (prev ? { ...prev, point } : prev)),
         onBorderEditChange: (state) => setBorderEdit(state?.active ? state : NO_BORDER_EDIT),
         onCountryFingerprints: setCountryFingerprints,
         onChoroplethChange: setChoropleth,
@@ -181,6 +189,14 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     setSelectedCountry(null);
   }, []);
 
+  // Same shape as closeCountryCard, but closing a water body's card also
+  // deselects it -- see createMapController's closeWaterCard for why the two
+  // gestures are one here where they are two for a country.
+  const closeWaterCard = useCallback(() => {
+    controllerRef.current?.closeWaterCard();
+    setSelectedWater(null);
+  }, []);
+
   const focusCountry = useCallback((key) => {
     controllerRef.current?.focusCountry(key);
   }, []);
@@ -251,6 +267,7 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
 
   return {
     ready, counts, zoomNotes, mapBounds, zoom, windStatus, selectedCountry, countrySelection,
+    selectedWater, closeWaterCard,
     layerState, setSceneBypass, invalidateSize, focus,
     applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, setAgeReference,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,

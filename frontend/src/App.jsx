@@ -31,6 +31,7 @@ import ControlPanel from "./components/controlPanel/ControlPanel";
 import TimelineBar from "./components/TimelineBar";
 import Attribution from "./components/Attribution";
 import CountryInfoCard from "./components/CountryInfoCard";
+import WaterInfoCard from "./components/WaterInfoCard";
 import EventDetailCard from "./components/EventDetailCard";
 import CountrySelectionBar from "./components/CountrySelectionBar";
 import BorderEditBar from "./components/BorderEditBar";
@@ -696,6 +697,12 @@ export default function App() {
         country={mapApi.selectedCountry}
         onClose={mapApi.closeCountryCard}
         borderEdit={borderEditProps}
+        onOpenRecord={openRecordDetail}
+      />
+
+      <WaterInfoCard
+        water={mapApi.selectedWater}
+        onClose={mapApi.closeWaterCard}
         onOpenRecord={openRecordDetail}
       />
 

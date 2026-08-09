@@ -138,6 +138,19 @@ export function buildWaterIndex(features) {
     class: props.class || "other",
     antimeridian: !!props.antimeridian,
     area_deg2: props.area_deg2,
+    // The feature's own stored [south, west, north, east] (water_bodies.py's
+    // _bbox; west > east means it wraps the antimeridian), kept under its own
+    // key rather than `bbox` -- buildShapeIndex writes that key itself, from
+    // the geometry, as {minLat,maxLat,minLon,maxLon} for this module's own
+    // hit-testing, and a naive spread here would just be overwritten by it.
+    // The two are different metrics for different jobs: `bbox` is a cheap
+    // reject before a real ray-cast and tolerates being wrong-but-permissive
+    // for an antimeridian-wrapping feature (see buildWaterIndex's own
+    // docstring above); `rawBbox` is what Task 7's card uses for the
+    // rectangle-overlap tests -- bordering countries, chokepoint overlap --
+    // where a naive min/max would be wrong outright for the handful of
+    // marine features that actually wrap (the Bering Sea, the Pacific...).
+    rawBbox: Array.isArray(props.bbox) ? props.bbox : null,
   }));
   for (const entry of entries) {
     if (!Number.isFinite(entry.area_deg2)) entry.area_deg2 = fallbackAreaDeg2(entry.polygons);
@@ -197,21 +210,33 @@ export function findWaterAt(index, lat, lon) {
   return null;
 }
 
-const CLASS_LABEL = {
+// Exported for map/popups.js's waterCardSections (Task 7's card), which
+// labels the same `class` enum in its own "Water body" fold.
+export const CLASS_LABEL = {
   ocean: "Ocean", sea: "Sea", gulf: "Gulf", bay: "Bay", strait: "Strait",
   channel: "Channel", sound: "Sound", lake: "Lake", river: "River", other: "Water",
 };
 
+// The 1:10m scale caveat, verbatim in both the quick popup below and the full
+// card's profile fold (map/popups.js) -- one string so the two can never say
+// something subtly different about the same limitation.
+export const WATER_SCALE_CAVEAT =
+  '<div class="meta">Boundary: Natural Earth 1:10m &mdash; generalised, schematic geometry, not ' +
+  "aligned to any higher-resolution coastline or shoreline.</div>";
+
 /**
- * What a clicked water body says. Deliberately as short as
- * subdivisionPopupHtml -- this confirms what was clicked and names the
- * source and its scale caveat; Task 7 gives it a full card.
+ * What a clicked water body says on first click, before the full card (Task
+ * 7's waterCardSections in map/popups.js) has rendered -- deliberately as
+ * short as subdivisionPopupHtml, this only ever confirms what was clicked and
+ * names the source and its scale caveat. Superseded as the map's *click*
+ * response by the full card, but kept and still tested as the short form: a
+ * hover tooltip or any other place a one-line confirmation is wanted has no
+ * reason to build the whole card just to read its first two lines.
  */
 export function waterPopupHtml(entry) {
   const label = CLASS_LABEL[entry.class] || "Water";
   return `
     <h3>${esc(entry.name || label)}</h3>
     <div class="meta">${esc(label)}</div>
-    <div class="meta">Boundary: Natural Earth 1:10m &mdash; generalised, schematic geometry, not
-      aligned to any higher-resolution coastline or shoreline.</div>`;
+    ${WATER_SCALE_CAVEAT}`;
 }

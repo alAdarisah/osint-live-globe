@@ -1458,19 +1458,51 @@ export function lastPingTooltip(seconds) {
 const MILITARY_SHIP_TYPE = 35;
 const TANKER_SHIP_TYPE_MIN = 80;
 const TANKER_SHIP_TYPE_MAX = 89;
+// Cargo (70-79) and fishing (30) are not distinguished by classifyShip below --
+// the map icon only ever needs navy/tanker/other -- but the water body card's
+// traffic tally (map/popups.js's buildWaterTraffic) does break them out, so
+// the two extra ranges live here, next to the ranges they're the same kind of
+// fact as, rather than being reinvented in a module with no other reason to
+// know an AIS type code from any other number.
+const CARGO_SHIP_TYPE_MIN = 70;
+const CARGO_SHIP_TYPE_MAX = 79;
+const FISHING_SHIP_TYPE = 30;
 
 export function isNavyVessel(d) {
   if (d.ship_type === MILITARY_SHIP_TYPE) return true;
   return /^(USS|USNS)\b/i.test((d.name || "").trim());
 }
 
-function isTanker(d) {
+export function isTanker(d) {
   return typeof d.ship_type === "number" && d.ship_type >= TANKER_SHIP_TYPE_MIN && d.ship_type <= TANKER_SHIP_TYPE_MAX;
+}
+
+function isCargoVessel(d) {
+  return typeof d.ship_type === "number" && d.ship_type >= CARGO_SHIP_TYPE_MIN && d.ship_type <= CARGO_SHIP_TYPE_MAX;
+}
+
+function isFishingVessel(d) {
+  return d.ship_type === FISHING_SHIP_TYPE;
 }
 
 export function classifyShip(d) {
   if (isNavyVessel(d)) return "navy";
   if (isTanker(d)) return "tanker";
+  return "other";
+}
+
+// The five-way split the water body card's traffic tally uses (map/popups.js),
+// where a "cargo" or "fishing" line is worth its own row. classifyShip above
+// stays three-way (navy/tanker/other) because that is all the map icon ever
+// needs, and widening it would recolour markers nobody asked to recolour.
+// Same priority order as classifyShip: a vessel that is both navy-flagged and
+// coded as a tanker (it happens -- some navies code auxiliaries that way) is
+// counted as navy, not double-counted.
+export function classifyVesselTraffic(d) {
+  if (isNavyVessel(d)) return "navy";
+  if (isTanker(d)) return "tanker";
+  if (isCargoVessel(d)) return "cargo";
+  if (isFishingVessel(d)) return "fishing";
   return "other";
 }
 
@@ -1760,6 +1792,17 @@ export function portIconSize(d) {
   return scaledSize(px, "ports", PORT_STYLE.token);
 }
 
+// Shared verbatim with the water body card's "Traffic now" section
+// (map/popups.js's buildWaterTraffic) -- both are the same claim, "this is
+// water we actually hear AIS from", and pulling it out here is what keeps the
+// two from drifting into two slightly different promises about the same
+// thing.
+export const AIS_COVERAGE_CAVEAT =
+  '<p class="meta">Inside the water this map receives AIS from. Two vessels sitting alongside ' +
+  "each other <i>here</i> are in a port, which is most of why this record exists: the Dark " +
+  "Vessels layer excludes ship-to-ship candidates near a listed port, and before this " +
+  "gazetteer arrived almost every real harbour on earth was open water to that detector.</p>";
+
 export function decoratePort(d, { offset } = {}) {
   const style = portStyle();
   const name = d.name || "Port";
@@ -1775,12 +1818,7 @@ export function decoratePort(d, { offset } = {}) {
     <div>${esc(size)} &middot; ${esc(type)}</div>
     ${d.oil_terminal ? "<div><b>Has an oil terminal.</b></div>" : ""}
     ${d.nav_area ? `<div class="meta">NGA navigational area ${esc(d.nav_area)}.</div>` : ""}
-    ${d.ais_watch
-      ? '<p class="meta">Inside the water this map receives AIS from. Two vessels sitting alongside ' +
-        "each other <i>here</i> are in a port, which is most of why this record exists: the Dark " +
-        "Vessels layer excludes ship-to-ship candidates near a listed port, and before this " +
-        "gazetteer arrived almost every real harbour on earth was open water to that detector.</p>"
-      : ""}
+    ${d.ais_watch ? AIS_COVERAGE_CAVEAT : ""}
     <p class="meta"><b>Reference data, not a feed. Nothing here is current.</b>${
       d.vintage ? ` ${esc(d.vintage)}.` : ""
     } For a port gazetteer that is acceptable &mdash; harbours are not built and demolished on a
@@ -2430,6 +2468,12 @@ export function gfwDetectionIconSize(d) {
 
 const GFW_SENSOR_LABEL = { sar: "Radar (SAR)", optical: "Optical (Sentinel-2)" };
 
+// Shared verbatim with the water body card's "Sources & caveats" section
+// (map/popups.js) -- the same warning against reading a quiet layer as a
+// finding, restated here for maritime imagery and there for AIS/news/
+// infrastructure coverage generally.
+export const EMPTY_WATER_HEADLINE = "<b>Empty water on this layer is not evidence of empty water.</b>";
+
 export function decorateGfwDetection(d, { offset } = {}) {
   const style = gfwDetectionStyle(d);
   const sensor = GFW_SENSOR_LABEL[(d.sensor || "").toLowerCase()] || d.sensor || "Sensor not stated";
@@ -2452,7 +2496,7 @@ export function decorateGfwDetection(d, { offset } = {}) {
         "Fishing Watch's conclusion, not this map's. It does not mean the transponder was off: it " +
         "means their correlation found nothing to pair this return with.</div>"}
     ${d.match_basis ? `<div class="meta">Matching basis: ${esc(d.match_basis)}</div>` : ""}
-    <p class="meta"><b>Empty water on this layer is not evidence of empty water.</b> There is no
+    <p class="meta">${EMPTY_WATER_HEADLINE} There is no
       coverage or footprint dataset in the API, so this map cannot tell "imaged, nothing there" from
       "not imaged at all". Never read a gap here the way you would read an AIS gap.</p>
     <p class="meta">${age !== null ? `This scene is <b>${esc(age)} days old</b>` : "This scene is not live"}${
