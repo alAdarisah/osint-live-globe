@@ -62,6 +62,7 @@ export const SETTINGS_LAYERS = [
   { key: "dams", label: "Dams & reservoirs (GDW)" },
   { key: "deflock", label: "ALPR cameras (DeFlock)" },
   { key: "railways", label: "Railways (Natural Earth)" },
+  { key: "water", label: "Water bodies (Natural Earth)" },
   { key: "firms", label: "Fires / thermal anomalies (FIRMS)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
 ].map((layer) => ({ ...layer, zoomGate: shippedDrawZoom(layer.key) }));
@@ -135,11 +136,18 @@ const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null
  * manages SCENE_APPLY_KEYS; the three trail toggles and the military-satellite
  * row are sub-tickers of a parent layer, which is exactly why map/scene.js keeps
  * them out of the manifest.
+ *
+ * waterLakes/waterRivers join the hand-added end of that list for the same
+ * reason: neither has an independent existence a manifest entry could gate --
+ * both ride the single `water` layer key, filtering what is currently synced
+ * into it rather than adding or removing a Leaflet layer of their own (see
+ * setLayerVisible in createMapController.js).
  */
 export const TOGGLEABLE_LAYER_KEYS = new Set([
   ...SCENE_APPLY_KEYS,
   ...Object.keys(TRAIL_PARENT),
   "satellitesMilitary",
+  "waterLakes", "waterRivers",
 ]);
 
 /**
@@ -212,6 +220,11 @@ export const UNEDITABLE_SOURCES = [
     label: "Country shapes & the choropleth",
     reason: "Geometry, not records. Boundaries have their own editor -- select a country and"
       + " use Edit border -- and the choropleth is computed from the country-keyed feeds.",
+  },
+  {
+    label: "Water bodies",
+    reason: "Geometry, not records, for the same reason as the country shapes above -- a sea,"
+      + " lake or river is a shape from Natural Earth, not a row with fields to correct.",
   },
   {
     label: "Internet disruption (IODA)",

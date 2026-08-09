@@ -136,6 +136,7 @@ import {
   createSubdivisionsLayer, buildSubdivisionIndex, findSubdivisionAt, subdivisionPopupHtml,
   subdivisionKeyOf,
 } from "./subdivisions";
+import { createWaterLayer, syncWater, buildWaterIndex, findWaterAt, waterPopupHtml } from "./water";
 import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { createEntityWebglLayer } from "./webglLayer";
@@ -484,6 +485,9 @@ export function createMapController(container, initial, callbacks) {
   // Coarse Natural Earth railway linework. NOT added to the map here -- off by
   // default (MANUAL disposition, see map/scene.js), toggled on from the panel.
   const railwaysGroup = createRailwaysGroup();
+  // Seas, lakes and rivers. Also NOT added to the map here, for the same
+  // reason -- MANUAL and off by default, see map/scene.js's `water` entry.
+  const waterLayer = createWaterLayer(map);
   // NASA GIBS imagery. Not added to the map until a reader picks a layer.
   const imageryLayer = createImageryLayer(map);
   let imageryKey = null;   // null == off; otherwise a key of GIBS_LAYERS
@@ -561,6 +565,11 @@ export function createMapController(container, initial, callbacks) {
     // railway linework (railways.py). Neither is a feed; the first is a worldwide
     // point layer gated deep by zoom, the second a whole-document set of lines.
     deflock: [], railways: { lines: [] },
+    // Marine polygons only (water_bodies.py) -- lakes and rivers are fetched on
+    // demand, the first time their own sub-toggle is switched on, and held in
+    // waterLakesFeatures/waterRiversFeatures below rather than here, since they
+    // never arrive through applyData's generic raw[key]=data assignment.
+    water: { type: "FeatureCollection", features: [] },
     // Country-keyed and drawn nowhere, same footing as `humanitarian` above.
     // energyFlows is keyed by ISO2 (Energy-Charts' own key), foodTrade by ISO3,
     // and foodPriceIndex is a single global document rather than a country map.
@@ -642,6 +651,11 @@ export function createMapController(container, initial, callbacks) {
   // handlers (see countryHitTest.js), so the map-level hit-test has to know
   // whether the layer is actually on before it selects anything.
   let countriesVisible = true;
+  // Same mirror for "water": MANUAL and off by default (see its LAYER_MANIFEST
+  // entry in scene.js), so unlike countriesVisible this starts false. Read by
+  // the click/hover chain below so a hidden water layer never answers for a
+  // click that landed on a sea nobody asked to see.
+  let waterVisible = false;
   // These three mirror their own dedicated "*Trails" sub-ticker toggle (see
   // LayersSection.jsx's "Show ... trails" rows and the matching keys in
   // setLayerVisible below) -- entityWebglLayer/renderSatellites keep
@@ -881,6 +895,11 @@ export function createMapController(container, initial, callbacks) {
   function applyScene() {
     viewportProfile = profileViewport({
       countryIndex,
+      // Only once marine has actually landed -- an empty index would answer
+      // "no water anywhere" for every viewport, which is a worse guess than
+      // the absence-of-land fallback profileViewport already has for exactly
+      // this "not loaded yet" moment.
+      waterIndex: waterIndex.length ? waterIndex : null,
       bounds: boundsToPlainObject(map.getBounds()),
       zoom: map.getZoom(),
       hotCountryKeys: refreshHotCountries(),
@@ -975,6 +994,8 @@ export function createMapController(container, initial, callbacks) {
     for (const key of SCENE_APPLY_KEYS) on[key] = layerOnMap[key] === true;
     for (const trailKey of Object.keys(TRAIL_TOGGLES)) on[trailKey] = layerOnMap[trailKey] === true;
     on.satellitesMilitary = satellitesMilitaryVisible;
+    on.waterLakes = waterLakesVisible;
+    on.waterRivers = waterRiversVisible;
     const signature = `${JSON.stringify(on)}|${JSON.stringify(userLayerWish)}|${sceneBypass}`;
     if (signature === lastLayerStateSignature) return;
     lastLayerStateSignature = signature;
@@ -1844,6 +1865,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "infra") return infraLayer; // wraps infraGroup + pipelinesGroup together
     if (key === "cables") return cablesLayer; // wraps cablesGroup + the landing-point markers
     if (key === "railways") return railwaysGroup;
+    if (key === "water") return waterLayer;
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
     if (key === "clouds") return weatherLayers.clouds;
@@ -1910,6 +1932,58 @@ export function createMapController(container, initial, callbacks) {
       return;
     }
 
+    // Water's own sub-toggles. Neither lakes nor rivers has a Leaflet layer of
+    // its own to add or remove -- both ride the single `waterLayer` -- so, like
+    // satellitesMilitary above, this re-renders in place instead of going
+    // through layerForKey. The first time either is switched on, its geometry
+    // has not been fetched at all (marine is the only kind the boot fetch
+    // loads, see useOsintData.js), so this is also where that fetch happens --
+    // once per session, not once per toggle; flipping the checkbox back on
+    // after switching it off re-uses whatever already landed.
+    if (key === "waterLakes") {
+      waterLakesVisible = visible;
+      if (visible && waterLakesFeatures == null) {
+        waterLakesFeatures = []; // in flight -- guards against a double fetch from a fast double-click
+        fetchJson("/api/water?kind=lakes")
+          .then((data) => {
+            waterLakesFeatures = data?.features || [];
+            renderWater();
+          })
+          .catch((err) => {
+            waterLakesFeatures = null; // let the next toggle retry rather than pin an empty layer
+            console.warn("Failed to load lakes:", err);
+          });
+      }
+      renderWater();
+      return;
+    }
+    if (key === "waterRivers") {
+      waterRiversVisible = visible;
+      if (visible && waterRiversFeatures == null) {
+        waterRiversFeatures = [];
+        // kind=rivers requires a bbox (the unfiltered document is ~5.12 MB --
+        // see backend/app.py's water_endpoint), so this is scoped to whatever
+        // the reader is looking at *right now*, once, rather than re-fetched on
+        // every pan -- a deliberate simplification for a layer that starts
+        // off and has no scene-resolver band of its own to re-trigger a fetch
+        // from. Panning away afterwards does not lose what already loaded; it
+        // simply will not pick up rivers outside that first snapshot.
+        const b = map.getBounds();
+        const bbox = `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`;
+        fetchJson(`/api/water?kind=rivers&bbox=${encodeURIComponent(bbox)}`)
+          .then((data) => {
+            waterRiversFeatures = data?.features || [];
+            renderWater();
+          })
+          .catch((err) => {
+            waterRiversFeatures = null;
+            console.warn("Failed to load rivers:", err);
+          });
+      }
+      renderWater();
+      return;
+    }
+
     const trailToggle = TRAIL_TOGGLES[key];
     if (trailToggle) {
       trailToggle.setFlag(visible);
@@ -1971,6 +2045,16 @@ export function createMapController(container, initial, callbacks) {
       // border session) is untouched, so without this the highlight stayed
       // gone until the next selection change wrote it again.
       else repaintCountryClasses();
+    }
+
+    if (key === "water") {
+      waterVisible = visible;
+      if (!visible) setHoveredWater(null);
+      // Same reason as countries above: addLayer re-creates every path element
+      // from scratch, throwing away whatever selection/hover class it carried,
+      // so a water body already selected before the layer was switched off
+      // needs its highlight repainted rather than left to the next click.
+      else updateWaterHighlights();
     }
 
     if (key === "satellites") {
@@ -4635,6 +4719,87 @@ export function createMapController(container, initial, callbacks) {
     scheduleReports({ counts: true });
   }
 
+  // ---------- water: seas, lakes, rivers ----------
+  //
+  // Marine arrives once at boot through applyData (see useOsintData.js's
+  // one-shot fetch). Lakes and rivers are not part of `raw.water` at all --
+  // neither is fetched until a reader switches on its own sub-toggle, so they
+  // are held here instead, where "not yet fetched" (null) and "fetched, but
+  // empty" ([]) can stay two different things without applyData's generic
+  // raw[key]=data assignment ever seeing them.
+  let waterLakesFeatures = null;
+  let waterRiversFeatures = null;
+  let waterLakesVisible = false;
+  let waterRiversVisible = false;
+  let waterIndex = [];
+  let selectedWaterId = null;
+  let hoveredWaterId = null;
+  // The popup a water click opened, tracked only so a stale reference is never
+  // read -- nothing here rewrites it in place the way the district card does.
+  let waterPopup = null;
+
+  /**
+   * Rebuild the water layer and its hit-test index from whatever is currently
+   * switched on: marine always (once it has arrived), lakes and rivers only
+   * while their own sub-toggle is on. Called whenever any of the three
+   * changes -- a fresh marine poll, a lakes/rivers fetch landing, or either
+   * sub-toggle flipping -- the same "small enough to redraw whole" reasoning
+   * renderCountries and syncWater's own note give: a few thousand features at
+   * most, not the tens of thousands the point layers cap and collapse for.
+   */
+  function renderWater() {
+    const features = [
+      ...(raw.water?.features || []),
+      ...(waterLakesVisible ? waterLakesFeatures || [] : []),
+      ...(waterRiversVisible ? waterRiversFeatures || [] : []),
+    ];
+    syncWater(waterLayer, features);
+    waterIndex = buildWaterIndex(features);
+    // A feature dropped out from under an open selection/popup (its sub-toggle
+    // was switched back off) should not go on claiming to be selected.
+    if (selectedWaterId != null && !waterIndex.some((e) => e.id === selectedWaterId)) {
+      selectedWaterId = null;
+      waterPopup = null;
+      map.closePopup();
+    }
+    updateWaterHighlights();
+    // Per feature in the synced document, the same "counts equal totals" rule
+    // countries and railways use -- there is no band cap or collapse for a
+    // polygon layer like this one.
+    counts.water = features.length;
+    totals.water = features.length;
+    scheduleReports({ counts: true });
+  }
+
+  // Same technique updateCountryHighlights/updateSubdivisionHighlights use:
+  // Leaflet applies a path's `className` once, at creation, so hover and
+  // selection are toggled on the already-rendered element rather than by
+  // rebuilding anything -- see water.js's own note on why that also means the
+  // colours these two classes show live in CSS custom properties, not here.
+  function updateWaterHighlights() {
+    waterLayer.eachLayer((layer) => {
+      const id = layer.feature?.properties?.id;
+      const el = layer.getElement?.();
+      if (!el || id == null) return;
+      el.classList.toggle("water-selected", id === selectedWaterId);
+      el.classList.toggle("water-hovered", id === hoveredWaterId);
+    });
+  }
+
+  /** Clicking the already-selected water body deselects it -- same gesture
+   *  the district/subdivision drill-down and country selection both use. */
+  function selectWater(id) {
+    if (id === selectedWaterId) return;
+    selectedWaterId = id;
+    updateWaterHighlights();
+  }
+
+  function setHoveredWater(id) {
+    if (id === hoveredWaterId) return;
+    hoveredWaterId = id;
+    updateWaterHighlights();
+  }
+
   // IODA's country-keyed scores -> one marker item per affected country.
   //
   // This layer used to tint the whole country shape instead. Two things were
@@ -4973,6 +5138,30 @@ export function createMapController(container, initial, callbacks) {
       }
     }
 
+    // Water is the next fallback, tried only once the country hit-test above
+    // has already said no -- so a lake sitting entirely inside a country never
+    // steals a click from the country around it, and a click at sea (where
+    // findCountryAt can only ever answer null) reaches here instead.
+    if (waterVisible && waterIndex.length) {
+      const waterEntry = findWaterAt(waterIndex, e.latlng.lat, e.latlng.lng);
+      if (waterEntry) {
+        // Clicking the already-selected water body deselects it, same gesture
+        // as the subdivision drill-down above and country selection below.
+        const wasSelected = waterEntry.id === selectedWaterId;
+        selectWater(wasSelected ? null : waterEntry.id);
+        if (!wasSelected) {
+          waterPopup = L.popup({ ...popupOptions(280), autoPan: false })
+            .setLatLng(e.latlng)
+            .setContent(waterPopupHtml(waterEntry))
+            .openOn(map);
+        } else {
+          waterPopup = null;
+          map.closePopup();
+        }
+        return;
+      }
+    }
+
     if (selectedIcao) {
       selectedIcao = null;
       aircraftTrails.clear();
@@ -4993,6 +5182,16 @@ export function createMapController(container, initial, callbacks) {
     // selection to drop; the call below is for the case where there was not --
     // an emphasis set by clicking a pin rather than a country. setFocus is a
     // no-op when the focus already matches, so running both costs nothing.
+    //
+    // Water selection is dropped here too, on the same reasoning: it has no
+    // parent selection to fall out of step with (unlike a subdivision, which
+    // is only ever drawn under a selected country and so is cleared when that
+    // country is), so a genuinely empty click is the only gesture that can
+    // mean "and put the sea away as well".
+    if (selectedWaterId != null) {
+      selectWater(null);
+      waterPopup = null;
+    }
     clearCountrySelection();
     setFocus(null);
   });
@@ -5012,6 +5211,7 @@ export function createMapController(container, initial, callbacks) {
       setHoveredCountry(null);
       setHoveredSubdivision(null);
       setHoveredDistrict(null);
+      setHoveredWater(null);
       return;
     }
     if (e.sourceTarget && e.sourceTarget !== map) return;
@@ -5020,27 +5220,42 @@ export function createMapController(container, initial, callbacks) {
     hoverFrame = requestAnimationFrame(() => {
       hoverFrame = null;
       const latlng = pendingHoverLatLng;
-      if (!latlng || !countriesVisible) {
+      if (!latlng) {
         setHoveredCountry(null);
         setHoveredSubdivision(null);
         setHoveredDistrict(null);
+        setHoveredWater(null);
         return;
       }
-      setHoveredCountry(findCountryAt(countryIndex, latlng.lat, latlng.lng)?.key ?? null);
-      // Only over a selected country's states, which is the only place any are
-      // drawn -- and only then is the extra scan paid for. It is the same cost
-      // as the country test above (bbox rejects, then one or two ray-casts),
-      // over at most a few hundred shapes.
-      const codes = subdivisionIndex.length ? subdivisionCountryCodes() : null;
-      const state = codes?.size
-        ? findSubdivisionAt(subdivisionIndex, latlng.lat, latlng.lng, codes)
-        : null;
-      setHoveredSubdivision(state?.key ?? null);
-      // And one level in again, over the selected state only -- the few dozen
-      // districts drawn there, rejected on their bounding boxes first.
-      setHoveredDistrict(
-        state && state.key === selectedSubdivisionKey
-          ? findDistrictAt(districtsOfSelectedState(), latlng.lat, latlng.lng)?.pcode ?? null
+      if (!countriesVisible) {
+        setHoveredCountry(null);
+        setHoveredSubdivision(null);
+        setHoveredDistrict(null);
+      } else {
+        setHoveredCountry(findCountryAt(countryIndex, latlng.lat, latlng.lng)?.key ?? null);
+        // Only over a selected country's states, which is the only place any
+        // are drawn -- and only then is the extra scan paid for. It is the
+        // same cost as the country test above (bbox rejects, then one or two
+        // ray-casts), over at most a few hundred shapes.
+        const codes = subdivisionIndex.length ? subdivisionCountryCodes() : null;
+        const state = codes?.size
+          ? findSubdivisionAt(subdivisionIndex, latlng.lat, latlng.lng, codes)
+          : null;
+        setHoveredSubdivision(state?.key ?? null);
+        // And one level in again, over the selected state only -- the few
+        // dozen districts drawn there, rejected on their bounding boxes first.
+        setHoveredDistrict(
+          state && state.key === selectedSubdivisionKey
+            ? findDistrictAt(districtsOfSelectedState(), latlng.lat, latlng.lng)?.pcode ?? null
+            : null
+        );
+      }
+      // Independent of countriesVisible -- water is its own layer with its own
+      // checkbox, so a reader can have it on with countries off (or the other
+      // way round) and hover has to answer for whichever is actually showing.
+      setHoveredWater(
+        waterVisible && waterIndex.length
+          ? findWaterAt(waterIndex, latlng.lat, latlng.lng)?.id ?? null
           : null
       );
     });
@@ -5052,6 +5267,7 @@ export function createMapController(container, initial, callbacks) {
     setHoveredCountry(null);
     setHoveredSubdivision(null);
     setHoveredDistrict(null);
+    setHoveredWater(null);
   });
 
   // "Separate these pins", inside a collapsed group's popup. Delegated from the
@@ -5154,6 +5370,7 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "pipelines") renderPipelines();
     else if (key === "cables") renderCables();
     else if (key === "railways") renderRailways();
+    else if (key === "water") renderWater();
     // Served as a country-keyed dict (read as-is by the country card), drawn
     // from the derived point array -- same split as cables/cableLandings.
     else if (key === "outages") {

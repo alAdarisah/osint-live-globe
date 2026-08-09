@@ -185,6 +185,22 @@ export const PALETTE_GROUPS = [
       { id: "choropleth.high", label: "High", value: "#c026d3" },
     ],
   },
+  {
+    id: "water",
+    label: "Water bodies",
+    note: "Seas, lakes and rivers (Natural Earth, see backend/sources/water_bodies.py) -- the"
+      + " first polygon layer here that is not an administrative boundary. Like the country fill"
+      + " above, a marine or lake polygon is invisible until hovered or selected (see water.js),"
+      + " so 'Fill' and 'Outline' are what a reader sees on the shape their pointer is over and"
+      + " 'Selected fill' is what stays lit once they have clicked it -- the same distinction"
+      + " country-selected draws with the accent colour, given its own tokens here because an"
+      + " ocean should not have to share a hue with a border.",
+    tokens: [
+      { id: "water.fill", label: "Fill (hovered)", value: "#4fd1ff" },
+      { id: "water.outline", label: "Outline", value: "#8be9ff" },
+      { id: "water.selected", label: "Selected fill", value: "#0ea5e9" },
+    ],
+  },
 ];
 
 /** token id -> shipped default. Also the whole set of ids that may be overridden. */
@@ -209,6 +225,7 @@ export const DEFAULT_COLORS = Object.freeze(
 const COLOUR_ONLY_TOKENS = new Set([
   "event.corroborated", "sanctions.designated", "cable.route", "railway.line",
   "choropleth.low", "choropleth.mid", "choropleth.high",
+  "water.fill", "water.outline", "water.selected",
 ]);
 
 export function tokenHasSize(token) {
@@ -232,6 +249,14 @@ export const DEFAULT_SIZES = Object.freeze(
  * Deliberately not derived from the palette groups. Those group by subject --
  * "Air & sea traffic" holds three ship classes and four aircraft classes across
  * five different layers -- and a layer is not a subject.
+ *
+ * water.fill/water.outline/water.selected join the choropleth ramp in staying
+ * out of this table on purpose: they colour a polygon fill, not a pin with a
+ * zoom of its own, so there is no gate for them to sit under. They still get a
+ * control -- see TOKENS_BY_LAYER in components/admin/sections/shared.jsx, where
+ * an entry with no home here falls through to "Shared colours" rather than a
+ * per-layer block, the same place railway.line's colour lives for the same
+ * reason (a polyline, not a pin).
  */
 export const TOKEN_LAYER = Object.freeze({
   "severity.critical": "events",
@@ -335,6 +360,13 @@ export const PIN_STACK = [
   "railways", "cables", "outagePoints",
 ];
 export const WASH_STACK = ["vehicles", "jamming", "firms"];
+
+// water carries no PIN_STACK/WASH_STACK entry, deliberately: like the country
+// and subdivision shapes it is drawn `interactive: false` in its own pane
+// (waterPane, z 345, below countriesPane) rather than as a marker or a canvas,
+// so neither drawing mechanism this stack orders applies to it. It is
+// substrate in exactly the sense stackFade's own docstring already uses that
+// word for country shapes and districts -- see below.
 
 /**
  * Layer keys that ride another key's place in the stack.
@@ -567,8 +599,8 @@ function stackEntryFor(layerKey) {
  * per-layer slider stays an absolute correction on that.
  *
  * A key with no place in the stack is not faded. Those are the substrate --
- * country shapes, districts, the basemap -- which sit under everything by
- * construction and have nothing to be ranked against.
+ * country shapes, districts, water bodies, the basemap -- which sit under
+ * everything by construction and have nothing to be ranked against.
  */
 export function stackFade(layerKey) {
   const entry = stackEntryFor(layerKey);

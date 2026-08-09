@@ -343,6 +343,25 @@ export const LAYER_MANIFEST = {
     fetch: FETCH_MANUAL,
     disposition: MANUAL,
   },
+  water: {
+    // Natural Earth 1:10m marine polygons -- named oceans, seas, gulfs, bays,
+    // straits, sounds, channels (backend/sources/water_bodies.py). The first
+    // polygon layer on this map that is not an administrative boundary, and it
+    // is given the same treatment as railways just above: coarse basemap
+    // reference geometry, boot-fetched once rather than polled (see
+    // useOsintData.js), MANUAL and off by default so drawing it is a reader's
+    // choice, not the resolver's or a country focus's to make.
+    //
+    // Lakes and rivers ride this same key behind their own sub-toggles
+    // (waterLakes/waterRivers, wired in createMapController.js) rather than
+    // getting manifest entries of their own: neither is fetched at all until
+    // its checkbox is ticked, so there is nothing here for the resolver to gate
+    // -- and kind=rivers requires a bbox the resolver has no reason to compute
+    // for a layer nobody has asked for yet (see backend/app.py's water_endpoint).
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
   cableLandings: {
     // 1,922 landing points, most within a few km of another one.
     draw: { band: "THEATRE", z: 5 },

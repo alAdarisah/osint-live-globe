@@ -2062,6 +2062,30 @@ export function railwayRouteColor() {
   return paletteColor("railway.line", RAILWAY_ROUTE_COLOR);
 }
 
+// ---- water bodies (Natural Earth, via backend/sources/water_bodies.py) ----
+//
+// Three colour-only tokens rather than one: a marine/lake polygon reads as
+// "fill" while hovered and "selected" once picked, and both share the same
+// "outline" stroke -- see water.js for why a re-style is never used to switch
+// between them (CSS classes only) and useAppSettings.js for how these three
+// palette tokens reach the CSS custom properties those classes read.
+export const WATER_FILL_COLOR = "#4fd1ff";
+export const WATER_OUTLINE_COLOR = "#8be9ff";
+export const WATER_SELECTED_COLOR = "#0ea5e9";
+export const WATER_STYLE = {
+  svg: SVG.wave, color: WATER_FILL_COLOR, label: "Water bodies (Natural Earth)", token: "water.fill",
+};
+
+export function waterFillColor() {
+  return paletteColor("water.fill", WATER_FILL_COLOR);
+}
+export function waterOutlineColor() {
+  return paletteColor("water.outline", WATER_OUTLINE_COLOR);
+}
+export function waterSelectedColor() {
+  return paletteColor("water.selected", WATER_SELECTED_COLOR);
+}
+
 export function cableLandingStyle(d) {
   return themedStyle(d?.planned ? CABLE_PLANNED_STYLE : CABLE_LANDING_STYLE, "cables");
 }

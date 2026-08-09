@@ -40,6 +40,15 @@
   --shadow-color: rgba(0, 0, 0, 0.95);
   --country-fill: rgba(111, 227, 255, 0.03);
   --country-hover-fill: rgba(111, 227, 255, 0.18);
+  /* Fallbacks only -- hooks/useAppSettings.js overwrites these from the
+     water.fill/water.outline/water.selected palette tokens (see map/water.js
+     and map/iconTheme.js) as soon as it mounts, the same way --accent is a
+     shipped default that a custom accent colour overwrites. Not theme-split
+     like --country-fill above: these are plain admin-pickable colours, not a
+     translucency tuned per theme. */
+  --water-fill: #4fd1ff;
+  --water-outline: #8be9ff;
+  --water-selected-fill: #0ea5e9;
   --basemap-tiles: "dark_all";
 }
 
@@ -988,6 +997,39 @@ html, body {
 .subdivision-shape.subdivision-selected {
   fill: rgba(var(--accent-rgb), 0.18);
   stroke: var(--accent);
+  stroke-width: 1.8;
+}
+
+/* Seas, lakes and rivers (see map/water.js). A marine or lake polygon is drawn
+   with fill-opacity/stroke-opacity at 0 by default -- invisible until hovered
+   or selected, the same "boundaries only appear via classes" rule
+   .country-shape uses, and for the same reason: 306 named marine polygons
+   painted unconditionally at world zoom is exactly the clutter that rule
+   exists to avoid. A river is a line rather than a fill and gets a lower but
+   non-zero opacity baked in by water.js's own style function instead, so it
+   reads as a hairline even though it can never carry .water-hovered or
+   .water-selected (see findWaterAt's docstring for why a line is never a hit
+   in this index).
+
+   The colours themselves are CSS custom properties, not the hex literals
+   .country-shape's hover/selected rules use, because water's fill/outline/
+   selected colours are admin-configurable palette tokens (see
+   map/iconTheme.js's "water" PALETTE_GROUPS entry) and a re-style is never
+   used to apply a colour change to an already-hovered or already-selected
+   shape -- see hooks/useAppSettings.js for where --water-fill/--water-outline/
+   --water-selected-fill are kept in step with those tokens. */
+.water-shape.water-hovered {
+  fill: var(--water-fill);
+  fill-opacity: 0.22;
+  stroke: var(--water-outline);
+  stroke-opacity: 1;
+  stroke-width: 2;
+}
+.water-shape.water-selected {
+  fill: var(--water-selected-fill);
+  fill-opacity: 0.32;
+  stroke: var(--water-outline);
+  stroke-opacity: 1;
   stroke-width: 1.8;
 }
 

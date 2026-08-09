@@ -255,6 +255,16 @@ export function useAppSettings() {
       stack: settings.layerStack,
       stackFadeFloor: settings.ui.stackFadeFloor,
     });
+    // The water layer's hover/selected states are CSS classes, never a
+    // re-style (see map/water.js) -- so, unlike every other palette token,
+    // these three have to reach the stylesheet itself, the same way --accent
+    // does just below. Without this a colour picked for water.fill would only
+    // ever show up on a shape drawn *after* the change (the next sync), never
+    // on one already hovered or selected when it was made.
+    const root = document.documentElement;
+    root.style.setProperty("--water-fill", settings.icons.colors["water.fill"]);
+    root.style.setProperty("--water-outline", settings.icons.colors["water.outline"]);
+    root.style.setProperty("--water-selected-fill", settings.icons.colors["water.selected"]);
   }, [settings.icons, settings.layers, settings.layerStack, settings.ui.stackFadeFloor]);
 
   // UI settings reach the stylesheet as custom properties on <html>, which is

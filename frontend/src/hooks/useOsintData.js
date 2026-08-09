@@ -550,6 +550,20 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
       })
       .catch((err) => console.warn("Failed to load railway linework:", err));
 
+    // Seas, gulfs, bays and straits -- marine only (see backend/sources/
+    // water_bodies.py and backend/app.py's water_endpoint for why lakes and
+    // rivers are not fetched here). Boot-fetched once like railways above,
+    // not polled: the backend refreshes this weekly, which is not a cadence
+    // worth a client-side timer for. Lakes and rivers are fetched on demand,
+    // the first time their own control-panel sub-toggle is switched on -- see
+    // setLayerVisible in createMapController.js.
+    fetchJson("/api/water?kind=marine")
+      .then((data) => {
+        if (cancelled) return;
+        onDataRef.current("water", data || { type: "FeatureCollection", features: [] });
+      })
+      .catch((err) => console.warn("Failed to load water bodies:", err));
+
     fetchJson("/api/infrastructure")
       .then((data) => {
         if (cancelled) return;

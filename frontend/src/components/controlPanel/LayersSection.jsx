@@ -7,6 +7,7 @@ import {
   LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
   GFW_GAP_STYLE, GFW_DETECTION_STYLE, GFW_DETECTION_ORDER,
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
+  WATER_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR, CONFIDENCE_THRESHOLD } from "../../map/severity";
 import LayerIcon from "./LayerIcon";
@@ -95,7 +96,10 @@ const GROUP_LAYERS = {
   // Airfields sit with infrastructure rather than with the aircraft layers:
   // it is a place layer, and the aircraft that need it already get their
   // nearest field named inside their own popup.
-  ground: ["infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "cables", "firms", "jamming"],
+  ground: [
+    "infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "water", "cables",
+    "firms", "jamming",
+  ],
   // Its own group rather than a ninth row under traffic: a regulator's ruling
   // about a volume of airspace is neither traffic nor infrastructure, and
   // traffic already carries nine layers.
@@ -1008,6 +1012,57 @@ export default function LayersSection({
             <b>It will not sit exactly on the railway station points.</b> Those come from OpenStreetMap
             (the Infrastructure layer above); this linework is a different, coarser source and the two
             are not aligned. Clipped to this map&apos;s conflict theatres rather than drawn worldwide.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="water">
+          <LayerCheck
+            layerKey="water"
+            on={layerVisibility.water}
+            wish={layerWish?.water}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={WATER_STYLE.svg} color={WATER_STYLE.color} token={WATER_STYLE.token} />
+          {" "}Water Bodies (Natural Earth)
+          <span className="count">{counts.water} ({counts.waterTotal})</span>
+        </label>
+        <label className="layer-row sub-row" data-layer="waterLakes">
+          <LayerCheck
+            layerKey="waterLakes"
+            on={layerVisibility.waterLakes}
+            wish={layerWish?.waterLakes}
+            onToggle={onToggleLayer}
+          />
+          Show lakes
+        </label>
+        <label className="layer-row sub-row" data-layer="waterRivers">
+          <LayerCheck
+            layerKey="waterRivers"
+            on={layerVisibility.waterRivers}
+            wish={layerWish?.waterRivers}
+            onToggle={onToggleLayer}
+          />
+          Show rivers
+        </label>
+        <LayerDetails id="det-water" open={isOpen("det-water")} onToggle={setOpen}>
+          <div className="sublegend">
+            Named oceans, seas, gulfs, bays, straits, sounds and channels, from Natural Earth&apos;s
+            1:10m marine polygons. The first shape on this map that is not an administrative
+            boundary &mdash; click one the same way you would a country. A sea is invisible until
+            you hover or select it; filling every named body of water on Earth at world zoom would
+            be exactly the clutter every other polygon layer here avoids.
+          </div>
+          <div className="sublegend">
+            <b>Coarse, schematic geometry, 1:10,000,000.</b> Public domain (CC0), generalised well
+            past any real coastline &mdash; treat a boundary as which sea you clicked, not where its
+            shore actually runs.
+          </div>
+          <div className="sublegend">
+            <b>Show lakes</b> and <b>Show rivers</b> ride this same checkbox rather than getting one
+            each: both are off by default and fetched only once you switch them on. Rivers are drawn
+            as lines and cannot be clicked or hovered the way a sea or a lake can &mdash; and rivers
+            are fetched once, for whatever the map is showing the moment you switch them on, not
+            re-fetched as you pan.
           </div>
         </LayerDetails>
 

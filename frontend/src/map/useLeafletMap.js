@@ -13,7 +13,7 @@ const COUNT_KEYS = [
   "infraNuclear", "infraFab", "infraPipelineNode", "pipelineRoutes",
   "gfwGaps", "gfwDetections", "gfwDetMatched", "gfwDetUnmatched",
   "czib", "czibActive", "czibWithdrawn", "floods", "floodsCurrent",
-  "ports", "portsOil", "dams", "damsLarge", "deflock", "railways",
+  "ports", "portsOil", "dams", "damsLarge", "deflock", "railways", "water",
 ];
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])

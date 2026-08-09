@@ -527,6 +527,21 @@ export const SVG = {
     '<rect x="8.2" y="6" width="7.6" height="4" rx="0.8" fill="currentColor"/>' +
     '<circle cx="9" cy="18" r="1.4" fill="currentColor"/><circle cx="15" cy="18" r="1.4" fill="currentColor"/>' +
     '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M6.2 20.8h11.6"/>',
+
+  // ---- water bodies (Natural Earth, via backend/sources/water_bodies.py) ----
+  //
+  // Three stacked wave lines -- a legend-row glyph only, for the same reason
+  // railway.line's `railway` glyph above is: the layer itself is a polygon
+  // fill and a line, drawn by water.js's own style function, not by a marker
+  // this SVG is turned into. Nothing chooses between shapes here (no
+  // GLYPH_CHOICES entry), the same treatment the choropleth ramp gets and for
+  // the same reason -- a fill has no shape to pick between.
+  wave: '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+    'd="M2.5 8.5c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+    'd="M2.5 14.5c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+    'd="M2.5 20c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>',
 };
 
 // Which glyph an Officials & Diplomacy record gets, keyed on the `kind` the
