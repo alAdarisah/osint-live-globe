@@ -19,7 +19,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity
+from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, water_bodies
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe")
@@ -474,6 +474,113 @@ async def admin1_boundaries_endpoint(country: str):
         }
         _ADMIN1_BOUNDARY_CACHE.set(iso3, cached)
     return JSONResponse(cached, headers={"Cache-Control": "public, max-age=86400"})
+
+
+# Seas, lakes and river centrelines, stored one reference_snapshots row per
+# kind (see sources/water_bodies.py). This reads from Postgres per request,
+# the same as the district/admin1 boundaries above and for the same reason:
+# water_bodies.py deliberately does not warm its geometry into registry state
+# (see its NOT_WARMED entry in test_persistence_coverage.py), so there is no
+# SourceState.data/version for _cached_source_response to key an ETag off --
+# that machinery assumes a registry-backed source, which this is not.
+#
+# Kind -> snapshot name is built from water_bodies.DATASETS rather than
+# retyping "water_marine"/"water_lakes"/"water_rivers" here, so the two
+# cannot drift apart.
+_WATER_SNAPSHOT_BY_KIND = {key: snapshot for key, snapshot, *_rest in water_bodies.DATASETS}
+
+# Keyed by (kind, bbox) the same way _FILTERED_CACHE above is keyed by
+# (source, version, region, bbox) -- three kinds times however many distinct
+# viewport cells are actually asked for inside an hour, which is small next
+# to that cache's 256.
+_WATER_CACHE = LruTtlCache(maxsize=64, ttl=3600)
+metrics.track_local_cache("water", _WATER_CACHE)
+
+
+def _marine_bbox_overlaps(feature_bbox: list, bounds) -> bool:
+    """Rectangle overlap between one marine feature's stored bbox and a query
+    box, antimeridian-aware.
+
+    Six real marine features (Bering Sea, Chukchi Sea, Ross Sea, Gulf of
+    Anadyr', North Pacific, South Pacific) store `west > east` -- two
+    longitude ranges, `west..180` and `-180..east`, not an inverted box; see
+    water_bodies._bbox_and_area's docstring for why. regions.parse_bbox
+    refuses a wrapped *query* box outright (a client wanting both halves asks
+    twice), so only the feature side of this test ever needs the two-range
+    treatment.
+    """
+    f_south, f_west, f_north, f_east = feature_bbox
+    q_south, q_west, q_north, q_east = bounds
+    if f_south > q_north or q_south > f_north:
+        return False
+    if f_west <= f_east:
+        return f_west <= q_east and q_west <= f_east
+    return q_east >= f_west or q_west <= f_east
+
+
+def _filter_water(collection: dict, kind: str, bounds) -> dict:
+    """Bbox-filter one water dataset, or hand it back whole when bounds is
+    None (kind=rivers never reaches here with bounds None -- see the 400 in
+    water_endpoint below).
+
+    Marine features carry a stored bbox purely so a query like this one can
+    test it as a cheap rectangle -- no polygon maths -- via
+    _marine_bbox_overlaps. Lakes and river centrelines carry no stored bbox
+    at all: it exists only to rank nested marine polygons on a click, which
+    neither of them ever needs (see water_bodies.py's module docstring and
+    _build_collection). So those two fall back to regions.filter_geojson,
+    the same geometry-derived bbox test /api/countries already uses -- a
+    real coordinate walk, but the only option when there is no stored box to
+    read.
+    """
+    if not isinstance(collection, dict):
+        return {"type": "FeatureCollection", "features": []}
+    if bounds is None:
+        return collection
+    if kind == "marine":
+        features = [
+            f for f in collection.get("features", [])
+            if _marine_bbox_overlaps(
+                f.get("properties", {}).get("bbox") or [0.0, 0.0, 0.0, 0.0], bounds
+            )
+        ]
+        return {"type": "FeatureCollection", "features": features}
+    return regions.filter_geojson(collection, bounds)
+
+
+@app.get("/api/water")
+async def water_endpoint(kind: str = "marine", bbox: str | None = None):
+    """Seas, lakes or river centrelines, from Natural Earth via
+    sources/water_bodies.py.
+
+    kind=rivers must carry a bbox: the unfiltered dataset serialises to about
+    5 MB (measured in task 4's review), the same order of size
+    /api/district-boundaries and /api/admin1-boundaries avoid by requiring a
+    country rather than serving every boundary at once. Marine (1.19 MB) and
+    lakes (3.10 MB) are small enough to still be served whole.
+    """
+    if kind not in _WATER_SNAPSHOT_BY_KIND:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of: {', '.join(_WATER_SNAPSHOT_BY_KIND)}",
+        )
+    bounds = regions.parse_bbox(bbox)
+    if kind == "rivers" and bounds is None:
+        raise HTTPException(
+            status_code=400,
+            detail="kind=rivers requires a bbox parameter -- the unfiltered river "
+                   "dataset is about 5 MB and is not served whole",
+        )
+    box_key = ",".join(f"{v:g}" for v in bounds) if bounds else "-"
+    cache_key = (kind, box_key)
+    payload = _WATER_CACHE.get(cache_key)
+    if payload is None:
+        raw = await storage.reference(_WATER_SNAPSHOT_BY_KIND[kind]) or {
+            "type": "FeatureCollection", "features": [],
+        }
+        payload = _filter_water(raw, kind, bounds)
+        _WATER_CACHE.set(cache_key, payload)
+    return JSONResponse(payload, headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/conflict-district-months")
