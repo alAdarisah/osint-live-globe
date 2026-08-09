@@ -118,9 +118,9 @@ def test_a_hull_with_reports_but_no_decoded_draught_is_insufficient_samples():
     profile = vp.build_profile(MMSI, entry, None, None, now=200.0)
     assert profile["laden_state"] == "unknown"
     assert profile["laden_state_reason"] == "insufficient_samples"
-    assert profile["draught_sample_count"] == 0
-    assert profile["draught_max_seen_m"] is None
-    assert profile["draught_current_m"] is None
+    assert profile["sample_count"] == 0
+    assert profile["draught_max_seen"] is None
+    assert profile["draught_current"] is None
 
 
 # --- no commodity, ever -------------------------------------------------------
@@ -313,7 +313,7 @@ def test_run_once_advances_the_cursor_and_writes_a_profile(monkeypatch):
     assert fake.docs["vessel_profile_cursor"] == {"last_id": 2}
     profile = fake.docs["vessel_profiles"][MMSI]
     assert profile["cargo_class"] == "tanker"
-    assert profile["draught_current_m"] == 17.0
+    assert profile["draught_current"] == 17.0
 
     # Nothing new: the second pass asks for everything past id 2, not the
     # same rows again.
