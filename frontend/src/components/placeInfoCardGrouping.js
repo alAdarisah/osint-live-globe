@@ -32,16 +32,26 @@ export function groupSections(sections, groups) {
   const byId = new Map(sections.map((section) => [section.id, section]));
   // Tracks which ids have already been placed, so (a) a section claimed by an
   // earlier group is not rendered a second time by a later one that also
-  // names its id, and (b) the final ungrouped pass knows what is left.
+  // names its id, (b) the same id repeated within one group's own
+  // sectionIds is only placed once, and (c) the final ungrouped pass knows
+  // what is left. (b) is why this has to be a single pass that claims each
+  // id the moment it is accepted, rather than a map+filter over the whole
+  // group followed by one claim pass at the end -- the latter checks every
+  // id in a group against the *same* stale `claimed` snapshot, so two
+  // occurrences of "a" in one group's own sectionIds would both pass the
+  // filter and render the same section twice with a duplicate React key.
   const claimed = new Set();
   const items = [];
 
   for (const group of groups) {
-    const groupSections = (group.sectionIds || [])
-      .map((id) => byId.get(id))
-      .filter((section) => section && !claimed.has(section.id));
-    if (!groupSections.length) continue; // every id in this group is either missing or already placed
-    groupSections.forEach((section) => claimed.add(section.id));
+    const groupSections = [];
+    for (const id of group.sectionIds || []) {
+      const section = byId.get(id);
+      if (!section || claimed.has(section.id)) continue; // missing, or already placed -- by this group or an earlier one
+      claimed.add(section.id);
+      groupSections.push(section);
+    }
+    if (!groupSections.length) continue; // every id in this group was either missing or already placed
     items.push({ kind: "group", id: group.id, title: group.title, sections: groupSections });
   }
 

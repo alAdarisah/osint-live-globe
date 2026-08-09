@@ -1204,9 +1204,20 @@ export function coverageStateFor(key, bounds, raw) {
 // real, checked zero -- is ever printed as a number.
 const NO_BOUNDS_REASON = "This country has no bounding box loaded, so this could not be checked.";
 
-/** The same wording buildCoverage's own rows use for these two states, so the
- * strip and the Data Coverage fold never tell two different stories about the
- * same feed. `null` means "checked" -- the caller has a real answer to show. */
+/**
+ * The same *category* of reason buildCoverage's own rows report for these two
+ * states -- not always the identical sentence. "scoped_elsewhere" here is in
+ * fact copied verbatim from coverageRow's own text (the mdash aside, which is
+ * an HTML entity there and a literal character here, since this string feeds
+ * a React text node, not innerHTML). "not_loaded" is deliberately fuller than
+ * the coverage table's terser "Not loaded this session -- not checked.": a
+ * hover tooltip has room a compact table row does not, so it spells out *why*
+ * ("most often because this feed's own zoom gate has not lifted") rather than
+ * just naming the state. Both still answer to the same three states
+ * coverageStateFor defines, so the strip and the fold can never disagree
+ * about *which* of the three happened, even on the one where the words differ.
+ * `null` means "checked" -- the caller has a real answer to show.
+ */
 function coverageReason(key, bounds, raw) {
   const state = coverageStateFor(key, bounds, raw);
   if (state === "not_loaded") {

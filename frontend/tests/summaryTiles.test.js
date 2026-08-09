@@ -27,7 +27,7 @@ registerHooks({
 
 globalThis.window = { L: { geoJSON: () => ({}) } };
 
-const { summaryTiles, countryCardSections } = await import("../src/map/popups.js");
+const { summaryTiles, countryCardSections, COUNTRY_CARD_GROUPS } = await import("../src/map/popups.js");
 const { groupSections } = await import("../src/components/placeInfoCardGrouping.js");
 
 const baseProps = { name: "Testland", iso_a2: "TL", iso_a3: "TST", population: 1_000_000 };
@@ -318,6 +318,20 @@ test("groupSections -- PlaceInfoCard's super-fold grouping helper", async (t) =>
     // rendered as an empty fold -- same rule as the "ghost" case above.
     assert.equal(items.some((item) => item.kind === "group" && item.id === "second"), false);
   });
+
+  await t.test("a section id repeated within one group's own sectionIds is only ever rendered once", () => {
+    // The cross-group duplicate above exercises `claimed` carrying state
+    // *between* groups; this exercises the narrower case a single map+filter
+    // pass over one group's own list can miss -- a group naming the same id
+    // twice must not place the same section object into its own `sections`
+    // array twice, which would hand React two <details> with the same key.
+    const groups = [{ id: "first", title: "First", sectionIds: ["a", "a", "b"] }];
+    const items = groupSections(sections, groups);
+    assert.deepEqual(items, [
+      { kind: "group", id: "first", title: "First", sections: [sections[0], sections[1]] },
+      { kind: "section", section: sections[2] },
+    ]);
+  });
 });
 
 test("countryCardSections -- COUNTRY_CARD_GROUPS drops nothing when applied through groupSections", async (t) => {
@@ -329,5 +343,34 @@ test("countryCardSections -- COUNTRY_CARD_GROUPS drops nothing when applied thro
     const items = groupSections(sections, groups);
     const renderedIds = items.flatMap((item) => (item.kind === "group" ? item.sections : [item.section])).map((s) => s.id);
     assert.deepEqual(new Set(renderedIds), new Set(sections.map((s) => s.id)));
+  });
+
+  // The test above proves COUNTRY_CARD_GROUPS currently accounts for every
+  // real section id -- which, by construction, means it can never exercise
+  // groupSections' own fallback branch: with nothing left unclaimed, the
+  // "still renders, at the end" guarantee is unverified on anything but
+  // synthetic a/b/c fixtures. This closes that gap using the *real* table
+  // and *real* card output, with one section injected that COUNTRY_CARD_GROUPS
+  // was never told about -- the actual failure mode the fallback exists for
+  // is a later task adding a section and forgetting this table, not a
+  // hand-written test fixture.
+  await t.test("a section id real countryCardSections output has, but the real COUNTRY_CARD_GROUPS doesn't name, still renders at the end", () => {
+    const raw = emptyRaw({
+      events: [{ lat: 5, lon: 5, date: TODAY, fatalities: 1 }],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const orphan = { id: "totallyNewSection", title: "Totally New", html: "<p>new</p>" };
+    const withOrphan = [...sections, orphan];
+
+    // COUNTRY_CARD_GROUPS itself, unmodified -- not a copy with the orphan's
+    // id added to some group, which would just be testing the fixture back
+    // to itself.
+    const items = groupSections(withOrphan, COUNTRY_CARD_GROUPS);
+
+    assert.deepEqual(items[items.length - 1], { kind: "section", section: orphan },
+      "an id no real group claims falls through to the standalone tail, last");
+    const renderedIds = items.flatMap((item) => (item.kind === "group" ? item.sections : [item.section])).map((s) => s.id);
+    assert.deepEqual(new Set(renderedIds), new Set(withOrphan.map((s) => s.id)),
+      "nothing about the real fifteen sections was disturbed by the sixteenth");
   });
 });
