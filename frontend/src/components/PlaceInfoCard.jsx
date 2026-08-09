@@ -24,7 +24,6 @@
 // own and the choice is remembered across places and reloads, under whatever
 // `accordionKey` the caller passes (each surface -- country, water body,
 // state, district -- gets its own key, so their folds cannot collide).
-import { useEffect } from "react";
 import { useAccordion } from "../hooks/useAccordion";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import { computeAnchorLayout } from "./placeInfoCardLayout";
@@ -81,18 +80,6 @@ export default function PlaceInfoCard({
   // decide the naming scheme for all of them together, CSS included, rather
   // than this one guessing at it now.
   const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel("countryInfoCard");
-
-  // Escape closes it. Registered on the window rather than the card so it
-  // works without the card having taken focus -- the same reasoning
-  // EventDetailCard's own Escape handling uses.
-  useEffect(() => {
-    if (!place) return undefined;
-    const onKey = (event) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [place, onClose]);
 
   if (!place) return null;
 

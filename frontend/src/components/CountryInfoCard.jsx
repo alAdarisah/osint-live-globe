@@ -4,9 +4,9 @@
 // border-edit button, offered only in Admin Mode -- see AdminPanel.jsx).
 //
 // Everything else -- the drag/anchor behaviour, the accordion mechanics, the
-// delegated row-click handler, the close button, Escape-to-close -- lives in
-// PlaceInfoCard now, shared with the water-body, admin-1 state and admin-2
-// district cards still to come. See createMapController.js's countriesLayer
+// delegated row-click handler, the close button -- lives in PlaceInfoCard
+// now, shared with the water-body, admin-1 state and admin-2 district cards
+// still to come. See createMapController.js's countriesLayer
 // click handler for why this replaced the old Leaflet popup in the first
 // place: the map keeps panning/zooming freely while it's open, instead of
 // the popup auto-closing/panning on every interaction.
