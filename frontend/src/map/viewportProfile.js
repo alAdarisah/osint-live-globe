@@ -20,7 +20,6 @@
 //     exists to prevent.
 
 import { findCountryAt } from "./countryHitTest";
-import { findWaterAt } from "./water";
 import { bandFor } from "./scene";
 
 // 7 across, 5 down, on the viewport the reader can actually see rather than the
@@ -41,18 +40,24 @@ const ROWS = 5;
 const MARITIME_ENTER_BELOW = 0.20;
 const MARITIME_LEAVE_ABOVE = 0.30;
 
-// The same dead-band idea, restated for the water index's *direct* evidence
-// rather than land's absence: enter maritime once a clear majority of samples
-// land inside a named sea, leave once a clear majority do not. Mirrored around
-// the land thresholds above rather than reusing them as-is, because the two
-// questions are not complements of each other -- a sample outside every
-// country is not necessarily inside a named marine polygon too (Antarctica's
-// interior, or any patch of open ocean the 1:10m marine file simply has no
-// named polygon for), so "enter below 20% land" and "enter above 80% water"
-// are two different, independently-argued-for cuts rather than one formula
-// restated twice.
-const MARITIME_WATER_ENTER_ABOVE = 0.60;
-const MARITIME_WATER_LEAVE_BELOW = 0.40;
+// isMaritime is deliberately still read from land's *absence* rather than
+// from the water index's presence, even though map/water.js now exists and
+// even though that looks like the more direct question to ask. It was tried
+// (see git history on this file) and reverted: Natural Earth's 1:10m marine
+// file names oceans, seas, gulfs, bays, straits, sounds and channels, but it
+// does not tile the whole ocean surface the way a satellite basemap does --
+// large stretches of open water simply have no named polygon over them. A
+// water-fraction test built on that file under-counts exactly where the
+// land-absence test was already right, which would make a genuinely oceanic
+// viewport stop promoting AIS/tankers/ports/cables/GFW (MARITIME_PROMOTE) and
+// stop demoting cities/infra/airports/dams (MARITIME_DEMOTE, both in
+// scene.js) the moment marine data happened to land -- a real, silent,
+// mid-session regression, not a theoretical one. The water index is still the
+// right tool for a narrower question it answers exactly: which named body is
+// under the cursor right now (see findWaterAt, used directly by
+// createMapController.js's click/hover handling). "Is this viewport oceanic"
+// and "what is this point called" are different questions, and only the
+// second one belongs to the water index.
 
 // How coarsely the memo key rounds the viewport centre, per band. Deliberately
 // the same idea as the wind endpoint's snapped bbox cache key on the backend:
@@ -79,15 +84,10 @@ const NULL_PROFILE = {
  *   rather than recomputed, so there is exactly one definition of "at war".
  * @param {object|null} options.previous  the last profile this function
  *   returned, for the hysteresis and the memo.
- * @param {Array|null} [options.waterIndex]  buildWaterIndex's output (marine
- *   only, in practice -- see createMapController.js), or null/absent before
- *   it has loaded. When present, isMaritime is read directly from it instead
- *   of inferred from land's absence -- see stickyMaritime's docstring below
- *   for why that is a real difference, not a restatement of the same test.
  * @returns {{landFraction:number|null, isMaritime:boolean,
  *            dominantCountries:string[], hotCountries:string[], key:string}}
  */
-export function profileViewport({ countryIndex, bounds, zoom, hotCountryKeys, previous, waterIndex }) {
+export function profileViewport({ countryIndex, bounds, zoom, hotCountryKeys, previous }) {
   // Before the boundaries land there is nothing to hit-test against, and a
   // profile of "no land anywhere" would be a lie that reads as open ocean. Null
   // means "apply no promotion and no demotion" -- a beat of the shipped
@@ -95,18 +95,11 @@ export function profileViewport({ countryIndex, bounds, zoom, hotCountryKeys, pr
   // the reader cannot see.
   if (!countryIndex?.length || !bounds) return { ...NULL_PROFILE, key: "none" };
 
-  const haveWaterIndex = !!waterIndex?.length;
   const band = bandFor(zoom);
-  // The water index arriving mid-session changes which of the two tests below
-  // decides isMaritime for a viewport that has not otherwise moved, so it is
-  // part of the memo key -- without this, a profile computed and cached before
-  // marine loaded would go on answering from land's absence indefinitely, for
-  // however long the reader happened to sit still after boot.
-  const key = `${memoKey(bounds, band)}:${haveWaterIndex ? "w" : "l"}`;
+  const key = memoKey(bounds, band);
   if (previous && previous.key === key) return previous;
 
   let land = 0;
-  let waterHits = 0;
   const counts = new Map();
   const latSpan = bounds.north - bounds.south;
   const lonSpan = normalizedLonSpan(bounds);
@@ -119,12 +112,9 @@ export function profileViewport({ countryIndex, bounds, zoom, hotCountryKeys, pr
     for (let col = 0; col < COLS; col++) {
       const lon = bounds.west + (lonSpan * (col + 0.5)) / COLS;
       const entry = findCountryAt(countryIndex, lat, lon);
-      if (entry) {
-        land += 1;
-        counts.set(entry.key, (counts.get(entry.key) || 0) + 1);
-      } else if (haveWaterIndex && findWaterAt(waterIndex, lat, lon)) {
-        waterHits += 1;
-      }
+      if (!entry) continue;
+      land += 1;
+      counts.set(entry.key, (counts.get(entry.key) || 0) + 1);
     }
   }
 
@@ -136,9 +126,7 @@ export function profileViewport({ countryIndex, bounds, zoom, hotCountryKeys, pr
   return {
     key,
     landFraction,
-    isMaritime: haveWaterIndex
-      ? stickyWaterMaritime(waterHits / (COLS * ROWS), previous?.isMaritime)
-      : stickyMaritime(landFraction, previous?.isMaritime),
+    isMaritime: stickyMaritime(landFraction, previous?.isMaritime),
     dominantCountries,
     hotCountries: hotCountryKeys
       ? dominantCountries.filter((countryKey) => hotCountryKeys.has(countryKey))
@@ -150,23 +138,6 @@ export function profileViewport({ countryIndex, bounds, zoom, hotCountryKeys, pr
 function stickyMaritime(landFraction, wasMaritime) {
   if (landFraction < MARITIME_ENTER_BELOW) return true;
   if (landFraction > MARITIME_LEAVE_ABOVE) return false;
-  return !!wasMaritime;
-}
-
-/**
- * The direct read: "is this point inside a named sea" rather than "is this
- * point outside every country". The two are not the same question -- outside
- * every country is also true of Antarctica's interior, of any small strip of
- * land Natural Earth's admin-0 file leaves unclaimed, and of open ocean the
- * 1:10m marine file has no named polygon for, none of which is what
- * "maritime" is meant to mean here. Once the water index has loaded this is
- * the more honest of the two tests, which is why it replaces the land-based
- * one rather than merely confirming it. See MARITIME_WATER_ENTER_ABOVE /
- * MARITIME_WATER_LEAVE_BELOW for the thresholds.
- */
-function stickyWaterMaritime(waterFraction, wasMaritime) {
-  if (waterFraction > MARITIME_WATER_ENTER_ABOVE) return true;
-  if (waterFraction < MARITIME_WATER_LEAVE_BELOW) return false;
   return !!wasMaritime;
 }
 

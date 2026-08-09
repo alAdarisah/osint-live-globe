@@ -1011,24 +1011,30 @@ html, body {
    .water-selected (see findWaterAt's docstring for why a line is never a hit
    in this index).
 
-   The colours themselves are CSS custom properties, not the hex literals
-   .country-shape's hover/selected rules use, because water's fill/outline/
-   selected colours are admin-configurable palette tokens (see
+   The colours themselves are CSS custom properties everywhere, not the hex
+   literals .country-shape's hover/selected rules use, because water's fill/
+   outline/selected colours are admin-configurable palette tokens (see
    map/iconTheme.js's "water" PALETTE_GROUPS entry) and a re-style is never
-   used to apply a colour change to an already-hovered or already-selected
-   shape -- see hooks/useAppSettings.js for where --water-fill/--water-outline/
-   --water-selected-fill are kept in step with those tokens. */
+   used to apply a colour change to a shape already drawn -- see
+   hooks/useAppSettings.js for where --water-fill/--water-outline/
+   --water-selected-fill are kept in step with those tokens. The base rule's
+   stroke matters for exactly one case: a river, which is visible at rest (see
+   water.js's waterStyle) and carries no hover/selected class to override it,
+   so its colour has to live here rather than be baked into the JS style the
+   way it once was -- an operator's colour change reaches an already-drawn
+   river immediately, not on the next sync. */
+.water-shape {
+  stroke: var(--water-outline);
+}
 .water-shape.water-hovered {
   fill: var(--water-fill);
   fill-opacity: 0.22;
-  stroke: var(--water-outline);
   stroke-opacity: 1;
   stroke-width: 2;
 }
 .water-shape.water-selected {
   fill: var(--water-selected-fill);
   fill-opacity: 0.32;
-  stroke: var(--water-outline);
   stroke-opacity: 1;
   stroke-width: 1.8;
 }

@@ -1061,8 +1061,9 @@ export default function LayersSection({
             <b>Show lakes</b> and <b>Show rivers</b> ride this same checkbox rather than getting one
             each: both are off by default and fetched only once you switch them on. Rivers are drawn
             as lines and cannot be clicked or hovered the way a sea or a lake can &mdash; and rivers
-            are fetched once, for whatever the map is showing the moment you switch them on, not
-            re-fetched as you pan.
+            are fetched for an area around wherever you are looking, then fetched again as you pan
+            far enough to leave that area. Panning never blanks what already loaded; it just takes a
+            moment after a long pan for the new area&apos;s rivers to catch up.
           </div>
         </LayerDetails>
 

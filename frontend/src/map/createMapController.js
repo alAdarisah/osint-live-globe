@@ -609,6 +609,9 @@ export function createMapController(container, initial, callbacks) {
   let windRefreshTimer = null;
   let moveEndWindTimer = null;
   let precipRefreshTimer = null;
+  // Debounced re-check of the rivers sub-toggle's loaded extent -- see
+  // maybeRefetchRivers below, wired to moveend next to moveEndWindTimer above.
+  let moveEndRiversTimer = null;
 
   // ---------- cities gate + country selection/highlight ----------
   // Cities only render once the user has opted into a scope (clicking a
@@ -895,11 +898,6 @@ export function createMapController(container, initial, callbacks) {
   function applyScene() {
     viewportProfile = profileViewport({
       countryIndex,
-      // Only once marine has actually landed -- an empty index would answer
-      // "no water anywhere" for every viewport, which is a worse guess than
-      // the absence-of-land fallback profileViewport already has for exactly
-      // this "not loaded yet" moment.
-      waterIndex: waterIndex.length ? waterIndex : null,
       bounds: boundsToPlainObject(map.getBounds()),
       zoom: map.getZoom(),
       hotCountryKeys: refreshHotCountries(),
@@ -1959,27 +1957,7 @@ export function createMapController(container, initial, callbacks) {
     }
     if (key === "waterRivers") {
       waterRiversVisible = visible;
-      if (visible && waterRiversFeatures == null) {
-        waterRiversFeatures = [];
-        // kind=rivers requires a bbox (the unfiltered document is ~5.12 MB --
-        // see backend/app.py's water_endpoint), so this is scoped to whatever
-        // the reader is looking at *right now*, once, rather than re-fetched on
-        // every pan -- a deliberate simplification for a layer that starts
-        // off and has no scene-resolver band of its own to re-trigger a fetch
-        // from. Panning away afterwards does not lose what already loaded; it
-        // simply will not pick up rivers outside that first snapshot.
-        const b = map.getBounds();
-        const bbox = `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`;
-        fetchJson(`/api/water?kind=rivers&bbox=${encodeURIComponent(bbox)}`)
-          .then((data) => {
-            waterRiversFeatures = data?.features || [];
-            renderWater();
-          })
-          .catch((err) => {
-            waterRiversFeatures = null;
-            console.warn("Failed to load rivers:", err);
-          });
-      }
+      if (visible) maybeRefetchRivers();
       renderWater();
       return;
     }
@@ -4786,6 +4764,59 @@ export function createMapController(container, initial, callbacks) {
     });
   }
 
+  // Rivers, unlike marine and lakes, are never loaded whole -- kind=rivers
+  // requires a bbox (the unfiltered document is ~5.12 MB, see backend/app.py's
+  // water_endpoint), so what is drawn is only ever whatever extent was last
+  // fetched. That has to be tracked and re-fetched as the reader pans, or a
+  // pan away from the loaded extent reads as "no rivers here" -- indistinguishable
+  // from "we looked and found none", which is exactly the distinction this
+  // project's provenance rules exist to preserve (see the memory note on
+  // trusted sources: every pin says what kind of evidence it is; an empty
+  // layer is itself a claim, and it must be an honest one).
+  //
+  // waterRiversLoadedBounds is the padded box actually asked for last time, an
+  // L.LatLngBounds -- not the viewport at that moment, which is why it is
+  // padded 100% before being stored: an ordinary few-hundred-metre pan inside
+  // an already-loaded city must not immediately re-trigger a fetch for
+  // essentially the same rivers.
+  let waterRiversLoadedBounds = null;
+  let waterRiversFetchInFlight = false;
+
+  /**
+   * Fetch rivers for a padded box around the current viewport and merge the
+   * result in. A failed fetch is logged and otherwise ignored -- deliberately
+   * NOT setting waterRiversFeatures to null or [] here, because a network
+   * hiccup blanking a layer that was showing real rivers a moment ago would
+   * be a worse lie than simply not having refreshed yet.
+   */
+  function fetchRivers() {
+    if (waterRiversFetchInFlight) return;
+    waterRiversFetchInFlight = true;
+    const bounds = map.getBounds().pad(1.0);
+    const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+    fetchJson(`/api/water?kind=rivers&bbox=${encodeURIComponent(bbox)}`)
+      .then((data) => {
+        waterRiversFeatures = data?.features || [];
+        waterRiversLoadedBounds = bounds;
+        renderWater();
+      })
+      .catch((err) => console.warn("Failed to load rivers:", err))
+      .finally(() => { waterRiversFetchInFlight = false; });
+  }
+
+  /**
+   * Fetch rivers if the sub-toggle is on and either nothing has loaded yet or
+   * the viewport has panned outside what was last fetched. Called on toggle-on
+   * and, debounced, from moveend below -- both funnel through the same
+   * "has the viewport actually left the loaded extent" check, so a reader
+   * cannot end up re-fetching the same rivers on every pan inside a city.
+   */
+  function maybeRefetchRivers() {
+    if (!waterRiversVisible) return;
+    if (waterRiversLoadedBounds && waterRiversLoadedBounds.contains(map.getBounds())) return;
+    fetchRivers();
+  }
+
   /** Clicking the already-selected water body deselects it -- same gesture
    *  the district/subdivision drill-down and country selection both use. */
   function selectWater(id) {
@@ -5032,6 +5063,12 @@ export function createMapController(container, initial, callbacks) {
     reportZoom();
     clearTimeout(moveEndWindTimer);
     moveEndWindTimer = setTimeout(refreshWindArrows, 500); // debounced: don't hammer Open-Meteo mid-drag
+    // Same debounce idea, for the rivers sub-toggle's loaded extent -- a no-op
+    // call when the toggle is off or the viewport is still inside what was
+    // last fetched (see maybeRefetchRivers), so this costs nothing on every
+    // other pan.
+    clearTimeout(moveEndRiversTimer);
+    moveEndRiversTimer = setTimeout(maybeRefetchRivers, 500);
   });
 
   // Country info card is anchored to a screen pixel, not a DOM position
@@ -5709,6 +5746,7 @@ export function createMapController(container, initial, callbacks) {
       clearInterval(windRefreshTimer);
       clearInterval(precipRefreshTimer);
       clearTimeout(moveEndWindTimer);
+      clearTimeout(moveEndRiversTimer);
       clearTimeout(regionFlightTimer);
       if (hoverFrame != null) cancelAnimationFrame(hoverFrame);
       // A live editing session holds its own animation frame and a map listener,

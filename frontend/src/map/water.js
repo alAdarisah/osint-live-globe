@@ -16,7 +16,6 @@
 
 import { L } from "./leafletGlobal";
 import { buildShapeIndex, countryContainsPoint } from "./countryHitTest";
-import { waterFillColor, waterOutlineColor } from "./decorators";
 import { esc } from "../utils/format";
 
 /**
@@ -32,21 +31,24 @@ import { esc } from "../utils/format";
  * always-visible hairline treatment createRailwaysGroup gives its own
  * linework instead of the hover-reveal treatment above.
  *
- * The colours themselves come from the palette (water.fill/water.outline),
- * so an operator's choice reaches the map without a resync -- but only for
- * this baked, at-creation-time value. The hover/selected CSS classes below
- * read the *same* tokens through CSS custom properties useAppSettings.js
- * pushes onto <html>, which is what lets a colour change reach an
- * already-hovered or already-selected shape without ever calling setStyle.
+ * Deliberately no `color`/`fillColor` baked in here -- earlier revisions read
+ * the palette once, at creation time, and a river's always-visible hairline
+ * paid for that: an operator changing the outline colour would not reach a
+ * river already drawn until the next sync. `.water-shape` in style.css sets
+ * `stroke: var(--water-outline)` unconditionally instead, and `.water-hovered`
+ * / `.water-selected` set `fill` the same way -- see useAppSettings.js for how
+ * those three CSS custom properties are kept in step with the water.fill/
+ * water.outline/water.selected palette tokens. Every colour a reader can see
+ * on this layer is therefore live, not baked, and this function's only job is
+ * the one thing that genuinely has to be decided per feature at creation time:
+ * whether it is a line or a fill.
  */
 function waterStyle(feature) {
   const geomType = feature?.geometry?.type || "";
   const isLine = geomType === "LineString" || geomType === "MultiLineString";
   return {
     className: "water-shape",
-    color: waterOutlineColor(),
     weight: 1,
-    fillColor: waterFillColor(),
     fillOpacity: 0,
     opacity: isLine ? 0.55 : 0,
     interactive: false,
@@ -92,23 +94,34 @@ export function syncWater(layer, features) {
  * `area_deg2`.
  *
  * Lakes carry no `area_deg2` at all -- water_bodies.py computes it for
- * marine only, since ranking nested polygons is a marine problem (see that
- * module's `_build_collection`). Lakes still need *a* tie-break: they nest
- * nine times across 1,355 features, and never more than one level deep. The
- * choice here is each entry's own bounding-box area
- * (`(maxLat-minLat)*(maxLon-minLon)`), computed below rather than a true
- * ring area, for two reasons: buildShapeIndex already puts a bbox on every
- * entry with nothing further to compute, and one level of nesting means
- * there is only ever one comparison to make -- a bbox is already the right
- * answer to "which of these two is bigger" that often. A real ring-area
- * function would earn its cost only if lakes nested more deeply or more
- * often than they do.
+ * marine only, since ranking nested polygons is a marine problem there (see
+ * that module's `_build_collection`). Lakes still need *a* tie-break: they
+ * nest nine times across 1,355 features, and never more than one level deep.
  *
- * A marine `area_deg2` and a lake's bbox-area approximation are never
- * compared against each other in practice -- nothing in this dataset nests a
- * marine polygon inside a lake or a lake inside a sea -- so the two
- * tie-break bases only ever have to rank correctly within their own kind,
- * which they do.
+ * An earlier revision of this function filled the gap with each entry's own
+ * bounding-box area -- cheap, but a *different metric* from marine's real
+ * ring-shoelace `area_deg2`, and a Task 6 review caught the real risk in
+ * that: if a marine polygon and a lake ever nested (a landlocked marine
+ * "sea", say, sharing ground with a lake Natural Earth also has drawn), the
+ * two size numbers being compared would not mean the same thing, and the
+ * smaller-first sort could pick the wrong one for no principled reason.
+ * Checked against the live files during that review -- 306 marine features
+ * against 1,355 lakes, 2,654 pairs sharing a bounding box, every one tested
+ * for one feature's representative point (properly excluding island holes,
+ * the way countryContainsPoint does) landing inside the other -- and none of
+ * them nest as of that check. That is reassuring, not sufficient: Natural
+ * Earth could ship a nesting pair in a future release, exactly the kind of
+ * thing this codebase does not treat as ruled out just because today's file
+ * does not exercise it (see water_bodies.py's own antimeridian/dedup notes
+ * for the same discipline).
+ *
+ * So the fix is not "trust today's file" but `fallbackAreaDeg2` below: the
+ * same shoelace formula water_bodies.py's `_ring_area`/`_bbox_and_area` use
+ * for marine's stored `area_deg2`, run here in JS for whatever the backend
+ * did not compute it for. Marine's real value and this computed one are the
+ * same metric by construction, not by coincidence of today's geography, so
+ * the single sort-then-first-match below is correct regardless of whether a
+ * marine/lake nesting pair ever exists.
  *
  * Rivers are LineStrings (or MultiLineStrings), and containment by area does
  * not apply to a line at all: buildShapeIndex's own `polygonsOf` returns no
@@ -127,13 +140,47 @@ export function buildWaterIndex(features) {
     area_deg2: props.area_deg2,
   }));
   for (const entry of entries) {
-    if (!Number.isFinite(entry.area_deg2)) {
-      const b = entry.bbox;
-      entry.area_deg2 = (b.maxLat - b.minLat) * (b.maxLon - b.minLon);
-    }
+    if (!Number.isFinite(entry.area_deg2)) entry.area_deg2 = fallbackAreaDeg2(entry.polygons);
   }
   entries.sort((a, b) => a.area_deg2 - b.area_deg2);
   return entries;
+}
+
+/**
+ * The shoelace formula over one ring, in square degrees -- identical to
+ * water_bodies.py's `_ring_area` (and to countryHitTest.js's own `ringArea`,
+ * kept separate here rather than imported since neither module has another
+ * reason to depend on the other, the same call `_walk_lonlat` makes in the
+ * backend). Not a true area in km^2 for the same reason the backend's
+ * docstring gives: nothing here corrects for a degree of longitude covering
+ * less ground at high latitude than at the equator. It only has to rank two
+ * shapes against each other, and it does.
+ */
+function shoelaceArea(ring) {
+  let total = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[i + 1];
+    total += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(total) / 2;
+}
+
+/**
+ * `area_deg2`, computed the way water_bodies.py computes it for marine --
+ * the outer ring's shoelace area, summed across every part of a
+ * MultiPolygon -- for whichever kind the backend did not already compute it
+ * for. See buildWaterIndex's docstring for why this replaced a
+ * bounding-box approximation: the two size numbers a nesting tie-break
+ * compares have to be the same metric, not merely both plausible.
+ */
+function fallbackAreaDeg2(polygons) {
+  let area = 0;
+  for (const rings of polygons) {
+    const outer = rings[0];
+    if (outer) area += shoelaceArea(outer);
+  }
+  return area;
 }
 
 /**

@@ -1,5 +1,7 @@
 // Water hit-testing, asserted: smallest-containing-polygon selection over
-// nested marine polygons, a miss, a boundary point, and the antimeridian.
+// nested marine polygons, a miss, a boundary point, the antimeridian, the
+// lakes' ring-area fallback, and a combined marine+lakes index -- the real
+// runtime shape once the lakes sub-toggle is on.
 //
 // map/water.js pulls in map/decorators.js for its palette-driven colours,
 // which (like every marker decorator) imports map/leafletGlobal.js and reads
@@ -86,18 +88,33 @@ test("a point exactly on the inner shape's edge falls through to the outer one",
   assert.equal(onInnerEdge.id, "marine:1", "the point sits on the gulf's own edge, not inside it");
 });
 
-test("lakes with no area_deg2 fall back to their own bounding-box area", () => {
+test("lakes with no area_deg2 fall back to their own ring area", () => {
   // Lakes carry no area_deg2 at all (see water_bodies.py -- it is computed
-  // for marine only), so buildWaterIndex's fallback -- each entry's own
-  // bbox area -- is what breaks a nesting tie for them. Kept simple on
-  // purpose: lakes nest at most one level deep across the real dataset, so
-  // there is only ever one comparison to make, and a bbox is already sitting
-  // on every buildShapeIndex entry with nothing further to compute.
+  // for marine only), so buildWaterIndex's fallback -- the same
+  // shoelace ring area water_bodies.py computes for marine, run here in JS
+  // -- is what breaks a nesting tie for them. Both lakes below are squares,
+  // where a bounding-box area and a true ring area happen to be the same
+  // number; see the next test for a shape where they are not, which is what
+  // actually proves the fallback is a ring area rather than a bbox.
   const outerLake = feature({ id: "lake:1", name: "Great Lake", class: "lake" }, square(-5, -5, 5, 5));
   const innerLake = feature({ id: "lake:2", name: "Island Pond", class: "lake" }, square(-1, -1, 1, 1));
   const index = buildWaterIndex([outerLake, innerLake]);
   assert.deepEqual(index.map((e) => e.id), ["lake:2", "lake:1"]);
   assert.equal(findWaterAt(index, 0, 0).id, "lake:2");
+});
+
+test("a lake's fallback area is its ring area, not its bounding-box area", () => {
+  // An L-shape: a 10x10 bounding box (area 100) around a true footprint of
+  // only 36 -- exactly the gap a Task 6 review finding caught in an earlier
+  // revision, where the fallback was the bbox area instead. If this fallback
+  // ever regresses back to a bbox area, this lake's area_deg2 becomes 100
+  // and this assertion catches it.
+  const lShape = feature(
+    { id: "lake:l-shape", name: "L Lake", class: "lake" },
+    { type: "Polygon", coordinates: [[[0, 0], [10, 0], [10, 2], [2, 2], [2, 10], [0, 10], [0, 0]]] }
+  );
+  const [entry] = buildWaterIndex([lShape]);
+  assert.equal(entry.area_deg2, 36, "the true shoelace area of the L-shape, not its 100-degree^2 bbox");
 });
 
 test("a river (a line, not a polygon) never produces a hit-testable entry", () => {
@@ -135,6 +152,37 @@ test("antimeridian: a wrapped marine MultiPolygon resolves on both sides of the 
   assert.equal(findWaterAt(index, 55, 175)?.id, "marine:bering", "east of the seam");
   assert.equal(findWaterAt(index, 55, -175)?.id, "marine:bering", "west of the seam");
   assert.equal(findWaterAt(index, 55, 0), null, "nowhere near either part");
+});
+
+test("a combined marine + lakes index -- the real runtime shape once lakes are switched on", () => {
+  // createMapController.js's renderWater() builds exactly one index out of
+  // marine plus whatever lakes/rivers sub-toggles are on (see its `features`
+  // array) -- every test above builds an index from one kind at a time,
+  // which is not that shape. This is the case a Task 6 review finding raised:
+  // marine's stored area_deg2 and a lake's computed fallback have to be the
+  // same metric, or a nesting tie-break between the two kinds would compare
+  // two different numbers and pick arbitrarily. Checked against the live
+  // Natural Earth files for this review (306 marine features against 1,355
+  // lakes, 2,654 sharing a bounding box, hole-aware): none of them actually
+  // nest today. This test does not depend on that holding forever -- it
+  // constructs a synthetic marine/lake nesting pair and checks the tie-break
+  // resolves it exactly the way an all-marine or all-lakes nesting pair
+  // would, because both sides are the same metric by construction now.
+  const sea = feature({ id: "marine:1", name: "Big Sea", class: "sea", area_deg2: 100 }, square(-5, -5, 5, 5));
+  const lake = feature({ id: "lake:1", name: "Salt Lake", class: "lake" }, square(-1, -1, 1, 1));
+  const distantLake = feature({ id: "lake:2", name: "Faraway Lake", class: "lake" }, square(20, 20, 22, 22));
+  const index = buildWaterIndex([sea, lake, distantLake]);
+
+  // Sorted smallest-first across both kinds at once: the lake's computed
+  // ring area (4) comes before the sea's stored area_deg2 (100), and the
+  // unrelated distant lake (also area 4) sits wherever it lands without
+  // disturbing the other two.
+  assert.equal(index.find((e) => e.id === "lake:1").area_deg2, 4);
+
+  assert.equal(findWaterAt(index, 0, 0).id, "lake:1", "the lake nested inside the sea wins over the sea");
+  assert.equal(findWaterAt(index, 3, 3).id, "marine:1", "outside the lake, the sea still answers");
+  assert.equal(findWaterAt(index, 21, 21).id, "lake:2", "the unrelated lake answers for its own point");
+  assert.equal(findWaterAt(index, 50, 50), null);
 });
 
 test("waterPopupHtml names the feature and its class", () => {
