@@ -14,7 +14,7 @@ context:
 
   cargo class   AIS's own "ship type" code (aisstream forwards it verbatim as
                 ShipStaticData.Type) sorted into seven broad buckets by
-                ITU-R M.1371-5 Annex 8, Table 50 -- see _cargo_class. This part
+                ITU-R M.1371-5 Annex 8, Table 50 -- see cargo_class. This part
                 is deterministic: the same code always sorts the same way, so
                 it is labelled **derived**, not inferred.
 
@@ -94,7 +94,6 @@ opposed to the vessel_port_calls rows record_port_calls actually verifies).
 import asyncio
 import copy
 import logging
-import time
 
 from backend import config, infrastructure, storage
 
@@ -296,6 +295,14 @@ def build_profile(
     max_seen = max(values) if values else None
     min_seen = min(values) if values else None
     current = entry.get("current_draught")
+    current_ts = entry.get("current_ts")
+    # A reading older than the retained window is not "current" any more --
+    # apply_history already ages it out of `samples`, and reporting the stale
+    # number here anyway (even under an honest "insufficient_samples" verdict)
+    # would still read as a live measurement to anyone who only looked at the
+    # field, not the reason.
+    if current is not None and (current_ts is None or now - current_ts > config.HISTORY_RETENTION_SECONDS):
+        current = None
     verdict, reason = laden_state(current, max_seen, sample_count)
     ship_type = entry.get("ship_type")
     cclass = cargo_class(ship_type)
@@ -388,14 +395,21 @@ async def run_once() -> dict:
         return {"read": 0, "profiles": 0, "ok": True}
 
     state = await _load_state()
-    new_state, touched = apply_history(rows, state, rows[-1]["ts"])
+    # The newest row's own timestamp, not time.time(): apply_history's sample
+    # pruning and build_profile's "is this reading still current" check both
+    # have to reason about the same clock, or a job catching up on backlog
+    # would prune samples against AIS time while separately expiring
+    # `current` against wall-clock time -- two different windows agreeing by
+    # coincidence on a live feed and disagreeing the moment this job falls
+    # behind, which is exactly when a reader most needs the two to agree.
+    now = rows[-1]["ts"]
+    new_state, touched = apply_history(rows, state, now)
     new_state = _evict_lru(new_state, HULL_CAP)
     # A hull evicted the same pass it was touched gets no profile written --
     # there is nowhere durable left to attach one to.
     touched &= new_state.keys()
 
     port_labels = await _load_port_labels()
-    now = time.time()
     results = await asyncio.gather(
         *(_profile_one(mmsi, new_state[mmsi], port_labels, now) for mmsi in touched)
     )

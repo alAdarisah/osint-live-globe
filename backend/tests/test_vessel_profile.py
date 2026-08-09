@@ -123,6 +123,28 @@ def test_a_hull_with_reports_but_no_decoded_draught_is_insufficient_samples():
     assert profile["draught_current"] is None
 
 
+def test_a_current_draught_older_than_the_retained_window_is_not_reported_as_current():
+    """current_draught/current_ts are not pruned by apply_history the way
+    `samples` are (see that function's own comment) -- build_profile is where
+    a reading that old stops being called "current" instead."""
+    entry = {
+        "samples": {f"{v:.1f}": 0.0 for v in (10.0, 11.0, 12.0, 13.0, 14.0)},
+        "current_draught": 14.0,
+        "current_ts": 0.0,
+    }
+    now = config.HISTORY_RETENTION_SECONDS + 1.0
+    profile = vp.build_profile(MMSI, entry, None, None, now=now)
+    assert profile["draught_current"] is None
+    # The samples themselves are untouched by build_profile -- only apply_history
+    # prunes those -- so max/min still reflect what this entry was handed.
+    assert profile["draught_max_seen"] == 14.0
+    # No current draught to compare against, so laden_state falls into the
+    # same "insufficient_samples" bucket as a hull with too few readings --
+    # a stale current is not evidence, even though the samples exist.
+    assert profile["laden_state"] == "unknown"
+    assert profile["laden_state_reason"] == "insufficient_samples"
+
+
 # --- no commodity, ever -------------------------------------------------------
 
 # Deliberately excludes the word "commodity" itself -- the sentence is
@@ -158,6 +180,7 @@ def test_no_profile_ever_emits_a_commodity_across_every_ship_type_code():
             entry = {
                 "samples": {f"{v:.1f}": 1.0 for v in samples},
                 "current_draught": current,
+                "current_ts": 1.0,  # matches `now` below -- well inside the retained window
                 "ship_type": ship_type,
                 "destination": "PORT OF EXAMPLE",
             }
@@ -218,11 +241,13 @@ def test_apply_history_prunes_samples_older_than_the_retained_window():
     later_ts = config.HISTORY_RETENTION_SECONDS + 1.0
     state2, _touched2 = vp.apply_history([row(2, later_ts)], state, now_ts=later_ts)
     assert state2[MMSI]["samples"] == {}
-    # current_draught is a separate field from the pruned samples dict and is
-    # not retroactively cleared -- it simply stops being backed by a sample
-    # inside the window, which build_profile's max_seen (now None) reflects.
+    # apply_history itself never clears current_draught/current_ts -- they are
+    # a separate field from the pruned samples dict -- but build_profile reads
+    # `now` against current_ts and must not report a reading this stale as
+    # "current" just because nothing newer ever arrived to overwrite it.
     profile = vp.build_profile(MMSI, state2[MMSI], None, None, now=later_ts)
     assert profile["laden_state_reason"] == "insufficient_samples"
+    assert profile["draught_current"] is None
 
 
 def test_apply_history_does_not_mutate_the_state_it_was_given():
