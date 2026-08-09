@@ -24,7 +24,6 @@
 
 import { L } from "./leafletGlobal";
 import { buildShapeIndex, countryContainsPoint } from "./countryHitTest";
-import { esc } from "../utils/format";
 
 export function createSubdivisionsLayer(map) {
   // Between the country shapes (350) and the district choropleth (360): a state
@@ -101,34 +100,16 @@ export function findSubdivisionAt(index, lat, lon, countryCodes = null) {
   return null;
 }
 
-/**
- * What a clicked state says.
- *
- * Deliberately short. This popup exists to confirm what was clicked and to name
- * the boundary's source; it is not a country card, and inventing a statistics
- * panel out of a boundary file would be claiming the geometry knows things it
- * does not. The scale is stated because it is the honest caveat: at 1:10m these
- * outlines are generalised to a few hundred metres and should not be read as a
- * cadastral border.
- *
- * `districtCount` is how many districts were drawn inside this state -- non-zero
- * only for the countries with OCHA admin-2 geometry, which is where the next
- * click down leads. Said in the popup because a set of fainter lines appearing
- * inside the state is not, on its own, an instruction to click one.
- */
-export function subdivisionPopupHtml(entry, districtCount = 0) {
-  const code = entry.code || (entry.postal ? `${entry.country_code}-${entry.postal}` : "");
-  // Escaped part by part, then joined: escaping the joined string would escape
-  // the separator's own ampersand and print "State &middot; Nigeria" literally.
-  const meta = [entry.kind, entry.country].filter(Boolean).map(esc).join(" &middot; ");
-  const districts = districtCount
-    ? `<div class="meta">${districtCount} district${districtCount === 1 ? "" : "s"} drawn inside
-        &mdash; click one for its monthly conflict record.</div>`
-    : "";
-  return `
-    <h3>${esc(entry.name)}</h3>
-    <div class="meta">${meta}${code ? ` &middot; ${esc(code)}` : ""}</div>
-    ${districts}
-    <div class="meta">Boundary: Natural Earth admin-1, 1:10m &mdash; generalised to a few hundred
-      metres, so it marks which state a point is in rather than exactly where the line runs.</div>`;
-}
+// The 1:10m scale caveat -- kept as its own constant, verbatim, so the card's
+// coverage fold (map/popups.js's buildAdminCoverage) can never say something
+// subtly different about this limitation than the sentence that used to live
+// in this module's own popup. Same discipline water.js's WATER_SCALE_CAVEAT
+// follows, for the same reason: one sentence, one place it is actually
+// written, every caller quotes it.
+//
+// The scale is stated because it is the honest caveat: at 1:10m these outlines
+// are generalised to a few hundred metres and should not be read as a
+// cadastral border.
+export const SUBDIVISION_SCALE_CAVEAT =
+  "Boundary: Natural Earth admin-1, 1:10m &mdash; generalised to a few hundred metres, so it marks " +
+  "which state a point is in rather than exactly where the line runs.";

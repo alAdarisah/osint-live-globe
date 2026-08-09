@@ -126,14 +126,17 @@ import { profileViewport } from "./viewportProfile";
 import { buildCountryIndex, findCountryAt, representativePointOf } from "./countryHitTest";
 import { createBorderEditor } from "./borderEdit";
 import { countryFingerprints } from "../settings/borderOverrides";
-import { countryCardSections, waterCardSections, cityPopupHtml, normalizeCountryName } from "./popups";
+import {
+  countryCardSections, waterCardSections, subdivisionCardSections, districtCardSections,
+  cityPopupHtml, normalizeCountryName,
+} from "./popups";
 import { buildChoropleth } from "./choropleth";
 import {
   createDistrictOutlineLayer, indexDistrictCounts,
-  buildDistrictIndex, findDistrictAt, districtPopupHtml,
+  buildDistrictIndex, findDistrictAt,
 } from "./districts";
 import {
-  createSubdivisionsLayer, buildSubdivisionIndex, findSubdivisionAt, subdivisionPopupHtml,
+  createSubdivisionsLayer, buildSubdivisionIndex, findSubdivisionAt,
   subdivisionKeyOf,
 } from "./subdivisions";
 import { createWaterLayer, syncWater, buildWaterIndex, findWaterAt } from "./water";
@@ -325,6 +328,19 @@ const COUNTRY_CARD_FEEDS = new Set([
 // cableLandings, ports) are left out too: none of them refreshes more than
 // about once a day, so there is nothing here for a mid-session poll to move.
 const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps"]);
+
+// The admin-1/admin-2 card counterpart to COUNTRY_CARD_FEEDS/WATER_CARD_FEEDS
+// above -- same reasoning: an open card is built from `raw` at the moment it
+// was clicked, and without this it would keep showing what was true then. The
+// district card's own conflict fold is excluded here on purpose: its record
+// and trend come from `districtCounts`/`districtSeries`, which are refreshed
+// by their own dedicated fetches (loadDistrictMonth, loadDistrictSeries) and
+// call refreshFocusedDistrictCard directly rather than riding through
+// applyData's per-key dispatch. "cities" is here for both -- GeoNames rarely
+// moves mid-session, but a card opened before that boot fetch lands should
+// not keep saying zero once it does.
+const SUBDIVISION_CARD_FEEDS = new Set(["events", "cities", "osmInfra", "dams", "airports", "ports"]);
+const DISTRICT_CARD_FEEDS = new Set(["cities", "osmInfra", "dams", "airports", "ports"]);
 
 // leaflet.heat's setLatLngs() always calls its own redraw(), which
 // dereferences `this._map._animating` with no null check -- harmless when
@@ -543,6 +559,15 @@ export function createMapController(container, initial, callbacks) {
     // district-level monthly counts. Held here so country cards can show the
     // verified numbers next to the live picture, each labelled for what it is.
     conflictHistory: [], conflictDistricts: [], escalation: [],
+    // The admin-2 drill-down's own archive state, mirrored here so
+    // districtCardSections (map/popups.js) can read it the same way every
+    // other section builder reads `raw` -- reassigned in step wherever the
+    // controller's own districtCounts/districtCountsLoading/districtSeries
+    // locals change (see loadDistrictMonth, ensureDistrictArchive,
+    // loadDistrictSeries). `districtCounts` is a Map (pcode -> one month's
+    // record); `districtSeries` is {ISO3: record[]}, this app's own slice of
+    // the archive for whichever countries have been drilled into so far.
+    districtCounts: new Map(), districtMonthLoading: false, districtSeries: {},
     // Earthquakes (USGS, ~5min) and volcanic activity (Smithsonian GVP, weekly)
     // in one array, each row carrying its own `kind` -- see hazards.py.
     hazards: [],
@@ -1569,6 +1594,14 @@ export function createMapController(container, initial, callbacks) {
   // ISO3 -> FeatureCollection, or null while a request is in flight, so a
   // country drilled into twice is fetched once.
   const districtGeometry = new Map();
+  // ISO3 -> that country's own slice of the hapi_conflict archive (up to its
+  // 24-month retention), or null while a request is in flight -- the district
+  // card's 24-month trend sparkline reads this. Fetched once per country,
+  // scoped by the existing /api/conflict-districts endpoint's own `country`
+  // parameter rather than the unscoped `months=24` the endpoint's own
+  // docstring warns off (see loadDistrictSeries): a single country's slice is
+  // a few hundred KB at most, not the ~23 MB whole-world archive.
+  const districtSeriesByCountry = new Map();
 
   // ---------- country, then state, then district ----------
   // The last step of the selection: the districts of the one state singled out,
@@ -1588,9 +1621,11 @@ export function createMapController(container, initial, callbacks) {
   let selectedDistrictPcode = null;
   let hoveredDistrictPcode = null;
   let drawnDistrictState = "";               // which state's districts are drawn
-  // The popup a state click opened, held so it can be rewritten once that
-  // state's districts land -- see the tail of drawStateDistricts.
-  let subdivisionPopup = null;
+  // The Leaflet layer backing the district whose card is open, held so its
+  // on-screen anchor point can be recomputed on every pan/zoom (see
+  // districtAnchorPoint and the "move zoom" handler) -- the district
+  // counterpart to focusedWaterLayer below.
+  let focusedDistrictLayer = null;
   // ---------- admin-1 subdivisions ----------
   // Drawn for whichever countries are selected right now, and for no others --
   // see subdivisions.js on why this rides on the selection instead of being a
@@ -1606,6 +1641,8 @@ export function createMapController(container, initial, callbacks) {
   let selectedSubdivisionKey = null;
   let hoveredSubdivisionKey = null;
   let drawnSubdivisionCountries = "";  // signature of what is currently drawn
+  // The subdivision counterpart to focusedDistrictLayer above.
+  let focusedSubdivisionLayer = null;
 
   let countryIndex = [];          // see buildCountryIndex -- smallest-area-first
   let layerByCountryKey = new Map();
@@ -3795,6 +3832,7 @@ export function createMapController(container, initial, callbacks) {
     // the months are still in flight would otherwise say "no record for this
     // month" -- the archive's one claim that has to mean something.
     districtCountsLoading = true;
+    raw.districtMonthLoading = true;
     let months = [];
     try {
       months = await fetchJson("/api/conflict-district-months");
@@ -3804,7 +3842,8 @@ export function createMapController(container, initial, callbacks) {
     }
     if (!Array.isArray(months) || !months.length) {
       districtCountsLoading = false;
-      refreshDistrictCard();
+      raw.districtMonthLoading = false;
+      refreshFocusedDistrictCard();
       return;
     }
     districtMonths = months;
@@ -3816,7 +3855,8 @@ export function createMapController(container, initial, callbacks) {
   async function loadDistrictMonth(month) {
     if (!month) return;
     districtCountsLoading = true;
-    refreshDistrictCard();
+    raw.districtMonthLoading = true;
+    refreshFocusedDistrictCard();
     let counts = new Map();
     try {
       counts = indexDistrictCounts(await fetchJson(
@@ -3831,8 +3871,40 @@ export function createMapController(container, initial, callbacks) {
     // so an early response could otherwise overwrite a later one.
     if (districtMonth !== month) return;
     districtCounts = counts;
+    raw.districtCounts = districtCounts;
     districtCountsLoading = false;
-    refreshDistrictCard();
+    raw.districtMonthLoading = false;
+    refreshFocusedDistrictCard();
+  }
+
+  /**
+   * One country's own slice of the hapi_conflict archive, up to its 24-month
+   * retention -- what the district card's trend sparkline reads. Fetched at
+   * most once per country, the same claim-then-fetch pattern loadDistrictCountry
+   * uses for boundaries just above, and the same existing /api/conflict-districts
+   * endpoint loadDistrictMonth already calls for one month at a time, just
+   * scoped by country instead of by month -- no new endpoint. `months=24`
+   * rather than the endpoint's own `months=1` default: hapi_conflict.py keeps
+   * at most 24 months per district in the first place (MONTHS_KEPT), so this
+   * asks for everything the archive could possibly hold for this one country,
+   * not the ~23 MB whole-world archive its own docstring warns off.
+   */
+  async function loadDistrictSeries(iso3) {
+    if (!iso3 || districtSeriesByCountry.has(iso3)) return;
+    districtSeriesByCountry.set(iso3, null); // claimed, so a second drill-down does not refetch
+    let records = [];
+    try {
+      records = await fetchJson(`/api/conflict-districts?country=${encodeURIComponent(iso3)}&months=24`);
+    } catch {
+      // No archive reachable for this country -- the trend section is simply
+      // absent, same as every other optional fold with nothing to show.
+    }
+    districtSeriesByCountry.set(iso3, records);
+    raw.districtSeries = { ...raw.districtSeries, [iso3]: records };
+    // A district card in this country may already be open (the boundaries and
+    // the archive load in parallel -- see syncDistrictDrilldown), and its
+    // trend fold has been waiting on exactly this.
+    refreshFocusedDistrictCard();
   }
 
   /** Which month the card reads. Fetches that month's counts. */
@@ -3876,12 +3948,12 @@ export function createMapController(container, initial, callbacks) {
     const selected = subdivisionEntryFor(selectedSubdivisionKey);
     if (selected && !wanted.has(selected.country_code)) {
       selectedSubdivisionKey = null;
-      // Its popup goes too. It describes a shape that is about to stop being
+      // Its card goes too. It describes a shape that is about to stop being
       // drawn, and a card still standing over a state nobody can see any more is
       // worse than no card -- it reads as the answer to the click that just
       // removed it.
-      if (subdivisionPopup && map.hasLayer(subdivisionPopup)) map.closePopup(subdivisionPopup);
-      subdivisionPopup = null;
+      focusedSubdivisionLayer = null;
+      reportSubdivisionSelection();
       // The districts drawn inside that state go with it -- assigned directly
       // rather than through selectSubdivision, so the drill-down is put away
       // here rather than by that function.
@@ -3953,12 +4025,67 @@ export function createMapController(container, initial, callbacks) {
   function selectSubdivision(key) {
     if (key === selectedSubdivisionKey) return;
     selectedSubdivisionKey = key;
+    focusedSubdivisionLayer = subdivisionLayerForKey(key);
     updateSubdivisionHighlights();
+    reportSubdivisionSelection();
     // The districts follow the state exactly as the states follow the country.
     // Not awaited: a country being drilled into for the first time has its
     // district geometry fetched here, and the state highlights immediately
     // rather than waiting on it.
     syncDistrictDrilldown();
+  }
+
+  /** The Leaflet layer for one subdivision, or null -- same "scan the layer
+   *  group" approach waterLayerFor uses, since subdivisionsLayer only ever
+   *  holds a few dozen paths at once (the selected countries' own states). */
+  function subdivisionLayerForKey(key) {
+    if (key == null) return null;
+    let found = null;
+    subdivisionsLayer.eachLayer((layer) => {
+      if (!found && subdivisionKeyOf(layer.feature?.properties || {}) === key) found = layer;
+    });
+    return found;
+  }
+
+  /** Viewport-pixel anchor for the subdivision info card -- same arithmetic as
+   *  countryAnchorPoint/waterAnchorPoint. */
+  function subdivisionAnchorPoint(layer) {
+    const center = layer.getBounds().getCenter();
+    const pt = map.latLngToContainerPoint(center);
+    const rect = container.getBoundingClientRect();
+    return { x: rect.left + pt.x, y: rect.top + pt.y };
+  }
+
+  /** The card payload for one subdivision index entry, built from current
+   *  data -- the state counterpart to countryCardFor/waterCardFor. */
+  function subdivisionCardFor(entry) {
+    const bounds = entry.bbox
+      ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
+      : null;
+    const { title, sections } = subdivisionCardSections(entry, raw, bounds);
+    const layer = subdivisionLayerForKey(entry.key);
+    return {
+      key: entry.key,
+      name: title,
+      sections,
+      point: layer ? subdivisionAnchorPoint(layer) : null,
+    };
+  }
+
+  /** Tell React which state's card is open, or that none is -- the
+   *  subdivision counterpart to reportWaterSelection. No selection array
+   *  alongside it, same reasoning as water: no chips, no highlight that
+   *  outlives the card. */
+  function reportSubdivisionSelection() {
+    const entry = subdivisionEntryFor(selectedSubdivisionKey);
+    callbacks.onSubdivisionSelect?.(entry ? subdivisionCardFor(entry) : null);
+  }
+
+  /** Rebuild the open state card against data that has just landed -- the
+   *  subdivision counterpart to refreshFocusedCountryCard/refreshFocusedWaterCard. */
+  function refreshFocusedSubdivisionCard() {
+    if (!selectedSubdivisionKey) return;
+    reportSubdivisionSelection();
   }
 
   function setHoveredSubdivision(key) {
@@ -4028,7 +4155,13 @@ export function createMapController(container, initial, callbacks) {
     }
     assignDistrictStates(state.country_code);
     drawStateDistricts();
-    await loadDistrictCountry(state.country_code);
+    // Boundaries and this country's own slice of the conflict archive load in
+    // parallel -- the outlines must not wait on the archive to be drawn, and
+    // the archive request is exactly as fire-and-forget as loadDistrictCountry
+    // already was on its own. loadDistrictSeries refreshes any open district
+    // card itself once it lands (see its own docstring), so nothing further is
+    // needed here for that half.
+    await Promise.all([loadDistrictCountry(state.country_code), loadDistrictSeries(state.country_code)]);
     assignDistrictStates(state.country_code);
     drawStateDistricts();
   }
@@ -4038,9 +4171,13 @@ export function createMapController(container, initial, callbacks) {
     if (signature !== drawnDistrictState || (signature && !districtOutlineLayer.getLayers().length)) {
       drawnDistrictState = signature;
       // The district singled out belonged to the state being left; carrying it
-      // across would leave a selection nobody can see.
+      // across would leave a selection nobody can see. Its card goes with it,
+      // the same reasoning syncSubdivisions gives for dropping a state's own
+      // card when its country is deselected.
       selectedDistrictPcode = null;
       hoveredDistrictPcode = null;
+      focusedDistrictLayer = null;
+      reportDistrictSelection();
       districtOutlineLayer.clearLayers();
       const pcodes = new Set(districtsOfSelectedState().map((d) => d.pcode));
       const iso3 = subdivisionEntryFor(selectedSubdivisionKey)?.country_code;
@@ -4057,16 +4194,6 @@ export function createMapController(container, initial, callbacks) {
     if (any && !map.hasLayer(districtOutlineLayer)) districtOutlineLayer.addTo(map);
     if (!any && map.hasLayer(districtOutlineLayer)) map.removeLayer(districtOutlineLayer);
     updateDistrictHighlights();
-
-    // The state's own popup is opened by the click that selected it, which is
-    // before its districts have been fetched the first time a country is drilled
-    // into. Rewritten here so the line telling the reader there is another level
-    // to click appears when the districts do, rather than only on the second
-    // visit to that country.
-    if (subdivisionPopup && map.hasLayer(subdivisionPopup)) {
-      const state = subdivisionEntryFor(selectedSubdivisionKey);
-      if (state) subdivisionPopup.setContent(subdivisionPopupHtml(state, districtsOfSelectedState().length));
-    }
   }
 
   function updateDistrictHighlights() {
@@ -4079,10 +4206,16 @@ export function createMapController(container, initial, callbacks) {
     });
   }
 
+  function districtEntryFor(pcode) {
+    return pcode == null ? null : districtIndex.find((d) => d.pcode === pcode) || null;
+  }
+
   function selectDistrict(pcode) {
     if (pcode === selectedDistrictPcode) return;
     selectedDistrictPcode = pcode;
+    focusedDistrictLayer = districtLayerForPcode(pcode);
     updateDistrictHighlights();
+    reportDistrictSelection();
   }
 
   function setHoveredDistrict(pcode) {
@@ -4091,46 +4224,64 @@ export function createMapController(container, initial, callbacks) {
     updateDistrictHighlights();
   }
 
-  // The open district card and the district it is describing, held so the month
-  // selector inside it can rewrite it in place when the counts for a new month
-  // land. Cleared implicitly: every read is guarded on the popup still being on
-  // the map.
-  let districtCard = null;
-  let districtCardEntry = null;
+  /** The Leaflet layer for one district, or null -- same "scan the layer
+   *  group" approach subdivisionLayerForKey/waterLayerFor use, since
+   *  districtOutlineLayer only ever holds one state's worth of districts. */
+  function districtLayerForPcode(pcode) {
+    if (pcode == null) return null;
+    let found = null;
+    districtOutlineLayer.eachLayer((layer) => {
+      if (!found && layer.feature?.properties?.pcode === pcode) found = layer;
+    });
+    return found;
+  }
 
-  function districtCardHtml() {
-    return districtPopupHtml(districtCardEntry, {
-      record: districtCounts.get(districtCardEntry.pcode) || null,
+  /** Viewport-pixel anchor for the district info card -- same arithmetic as
+   *  countryAnchorPoint/waterAnchorPoint/subdivisionAnchorPoint. */
+  function districtAnchorPoint(layer) {
+    const center = layer.getBounds().getCenter();
+    const pt = map.latLngToContainerPoint(center);
+    const rect = container.getBoundingClientRect();
+    return { x: rect.left + pt.x, y: rect.top + pt.y };
+  }
+
+  /**
+   * The card payload for one district index entry, built from current data --
+   * the district counterpart to subdivisionCardFor/countryCardFor/
+   * waterCardFor. `month`/`months` ride along on the payload itself (rather
+   * than being read back out of `raw` by the component) so DistrictInfoCard's
+   * own month `<select>` has something to render without a second prop.
+   */
+  function districtCardFor(entry) {
+    const bounds = entry.bbox
+      ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
+      : null;
+    const { title, sections } = districtCardSections(entry, raw, bounds, districtMonth);
+    const layer = districtLayerForPcode(entry.pcode);
+    return {
+      pcode: entry.pcode,
+      name: title,
+      sections,
+      point: layer ? districtAnchorPoint(layer) : null,
       month: districtMonth,
       months: districtMonths,
-      loading: districtCountsLoading,
-    });
+    };
   }
 
-  function openDistrictPopup(district, latlng) {
-    districtCardEntry = district;
-    districtCard = L.popup({ ...popupOptions(280), autoPan: false })
-      .setLatLng(latlng)
-      .setContent(districtCardHtml())
-      .openOn(map);
-    bindDistrictMonthSelect();
+  /** Tell React which district's card is open, or that none is -- the
+   *  district counterpart to reportSubdivisionSelection/reportWaterSelection. */
+  function reportDistrictSelection() {
+    const entry = districtEntryFor(selectedDistrictPcode);
+    callbacks.onDistrictSelect?.(entry ? districtCardFor(entry) : null);
   }
 
-  /** Rewrite the open card from whatever counts are now held. */
-  function refreshDistrictCard() {
-    if (!districtCard || !districtCardEntry || !map.hasLayer(districtCard)) return;
-    districtCard.setContent(districtCardHtml());
-    bindDistrictMonthSelect();
-  }
-
-  // Bound after every setContent rather than once at open: setContent replaces
-  // the content node, taking any listener on it with it. Leaflet already stops
-  // clicks inside a popup reaching the map, so the select does not need its own
-  // propagation guard.
-  function bindDistrictMonthSelect() {
-    const select = districtCard?.getElement?.()?.querySelector(".district-month-select");
-    if (!select) return;
-    select.addEventListener("change", (e) => setDistrictMonth(e.target.value));
+  /** Rebuild the open district card against data that has just landed --
+   *  called both by applyData's per-feed dispatch (DISTRICT_CARD_FEEDS) and
+   *  directly by loadDistrictMonth/ensureDistrictArchive/loadDistrictSeries,
+   *  whose archive state does not flow through applyData at all. */
+  function refreshFocusedDistrictCard() {
+    if (!selectedDistrictPcode) return;
+    reportDistrictSelection();
   }
 
   /**
@@ -5215,6 +5366,9 @@ export function createMapController(container, initial, callbacks) {
     // Water info card, same reasoning: glued to its feature's on-screen
     // position through a pan or zoom gesture rather than left to drift.
     if (focusedWaterLayer) callbacks.onWaterPointChange?.(waterAnchorPoint(focusedWaterLayer));
+    // State and district info cards, same reasoning again.
+    if (focusedSubdivisionLayer) callbacks.onSubdivisionPointChange?.(subdivisionAnchorPoint(focusedSubdivisionLayer));
+    if (focusedDistrictLayer) callbacks.onDistrictPointChange?.(districtAnchorPoint(focusedDistrictLayer));
   });
 
   // No separate zoomend handler: Leaflet always fires moveend right after
@@ -5265,22 +5419,14 @@ export function createMapController(container, initial, callbacks) {
       const { state, district } = drill;
       if (district) {
         const wasSelected = district.pcode === selectedDistrictPcode;
+        // selectDistrict reports the open/closed card to React itself (see
+        // reportDistrictSelection) -- the same "select decides, no separate
+        // popup branch" shape selectWater already uses below.
         selectDistrict(wasSelected ? null : district.pcode);
-        if (wasSelected) map.closePopup();
-        else openDistrictPopup(district, e.latlng);
         return;
       }
       const wasSelected = state && state.key === selectedSubdivisionKey;
       selectSubdivision(state && !wasSelected ? state.key : null);
-      if (state && !wasSelected) {
-        subdivisionPopup = L.popup({ ...popupOptions(280), autoPan: false })
-          .setLatLng(e.latlng)
-          .setContent(subdivisionPopupHtml(state, districtsOfSelectedState().length))
-          .openOn(map);
-      } else {
-        subdivisionPopup = null;
-        map.closePopup();
-      }
       return;
     }
 
@@ -5582,6 +5728,11 @@ export function createMapController(container, initial, callbacks) {
       // Same property, same fix, for the water card -- see WATER_CARD_FEEDS
       // and refreshFocusedWaterCard.
       if (WATER_CARD_FEEDS.has(key)) refreshFocusedWaterCard();
+      // And again for the state/district cards -- see SUBDIVISION_CARD_FEEDS/
+      // DISTRICT_CARD_FEEDS above for which feeds qualify, and why the
+      // district card's own conflict fold is not among them.
+      if (SUBDIVISION_CARD_FEEDS.has(key)) refreshFocusedSubdivisionCard();
+      if (DISTRICT_CARD_FEEDS.has(key)) refreshFocusedDistrictCard();
     },
 
     flyToRegion,
@@ -5634,6 +5785,24 @@ export function createMapController(container, initial, callbacks) {
     // same gesture, unlike closeCountryCard above.
     closeWaterCard() {
       selectWater(null);
+    },
+
+    // Neither a state nor a district has a chip-backed selection that outlives
+    // its card either -- same shape as closeWaterCard, one gesture apiece.
+    closeSubdivisionCard() {
+      selectSubdivision(null);
+    },
+
+    closeDistrictCard() {
+      selectDistrict(null);
+    },
+
+    // The month `<select>` a district card's own header renders (see
+    // DistrictInfoCard.jsx) calls this directly rather than going through a
+    // popup-content rebind, now that the picker is a real React element
+    // instead of a string of HTML.
+    setDistrictMonth(month) {
+      setDistrictMonth(month);
     },
 
     /** Open the card on an already-selected country (the selection chips). */

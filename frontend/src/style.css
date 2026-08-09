@@ -1452,11 +1452,12 @@ html, body {
    the country's name and its close button off the top of a 44vh box the moment
    anyone read past the second fold: the one line telling you *which* country
    you were reading was the first thing to go. */
-/* #waterInfoCard rides along on every rule below: PlaceInfoCard.jsx's
-   `panelId` prop is what tells the two apart (own DOM id, own drag-position
-   storage key), but they are the same floating-card look, so nothing here
-   needed forking -- see PlaceInfoCard.jsx's own note on why panelId exists. */
-#countryInfoCard, #waterInfoCard {
+/* #waterInfoCard/#subdivisionInfoCard/#districtInfoCard ride along on every
+   rule below: PlaceInfoCard.jsx's `panelId` prop is what tells the four apart
+   (own DOM id, own drag-position storage key), but they are the same
+   floating-card look, so nothing here needed forking -- see PlaceInfoCard.jsx's
+   own note on why panelId exists. */
+#countryInfoCard, #waterInfoCard, #subdivisionInfoCard, #districtInfoCard {
   position: fixed;
   width: 320px;
   max-width: calc(100vw - 28px);
@@ -1472,18 +1473,21 @@ html, body {
   z-index: 950;
   animation: popup-in 0.16s ease;
 }
-/* A country and a water body can be selected at once (water selection does
-   not clear a standing country selection -- see createMapController.js's
-   click handler), and the two cards can anchor near the same screen point.
-   Given no cheap way to track which of two independently-mounted components
-   was focused more recently, this is a static tie-break rather than one:
-   water wins. Reaching a water selection at all means the click fell where
-   the country hit-test already said no (water is the fallback tried only
-   after it -- see the click handler), so a water card on screen is always at
-   least as fresh as a country card that may be left over from an earlier
-   click; the reverse (a country card genuinely fresher than a standing water
-   card) is the case this ordering gets wrong, and is rarer in practice. */
+/* A country, a water body, a state and a district can all be selected at
+   once (none of the four clears another's selection -- see
+   createMapController.js's click handler), and any two of their cards can
+   anchor near the same screen point. Given no cheap way to track which was
+   focused most recently, this is a static tie-break rather than one: deeper
+   in the drill-down wins. Reaching a water selection at all means the click
+   fell where the country hit-test already said no (water is the fallback
+   tried only after it), and reaching a state or district means the click
+   landed inside a selected country and, for a district, inside its selected
+   state too -- so each step in that chain is at least as fresh as the one
+   before it. The reverse (an outer card genuinely fresher than a standing
+   inner one) is the case this ordering gets wrong, and is rarer in practice. */
 #waterInfoCard { z-index: 951; }
+#subdivisionInfoCard { z-index: 952; }
+#districtInfoCard { z-index: 953; }
 .country-info-body {
   overflow-y: auto;
   padding: 8px 16px 14px;
@@ -1500,12 +1504,18 @@ html, body {
 /* Default (opens upward): tail sits on the bottom edge, pointing down at
    the country. Only the bottom-right two edges get a border so it reads as
    part of the card's outline rather than a floating diamond. */
-#countryInfoCard:not(.flip) .country-info-tail, #waterInfoCard:not(.flip) .country-info-tail {
+#countryInfoCard:not(.flip) .country-info-tail,
+#waterInfoCard:not(.flip) .country-info-tail,
+#subdivisionInfoCard:not(.flip) .country-info-tail,
+#districtInfoCard:not(.flip) .country-info-tail {
   bottom: -7.5px;
   border-top: none;
   border-left: none;
 }
-#countryInfoCard.flip .country-info-tail, #waterInfoCard.flip .country-info-tail {
+#countryInfoCard.flip .country-info-tail,
+#waterInfoCard.flip .country-info-tail,
+#subdivisionInfoCard.flip .country-info-tail,
+#districtInfoCard.flip .country-info-tail {
   top: -7.5px;
   border-bottom: none;
   border-right: none;
@@ -2152,17 +2162,20 @@ html, body {
 
 /* --- admin-2 district record -------------------------------------------- */
 
-/* The whole archive control, now that this card is the only place the record is
-   read: which month, with all four counts shown under it at once. */
-.popup .district-month {
+/* The whole archive control: which month, with all four counts shown under it
+   at once. Lives in #districtInfoCard's own header now (DistrictInfoCard.jsx's
+   `headerExtra`, a real React <select> rather than a string of HTML), so this
+   targets the header directly rather than `.popup` -- kept alongside it since
+   nothing else in this app still builds a Leaflet popup with this class. */
+.popup .district-month, .country-info-header .district-month {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 6px 0 2px;
+  margin: 0 6px;
   font-size: 11px;
   color: var(--text-dim);
 }
-.popup .district-month select {
+.popup .district-month select, .country-info-header .district-month select {
   flex: 1;
   min-width: 0;
   padding: 2px 4px;
@@ -2173,12 +2186,14 @@ html, body {
   font: inherit;
 }
 
-/* All four counts, every time -- see districtPopupHtml. */
-.popup .district-rows {
+/* All four counts, every time -- see buildDistrictConflict in map/popups.js.
+   `.country-info-body` covers the district card's own conflict fold, the same
+   dual-targeting the rules above use. */
+.popup .district-rows, .country-info-body .district-rows {
   margin: 6px 0;
   border-top: 1px solid var(--panel-border);
 }
-.popup .district-row {
+.popup .district-row, .country-info-body .district-row {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -2190,8 +2205,8 @@ html, body {
    rests on that difference -- so it is said in words rather than left to a
    blank space to imply. A month still loading is a third state and must not be
    drawn as either. */
-.popup .meta.district-nodata,
-.popup .meta.district-loading { color: var(--text-dim); }
+.popup .meta.district-nodata, .country-info-body .meta.district-nodata,
+.popup .meta.district-loading, .country-info-body .meta.district-loading { color: var(--text-dim); }
 
 /* --- country fill (choropleth) ------------------------------------------ */
 
@@ -3307,7 +3322,8 @@ html, body {
 /* Once dragged the card is its own window: no tail, and it no longer tracks
    the country's (or water body's) screen position (see CountryInfoCard.jsx
    and WaterInfoCard.jsx). */
-#countryInfoCard.detached, #waterInfoCard.detached { animation: none; }
+#countryInfoCard.detached, #waterInfoCard.detached,
+#subdivisionInfoCard.detached, #districtInfoCard.detached { animation: none; }
 
 /* A row in the country card that opens the record behind it. Only the rows that
    carry an id get this (see openableRow in map/popups.js) -- the rest stay inert

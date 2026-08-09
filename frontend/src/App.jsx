@@ -32,6 +32,8 @@ import TimelineBar from "./components/TimelineBar";
 import Attribution from "./components/Attribution";
 import CountryInfoCard from "./components/CountryInfoCard";
 import WaterInfoCard from "./components/WaterInfoCard";
+import SubdivisionInfoCard from "./components/SubdivisionInfoCard";
+import DistrictInfoCard from "./components/DistrictInfoCard";
 import EventDetailCard from "./components/EventDetailCard";
 import CountrySelectionBar from "./components/CountrySelectionBar";
 import BorderEditBar from "./components/BorderEditBar";
@@ -704,6 +706,19 @@ export default function App() {
         water={mapApi.selectedWater}
         onClose={mapApi.closeWaterCard}
         onOpenRecord={openRecordDetail}
+      />
+
+      <SubdivisionInfoCard
+        subdivision={mapApi.selectedSubdivision}
+        onClose={mapApi.closeSubdivisionCard}
+        onOpenRecord={openRecordDetail}
+      />
+
+      <DistrictInfoCard
+        district={mapApi.selectedDistrict}
+        onClose={mapApi.closeDistrictCard}
+        onOpenRecord={openRecordDetail}
+        onMonthChange={mapApi.setDistrictMonth}
       />
 
       <EventDetailCard detail={recordDetail} onClose={() => setRecordDetail(null)} />

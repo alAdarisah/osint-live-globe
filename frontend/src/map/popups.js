@@ -12,6 +12,8 @@ import {
 } from "./decorators";
 import { countryContainsPoint } from "./countryHitTest";
 import { CLASS_LABEL as WATER_CLASS_LABEL, WATER_SCALE_CAVEAT } from "./water";
+import { SUBDIVISION_SCALE_CAVEAT } from "./subdivisions";
+import { DISTRICT_METRICS, DISTRICT_NO_RECORD_CAVEAT } from "./districts";
 
 // ACLED/GDELT country names don't always match Natural Earth's ADMIN name
 // (e.g. "Russian Federation" vs "Russia") -- this covers the common cases.
@@ -1853,4 +1855,372 @@ export function cityPopupHtml(city, raw, countryNameByIso2) {
     <div class="meta">${esc(countryName)} &middot; Population: ${fmtNumber(city.population)}</div>
     ${buildEventsSection(eventMatches, gdeltMatches)}
     <p class="meta">Population: GeoNames. Events within 50km, matched by distance.</p>`;
+}
+
+// ---------- admin-1 (state) and admin-2 (district) cards (Task 11) ----------
+//
+// The third and fourth users of the shape countryCardSections/waterCardSections
+// established, and structurally closer to the water card than the country one:
+// a country counts "inside this bounding box" because a true polygon test over
+// every AIS/ADS-B contact on Earth is not affordable at that scale (see
+// buildLivePicture's own note), but a state or a district gets no such excuse
+// -- Rhode Island's bbox reaches into three neighbours, and a district shaped
+// round a river bend is exactly the long-thin-shape problem water bodies
+// already have. So every "inside this state/district" test below is the same
+// true point-in-polygon test the map's own hit-testing already runs to select
+// these shapes in the first place (findSubdivisionAt/findDistrictAt).
+//
+// Nothing new to build for that: entries from buildSubdivisionIndex and
+// buildDistrictIndex are buildShapeIndex entries themselves (`{polygons,
+// bbox}`), the exact pair countryContainsPoint needs, so the same clipping the
+// map already does to find which shape a click landed in is reused here to
+// find which live records land inside it -- by structural typing, the same
+// reuse Task 7 made of buildShapeIndex/countryContainsPoint for water.
+
+/**
+ * True containment inside a subdivision or district's own polygon -- the same
+ * two-step test insideWaterFeature runs above (a cheap bbox prefilter, then
+ * the real ray-cast), rewritten here rather than imported from it: a third
+ * caller of two lines is still two lines, and reaching into a section that
+ * exists to describe water for a helper that has nothing to do with water
+ * would be a stranger coupling than repeating them. `bounds`, when given, is
+ * the entry's own bbox converted to {south,west,north,east} -- see
+ * subdivisionCardFor/districtCardFor in createMapController.js, which do that
+ * conversion the same way waterCardFor already does for water.
+ */
+function insideAdminFeature(entry, bounds, lat, lon) {
+  if (typeof lat !== "number" || typeof lon !== "number") return false;
+  if (bounds && !boundsContainsPoint(bounds, lat, lon)) return false;
+  return countryContainsPoint(entry, lat, lon);
+}
+
+/** Every item from `items` that falls inside `entry`'s polygon, `predicate`
+ *  permitting -- the polygon-test counterpart to itemsInBounds above. */
+function itemsInFeature(items, entry, bounds, predicate) {
+  const out = [];
+  for (const item of items || []) {
+    if (!insideAdminFeature(entry, bounds, item.lat, item.lon)) continue;
+    if (predicate && !predicate(item)) continue;
+    out.push(item);
+  }
+  return out;
+}
+
+// ---------- admin-1 profile ----------
+
+function buildSubdivisionProfile(entry) {
+  const code = entry.code || (entry.postal ? `${entry.country_code}-${entry.postal}` : "");
+  // Escaped part by part, then joined -- escaping the joined string would
+  // escape the separator's own ampersand and print "State &middot; Nigeria"
+  // literally (same reasoning the old subdivisionPopupHtml gave for this).
+  const meta = [entry.kind, entry.country].filter(Boolean).map(esc).join(" &middot; ");
+  return `
+    <div class="meta">${esc(entry.name)}</div>
+    <div class="meta">${meta}${code ? ` &middot; ${esc(code)}` : ""}</div>
+    <div class="meta">Natural Earth admin-1 boundary, <i>reported</i> geometry. Scale caveat and district
+      coverage are in the Data coverage fold below.</div>`;
+}
+
+// ---------- admin-2 profile ----------
+
+function buildDistrictProfile(entry) {
+  const where = [entry.admin1, entry.country_code].filter(Boolean).join(" &middot; ");
+  return `
+    <div class="meta">${esc(entry.name || entry.pcode)}</div>
+    <div class="meta">${esc(where)}${entry.pcode ? ` &middot; ${esc(entry.pcode)}` : ""}</div>
+    <div class="meta">OCHA COD-AB boundary, <i>reported</i> geometry, joined to HDX HAPI's conflict
+      archive on p-code. District coverage is in the Data coverage fold below.</div>`;
+}
+
+// ---------- admin-1 conflict: live ACLED points, clipped to the polygon ----------
+
+/**
+ * Events and fatalities inside this state over the same 72h window the
+ * country card's own conflict fold uses (RECENT_WINDOW_MS above), plus the
+ * two things a country-wide tally cannot show: which event types actually
+ * made up the total here, and the single worst one. Never returns "" -- a
+ * quiet state in the last 72h is itself the answer, said in words rather than
+ * a fold that silently vanishes (see buildCoverage's own note on the same
+ * choice for the honesty section).
+ */
+function buildSubdivisionConflict(entry, raw, bounds) {
+  const cutoff = Date.now() - RECENT_WINDOW_MS;
+  let count = 0;
+  let fatalities = 0;
+  let worst = null;
+  const typeCounts = {};
+  for (const e of raw.events || []) {
+    if (!insideAdminFeature(entry, bounds, e.lat, e.lon)) continue;
+    if (e.date) {
+      const t = Date.parse(`${e.date}T00:00:00Z`);
+      if (!Number.isNaN(t) && t < cutoff) continue;
+    }
+    count += 1;
+    fatalities += e.fatalities || 0;
+    if (!worst || (e.severity || 0) > (worst.severity || 0)) worst = e;
+    const type = e.event_type || "Unspecified";
+    typeCounts[type] = (typeCounts[type] || 0) + 1;
+  }
+  const provenance = '<div class="meta">ACLED, matched by point falling inside this state\'s own polygon, '
+    + 'last 72h &mdash; <i>reported</i>.</div>';
+  if (!count) {
+    return `<div class="meta">No conflict events matched inside this state in the last 72h.</div>${provenance}`;
+  }
+  const topTypes = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  const worstLine = worst
+    ? `<div class="meta">Most severe: ${esc(worst.event_type || "event")} &middot; ${worst.severity ?? 0}/100${
+        worst.notes ? ` &mdash; ${esc(worst.notes.slice(0, 90))}` : ""
+      }</div>`
+    : "";
+  return `
+    <div class="cstats">
+      ${statRow("", "events", count, "hot")}
+      ${statRow("", "killed", fatalities, "hot")}
+    </div>
+    ${topTypes.length ? `<div class="meta">Top event types: ${topTypes.map(([t, n]) => `${esc(t)} (${n})`).join(", ")}</div>` : ""}
+    ${worstLine}
+    ${provenance}`;
+}
+
+// ---------- admin-2 conflict: the reviewed monthly record plus its trend ----------
+
+const DISTRICT_TREND_MONTHS = 24;
+
+/**
+ * The four DISTRICT_METRICS rows for whichever month is selected, plus a
+ * 24-month fatality sparkline built from that district's own slice of the
+ * hapi_conflict archive.
+ *
+ * `record` is null for a district the archive has no row for in the selected
+ * month -- distinct from a row of zeros, and said in DISTRICT_NO_RECORD_CAVEAT's
+ * own words, because the whole archive rests on that difference.
+ * `loading` is the third state and is kept apart from both: a month whose
+ * counts are still in flight must not read as a month with no record.
+ * `series` is that one district's own records across every month the archive
+ * has fetched for its country (see districtCardSections/createMapController.js's
+ * loadDistrictSeries) -- already this district's alone, so no further
+ * filtering happens here.
+ */
+function buildDistrictConflict(record, series, month, loading) {
+  const monthLabel = esc(month || "the archive");
+  const provenance = '<div class="meta">ACLED via HDX HAPI, joined to OCHA COD-AB boundaries on p-code '
+    + '&mdash; <i>reported</i>. A monthly archive that runs to the end of a past month, not the live '
+    + 'conflict layer, and not comparable to it.</div>';
+  if (loading) {
+    return `<div class="meta district-loading">Loading ${monthLabel}&hellip;</div>${provenance}`;
+  }
+  const recordBlock = record
+    ? `<div class="meta">Reviewed record for <b>${esc(record.month || month || "")}</b></div>
+       <div class="district-rows">${DISTRICT_METRICS.map((m) => {
+         const value = Number(m.valueOf(record)) || 0;
+         return `<div class="district-row"><span>${esc(m.label)}</span><b>${fmtNumber(value)}</b></div>`;
+       }).join("")}</div>
+       <div class="meta">Demonstrations are counted separately and are not part of the violence totals.</div>`
+    : `<div class="meta district-nodata">No record for ${monthLabel}. ${DISTRICT_NO_RECORD_CAVEAT}</div>`;
+  const trend = buildSparkline(series, {
+    count: DISTRICT_TREND_MONTHS,
+    readValue: (r) => r.fatalities || 0,
+    headingOf: (recent) => `Fatalities, last ${recent.length} months (HDX/ACLED)`,
+    captionOf: (recent, max) => {
+      const last = recent[recent.length - 1];
+      return last ? `${last.month || ""}: ${last.fatalities || 0} killed · peak ${max}` : "";
+    },
+  });
+  return `${recordBlock}${trend}${provenance}`;
+}
+
+// ---------- shared: cities, live picture, infrastructure, coverage ----------
+//
+// Identical for admin-1 and admin-2 (see the task brief's own table), so each
+// is written once and called from both subdivisionCardSections and
+// districtCardSections below.
+
+const ADMIN_CITY_CAP = 8;
+
+/** Cities inside this state/district, largest first, with a capital flag. */
+function buildAdminCities(entry, raw, bounds) {
+  const cities = itemsInFeature(raw.cities, entry, bounds)
+    .sort((a, b) => (b.population || 0) - (a.population || 0));
+  if (!cities.length) return "";
+  const largest = cities[0];
+  const shown = cities.slice(0, ADMIN_CITY_CAP);
+  const rows = shown.map((c) => `<div class="event-row"><b>${esc(c.name)}</b>${c.is_capital ? " &middot; capital" : ""}
+    <div class="event-meta">Population ${fmtNumber(c.population)}</div></div>`).join("");
+  return `
+    <div class="cstats">${statRow("", "cities", cities.length, "hot")}</div>
+    <div class="meta">Largest: <b>${esc(largest.name)}</b>, population ${fmtNumber(largest.population)}${
+      largest.is_capital ? " &middot; capital" : ""
+    }</div>
+    <div class="popup-events">${rows}</div>
+    ${cities.length > shown.length ? `<div class="meta">+${cities.length - shown.length} more</div>` : ""}
+    <div class="meta">Cities: GeoNames, <i>reported</i> population figures.</div>`;
+}
+
+/** Aircraft, ships, fires and GPS jamming cells inside -- the live picture,
+ *  narrower than the country card's own (buildLivePicture) because a state or
+ *  a district is a smaller claim to begin with: counts only, no navy/tanker
+ *  breakdown. */
+function buildAdminLive(entry, raw, bounds) {
+  const aircraft = itemsInFeature(raw.adsb, entry, bounds).length;
+  const ships = itemsInFeature(raw.ais, entry, bounds).length;
+  const fires = itemsInFeature(raw.firms, entry, bounds).length;
+  const jamming = itemsInFeature(raw.jamming, entry, bounds).length;
+  const cells = [
+    statRow("", "aircraft", aircraft, "hot"),
+    statRow("", "ships", ships),
+    statRow("", "active fires", fires),
+    statRow("", "GPS jamming cells", jamming, "hot"),
+  ].join("");
+  if (!cells) return "";
+  return `<div class="cstats">${cells}</div>
+    ${BBOX_LOAD_CAVEAT}
+    <div class="meta">Aircraft: ADS-B, <i>measured</i>. Ships: AIS (aisstream.io), <i>measured</i>. Fires:
+      NASA FIRMS/HMS, <i>measured</i>. GPS jamming cells: gpsjam.org, <i>derived</i> from crowdsourced
+      ADS-B anomalies.</div>`;
+}
+
+/** Power plants, dams, airfields, ports, rail stops and border crossings
+ *  inside -- the country card's own energy-infrastructure and transport
+ *  folds (buildEnergyInfrastructure/buildTransport), merged into one section
+ *  here because a state or district card has room for one infrastructure
+ *  fold, not two. */
+function buildAdminInfrastructure(entry, raw, bounds) {
+  const inside = (items, predicate) => itemsInFeature(items, entry, bounds, predicate);
+  const plants = inside(raw.osmInfra, (d) => d.kind === "power_plant");
+  const dams = inside(raw.dams);
+  const airports = inside(raw.airports);
+  const ports = inside(raw.ports);
+  const rail = inside(raw.osmInfra, (d) => typeof d.kind === "string" && d.kind.startsWith("railway_"));
+  const crossings = inside(raw.osmInfra, (d) => d.kind === "border_control");
+  if (!plants.length && !dams.length && !airports.length && !ports.length && !rail.length && !crossings.length) {
+    return "";
+  }
+
+  const summary = summarizePowerPlants(plants);
+  const airportBuckets = bucketAirportsByType(airports);
+
+  return `
+    <div class="cstats">
+      ${statRow("", "power plants", summary.count)}
+      ${statRow("", "dams", dams.length)}
+      ${statRow("", "airfields", airports.length)}
+      ${statRow("", "ports", ports.length)}
+      ${statRow("", "rail stops", rail.length)}
+      ${statRow("", "border crossings", crossings.length)}
+    </div>
+    ${summary.count ? `<div class="meta">${summary.taggedCount} of ${summary.count} power plant${
+        summary.count === 1 ? "" : "s"
+      } tag a generation capacity in OpenStreetMap${
+        summary.taggedCount
+          ? ` &mdash; <b>${fmtNumber(Math.round(summary.totalOutputMw))} MW</b> summed over just those`
+          : ""
+      }.</div>` : ""}
+    ${airports.length ? `<div class="meta">Airfields by size: ${
+        AIRFIELD_ORDER.filter((t) => airportBuckets.counts[t])
+          .map((t) => `${esc(AIRFIELD_STYLE[t].label)} (${airportBuckets.counts[t]})`)
+          .join(", ") || "size not classified by OurAirports"
+      }</div>` : ""}
+    ${(plants.length || dams.length || rail.length || crossings.length)
+      ? `<p class="meta">${OSM_SWEEP_CAVEAT} ${DAM_SWEEP_CAVEAT}</p>` : ""}
+    <div class="meta">Sources: OpenStreetMap contributors (ODbL) via Overpass, <i>reported</i>, for power
+      plants, rail and border crossings &middot; Global Dam Watch v1.0 (CC BY 4.0), <i>reported</i> &middot;
+      OurAirports (public domain), <i>reported</i> &middot; NGA World Port Index, <i>reported</i> reference
+      data, roughly 2024-vintage.</div>`;
+}
+
+// Mirrors backend/sources/admin2_boundaries.py's own COUNTRIES tuple by hand
+// -- the same discipline WATCHED_WATERS above follows for its own backend
+// default: six ISO3 codes are thirty-six characters, and a network round trip
+// to keep them in sync would be a strange trade. If admin2_boundaries.py's
+// COUNTRIES tuple ever changes, this has to change with it by hand.
+const ADMIN2_COUNTRIES = [
+  { iso3: "AFG", name: "Afghanistan" },
+  { iso3: "VEN", name: "Venezuela" },
+  { iso3: "YEM", name: "Yemen" },
+  { iso3: "SDN", name: "Sudan" },
+  { iso3: "COD", name: "Democratic Republic of the Congo" },
+  { iso3: "UKR", name: "Ukraine" },
+];
+
+/**
+ * The honesty fold both cards share: which six countries have admin-2
+ * boundaries at all, the Natural Earth 1:10m subdivision caveat verbatim, and
+ * the "a missing row is not a reported zero" caveat verbatim -- see
+ * SUBDIVISION_SCALE_CAVEAT and DISTRICT_NO_RECORD_CAVEAT for why each is kept
+ * as its own constant rather than retyped here. Never empty, like
+ * buildCoverage on the country card: this is the place a reader checks *why*
+ * a fold above came back thin, so it has to survive being asked about a
+ * country with no district layer at all.
+ */
+function buildAdminCoverage() {
+  const list = ADMIN2_COUNTRIES.map((c) => esc(c.name)).join(", ");
+  return `
+    <div class="meta">${SUBDIVISION_SCALE_CAVEAT}</div>
+    <div class="meta">District-level (admin-2) boundaries and their monthly conflict archive exist for
+      six countries only: ${list}. Every other state or district on this map has no district layer to
+      drill into, which is not a claim that nothing has happened there.</div>
+    <div class="meta district-nodata">A district can go unmentioned in the archive for any given month.
+      ${DISTRICT_NO_RECORD_CAVEAT}</div>
+    <div class="meta">Boundaries: Natural Earth admin-1 (public domain, CC0) and OCHA COD-AB admin-2
+      (public domain), both <i>reported</i> geometry.</div>`;
+}
+
+/**
+ * The admin-1 (state) card, as a list of independently foldable sections --
+ * the sibling of countryCardSections/waterCardSections above, same
+ * {title, sections} shape.
+ *
+ * @param props   a buildSubdivisionIndex entry: key/code/name/postal/kind/
+ *                country_code/country, plus the `{polygons, bbox}` pair
+ *                buildShapeIndex attaches to every entry.
+ * @param raw     the map controller's live data buckets.
+ * @param bounds  the entry's own bbox, converted to {south,west,north,east}
+ *                -- a cheap pre-filter ahead of the real polygon tests above,
+ *                same role it plays for waterCardSections. Optional.
+ */
+export function subdivisionCardSections(props, raw, bounds) {
+  const sections = [
+    { id: "profile", title: "State profile", defaultOpen: true, html: buildSubdivisionProfile(props) },
+    { id: "conflict", title: "Conflict · last 72h", defaultOpen: true, html: buildSubdivisionConflict(props, raw, bounds) },
+    { id: "cities", title: "Cities", html: buildAdminCities(props, raw, bounds) },
+    { id: "live", title: "Live picture", html: buildAdminLive(props, raw, bounds) },
+    { id: "infrastructure", title: "Infrastructure", html: buildAdminInfrastructure(props, raw, bounds) },
+    { id: "coverage", title: "Data coverage", html: buildAdminCoverage() },
+  ];
+  return { title: props.name || "State", sections: sections.filter((s) => s.html && s.html.trim()) };
+}
+
+/**
+ * The admin-2 (district) card, as a list of independently foldable sections.
+ *
+ * @param props   a buildDistrictIndex entry: pcode/name/admin1/country_code,
+ *                plus the `{polygons, bbox}` pair buildShapeIndex attaches.
+ * @param raw     the map controller's live data buckets, plus the three
+ *                district-archive fields the controller mirrors onto it
+ *                (see createMapController.js): `districtCounts` (a Map,
+ *                pcode -> this month's record), `districtMonthLoading`
+ *                (whether that month's counts are still in flight) and
+ *                `districtSeries` ({ISO3: record[]}, this country's own slice
+ *                of the archive across every month fetched so far).
+ * @param bounds  the entry's own bbox, converted to {south,west,north,east}.
+ *                Optional.
+ * @param month   the archive month currently selected ("YYYY-MM"), or null
+ *                before the months list has loaded.
+ */
+export function districtCardSections(props, raw, bounds, month) {
+  const record = (raw.districtCounts && raw.districtCounts.get(props.pcode)) || null;
+  const loading = !!raw.districtMonthLoading;
+  const series = ((raw.districtSeries || {})[props.country_code] || [])
+    .filter((r) => (r.admin2_code || String(r.id || "").split("-")[2]) === props.pcode)
+    .sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
+
+  const sections = [
+    { id: "profile", title: "District profile", defaultOpen: true, html: buildDistrictProfile(props) },
+    { id: "conflict", title: "Conflict record", defaultOpen: true, html: buildDistrictConflict(record, series, month, loading) },
+    { id: "cities", title: "Cities", html: buildAdminCities(props, raw, bounds) },
+    { id: "live", title: "Live picture", html: buildAdminLive(props, raw, bounds) },
+    { id: "infrastructure", title: "Infrastructure", html: buildAdminInfrastructure(props, raw, bounds) },
+    { id: "coverage", title: "Data coverage", html: buildAdminCoverage() },
+  ];
+  return { title: props.name || props.pcode || "District", sections: sections.filter((s) => s.html && s.html.trim()) };
 }

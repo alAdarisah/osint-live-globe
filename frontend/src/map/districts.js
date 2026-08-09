@@ -15,7 +15,6 @@
 
 import { L } from "./leafletGlobal";
 import { buildShapeIndex, countryContainsPoint } from "./countryHitTest";
-import { esc, fmtNumber } from "../utils/format";
 
 // The three counts HAPI reports separately, kept separate here.
 //
@@ -134,71 +133,14 @@ export function findDistrictAt(index, lat, lon) {
   return null;
 }
 
-/**
- * The month selector that rides on the card.
- *
- * This is the whole archive control now that nothing is painted: no metric to
- * choose, because all four counts are shown at once, and no layer-wide coverage
- * tally, because the card is answering about one district rather than about the
- * layer. The change handler is bound by the controller after the content is set
- * -- see bindDistrictMonthSelect in createMapController.js -- because this is a
- * string of HTML and cannot carry one.
- *
- * Omitted entirely when the months list has not arrived: a selector with one
- * option nobody chose is furniture.
- */
-function monthPickerHtml(month, months) {
-  if (!months.length) return "";
-  const options = months
-    .map((m) => `<option value="${esc(m)}"${m === month ? " selected" : ""}>${esc(m)}</option>`)
-    .join("");
-  return `<label class="district-month">Month
-    <select class="district-month-select">${options}</select></label>`;
-}
-
-/**
- * What a clicked district says.
- *
- * All four counts, every time. They are three different things HAPI counts
- * separately -- and deaths -- so showing one and hiding the rest behind a
- * control would make a reader click twice to learn what one request already
- * fetched.
- *
- * `record` is null for a district the archive has no row for in this month --
- * distinct from a row of zeros, and said in those words, because the whole
- * archive rests on that difference. `loading` is the third state and is kept
- * apart from both: a month whose counts are still in flight must not read as a
- * month with no record.
- */
-export function districtPopupHtml(entry, state = {}) {
-  const { record = null, month = null, months = [], loading = false } = state;
-  const where = [entry.admin1, entry.country_code].filter(Boolean).join(" &middot; ");
-  const head = `
-    <h3>${esc(entry.name || entry.pcode)}</h3>
-    <div class="meta">${where}${entry.pcode ? ` &middot; ${esc(entry.pcode)}` : ""}</div>
-    ${monthPickerHtml(month, months)}`;
-  const provenance = `<div class="meta">ACLED via HDX HAPI, joined to OCHA COD-AB boundaries on
-    p-code. A monthly archive that runs to the end of a past month &mdash; not the live conflict
-    layer, and not comparable to it.</div>`;
-  if (loading) {
-    return `${head}
-      <div class="meta district-loading">Loading ${esc(month || "the archive")}&hellip;</div>
-      ${provenance}`;
-  }
-  if (!record) {
-    return `${head}
-      <div class="meta district-nodata">No record for ${esc(month || "this month")}.
-        That is different from a reported zero &mdash; this district is not in the archive for this
-        month, so nothing is claimed about it either way.</div>
-      ${provenance}`;
-  }
-  const rows = DISTRICT_METRICS.map((m) => {
-    const value = Number(m.valueOf(record)) || 0;
-    return `<div class="district-row"><span>${esc(m.label)}</span><b>${fmtNumber(value)}</b></div>`;
-  }).join("");
-  return `${head}
-    <div class="meta">Reviewed record for <b>${esc(record.month || month || "")}</b></div>
-    <div class="district-rows">${rows}</div>
-    <div class="meta">Demonstrations are counted separately and are not part of the violence totals.</div>
-    ${provenance}`;
-}
+// The "a missing row is not a reported zero" caveat -- kept as its own
+// constant, verbatim, for the same reason SUBDIVISION_SCALE_CAVEAT is
+// (subdivisions.js): the whole archive rests on this distinction, and a
+// second hand-typed copy is how a future edit could quietly soften it in one
+// place and not the other. Used both where a specific month has no row for a
+// specific district (map/popups.js's buildDistrictConflict) and in the card's
+// general coverage fold (buildAdminCoverage), which states the same rule
+// without a month already in hand.
+export const DISTRICT_NO_RECORD_CAVEAT =
+  "That is different from a reported zero &mdash; this district is not in the archive for this month, " +
+  "so nothing is claimed about it either way.";

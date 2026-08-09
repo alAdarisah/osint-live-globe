@@ -65,6 +65,12 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // card (see createMapController's reportWaterSelection), so one piece of
   // state is the whole of it.
   const [selectedWater, setSelectedWater] = useState(null);
+  // The state/district whose card is open, or null -- same shape as
+  // selectedWater above (one piece of state apiece, no chip array: neither
+  // has a highlight that outlives its card). See createMapController's
+  // reportSubdivisionSelection/reportDistrictSelection.
+  const [selectedSubdivision, setSelectedSubdivision] = useState(null);
+  const [selectedDistrict, setSelectedDistrict] = useState(null);
   // What the boundary editor is doing, for the controls that drive it: whether
   // a session is open, on which country, how many handles are drawn and whether
   // there is anything to undo. See map/borderEdit.js.
@@ -108,6 +114,10 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
         onCountryPointChange: (point) => setSelectedCountry((prev) => (prev ? { ...prev, point } : prev)),
         onWaterSelect: setSelectedWater,
         onWaterPointChange: (point) => setSelectedWater((prev) => (prev ? { ...prev, point } : prev)),
+        onSubdivisionSelect: setSelectedSubdivision,
+        onSubdivisionPointChange: (point) => setSelectedSubdivision((prev) => (prev ? { ...prev, point } : prev)),
+        onDistrictSelect: setSelectedDistrict,
+        onDistrictPointChange: (point) => setSelectedDistrict((prev) => (prev ? { ...prev, point } : prev)),
         onBorderEditChange: (state) => setBorderEdit(state?.active ? state : NO_BORDER_EDIT),
         onCountryFingerprints: setCountryFingerprints,
         onChoroplethChange: setChoropleth,
@@ -197,6 +207,26 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     setSelectedWater(null);
   }, []);
 
+  // Same shape again, for the state and district cards -- neither has a
+  // selection that outlives its card, so closing is deselecting, same as water.
+  const closeSubdivisionCard = useCallback(() => {
+    controllerRef.current?.closeSubdivisionCard();
+    setSelectedSubdivision(null);
+  }, []);
+
+  const closeDistrictCard = useCallback(() => {
+    controllerRef.current?.closeDistrictCard();
+    setSelectedDistrict(null);
+  }, []);
+
+  // The district card's own month <select> (DistrictInfoCard.jsx) calls this;
+  // the controller fetches the new month's counts and reports the rebuilt
+  // card back through onDistrictSelect itself, so there is nothing to set
+  // here beyond forwarding the call.
+  const setDistrictMonth = useCallback((month) => {
+    controllerRef.current?.setDistrictMonth(month);
+  }, []);
+
   const focusCountry = useCallback((key) => {
     controllerRef.current?.focusCountry(key);
   }, []);
@@ -268,6 +298,7 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   return {
     ready, counts, zoomNotes, mapBounds, zoom, windStatus, selectedCountry, countrySelection,
     selectedWater, closeWaterCard,
+    selectedSubdivision, closeSubdivisionCard, selectedDistrict, closeDistrictCard, setDistrictMonth,
     layerState, setSceneBypass, invalidateSize, focus,
     applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, setAgeReference,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
