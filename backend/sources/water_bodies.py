@@ -17,9 +17,11 @@ thing:
     Mediterranean contains the Aegean, which contains the Saronic Gulf), which
     is what area_deg2 exists to rank -- see _ring_area's docstring. It is also
     the only one with antimeridian-spanning features (Bering Sea, the North/
-    South Pacific, ...); see _bbox_and_area's docstring for how their bbox is
-    kept useful instead of collapsing to roughly the whole globe, and what
-    that means for a bbox-overlap test built on top of this.
+    South Pacific, ...); see _bbox's docstring for how their bbox is kept
+    useful instead of collapsing to roughly the whole globe (a rule every
+    kind's bbox shares, even though only marine's live data actually
+    exercises it), and what that means for a bbox-overlap test built on top
+    of this.
   ne_10m_lakes -- named lakes, reservoirs and alkaline lakes.
   ne_10m_rivers_lake_centerlines -- river centrelines, including the segments
     Natural Earth draws through a lake a river flows into, so the line does
@@ -186,9 +188,41 @@ def _ring_area(ring: list[list[float]]) -> float:
     return abs(total) / 2.0
 
 
-def _bbox_and_area(geometry: dict) -> tuple[list[float], float, bool]:
-    """[south, west, north, east], area_deg2, and an antimeridian flag, over
-    every polygon in the geometry.
+def _walk_lonlat(coords):
+    """Recurse into a GeoJSON coordinates array to any depth and yield every
+    (lon, lat) pair it contains.
+
+    The same shape regions.py's _walk_coords solves, kept local rather than
+    imported: this module has no other reason to depend on regions.py, and
+    the recursion is four lines. Handles every geometry type
+    _build_collection sees uniformly -- Polygon/MultiPolygon (marine, lakes)
+    and LineString/MultiLineString (rivers) all bottom out the same way, a
+    list whose first element is a number rather than another list. Interior
+    rings (holes) get walked along with the outer ring for a Polygon; that is
+    harmless for a bbox, since a hole can never extend past the outer ring
+    that contains it.
+    """
+    if not coords:
+        return
+    if isinstance(coords[0], (int, float)):
+        yield coords[0], coords[1]
+        return
+    for c in coords:
+        yield from _walk_lonlat(c)
+
+
+def _bbox(geometry: dict) -> tuple[list[float], bool]:
+    """[south, west, north, east] and an antimeridian flag, over every point
+    in the geometry.
+
+    Shared by every kind _build_collection stores -- Task 5's review found
+    that giving bbox to marine only forced /api/water to fall back to
+    walking full geometry for lakes and rivers on every request, with no
+    cache able to absorb the cost (storage.reference() never returns the
+    same object twice, so an identity-keyed memo like regions.filter_geojson's
+    never fires for it). A stored bbox for every kind is what makes that
+    endpoint's overlap test a cheap rectangle check for all three, not just
+    one.
 
     16 of the 306 marine features are MultiPolygon; measured against the live
     file, 6 of those are split at the antimeridian (Bering Sea, Chukchi Sea,
@@ -196,45 +230,74 @@ def _bbox_and_area(geometry: dict) -> tuple[list[float], float, bool]:
     disjoint named pieces, and every one of the 6 spans exactly [-180, 180] in
     raw longitude -- a flat min/max there would produce a box that matches
     every bbox query on Earth rather than the strait or ocean it is actually
-    bounding, defeating the cheap rectangle-overlap test a later task builds
-    on this. None of the other 10 MultiPolygon features comes close (10.5
-    degrees wide at most), so "MultiPolygon whose flat longitude span exceeds
-    180 degrees" is a clean, cheap detector for the 6 that need it.
+    bounding, defeating the cheap rectangle-overlap test built on this. None
+    of the other 10 MultiPolygon marine features comes close (10.5 degrees
+    wide at most), so "a Multi* geometry whose flat longitude span exceeds
+    180 degrees" is a clean, cheap detector for the 6 that need it -- and it
+    generalises past marine for free, MultiPolygon and MultiLineString alike,
+    since nothing about the test is polygon-specific.
 
-    For those 6, west/east are recomputed by shifting every negative
-    longitude into [180, 360) before taking min/max -- unwrapping the seam --
-    then shifting the result back into [-180, 180]. That can leave west >
-    east (e.g. Bering Sea: west=162.76, east=-161.44): this is not a bug, it
-    is the standard convention for a box that wraps the antimeridian, and
-    `antimeridian` is set alongside it so a reader does not have to infer the
-    wrap from a numeric comparison. A later task's bbox-overlap test must
-    treat west > east as two ranges (west..180 and -180..east), not reject it
-    as an inverted box.
+    Checked against the live lakes and rivers files before this was
+    generalised: neither comes close either. The widest multi-part longitude
+    span in ne_10m_lakes.geojson is 3.16 degrees (one of nine MultiPolygon
+    lakes, all disjoint pieces, none near the seam); in
+    ne_10m_rivers_lake_centerlines.geojson (every feature MultiLineString) it
+    is 30.05 degrees, the widest single river network. Both are far under
+    the 180-degree threshold below, so this path exists for correctness
+    against a future Natural Earth release, not because today's lakes/rivers
+    data exercises it -- test_water_bodies.py proves it works on a synthetic
+    lake anyway, since "untested until it happens in the wild" is not a plan.
+
+    For a feature that does wrap, west/east are recomputed by shifting every
+    negative longitude into [180, 360) before taking min/max -- unwrapping
+    the seam -- then shifting the result back into [-180, 180]. That can
+    leave west > east (e.g. Bering Sea: west=162.76, east=-161.44): this is
+    not a bug, it is the standard convention for a box that wraps the
+    antimeridian, and `antimeridian` is set alongside it so a reader does not
+    have to infer the wrap from a numeric comparison. A bbox-overlap test
+    built on this must treat west > east as two ranges (west..180 and
+    -180..east), not reject it as an inverted box.
     """
-    if geometry["type"] == "Polygon":
-        polygons = [geometry["coordinates"]]
-    else:
-        polygons = geometry["coordinates"]
     lats: list[float] = []
     lons: list[float] = []
-    area = 0.0
-    for polygon in polygons:
-        if not polygon:
-            continue
-        outer = polygon[0]
-        lons.extend(pt[0] for pt in outer)
-        lats.extend(pt[1] for pt in outer)
-        area += _ring_area(outer)
+    for lon, lat in _walk_lonlat(geometry.get("coordinates")):
+        lats.append(lat)
+        lons.append(lon)
     if not lats:
-        return [0.0, 0.0, 0.0, 0.0], 0.0, False
+        return [0.0, 0.0, 0.0, 0.0], False
     west, east = min(lons), max(lons)
-    antimeridian = geometry["type"] == "MultiPolygon" and (east - west) > 180
+    antimeridian = geometry["type"].startswith("Multi") and (east - west) > 180
     if antimeridian:
         shifted = [lon + 360 if lon < 0 else lon for lon in lons]
         s_west, s_east = min(shifted), max(shifted)
         west = s_west - 360 if s_west > 180 else s_west
         east = s_east - 360 if s_east > 180 else s_east
-    return [min(lats), west, max(lats), east], area, antimeridian
+    return [min(lats), west, max(lats), east], antimeridian
+
+
+def _bbox_and_area(geometry: dict) -> tuple[list[float], float, bool]:
+    """bbox/antimeridian (delegated to _bbox, which every kind now shares)
+    plus area_deg2 -- the shoelace sum over each polygon's outer ring, summed
+    across every part for a MultiPolygon.
+
+    Marine-only, unlike bbox: area_deg2 exists purely to rank nested
+    polygons on a click (the Mediterranean contains the Aegean, which
+    contains the Saronic Gulf -- see _ring_area's docstring), which lakes
+    (nested nine times across 1355 features, and never more than one level
+    deep) and rivers (lines, which have no area at all) don't need. See
+    _build_collection for where that per-kind decision is made.
+    """
+    if geometry["type"] == "Polygon":
+        polygons = [geometry["coordinates"]]
+    else:
+        polygons = geometry["coordinates"]
+    area = 0.0
+    for polygon in polygons:
+        if not polygon:
+            continue
+        area += _ring_area(polygon[0])
+    bbox, antimeridian = _bbox(geometry)
+    return bbox, area, antimeridian
 
 
 def _build_collection(features: list[dict], prefix: str, id_fn) -> dict:
@@ -261,12 +324,23 @@ def _build_collection(features: list[dict], prefix: str, id_fn) -> dict:
             "featurecla": props.get("featurecla") or None,
             "scalerank": int(props["scalerank"]) if props.get("scalerank") is not None else None,
         }
-        # bbox/area_deg2 are for ranking nested polygons on click, which is
-        # only a marine problem -- lakes and river centrelines do not nest.
+        # Every kind gets bbox/antimeridian -- /api/water needs a cheap
+        # stored rectangle to filter any of the three against, not just
+        # marine (see _bbox's docstring for why the first cut of this, bbox
+        # on marine alone, was a Task 5 review finding: lakes/rivers had to
+        # fall back to walking full geometry on every request instead).
+        # area_deg2 stays marine-only: it ranks nested polygons on a click,
+        # which is a marine problem (the Mediterranean/Aegean/Saronic Gulf
+        # nesting) that lakes barely have and rivers, being lines, cannot
+        # have at all -- see _bbox_and_area's docstring.
         if prefix == "marine":
             bbox, area_deg2, antimeridian = _bbox_and_area(geometry)
             record_props["bbox"] = bbox
             record_props["area_deg2"] = area_deg2
+            record_props["antimeridian"] = antimeridian
+        else:
+            bbox, antimeridian = _bbox(geometry)
+            record_props["bbox"] = bbox
             record_props["antimeridian"] = antimeridian
         out.append({"type": "Feature", "geometry": geometry, "properties": record_props})
     _dedupe_ids(out)

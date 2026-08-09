@@ -11,11 +11,18 @@ endpoint function directly, monkeypatch storage.reference to a fake in-memory
 map, and monkeypatch the module-level cache so tests don't bleed into each
 other.
 
-Only marine features carry a stored bbox (water_bodies._build_collection adds
-it to marine only, to rank nested polygons on a click -- lakes and river
-centrelines don't nest). Lakes and rivers therefore filter through
-regions.filter_geojson's geometry-derived bbox instead of a stored one; the
-tests below cover both paths.
+Every kind carries a stored bbox now (water_bodies._build_collection adds one
+to marine, lakes and rivers alike -- only area_deg2, which ranks nested
+polygons on a click, stays marine-only). That is the fix for a review finding
+on the first pass of this endpoint: giving bbox to marine only meant lakes
+and rivers filtered through regions.filter_geojson's geometry-derived bbox
+instead, which walks every coordinate, and did so on *every* request because
+storage.reference() never returns the same object twice (a fresh Postgres
+read plus json.loads each call), so filter_geojson's identity-keyed memo
+never fired for water traffic at all. The fixtures below give lakes and
+rivers a stored bbox that can *disagree* with their geometry specifically so
+a test can prove the endpoint reads the stored value rather than silently
+falling back to a walk.
 """
 
 import asyncio
@@ -36,21 +43,11 @@ def _body(response):
     return json.loads(response.body)
 
 
-def _feature(fid, south, west, north, east, geometry=None, bbox=None):
-    props = {"id": fid, "name": fid}
-    if bbox is not None:
-        props["bbox"] = bbox
+def _feature(fid, bbox, geometry=None):
     return {
         "type": "Feature",
-        "properties": props,
-        "geometry": geometry or {
-            "type": "Polygon",
-            # A simple closed square spanning the same box as the bbox
-            # argument, in GeoJSON's [lon, lat] order -- used by lakes/rivers
-            # fixtures below, whose bbox is derived from this geometry rather
-            # than stored.
-            "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
-        },
+        "properties": {"id": fid, "name": fid, "bbox": bbox, "antimeridian": False},
+        "geometry": geometry or {"type": "Point", "coordinates": [0.0, 0.0]},
     }
 
 
@@ -58,38 +55,34 @@ def _feature(fid, south, west, north, east, geometry=None, bbox=None):
 # a real antimeridian-spanning sea (Bering Sea, Chukchi Sea, Ross Sea, Gulf of
 # Anadyr', North/South Pacific -- the six water_bodies.py actually flags):
 # west=170 > east=-170 means two longitude ranges, 170..180 and -180..-170,
-# not an inverted box. See water_bodies._bbox_and_area's docstring, which
-# Task 4 wrote specifically so Task 5 would not reject this as malformed.
+# not an inverted box. See water_bodies._bbox's docstring, which explains why
+# this endpoint must not reject that as malformed.
 MARINE = {
     "type": "FeatureCollection",
     "features": [
-        _feature("marine:1", 10.0, 20.0, 15.0, 25.0, bbox=[10.0, 20.0, 15.0, 25.0]),
-        _feature("marine:2", 50.0, 170.0, 65.0, -170.0, bbox=[50.0, 170.0, 65.0, -170.0]),
+        _feature("marine:1", [10.0, 20.0, 15.0, 25.0]),
+        _feature("marine:2", [50.0, 170.0, 65.0, -170.0]),
     ],
 }
 
-# Lakes carry no stored bbox at all (verified against water_bodies.py: bbox is
-# only ever added when prefix == "marine"). Two features, near and far, so a
-# bbox query can tell them apart via their geometry.
+# Each feature's stored bbox deliberately does NOT match where its geometry
+# actually sits (geometry is a Point off at [99, 99], nowhere near either
+# feature's real box) -- see test_bbox_filtering_reads_the_stored_box_not_the_
+# geometry below, which only passes if the endpoint reads properties["bbox"]
+# and never looks at the geometry at all.
 LAKES = {
     "type": "FeatureCollection",
     "features": [
-        _feature("lake:1", 0.0, 0.0, 2.0, 2.0),
-        _feature("lake:2", 40.0, 40.0, 42.0, 42.0),
+        _feature("lake:1", [0.0, 0.0, 2.0, 2.0], geometry={"type": "Point", "coordinates": [99.0, 99.0]}),
+        _feature("lake:2", [40.0, 40.0, 42.0, 42.0], geometry={"type": "Point", "coordinates": [99.0, 99.0]}),
     ],
 }
 
 RIVERS = {
     "type": "FeatureCollection",
     "features": [
-        _feature(
-            "river:1", 0.0, 0.0, 2.0, 2.0,
-            geometry={"type": "MultiLineString", "coordinates": [[[0.0, 0.0], [2.0, 2.0]]]},
-        ),
-        _feature(
-            "river:2", 40.0, 40.0, 42.0, 42.0,
-            geometry={"type": "MultiLineString", "coordinates": [[[40.0, 40.0], [42.0, 42.0]]]},
-        ),
+        _feature("river:1", [0.0, 0.0, 2.0, 2.0], geometry={"type": "Point", "coordinates": [99.0, 99.0]}),
+        _feature("river:2", [40.0, 40.0, 42.0, 42.0], geometry={"type": "Point", "coordinates": [99.0, 99.0]}),
     ],
 }
 
@@ -146,10 +139,14 @@ def test_rivers_with_a_malformed_bbox_still_400s(stored):
     # regions.parse_bbox degrades a malformed box to None (the same as
     # absent) rather than raising -- for every other bbox-taking endpoint
     # that means "serve unfiltered", which is exactly what the rivers gate
-    # exists to prevent. A malformed box must not be a backdoor around it.
+    # exists to prevent. A malformed box must not be a backdoor around it, so
+    # this checks the same detail content as the sibling test above, not just
+    # the status code.
     with pytest.raises(HTTPException) as raised:
         _run(app_mod.water_endpoint(kind="rivers", bbox="not,a,real,bbox"))
     assert raised.value.status_code == 400
+    assert "bbox" in raised.value.detail
+    assert "rivers" in raised.value.detail
 
 
 def test_marine_and_lakes_are_served_whole_without_a_bbox(stored):
@@ -172,17 +169,38 @@ def test_marine_bbox_keeps_only_overlapping_features(stored):
     assert _ids(body) == ["marine:1"]
 
 
-def test_lakes_bbox_filters_via_geometry_not_a_stored_bbox(stored):
-    # Lakes have no properties["bbox"] (see the LAKES fixture) -- this only
-    # passes if the endpoint falls back to computing a bbox from the
-    # geometry (regions.filter_geojson) instead of assuming one is stored.
+def test_lakes_bbox_keeps_only_overlapping_features(stored):
+    # Every LAKES fixture feature's geometry sits at [99, 99] -- nowhere near
+    # either feature's stored bbox (see the LAKES fixture above). This query
+    # matches lake:1's stored bbox and must keep it; if the endpoint were
+    # secretly deriving a bbox from geometry instead of reading
+    # properties["bbox"] (the old regions.filter_geojson fallback this
+    # replaced), it would come back empty instead.
     body = _body(_run(app_mod.water_endpoint(kind="lakes", bbox="0,0,2,2")))
     assert _ids(body) == ["lake:1"]
 
 
-def test_rivers_bbox_filters_via_geometry(stored):
+def test_rivers_bbox_keeps_only_overlapping_features(stored):
+    # Same proof as the lakes test above, for rivers.
     body = _body(_run(app_mod.water_endpoint(kind="rivers", bbox="40,40,42,42")))
     assert _ids(body) == ["river:2"]
+
+
+def test_lakes_and_rivers_bbox_filtering_never_calls_filter_geojson(stored, monkeypatch):
+    # Regression guard for the review finding directly: filter_geojson walks
+    # every coordinate to derive a bbox, and storage.reference() never
+    # returns the same object twice, so its identity-keyed memo never
+    # absorbed that cost for water traffic. The fix was giving lakes/rivers
+    # a stored bbox (water_bodies.py) and dropping filter_geojson from this
+    # endpoint's code path entirely -- asserted here on the code path itself,
+    # not on timing, so a regression fails loudly rather than just slowly.
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("regions.filter_geojson must not be called by /api/water")
+
+    monkeypatch.setattr(app_mod.regions, "filter_geojson", _must_not_be_called)
+    _run(app_mod.water_endpoint(kind="lakes", bbox="0,0,2,2"))
+    _run(app_mod.water_endpoint(kind="rivers", bbox="40,40,42,42"))
+    _run(app_mod.water_endpoint(kind="marine", bbox="12,22,14,24"))
 
 
 # --- antimeridian: the case Task 4 flagged for Task 5's overlap test --------

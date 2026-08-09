@@ -218,18 +218,22 @@ def test_parse_marine_fixture():
     assert named["properties"]["antimeridian"] is False
 
 
-def test_parse_lakes_and_rivers_do_not_carry_bbox_or_area():
-    # bbox/area_deg2 exist only to rank nested marine polygons -- lakes and
-    # river centrelines do not nest the way seas do, so they should not carry
-    # fields that imply a ranking use they have no reason for.
+def test_parse_lakes_and_rivers_carry_bbox_but_not_area():
+    # bbox lets /api/water filter every kind against a cheap stored
+    # rectangle instead of walking full geometry on every request (the gap a
+    # Task 5 review caught when bbox was marine-only: storage.reference()
+    # never returns the same object twice, so a memo keyed on object
+    # identity like regions.filter_geojson's never fired for lakes/rivers).
+    # area_deg2 stays marine-only: it ranks nested polygons on a click, which
+    # lakes barely do and rivers, being lines, cannot do at all.
     for feature in wb.parse_lakes(FIXTURE_LAKES)["features"]:
-        assert "bbox" not in feature["properties"]
+        assert "bbox" in feature["properties"]
+        assert "antimeridian" in feature["properties"]
         assert "area_deg2" not in feature["properties"]
-        assert "antimeridian" not in feature["properties"]
     for feature in wb.parse_rivers(FIXTURE_RIVERS)["features"]:
-        assert "bbox" not in feature["properties"]
+        assert "bbox" in feature["properties"]
+        assert "antimeridian" in feature["properties"]
         assert "area_deg2" not in feature["properties"]
-        assert "antimeridian" not in feature["properties"]
 
 
 def test_parse_rivers_keeps_line_geometry():
@@ -398,3 +402,60 @@ def test_disjoint_multipolygon_is_not_flagged_as_antimeridian():
     assert props["bbox"] == [20.0, 20.0, 26.0, 26.0]
     assert props["bbox"][1] < props["bbox"][3], "not wrapped -- west stays less than east"
     assert props["area_deg2"] == 2.0
+
+
+def test_lakes_bbox_matches_a_known_square():
+    """Same _CLOSED_SQUARE geometry the marine bbox test above uses, read
+    through the non-marine path in _build_collection (_bbox, not
+    _bbox_and_area) -- proves lakes get a real, correct bbox rather than a
+    placeholder."""
+    lakes = wb.parse_lakes(FIXTURE_LAKES)
+    named = next(f for f in lakes["features"] if f["properties"]["name"] == "Lake Test")
+    assert named["properties"]["bbox"] == [0.0, 0.0, 2.0, 2.0]
+    assert named["properties"]["antimeridian"] is False
+
+
+def test_rivers_bbox_matches_its_line_geometry():
+    """Test River's coordinates are [[0,0],[1,1],[2,2]] as a MultiLineString
+    -- a LineString/MultiLineString has no ring to walk, so this proves _bbox
+    handles that geometry shape correctly too, not just Polygon/
+    MultiPolygon."""
+    rivers = wb.parse_rivers(FIXTURE_RIVERS)
+    named = next(f for f in rivers["features"] if f["properties"]["name"] == "Test River")
+    assert named["properties"]["bbox"] == [0.0, 0.0, 2.0, 2.0]
+    assert named["properties"]["antimeridian"] is False
+
+
+# A lake shaped like Dateline Sea above (same two-part split, same numbers) --
+# no real lake in ne_10m_lakes.geojson actually wraps the antimeridian
+# (measured against the live file while fixing this: the widest multi-part
+# longitude span among its nine MultiPolygon lakes is 3.16 degrees, nowhere
+# near the 180-degree threshold), but _bbox is now shared code serving lakes
+# and rivers as well as marine, and this proves the wrap logic generalises
+# past marine rather than only ever having been exercised by marine's real
+# wrapped seas.
+FIXTURE_LAKES_ANTIMERIDIAN = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": {
+                "name": "Hypothetical Split Lake", "featurecla": "Lake", "scalerank": 5,
+                "ne_id": 2000099,
+            },
+            "geometry": {"type": "MultiPolygon", "coordinates": [
+                [[[170, 10], [179, 10], [179, 11], [170, 11], [170, 10]]],
+                [[[-180, 10], [-175, 10], [-175, 11], [-180, 11], [-180, 10]]],
+            ]},
+        },
+    ],
+}
+
+
+def test_lakes_antimeridian_wrap_is_handled_the_same_way_marine_is():
+    collection = wb.parse_lakes(FIXTURE_LAKES_ANTIMERIDIAN)
+    props = collection["features"][0]["properties"]
+    assert props["antimeridian"] is True
+    assert props["bbox"] == [10.0, 170.0, 11.0, -175.0]
+    assert props["bbox"][1] > props["bbox"][3], "west > east is the wrap signal"
+    assert "area_deg2" not in props, "area_deg2 stays marine-only even on a wrapped lake"
