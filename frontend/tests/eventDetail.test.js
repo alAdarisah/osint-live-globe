@@ -274,6 +274,19 @@ test("buildReliabilityBlock: a scored record shows the band, reasons and provena
   assert.match(html, /<b>derived<\/b>/);
 });
 
+// A record can carry a named band (reliability_band, which survives replay)
+// without a finite numeric score -- reliabilityBand() (severity.js) resolves
+// the band from the name alone in that case, and buildReliabilityBlock has
+// to show *something* for the bar/number rather than "NaN/100". It falls
+// back to the band's own floor (band.min), same guard decorators.js's own
+// reliabilityBlock uses for the popup version of this bar.
+test("buildReliabilityBlock: a named band with no finite score falls back to the band's floor", () => {
+  const html = buildReliabilityBlock(baseRecord({ reliability: undefined, reliability_band: "high" }));
+  assert.match(html, /70\/100/); // RELIABILITY_BANDS' "high" entry: min 70
+  assert.match(html, /Reliable/);
+  assert.match(html, /rel-high/);
+});
+
 // ---------- geolocation block ----------
 
 test("buildGeolocationBlock: a moved (refined) record states the move and why", () => {
