@@ -334,7 +334,7 @@ def test_run_once_advances_the_cursor_and_writes_a_profile(monkeypatch):
     monkeypatch.setattr(vp, "storage", fake)
 
     result = _run(vp.run_once())
-    assert result == {"read": 2, "profiles": 1, "ok": True}
+    assert result == {"read": 2, "touched": 1, "profiles": 1, "ok": True}
     assert fake.docs["vessel_profile_cursor"] == {"last_id": 2}
     profile = fake.docs["vessel_profiles"][MMSI]
     assert profile["cargo_class"] == "tanker"
@@ -343,7 +343,7 @@ def test_run_once_advances_the_cursor_and_writes_a_profile(monkeypatch):
     # Nothing new: the second pass asks for everything past id 2, not the
     # same rows again.
     second = _run(vp.run_once())
-    assert second == {"read": 0, "profiles": 0, "ok": True}
+    assert second == {"read": 0, "touched": 0, "profiles": 0, "ok": True}
     assert fake.calls == [0, 2]
 
 
@@ -368,5 +368,45 @@ def test_run_once_is_a_no_op_when_there_is_nothing_new(monkeypatch):
     fake = _FakeStorage([])
     monkeypatch.setattr(vp, "storage", fake)
     result = _run(vp.run_once())
-    assert result == {"read": 0, "profiles": 0, "ok": True}
+    assert result == {"read": 0, "touched": 0, "profiles": 0, "ok": True}
     assert fake.docs == {}
+
+
+def test_a_hull_that_goes_dark_decays_instead_of_freezing_at_its_last_verdict(monkeypatch):
+    """The Task 16 review's Important finding: a hull that stops reporting
+    must not keep serving its last confident laden_state/draught_current
+    forever just because build_profile only ever ran for it once. Other AIS
+    traffic (a second, unrelated hull) keeps the cursor moving and keeps
+    apply_history's pruning running against every hull in the accumulator,
+    including the one that has gone quiet -- see the module docstring."""
+    OTHER = "999999999"
+    confident_rows = [
+        row(i + 1, float(i), draught=v, ship_type=80)
+        for i, v in enumerate((16.0, 17.0, 18.0, 19.0, 20.0))
+    ]
+    fake = _FakeStorage(confident_rows)
+    monkeypatch.setattr(vp, "storage", fake)
+
+    _run(vp.run_once())
+    profile = fake.docs["vessel_profiles"][MMSI]
+    assert profile["laden_state"] == "laden"
+    assert profile["draught_current"] == 20.0
+    assert profile["sample_count"] == 5
+
+    # Far enough past HISTORY_RETENTION_SECONDS (from *every* one of MMSI's
+    # old timestamps, not just the newest) that every sample ages out -- but
+    # the batch itself only ever mentions a different hull, so MMSI is never
+    # in `touched` again.
+    later_ts = 2 * config.HISTORY_RETENTION_SECONDS
+    fake.history.append(row(6, later_ts, mmsi=OTHER, draught=5.0))
+
+    served = _run(vp.run_once())
+    assert served["touched"] == 1  # only OTHER reported this pass
+    profile = fake.docs["vessel_profiles"][MMSI]
+    assert profile["laden_state"] == "unknown"
+    assert profile["laden_state_reason"] == "insufficient_samples"
+    assert profile["draught_current"] is None
+    assert profile["sample_count"] == 0
+    # The dark hull is still in the document -- it has not been evicted, its
+    # verdict has simply stopped overclaiming.
+    assert MMSI in fake.docs["vessel_profiles"]

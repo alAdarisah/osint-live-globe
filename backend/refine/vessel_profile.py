@@ -76,8 +76,26 @@ storage.port_calls_for(mmsi, limit) is the only interface this codebase has for
 module docstring on backend/refine/port_calls.py. Fetched concurrently
 (asyncio.gather) for every hull touched *this pass*, not the whole 20,000-hull
 population, which is what keeps the fan-out proportional to genuinely new AIS
-traffic. VESSEL_PROFILE_INTERVAL is slower than port_calls' own 15 minutes for
-the same reason.
+traffic. The result is cached on the accumulator entry itself
+(last_port_label/last_port_country), not only on the built profile -- see the
+next paragraph for why that cache has to survive a pass where the hull isn't
+touched. VESSEL_PROFILE_INTERVAL is slower than port_calls' own 15 minutes for
+the same reason the lookup is per-hull rather than bulk.
+
+**Why build_profile reruns for every hull in the accumulator, not only the
+ones a pass touched.** A hull that goes dark -- transponder off, sanctions
+evasion, simply out of range -- stops appearing in `touched`, but
+apply_history keeps pruning *its* samples on every later pass regardless (see
+above): the evidence keeps eroding whether or not anyone is watching. Rerunning
+build_profile for the whole accumulator each pass is what lets laden_state and
+draught_current decay to insufficient_samples/None along with that evidence,
+instead of freezing at the hull's last confident verdict for as long as it
+survives the 20,000-hull cap -- which, on quiet unique-hull traffic, is not
+bounded in time at all. This costs nothing beyond CPU: build_profile is pure,
+the port-call lookup it needs is read from the cache the paragraph above
+describes rather than re-fetched, and storage.record_reference below was
+already writing the whole profiles document on every pass regardless of how
+much of it actually changed.
 
 **Why record_reference's writes are not verified before the cursor advances,
 unlike port_calls.record_port_calls.** That distinction is deliberate, not an
@@ -85,10 +103,9 @@ oversight: port_calls' rows are unique historical events entity_history will
 never offer twice (it is pruned at three days), so a lost write is a lost
 fact. A vessel profile is a recomputed summary, not an event -- if this pass's
 write is dropped by a Postgres hiccup, the next pass overwrites the same
-document with fresher numbers anyway, the same trade-off escalation.py and
-airfield_activity.py already make for their own reference documents (and the
-one port_calls.py itself makes for *its own* state and cursor writes, as
-opposed to the vessel_port_calls rows record_port_calls actually verifies).
+document with fresher numbers anyway, the same trade-off port_calls.py itself
+makes for *its own* state and cursor writes, as opposed to the
+vessel_port_calls rows record_port_calls actually verifies.
 """
 
 import asyncio
@@ -343,11 +360,6 @@ async def _load_state() -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
-async def _load_profiles() -> dict:
-    doc = await storage.reference(PROFILES_NAME)
-    return doc if isinstance(doc, dict) else {}
-
-
 async def _load_port_labels() -> dict:
     """Every port this map knows of, keyed by id, for turning a
     vessel_port_calls row's bare port_id back into a name and (for a World
@@ -372,7 +384,14 @@ async def _load_port_labels() -> dict:
     return by_id
 
 
-async def _profile_one(mmsi: str, entry: dict, port_labels: dict, now: float) -> dict:
+async def _refresh_port_label(mmsi: str, entry: dict, port_labels: dict) -> None:
+    """Mutates `entry` in place with the freshest last-port name/country this
+    pass can resolve, cached on the accumulator entry itself (not just the
+    built profile) so a later pass can rebuild a full profile for this hull
+    -- see run_once -- without re-querying storage.port_calls_for for a hull
+    it did not touch this time. Only ever called for hulls touched this pass;
+    see the module docstring on why the lookup itself is bounded that way.
+    """
     last_calls = await storage.port_calls_for(mmsi, limit=1)
     last_call = last_calls[0] if last_calls else None
     label, country = None, None
@@ -380,7 +399,8 @@ async def _profile_one(mmsi: str, entry: dict, port_labels: dict, now: float) ->
         port = port_labels.get(str(last_call.get("port_id")))
         label = (port or {}).get("name") or (port or {}).get("id") or last_call.get("port_id")
         country = (port or {}).get("country")
-    return build_profile(mmsi, entry, label, country, now)
+    entry["last_port_label"] = label
+    entry["last_port_country"] = country
 
 
 async def run_once() -> dict:
@@ -392,7 +412,7 @@ async def run_once() -> dict:
     cursor = await _load_cursor()
     rows = await storage.entity_history_since("ais", cursor, BATCH_LIMIT)
     if not rows:
-        return {"read": 0, "profiles": 0, "ok": True}
+        return {"read": 0, "touched": 0, "profiles": 0, "ok": True}
 
     state = await _load_state()
     # The newest row's own timestamp, not time.time(): apply_history's sample
@@ -405,28 +425,36 @@ async def run_once() -> dict:
     now = rows[-1]["ts"]
     new_state, touched = apply_history(rows, state, now)
     new_state = _evict_lru(new_state, HULL_CAP)
-    # A hull evicted the same pass it was touched gets no profile written --
-    # there is nowhere durable left to attach one to.
+    # A hull evicted the same pass it was touched gets no fresher port lookup
+    # -- there is nowhere durable left on the accumulator to cache it.
     touched &= new_state.keys()
 
     port_labels = await _load_port_labels()
-    results = await asyncio.gather(
-        *(_profile_one(mmsi, new_state[mmsi], port_labels, now) for mmsi in touched)
+    await asyncio.gather(
+        *(_refresh_port_label(mmsi, new_state[mmsi], port_labels) for mmsi in touched)
     )
 
-    profiles = await _load_profiles()
-    for profile in results:
-        profiles[profile["mmsi"]] = profile
-    # Keep the profiles document in lockstep with the accumulator's own cap,
-    # so a hull evicted from vessel_profile_state doesn't leave a stale
-    # profile behind under a key nothing will ever refresh again.
-    profiles = {mmsi: profile for mmsi, profile in profiles.items() if mmsi in new_state}
+    # Rebuilt for *every* hull the accumulator still holds, not only the ones
+    # this pass touched. apply_history prunes every entry's samples on every
+    # pass regardless of who reported this time (see its own comment), so a
+    # hull that has gone dark keeps losing evidence pass after pass whether or
+    # not build_profile ever runs again for it -- rerunning it here is what
+    # lets a stale laden_state decay to insufficient_samples along with the
+    # samples themselves, instead of freezing at its last confident verdict
+    # for as long as the hull stays under the 20,000-hull cap. This is pure
+    # dict-comprehension work over data already in memory -- no new I/O -- so
+    # doing it for the full accumulator each pass costs nothing beyond what
+    # storage.record_reference below was already going to write regardless.
+    profiles = {
+        mmsi: build_profile(mmsi, entry, entry.get("last_port_label"), entry.get("last_port_country"), now)
+        for mmsi, entry in new_state.items()
+    }
 
     await storage.record_reference(STATE_NAME, new_state)
     await storage.record_reference(PROFILES_NAME, profiles)
     await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
 
-    return {"read": len(rows), "profiles": len(results), "ok": True}
+    return {"read": len(rows), "touched": len(touched), "profiles": len(profiles), "ok": True}
 
 
 async def derive_forever():
@@ -440,8 +468,9 @@ async def derive_forever():
         try:
             summary = await run_once()
             log.info(
-                "Vessel profiles: read %d AIS movement rows, %d profile(s) recomputed",
-                summary["read"], summary["profiles"],
+                "Vessel profiles: read %d AIS movement rows, %d hull(s) reported this "
+                "pass, %d profile(s) held",
+                summary["read"], summary["touched"], summary["profiles"],
             )
             await storage.record_source_health(HEALTH_NAME, summary["profiles"], True)
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
