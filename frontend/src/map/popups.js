@@ -3,9 +3,13 @@
 // events/gdelt arrays passed in by the caller (see useLeafletMap) rather than
 // holding its own copy, so it's always working off the latest poll.
 
-import { esc, fmtNumber, haversineKm, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
+import { esc, fmtNumber, haversineKm, parseGdeltDateAdded, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
 import { boundsContainsPoint } from "../utils/geo";
-import { classifyAircraft, classifyShip, classifyVesselTraffic, AIS_COVERAGE_CAVEAT, EMPTY_WATER_HEADLINE } from "./decorators";
+import {
+  classifyAircraft, classifyShip, classifyVesselTraffic, isSanctioned,
+  AIS_COVERAGE_CAVEAT, EMPTY_WATER_HEADLINE,
+  OSM_INFRA_STYLE, OSM_INFRA_ORDER, AIRFIELD_STYLE, AIRFIELD_ORDER, MILITARY_ROLE_STYLE,
+} from "./decorators";
 import { countryContainsPoint } from "./countryHitTest";
 import { CLASS_LABEL as WATER_CLASS_LABEL, WATER_SCALE_CAVEAT } from "./water";
 
@@ -150,17 +154,31 @@ function buildEventsSection(eventItems, gdeltItems, { heading = true } = {}) {
 // and stays responsive on the ADS-B layer (10k+ aircraft). It over-counts
 // for sprawling or oddly-shaped countries, so the UI says "in / near"
 // rather than claiming precision it doesn't have.
-function countInBounds(items, bounds, predicate) {
-  if (!bounds || !items) return 0;
-  let n = 0;
+// The filtered records themselves, not just their count -- countInBounds
+// below is itemsInBounds(...).length, kept as its own name because most call
+// sites only ever want the number. Tasks 9's new sections need the records
+// (to list them, to sum a field on them), so this is the one both build on.
+function itemsInBounds(items, bounds, predicate) {
+  if (!bounds || !items) return [];
+  const out = [];
   for (const item of items) {
     if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
     if (!boundsContainsPoint(bounds, item.lat, item.lon)) continue;
     if (predicate && !predicate(item)) continue;
-    n += 1;
+    out.push(item);
   }
-  return n;
+  return out;
 }
+
+function countInBounds(items, bounds, predicate) {
+  return itemsInBounds(items, bounds, predicate).length;
+}
+
+// The exact sentence buildLivePicture has always used for "this is a count
+// over whatever this session happens to have loaded, not a survey" -- Task 9
+// reuses it verbatim for the military section's own bbox-scoped counts rather
+// than paraphrasing the same caveat a second way (see that task's brief).
+const BBOX_LOAD_CAVEAT = '<div class="cstat-note">Counted within the area currently loaded.</div>';
 
 function statRow(icon, label, value, extraClass) {
   if (!value) return ""; // a zero tells the reader nothing -- omit rather than pad the card with noise
@@ -201,7 +219,7 @@ function buildLivePicture(bounds, raw) {
   // with a label is a fact, and it is the same register as the choropleth's
   // coverage note and the conflict layer's cap note.
   return `<div class="cstats">${cells}</div>
-    <div class="cstat-note">Counted within the area currently loaded.</div>`;
+    ${BBOX_LOAD_CAVEAT}`;
 }
 
 // 72h rather than the full 3-day feed window so "recent" means recent --
@@ -760,6 +778,370 @@ function buildFoodTrade(props, raw) {
     } &mdash; curated forecasts (AMIS) and an observed index (FPI).</div>`;
 }
 
+// ---------- Task 9: energy, military, transport, data coverage ----------
+//
+// Four more sections, all read from data the app already has in hand for its
+// own layers -- same discipline buildLivePicture set: no extra request fires
+// just because a country was clicked. All four share two problems the rest of
+// the card mostly doesn't: OpenStreetMap and Global Dam Watch are swept over
+// only this app's eleven tracked conflict theatres (see osm_infra.py's and
+// dams.py's own module docstrings), so a country outside every theatre reads
+// zero from either not because it has none of that thing, but because the
+// sweep never reached it. Every section below that draws on raw.osmInfra or
+// raw.dams says so, rather than let an honest "not swept" read as "confirmed
+// empty" -- the same mistake the OSM output_mw caveat two sections down exists
+// to prevent for a single field, generalised here to a whole feed.
+const OSM_SWEEP_CAVEAT = "OpenStreetMap's sweep behind the figures above covers only this app's eleven "
+  + "tracked conflict theatres, not the whole world &mdash; a zero here can mean the sweep never reached "
+  + "this country, not that nothing is here.";
+const DAM_SWEEP_CAVEAT = "Global Dam Watch is limited the same way here: swept only over those same eleven "
+  + "theatres, not the whole world.";
+
+/**
+ * Group a list by some key, dropping items the key function says are
+ * unclassifiable into their own bucket rather than a bucket named "null".
+ * Shared by the energy section's by-source breakdown and the transport
+ * section's size-class bucketing -- the same small piece of arithmetic both
+ * need, so it exists once rather than as two hand-rolled loops that could
+ * quietly disagree about how a missing key is counted.
+ *
+ * Not exported itself; the two call sites below (summarizePowerPlants,
+ * bucketAirportsByType, bucketPortsBySize) are what the tests exercise, since
+ * those are the shapes a caller actually needs.
+ */
+function tallyBy(items, keyOf) {
+  const counts = {};
+  let unclassified = 0;
+  for (const item of items || []) {
+    const key = keyOf(item);
+    if (key == null) {
+      unclassified += 1;
+      continue;
+    }
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return { counts, unclassified, total: (items || []).length };
+}
+
+// ---------- energy infrastructure (beside the existing cross-border section) ----------
+//
+// Task 8 already gave this card a "Cross-border electricity" fold
+// (buildEnergy/id "power" below) for what the interconnectors carry and what
+// the day-ahead market sold -- a claim about flows crossing a border, which
+// has no location of its own and is deliberately not on the map. This section
+// is the opposite kind of claim: what generates and stores power *inside*
+// this country's own bbox. Kept as a separate fold rather than folded into
+// "power" -- physical vs. commercial flow (measured vs. scheduled) is already
+// the one distinction that section exists to make, and stacking "how much
+// generation capacity is here" on top would blur that into a second,
+// unrelated distinction sharing one heading. Task 9's brief leaves the choice
+// open; this is the "add beside it" branch, and nothing about buildEnergy
+// below (including its net_series sparkline and coverage line, both new in
+// Task 8) is touched.
+const ENERGY_SOURCE_CAP = 6;
+
+/**
+ * Power plants, reduced to the one arithmetic problem the brief calls out by
+ * name: OSM tags `output_mw` on a minority of the plants it has, and a sum
+ * over only the tagged ones must never be presented as this country's
+ * generation capacity. Exported so that arithmetic -- including the case
+ * where every plant in view is untagged -- is tested directly, without
+ * building a card around it.
+ */
+export function summarizePowerPlants(plants) {
+  const list = plants || [];
+  const tagged = list.filter((p) => Number.isFinite(p.output_mw));
+  const totalOutputMw = tagged.reduce((sum, p) => sum + p.output_mw, 0);
+  const { counts } = tallyBy(list, (p) => p.source_tag || null);
+  return {
+    count: list.length,
+    taggedCount: tagged.length,
+    totalOutputMw,
+    bySource: Object.entries(counts).sort((a, b) => b[1] - a[1]),
+  };
+}
+
+function buildEnergyInfrastructure(bounds, raw) {
+  const plants = itemsInBounds(raw.osmInfra, bounds, (d) => d.kind === "power_plant");
+  const dams = itemsInBounds(raw.dams, bounds);
+  const landings = itemsInBounds(raw.cableLandings, bounds);
+  if (!plants.length && !dams.length && !landings.length) return "";
+
+  const summary = summarizePowerPlants(plants);
+  const shownSources = summary.bySource.slice(0, ENERGY_SOURCE_CAP);
+
+  const damPower = dams.filter((d) => Number.isFinite(d.power_mw));
+  const damPowerMw = damPower.reduce((sum, d) => sum + d.power_mw, 0);
+  const damCapacity = dams.filter((d) => Number.isFinite(d.capacity_mcm));
+  const damCapacityMcm = damCapacity.reduce((sum, d) => sum + d.capacity_mcm, 0);
+
+  return `
+    <div class="cstats">
+      ${statRow("", "power plants (OSM)", summary.count)}
+      ${statRow("", "dams", dams.length)}
+      ${statRow("", "cable landings", landings.length)}
+    </div>
+    ${summary.count ? `
+    <div class="csection-h">Power plants</div>
+    <div>${summary.taggedCount} of ${summary.count} plant${summary.count === 1 ? "" : "s"} tag a
+      generation capacity in OpenStreetMap.</div>
+    ${summary.taggedCount
+      ? `<div><b>${fmtNumber(Math.round(summary.totalOutputMw))} MW</b> summed over just those
+          ${summary.taggedCount} &mdash; <b>not this country's generation capacity</b>, since
+          ${summary.count - summary.taggedCount} plant${summary.count - summary.taggedCount === 1 ? "" : "s"}
+          here carry no output tag at all and contribute nothing to that sum.</div>`
+      : `<div class="meta">None of the ${summary.count} plant${summary.count === 1 ? "" : "s"} found here
+          tag an output figure, so no capacity total can be shown &mdash; OpenStreetMap has the sites, not
+          the numbers, for this country.</div>`}
+    ${shownSources.length
+      ? `<div class="meta">By source: ${shownSources.map(([src, n]) => `${esc(src || "unspecified")} (${n})`).join(", ")}</div>`
+      : ""}
+    ` : ""}
+    ${dams.length ? `
+    <div class="csection-h">Dams</div>
+    <div>${damPower.length} of ${dams.length} dam${dams.length === 1 ? "" : "s"} report a generation
+      capacity: <b>${fmtNumber(Math.round(damPowerMw))} MW</b> summed over ${damPower.length === dams.length ? "all of them" : `just those ${damPower.length}`}.</div>
+    <div>${damCapacity.length} of ${dams.length} report a reservoir capacity:
+      <b>${fmtNumber(Math.round(damCapacityMcm))} million m&sup3;</b> summed over ${damCapacity.length === dams.length ? "all of them" : `just those ${damCapacity.length}`}.</div>
+    ` : ""}
+    <p class="meta">${OSM_SWEEP_CAVEAT} ${DAM_SWEEP_CAVEAT}</p>
+    <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass, <i>reported</i> by its
+      mappers and not checked by hand &middot; Global Dam Watch v1.0 (CC BY 4.0), <i>reported</i> by the
+      dataset's own contributing surveys &middot; TeleGeography submarine cable landings.</div>`;
+}
+
+// ---------- military & security ----------
+//
+// Sanctioned hulls and tails are matched on their *registry*, not their
+// position: an OFAC-listed flag state or an aircraft's ICAO allocation-block
+// country is a fact about who a hull or airframe is claimed under, unrelated
+// to where it happens to be on the map right now. So this half of the
+// section is not bbox-scoped like the rest of it, and says so in its own
+// caveat rather than borrowing the bbox one it does not share.
+const SANCTIONED_LIST_CAP = 6;
+
+function sanctionedByFlag(props, raw) {
+  const wanted = normalizeCountryName(props.name);
+  const iso2 = props.iso_a2 && props.iso_a2 !== "-99" ? props.iso_a2 : null;
+  const ships = wanted
+    ? (raw.ais || []).filter((d) => isSanctioned(d) && normalizeCountryName(d.sanctions.flag || "") === wanted)
+    : [];
+  // hex_country is derived from the aircraft's permanent ICAO 24-bit
+  // allocation (see decorators.js's own note on it vs. origin_country) --
+  // the closest thing an airframe has to a flag state, and the only one
+  // OFAC's own listing data does not carry for aircraft rows.
+  const aircraft = iso2
+    ? (raw.adsb || []).filter((d) => isSanctioned(d) && d.hex_country === iso2)
+    : [];
+  return { ships, aircraft };
+}
+
+function sanctionedRows(ships, aircraft) {
+  const shipRows = ships.slice(0, SANCTIONED_LIST_CAP).map((d) => {
+    const open = openableRow("ais", d.mmsi);
+    return `<div${open || ' class="event-row"'}><b>${esc(d.name || `MMSI ${d.mmsi}`)}</b>
+      <div class="event-meta">${esc(d.sanctions.program || "OFAC-designated")} &middot; vessel</div></div>`;
+  }).join("");
+  const aircraftRows = aircraft.slice(0, SANCTIONED_LIST_CAP).map((d) => {
+    const open = openableRow("adsb", d.icao24);
+    return `<div${open || ' class="event-row"'}><b>${esc(d.registration || d.callsign || d.icao24)}</b>
+      <div class="event-meta">${esc(d.sanctions.program || "OFAC-designated")} &middot; aircraft</div></div>`;
+  }).join("");
+  return shipRows + aircraftRows;
+}
+
+function buildMilitary(bounds, raw, props) {
+  const airfields = itemsInBounds(raw.osmInfra, bounds, (d) => d.kind === "military_airfield" || d.kind === "military_area");
+  // Curated infra (backend/infrastructure.py) tags every military site
+  // type: "military" -- the same field decorators.js reads to colour it.
+  const bases = itemsInBounds(raw.infra, bounds, (d) => d.type === "military");
+  const aircraft = itemsInBounds(raw.adsb, bounds, (a) => classifyAircraft(a) === "military");
+  const navy = itemsInBounds(raw.ais, bounds, (s) => classifyShip(s) === "navy");
+  const { ships: sanctionedShips, aircraft: sanctionedAircraft } = sanctionedByFlag(props, raw);
+
+  if (!airfields.length && !bases.length && !aircraft.length && !navy.length
+    && !sanctionedShips.length && !sanctionedAircraft.length) return "";
+
+  const roleCounts = tallyBy(aircraft, (a) => (a.military_role && MILITARY_ROLE_STYLE[a.military_role] ? a.military_role : null));
+  const roleEntries = Object.entries(roleCounts.counts).sort((a, b) => b[1] - a[1]);
+
+  const cells = [
+    statRow("", "military airfields/areas (OSM)", airfields.length, "hot"),
+    statRow("", "curated bases", bases.length),
+    statRow("", "military aircraft", aircraft.length, "hot"),
+    statRow("", "navy vessels", navy.length),
+  ].join("");
+
+  return `
+    <div class="cstats">${cells}</div>
+    ${BBOX_LOAD_CAVEAT}
+    ${roleEntries.length
+      ? `<div class="meta">Aircraft by role: ${roleEntries.map(([role, n]) => `${esc(MILITARY_ROLE_STYLE[role].label)} (${n})`).join(", ")}</div>`
+      : ""}
+    ${airfields.length ? `<div class="csection-h">Airfields & areas (OpenStreetMap)</div>${
+      infraListRows(airfields, "osmInfra", (d) => `${d.name} &mdash; ${OSM_INFRA_STYLE[d.kind]?.label || d.kind}`)
+    }<p class="meta">${OSM_SWEEP_CAVEAT}</p>` : ""}
+    ${bases.length ? `<div class="csection-h">Curated bases</div>${infraListRows(bases, null, (d) => d.name)}` : ""}
+    ${(sanctionedShips.length || sanctionedAircraft.length) ? `
+    <div class="csection-h">Sanctioned hulls & tails flagged to ${esc(props.name || "this country")}</div>
+    ${sanctionedRows(sanctionedShips, sanctionedAircraft)}
+    <p class="meta">Matched on OFAC's listed flag state for vessels and the aircraft's ICAO
+      allocation-block country for tails &mdash; both are a claim about the registry a hull or airframe is
+      held under, not about where it is right now, so this list is <b>not</b> limited to the area currently
+      loaded the way the counts above are.</p>` : ""}
+    <div class="meta">Sources: OpenStreetMap contributors (ODbL) via Overpass, <i>reported</i> &middot;
+      curated infrastructure list (this app, hand-checked coordinates), <i>reported</i> &middot; ADS-B
+      military classification, <i>inferred</i> from callsign/registry heuristics where no confirmed flag is
+      available (see the aircraft's own popup) &middot; AIS navy classification, <i>derived</i> from the
+      vessel's own broadcast ship-type code &middot; OFAC Specially Designated Nationals list (US
+      Treasury), <i>reported</i>.</div>`;
+}
+
+// ---------- transport ----------
+const PORT_SIZE_ORDER = ["Large", "Medium", "Small", "Very small"];
+
+/** Airports bucketed by OurAirports' own size class. Exported for the test. */
+export function bucketAirportsByType(airports) {
+  return tallyBy(airports, (a) => (AIRFIELD_STYLE[a.type] ? a.type : null));
+}
+
+/** Ports bucketed by the World Port Index's own harbour-size label. */
+export function bucketPortsBySize(ports) {
+  return tallyBy(ports, (p) => p.harbor_size_label || null);
+}
+
+function buildTransport(bounds, raw) {
+  const airports = itemsInBounds(raw.airports, bounds);
+  const ports = itemsInBounds(raw.ports, bounds);
+  const crossings = itemsInBounds(raw.osmInfra, bounds, (d) => d.kind === "border_control");
+  const rail = itemsInBounds(raw.osmInfra, bounds, (d) => typeof d.kind === "string" && d.kind.startsWith("railway_"));
+  if (!airports.length && !ports.length && !crossings.length && !rail.length) return "";
+
+  const airportBuckets = bucketAirportsByType(airports);
+  const portBuckets = bucketPortsBySize(ports);
+  const oilTerminals = ports.filter((p) => p.oil_terminal).length;
+  const railBuckets = tallyBy(rail, (d) => d.kind);
+
+  return `
+    <div class="cstats">
+      ${statRow("", "airports", airports.length)}
+      ${statRow("", "ports", ports.length)}
+      ${statRow("", "border crossings (OSM)", crossings.length)}
+      ${statRow("", "rail stops (OSM)", rail.length)}
+    </div>
+    ${airports.length ? `<div class="csection-h">Airports by size</div>
+      <div>${AIRFIELD_ORDER.filter((t) => airportBuckets.counts[t]).map((t) => `${esc(AIRFIELD_STYLE[t].label)} (${airportBuckets.counts[t]})`).join(", ")
+        || "size not classified by OurAirports"}</div>` : ""}
+    ${ports.length ? `<div class="csection-h">Ports by size</div>
+      <div>${PORT_SIZE_ORDER.filter((s) => portBuckets.counts[s]).map((s) => `${esc(s)} (${portBuckets.counts[s]})`).join(", ")
+        || "size not classified"}${portBuckets.unclassified ? `, ${portBuckets.unclassified} not classified` : ""}${
+        oilTerminals ? ` &middot; <b>${oilTerminals}</b> with an oil terminal` : ""
+      }</div>` : ""}
+    ${crossings.length ? `<div class="csection-h">Border crossings (OpenStreetMap)</div>${infraListRows(crossings, "osmInfra", (d) => d.name)}` : ""}
+    ${rail.length ? `<div class="csection-h">Rail (OpenStreetMap)</div>
+      <div>${OSM_INFRA_ORDER.filter((k) => k.startsWith("railway_") && railBuckets.counts[k])
+        .map((k) => `${esc(OSM_INFRA_STYLE[k].label)} (${railBuckets.counts[k]})`).join(", ")}</div>` : ""}
+    ${(crossings.length || rail.length) ? `<p class="meta">${OSM_SWEEP_CAVEAT}</p>` : ""}
+    <div class="meta">Sources: OurAirports (public domain), <i>reported</i> &middot; NGA World Port Index,
+      <i>reported</i> reference data, roughly 2024-vintage &mdash; nothing in this feed is current &middot;
+      OpenStreetMap contributors (ODbL) via Overpass, <i>reported</i>, for border crossings and rail.</div>`;
+}
+
+// ---------- data coverage: the honesty section ----------
+//
+// Every other fold above can be dropped when it has nothing to say -- an
+// empty fold costs a click to discover, so countryCardSections filters it
+// out. This one is the deliberate exception: it is the place a reader checks
+// *why* a fold above is empty, so it has to survive being empty itself. It
+// never returns "" and countryCardSections never gets the chance to drop it.
+//
+// The two things this section refuses to conflate, per feed: "checked this
+// country's bbox against this feed and found nothing there" (a real,
+// positive fact -- this map has coverage here and simply saw nothing) versus
+// "this feed was never loaded this session, so nothing below was checked at
+// all" (not a fact about the country, a fact about this browser tab). A raw
+// bucket that is an empty array is the first case; one that is missing or not
+// an array is the second. Distinguishing them is the entire point of putting
+// this fold on the card.
+function firmsRecordMs(item) {
+  if (!item.acq_date) return null;
+  const time = String(item.acq_time || "").padStart(4, "0").slice(0, 4);
+  const t = Date.parse(`${item.acq_date}T${time.slice(0, 2)}:${time.slice(2, 4)}:00Z`);
+  return Number.isFinite(t) ? t : null;
+}
+
+function eventRecordMs(item) {
+  if (!item.date) return null;
+  const t = Date.parse(`${item.date}T00:00:00Z`);
+  return Number.isFinite(t) ? t : null;
+}
+
+// One entry per feed the card reads somewhere above for a bbox-scoped count
+// or list -- the country-keyed feeds (humanitarian, energyFlows, foodTrade,
+// outages, conflictStats/conflictDistricts) are matched by ISO code or name,
+// not by "inside this bbox", so "coverage inside the bbox" is not a claim
+// this section can honestly make about them and they are left out.
+// `whenMs` reads the freshest in-bbox record's own timestamp where the feed
+// carries one; the four reference gazetteers (infra/osmInfra/dams/airports/
+// ports) carry none, and are reported as a count on file rather than a
+// fabricated delivery time.
+const COVERAGE_FEEDS = [
+  { key: "events", label: "ACLED conflict events", provenance: "reported", whenMs: eventRecordMs },
+  { key: "gdelt", label: "GDELT news", provenance: "reported", whenMs: (r) => parseGdeltDateAdded(r.date_added)?.getTime() ?? null },
+  { key: "ais", label: "AIS vessel tracking (aisstream.io)", provenance: "measured", whenMs: (r) => (Number.isFinite(r.updated) ? r.updated * 1000 : null) },
+  { key: "adsb", label: "ADS-B aircraft tracking", provenance: "measured", whenMs: (r) => (Number.isFinite(r.updated) ? r.updated * 1000 : null) },
+  { key: "firms", label: "Fire detections (NASA FIRMS / HMS)", provenance: "measured", whenMs: firmsRecordMs },
+  { key: "jamming", label: "GPS jamming cells (gpsjam.org)", provenance: "derived", whenMs: () => null },
+  { key: "infra", label: "Curated critical infrastructure", provenance: "reported", whenMs: () => null },
+  { key: "osmInfra", label: "OpenStreetMap infrastructure sweep", provenance: "reported", whenMs: () => null },
+  { key: "dams", label: "Global Dam Watch", provenance: "reported", whenMs: () => null },
+  { key: "airports", label: "OurAirports gazetteer", provenance: "reported", whenMs: () => null },
+  { key: "ports", label: "NGA World Port Index", provenance: "reported", whenMs: () => null },
+];
+
+function coverageRow(label, body) {
+  return `<div class="event-row"><b>${esc(label)}</b><div class="event-meta">${body}</div></div>`;
+}
+
+function buildCoverage(bounds, raw) {
+  if (!bounds) {
+    // Nothing below can be checked against a country with no bounding box --
+    // this is the whole-card version of "did not look", stated once rather
+    // than repeated eleven times with nothing behind it.
+    return '<p class="meta">This country has no bounding box loaded, so none of the feeds below could be '
+      + 'checked against it. That is &ldquo;this map did not look here&rdquo;, not &ldquo;this map looked '
+      + 'and found nothing&rdquo;.</p>';
+  }
+  const rows = COVERAGE_FEEDS.map(({ key, label, provenance, whenMs }) => {
+    const feed = raw[key];
+    if (!Array.isArray(feed)) {
+      return coverageRow(label, "Not loaded this session &mdash; not checked.");
+    }
+    const matches = itemsInBounds(feed, bounds);
+    if (!matches.length) {
+      return coverageRow(label, "No coverage here &mdash; checked, nothing found.");
+    }
+    let freshest = null;
+    for (const item of matches) {
+      const ms = whenMs(item);
+      if (Number.isFinite(ms) && (freshest === null || ms > freshest)) freshest = ms;
+    }
+    const when = freshest !== null ? timeAgoFromUnix(freshest / 1000) : null;
+    const count = `${fmtNumber(matches.length)} on file here`;
+    return coverageRow(
+      label,
+      when
+        ? `Last delivered ${esc(when)} &middot; ${count} (${esc(provenance)})`
+        : `${count}, reference data with no delivery time of its own (${esc(provenance)})`
+    );
+  }).join("");
+  return `<div class="popup-events">${rows}</div>
+    <p class="meta">Each line answers one question: has this feed ever put anything inside this country's
+      bounding box. &ldquo;No coverage here&rdquo; means this map checked and came back empty; &ldquo;not
+      loaded this session&rdquo; means it never checked at all. The two look similar and are not the same
+      claim -- this section exists so they are never read as one.</p>`;
+}
+
 export function countryCardSections(props, raw, bounds) {
   const name = props.name || "Unknown";
   const wanted = normalizeCountryName(name);
@@ -811,6 +1193,13 @@ export function countryCardSections(props, raw, bounds) {
     // location and a marketing-year balance sheet is about a whole state. Both
     // sit below the humanitarian fold because both are context for it.
     { id: "power", title: "Cross-border electricity", html: buildEnergy(props, raw) },
+    // Task 9: generation/storage infrastructure inside the country's own bbox
+    // -- a different kind of claim from "power" above (a flow crossing a
+    // border) so it is its own fold rather than a second heading stacked
+    // inside that one. See buildEnergyInfrastructure's own note.
+    { id: "energy", title: "Energy infrastructure", html: buildEnergyInfrastructure(bounds, raw) },
+    { id: "military", title: "Military & security", html: buildMilitary(bounds, raw, props) },
+    { id: "transport", title: "Transport", html: buildTransport(bounds, raw) },
     { id: "food", title: "Food balance & prices", html: buildFoodTrade(props, raw) },
     { id: "verified", title: "Verified record", html: buildVerifiedRecord(wanted, raw) },
     { id: "trend", title: "Fatality trend", html: buildSparkline(trendSeries) },
@@ -830,6 +1219,9 @@ export function countryCardSections(props, raw, bounds) {
       }<p class="meta">Live counts use the country's bounding box, so figures near borders are
         approximate. Population/density: World Bank. HDI: UNDP. Listed events matched by country name.</p>`,
     },
+    // The honesty section (Task 9): always present, never dropped when empty,
+    // and last -- see buildCoverage's own note on why it never returns "".
+    { id: "coverage", title: "Data coverage", html: buildCoverage(bounds, raw) },
   ];
 
   return { title: name, sections: sections.filter((s) => s.html && s.html.trim()) };
