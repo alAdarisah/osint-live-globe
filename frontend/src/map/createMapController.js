@@ -5075,6 +5075,14 @@ export function createMapController(container, initial, callbacks) {
       name: title,
       sections,
       point: layer ? waterAnchorPoint(layer) : null,
+      // The raw hit-test geometry and its bbox, alongside the presentational
+      // fields above -- WaterInfoCard.jsx ignores both, but IntelPanel's water
+      // scope (intelPanelLogic.js) needs them to run the same
+      // insideWaterFeature/bboxesOverlap tests this card's own sections do
+      // (map/popups.js), rather than filtering records by a second, possibly-
+      // drifting approximation of "inside this water body".
+      entry,
+      bounds,
     };
   }
 

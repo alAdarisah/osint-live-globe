@@ -12,8 +12,8 @@
 // two disagree often enough (and about exactly the contested places this map
 // is for) that matching on either would quietly drop events. A point-in-polygon
 // test against the shape the reader actually clicked cannot disagree with the
-// map, which is the same reason NotableEventsPanel reuses the map's own
-// severity filter rather than reimplementing one.
+// map, which is the same reason IntelPanel reuses the map's own severity
+// filter rather than reimplementing one.
 //
 // This narrows the *presentation* only. Nothing here touches what the map
 // draws or what the poller fetches -- deselect the country and the full picture

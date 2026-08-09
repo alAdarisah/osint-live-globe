@@ -9,7 +9,7 @@ import {
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
   WATER_STYLE,
 } from "../../map/decorators";
-import { SEVERITY_BANDS, CORROBORATED_COLOR, CONFIDENCE_THRESHOLD } from "../../map/severity";
+import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import LayerIcon from "./LayerIcon";
 import LayerCheck from "./LayerCheck";
 import { PanelGroup, LayerDetails } from "./Collapsible";
@@ -216,18 +216,6 @@ export default function LayersSection({
               <option value="all">All available</option>
             </select>
           </label>
-          <label>
-            Minimum severity
-            <select
-              value={eventFilter.minSeverity}
-              onChange={(e) => onEventFilterChange({ minSeverity: Number(e.target.value) })}
-            >
-              <option value="0">Any</option>
-              <option value="40">Moderate and above</option>
-              <option value="55">High and above</option>
-              <option value="75">Critical only</option>
-            </select>
-          </label>
           <label className="event-filter-check">
             <input
               type="checkbox"
@@ -236,22 +224,21 @@ export default function LayersSection({
             />
             Show approximate locations
           </label>
-          {/* Fades rather than hides, which is why it is a separate control
-              from the one above rather than another value on it. Nearly every
-              event scores below the threshold (the backend checks a coordinate
-              only when the reporting gives it something to check against), so
-              hiding on this would empty the layer and read as a broken feed
-              instead of as an answer. */}
-          <label className="event-filter-check">
-            <input
-              type="checkbox"
-              checked={eventFilter.minConfidence >= CONFIDENCE_THRESHOLD}
-              onChange={(e) => onEventFilterChange({
-                minConfidence: e.target.checked ? CONFIDENCE_THRESHOLD : 0,
-              })}
-            />
-            Fade weakly-placed events
-          </label>
+        </div>
+        {/* Minimum severity and the verification floor ("Fade weakly-placed
+            events") used to live here, as two more selects/checkboxes on
+            `eventFilter` gated behind Admin Mode. Task 12 moved both up into
+            IntelPanel's own header, next to its Scope/Window/Group by
+            controls, so a reader can reach them without finding Admin Mode
+            first -- see App.jsx's note by IntelPanel's mount point. They still
+            write into this exact `eventFilter` object (App.jsx holds the one
+            copy; both this drawer and IntelPanel read/write it through the
+            same onEventFilterChange), so raising the floor here would be the
+            same control, just relocated -- there is nothing left to set on
+            this page. */}
+        <div className="sublegend">
+          Minimum severity and the verification floor moved to the Intel panel's own header (bottom-right) --
+          reachable there without Admin Mode.
         </div>
 
         {/* Where each pin's *coordinate* stands, as opposed to how severe or

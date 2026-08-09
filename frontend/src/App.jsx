@@ -23,8 +23,7 @@ import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
 import TitleBar from "./components/TitleBar";
 import RegionBar from "./components/RegionBar";
-import NewsBroadcastPanel from "./components/NewsBroadcastPanel";
-import NotableEventsPanel from "./components/NotableEventsPanel";
+import IntelPanel from "./components/IntelPanel";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
@@ -579,40 +578,38 @@ export default function App() {
         regionActivity={regionActivity}
       />
 
-      {/* The two reading panels, and they are the reader's rather than the
-          operator's.
+      {/* The reading panel, and it is the reader's rather than the operator's.
 
-          They were gated with the instruments for a while, on the argument that
-          each is a second reading of data the map is already drawing and so
+          It was gated with the instruments for a while, on the argument that
+          it is a second reading of data the map is already drawing and so
           costs a first look its clarity. That argument was wrong about which
-          question they answer. The control drawer, the replay scrubber and the
+          question it answers. The control drawer, the replay scrubber and the
           configuration panel are all about *the map* -- what is drawn, from what
-          zoom, out of which recorded moment. These two are about the world: what
-          is happening in view right now, and which of it matters most. A reader
+          zoom, out of which recorded moment. This is about the world: what is
+          happening in view right now, and which of it matters most. A reader
           who has come to a conflict map wants exactly that, and the map alone
           cannot say "this is the worst thing on screen" -- it can only draw the
           pin brighter and hope the eye lands on it.
 
-          Both stay honest without a control around them. The ticker names its
-          outlet and its age on every line, and the board ranks the same
-          /api/events data through the same filter the map draws, so the two
-          cannot disagree. Both collapse to their header, and the board renders
-          nothing at all when no event clears its severity floor -- so on a quiet
-          day they take no room rather than asserting significance that is not
-          there. */}
-      <NewsBroadcastPanel
-        gdeltRaw={dataApi.gdeltRaw}
-        mapBounds={mapApi.mapBounds}
-        regionLabel={dataApi.currentRegionLabel}
-        countryScope={countryScope}
-        onLocate={onLocateNewsItem}
-      />
-
-      <NotableEventsPanel
+          Task 12 merged what used to be two panels (a news ticker and a
+          notable-activity board) into this one, four-tab panel -- Escalation,
+          Events, News, Officials -- so there is one place to look, one set of
+          scope/window/severity/group-by controls, and one Minimum
+          severity/verification floor that this panel and the map both read off
+          `eventFilter` rather than two independent copies that could drift
+          apart. See IntelPanel.jsx for the rest. */}
+      <IntelPanel
         eventsRaw={dataApi.eventsRaw}
-        eventFilter={eventFilter}
+        gdeltRaw={dataApi.gdeltRaw}
+        officialsRaw={dataApi.officialsRaw}
         escalation={dataApi.escalation}
+        eventFilter={eventFilter}
+        onEventFilterChange={onEventFilterChange}
+        mapBounds={mapApi.mapBounds}
+        regions={dataApi.regions}
+        currentRegionKey={dataApi.currentRegionKey}
         countryScope={countryScope}
+        water={mapApi.selectedWater}
         onLocate={onLocateNewsItem}
         isMobile={isMobileViewport}
       />
@@ -639,15 +636,18 @@ export default function App() {
           of those answers a question about how the map is behaving rather than
           about the world, which is why they go together and why they go here.
 
-          The event filter goes with them for a subtler reason. Severity,
-          verification state and age are claim-*quality* dimensions, and no
-          camera position can infer "show me only the corroborated ones" -- so
-          it is the one control zoom and clicks genuinely cannot replace. A
-          reader still gets all of it, because the map already says it without a
-          control: severity sets the colour, an imprecise event is drawn smaller
-          and ringed, low confidence dims the pin, and the uncertainty circle is
-          drawn at its real radius. Filtering the doubtful ones *away* is an
-          analyst's act, and that is what belongs behind this gate. */}
+          Part of the event filter still goes with them: the conflict Window
+          (which dates the map's own layer, day-granular) and Show approximate
+          locations both change what the *map* draws, which is this drawer's
+          business. Minimum severity and the verification floor used to be here
+          too, on the argument that severity and verification state are claim-
+          *quality* dimensions an analyst opts into filtering. Task 12 moved
+          both up into IntelPanel's own header -- they are exactly the axes a
+          reader curating "what matters" wants without first finding Admin
+          Mode, and they still write into this same `eventFilter` object, not a
+          second copy, so the map and the panel can never disagree about what
+          "Minimum severity" means. See LayersSection.jsx's own note at the
+          spot the two controls used to sit. */}
       {adminMode && (
         <>
           <PanelToggle open={panelOpen} onToggle={togglePanel} />

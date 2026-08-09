@@ -1546,8 +1546,12 @@ export function countryCardSections(props, raw, bounds) {
  * source of a false negative, only of a skipped optimisation for the handful
  * of antimeridian-wrapping marine features where it is closer to the whole
  * globe than to the feature.
+ *
+ * Exported so IntelPanel's water scope (intelPanelLogic.js) can run the exact
+ * same test the card's own honesty sections do, rather than a second,
+ * possibly-drifting approximation of "inside this water body".
  */
-function insideWaterFeature(feature, bounds, lat, lon) {
+export function insideWaterFeature(feature, bounds, lat, lon) {
   if (typeof lat !== "number" || typeof lon !== "number") return false;
   if (bounds && !boundsContainsPoint(bounds, lat, lon)) return false;
   return countryContainsPoint(feature, lat, lon);

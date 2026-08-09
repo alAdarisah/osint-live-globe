@@ -1409,13 +1409,20 @@ html, body {
   margin: 0 0 6px;
 }
 
-#newsBroadcast {
+/* ---------- IntelPanel (Task 12) ----------
+   One panel, four tabs (Escalation/Events/News/Officials), replacing what
+   used to be two separate floating panels -- #newsBroadcast (a ticker) and
+   #notableEvents (a board). Same fixed bottom-right placement and the same
+   "background/padding would swallow a click meant for the map marker
+   underneath" fix as #regionBar: pointer-events is off on the panel itself
+   and opted back in below on the parts that are actually interactive. */
+#intelPanel {
   position: fixed;
-  top: 80px;
   right: 14px;
-  width: 340px;
+  bottom: 78px;
+  width: 360px;
   max-width: calc(100vw - 28px);
-  max-height: 42vh;
+  max-height: 50vh;
   display: flex;
   flex-direction: column;
   background: var(--panel-bg);
@@ -1425,10 +1432,6 @@ html, body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
   overflow: hidden;
-  /* The panel's own background/padding/whitespace used to swallow clicks
-     meant for whatever map marker sits underneath it (most often a GDELT
-     pin, since that's what this panel lists) -- same fix as #regionBar:
-     opt the actually-interactive parts back in below. */
   pointer-events: none;
 }
 
@@ -1448,7 +1451,7 @@ html, body {
    (anchored by `bottom`, tail on the bottom edge); `.flip` opens downward
    near the top of the screen instead (anchored by `top`, tail on top). */
 /* Header pinned, body scrolls -- the same flex-column shape #adminPanel and
-   #newsBroadcast already use. This card used to scroll as a whole, which took
+   #intelPanel already use. This card used to scroll as a whole, which took
    the country's name and its close button off the top of a 44vh box the moment
    anyone read past the second fold: the one line telling you *which* country
    you were reading was the first thing to go. */
@@ -1548,37 +1551,6 @@ html, body {
   touch-action: none;
 }
 
-.news-caret-btn {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 1px solid var(--accent);
-  background: rgba(var(--accent-rgb), 0.18);
-  color: var(--accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  cursor: pointer;
-  touch-action: auto;
-}
-.news-caret-btn:hover {
-  background: var(--accent);
-  color: var(--panel-bg);
-}
-
-.news-caret {
-  flex: none;
-  font-size: 13px;
-  line-height: 1;
-  transition: transform 0.2s ease;
-}
-
-#newsBroadcast.collapsed .news-caret { transform: rotate(-90deg); }
-#newsBroadcast.collapsed .news-header { border-bottom: none; }
-#newsBroadcast.collapsed .news-list { display: none; }
-
 .live-dot {
   width: 8px;
   height: 8px;
@@ -1591,17 +1563,6 @@ html, body {
 @keyframes news-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 61, 61, 0.5); }
   50% { opacity: 0.55; box-shadow: 0 0 0 4px rgba(255, 61, 61, 0); }
-}
-
-.news-title {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  color: var(--text-bright);
-  text-transform: uppercase;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .news-updated {
@@ -1651,11 +1612,13 @@ html, body {
   min-width: 0;
 }
 
-/* Conflict-zone briefing widget (ConflictBriefingCard.jsx) -- pops up next
-   to the news ticker's corner (not on top of it) whenever a conflict zone
-   is picked from RegionBar, same fixed-corner-card treatment as
-   #newsBroadcast/#countryInfoCard. Reuses .news-item/.news-list wholesale
-   for its headline rows instead of duplicating that styling. */
+/* Conflict-zone briefing widget (ConflictBriefingCard.jsx) -- pops up at the
+   top-right whenever a conflict zone is picked from RegionBar, same
+   fixed-corner-card treatment as #countryInfoCard. IntelPanel now lives at
+   the bottom-right (see #intelPanel), so the two no longer compete for the
+   same corner the way this card and the old #newsBroadcast ticker once did.
+   Reuses .news-item/.news-list wholesale for its headline rows instead of
+   duplicating that styling. */
 #conflictBriefing {
   position: fixed;
   top: 80px;
@@ -1787,32 +1750,11 @@ html, body {
   border-color: var(--accent);
 }
 
-/* ---------- notable activity board (NotableEventsPanel.jsx) ----------
-   Ranked "what matters right now", sitting bottom-right above the timeline
-   bar (46px) and clear of #attribution (bottom: 46px). Same panel language
-   as #newsBroadcast, but not draggable: it's a short, fixed-length board
-   rather than a scrolling feed, so there's nothing to get out of the way
-   of. Like #newsBroadcast it stays click-through except for its own
-   interactive parts, so map markers underneath remain reachable. */
-#notableEvents {
-  position: fixed;
-  right: 14px;
-  bottom: 78px;
-  width: 340px;
-  max-width: calc(100vw - 28px);
-  max-height: 38vh;
-  display: flex;
-  flex-direction: column;
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  backdrop-filter: blur(6px);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
-  overflow: hidden;
-  pointer-events: none;
-}
-
+/* ---------- IntelPanel's body: tabs, per-row lists (IntelPanel.jsx) ----------
+   Sits bottom-right above the timeline bar (46px) and clear of #attribution
+   (bottom: 46px) -- see #intelPanel above for the panel's own fixed
+   position/size, which used to belong to #notableEvents/#newsBroadcast before
+   Task 12 merged them into one draggable panel. */
 .notable-header, .notable-list { pointer-events: auto; }
 
 .notable-header {
@@ -1854,15 +1796,9 @@ html, body {
   white-space: nowrap;
 }
 
-.notable-count {
-  margin-left: auto;
-  font-size: 10px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-
-/* Only ever shown for a country selection -- the world board renders nothing
-   at all when it is empty. See NotableEventsPanel.jsx. */
+/* Only ever shown for a deliberately-scoped tab (country/region/water) with
+   nothing to show -- the World/Current-view board renders nothing at all
+   rather than an empty widget. See intelPanelIsEmpty in intelPanelLogic.js. */
 .notable-empty {
   padding: 10px;
   font-size: 11px;
@@ -1875,9 +1811,8 @@ html, body {
   color: var(--accent);
   transition: transform 0.18s ease;
 }
-#notableEvents.collapsed .notable-caret { transform: rotate(-90deg); }
-#notableEvents.collapsed .notable-header { border-bottom: none; }
-#notableEvents.collapsed .notable-list { display: none; }
+#intelPanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#intelPanel.collapsed .notable-header { border-bottom: none; }
 
 /* Distinct from .live-dot's steady pulse -- this one only exists when
    something is actually on the board, so it reads as an alert rather than a
@@ -1936,8 +1871,10 @@ html, body {
   color: #0b0d10;
   font-weight: 700;
 }
-/* Section dividers, present only when the panel is showing both an
-   escalation list and an event list. */
+/* Section dividers -- used both as group-by headers (IntelPanel.jsx's
+   TabList, when a reader groups a tab by country/type/actor/outlet) and,
+   historically, to separate an escalation list from an event list in the
+   panel this replaced. */
 .notable-section {
   padding: 6px 10px 3px;
   font-size: 8.5px;
@@ -1962,6 +1899,109 @@ html, body {
   font-variant-numeric: tabular-nums;
   min-width: 38px;
 }
+
+/* A synthesised 7-day sparkline (EscalationMiniBar in IntelPanel.jsx): six
+   bars at the region's own flat baseline, then a seventh, taller/shorter one
+   for today. There is no real day-by-day series behind this -- see that
+   component's own note on why -- so the bars are deliberately plain blocks
+   with no axis or gridlines that would claim a precision this does not have. */
+.escalation-minibar {
+  display: flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 20px;
+  flex: none;
+}
+.escalation-minibar-bar {
+  width: 3px;
+  min-height: 2px;
+  border-radius: 1px;
+  background: rgba(var(--accent-rgb), 0.35);
+}
+.escalation-minibar-bar.today {
+  background: #ff5c2a;
+}
+
+/* Officials & Diplomacy rows: the CAMEO/press-release label sits where the
+   severity chip does in an Events row, but it names the *kind* of act
+   ("Demand, criticism or rejection") rather than a one-word severity band, so
+   it needs more room and does not force uppercase like .notable-chip does. */
+.officials-chip {
+  flex: none;
+  font-size: 9px;
+  letter-spacing: 0.2px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--text-bright);
+  background: rgba(var(--accent-rgb), 0.18);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The tab strip and the header-control row sit between IntelPanel's header
+   and its list, both pointer-events: auto for the same reason
+   .notable-header/.notable-list are (see #intelPanel above). */
+.intel-tabs {
+  display: flex;
+  pointer-events: auto;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+.intel-tab {
+  flex: 1 1 auto;
+  padding: 6px 4px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.intel-tab:hover { color: var(--text-primary); }
+.intel-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.intel-tab-count {
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+  opacity: 0.75;
+}
+
+.intel-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  pointer-events: auto;
+  flex: none;
+}
+.intel-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 9px;
+  letter-spacing: 0.3px;
+  color: var(--text-dim);
+}
+.intel-controls select {
+  font-size: 11px;
+}
+.intel-controls label.event-filter-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  grid-column: span 2;
+}
+
+/* Group-by headers reuse .notable-section (see that rule's own note); this
+   only adds the vertical rhythm between one group's rows and the next. */
+.intel-group + .intel-group { margin-top: 2px; }
 
 /* Chip background is set inline from map/severity.js's SEVERITY_BANDS -- CSS
    cannot import JS, so this is the only way one definition can be
@@ -2478,15 +2518,6 @@ html, body {
 
   .leaflet-top { top: 88px; }
 
-  #newsBroadcast {
-    top: 88px;
-    left: 10px;
-    right: 10px;
-    width: auto;
-    max-width: none;
-    max-height: 30vh;
-  }
-
   .layer-row {
     padding: 10px 2px;
     font-size: 13px;
@@ -2502,16 +2533,18 @@ html, body {
   #attribution { bottom: 50px; }
 
   /* Full width and clear of the taller mobile timeline. Starts collapsed
-     (see NotableEventsPanel.jsx), so this is a single header bar until
-     tapped. */
-  #notableEvents {
+     (see IntelPanel.jsx), so this is a single header bar until tapped, and
+     undraggable on mobile (a full-width overlay has nowhere to drag to). */
+  #intelPanel {
     left: 10px;
     right: 10px;
     bottom: 84px;
     width: auto;
     max-width: none;
-    max-height: 34vh;
+    max-height: 46vh;
   }
+
+  .intel-controls { grid-template-columns: 1fr 1fr; }
 }
 
 /* ---------- boot-sequence loading screen ----------
@@ -3408,7 +3441,7 @@ html, body {
 }
 /* The body is the map's own popup HTML, so it needs the rules that are scoped
    to .leaflet-popup-content restated for this container -- the same thing
-   #newsBroadcast already does for the news list. */
+   #intelPanel already does for its own lists. */
 .event-detail-body h3 { margin: 0 0 6px; font-size: 13px; color: var(--text-heading); }
 .event-detail-body .meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
 .event-detail-body a { color: var(--accent); }

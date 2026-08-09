@@ -2,7 +2,7 @@
 // the controller once (on mount), mirrors the small slice of its state React
 // needs to display into real React state (counts, zoom-gate notes, viewport
 // bounds), and exposes an imperative handle (flyToRegion/flyTo/etc.) for
-// components like RegionBar and NewsBroadcastPanel to call.
+// components like RegionBar and IntelPanel to call.
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createMapController } from "./createMapController";
 
