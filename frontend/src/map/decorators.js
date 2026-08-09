@@ -1518,7 +1518,10 @@ const SHIP_TYPE_RANGES = [
   [90, 99, "Other type"],
 ];
 
-/** The AIS type code's label, or null for a reserved/unassigned code (1-19). */
+/**
+ * The AIS type code's label, or null for a reserved/unassigned code (1-19)
+ * or for 0, AIS's own "not available" value.
+ */
 function shipTypeLabel(code) {
   if (typeof code !== "number" || !Number.isInteger(code)) return null;
   if (code === 0) return null; // AIS's own "not available"
@@ -1587,7 +1590,12 @@ export function decorateAis(d, { selectedMmsi } = {}) {
   // nothing rather than a wrong country, and utils/format.js's formatAisEta
   // for why AIS's own ETA never becomes a date with a guessed year.
   const flag = flagForMmsi(d.mmsi);
-  const shipTypeCode = typeof d.ship_type === "number" ? d.ship_type : null;
+  // 0 is treated the same as the field being absent: it is AIS's own "not
+  // available" value (shipTypeLabel returns null for it too), not a real
+  // classification, so a ship broadcasting 0 and a ship whose static data
+  // hasn't arrived yet read the same way here rather than as two different
+  // "unclassified" labels for the same underlying fact.
+  const shipTypeCode = typeof d.ship_type === "number" && d.ship_type !== 0 ? d.ship_type : null;
   const shipLabel = shipTypeCode !== null ? shipTypeLabel(shipTypeCode) : null;
   const etaText = d.eta ? formatAisEta(d.eta) : null;
   const headingKnown = Number.isFinite(d.heading) && d.heading !== 511; // 511 is AIS's own "not available"

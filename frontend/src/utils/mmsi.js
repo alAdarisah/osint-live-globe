@@ -12,12 +12,17 @@
 // here is not malformed -- it is a 9-digit identifier that already lost its
 // leading zero(s) before this function ever sees it.
 //
-// The first digit tells the six apart, because ITU never hands out a MID
+// The first digit(s) tell the six apart, because ITU never hands out a MID
 // starting with 0, 1, 8 or 9 -- every real MID's first digit is 2-7 (the
 // region digit: 2=Europe, 3=Americas, 4=Asia, 5=Oceania, 6=Africa,
 // 7=South America). That is what makes the parsing below safe rather than a
-// guess: a string starting "8" is never an ordinary ship's MID misread, it
-// is unambiguously the "craft associated with a parent ship" form.
+// guess: a string starting "98" is never an ordinary ship's MID misread, it
+// is unambiguously the "craft associated with a parent ship" form -- 98MIDxxxx,
+// a *two*-digit prefix, the same shape as AtoN's 99MIDxxxx. A bare leading "8"
+// with no second "9"/"8" ahead of it is a different, unrelated allocation
+// (a handheld VHF transceiver with DSC and GNSS) whose own field layout this
+// module does not implement, so it is left to fall through to "not
+// identified" rather than be misread as the craft-associated form.
 //
 // Getting a form wrong would mean reading the wrong three digits as a MID
 // and printing a flag for a country that never claimed this MMSI -- worse
@@ -136,9 +141,12 @@ function looksLikeMid(threeDigits) {
  * digits (a string of only 0-9) -> the 3-digit MID substring, or null if this
  * length/prefix combination isn't a form this function can place a MID in.
  *
- * Ordered most-specific prefix first ("111" before "1", "00" before "0") so a
- * SAR aircraft's "111" is never read as a group call's bare "1", and a coast
- * station's "00" is never read as a group call's bare "0".
+ * Ordered most-specific prefix first ("111" before "1", "00" before "0", "99"
+ * and "98" before a bare "8" or "9" get any chance to be misread as one of
+ * them) so a SAR aircraft's "111" is never read as a group call's bare "1", a
+ * coast station's "00" is never read as a group call's bare "0", and AtoN's
+ * "99" / craft-associated's "98" are never read as the unrelated bare-"8"
+ * handheld allocation this module doesn't implement.
  */
 function midDigitsFor(digits) {
   const len = digits.length;
@@ -147,9 +155,14 @@ function midDigitsFor(digits) {
     if (digits.startsWith("00")) return digits.slice(2, 5);  // coast station: 00MIDXXXX
     if (digits.startsWith("0")) return digits.slice(1, 4);   // group ship call: 0MIDXXXXX
     if (digits.startsWith("99")) return digits.slice(2, 5);  // AtoN: 99MIDXXXX
-    if (digits.startsWith("8")) return digits.slice(1, 4);   // craft assoc. with parent ship: 8MIDXXXXX
+    if (digits.startsWith("98")) return digits.slice(2, 5);  // craft assoc. with parent ship: 98MIDXXXX
     if (looksLikeMid(digits.slice(0, 3))) return digits.slice(0, 3); // ordinary ship station: MIDXXXXXX
-    return null; // reserved prefix (bare "1" other than "111", bare "9" other than "99", ...)
+    // Reserved or out-of-scope prefixes: bare "1" other than "111", bare "9"
+    // other than "98"/"99", and bare "8" (a handheld VHF transceiver's own
+    // allocation, whose field layout this module does not implement -- see
+    // the header comment). Guessing a form here is exactly the failure mode
+    // this function exists to avoid, so all of these return null.
+    return null;
   }
   if (len === 8) {
     // A group ship call (0MIDXXXXX) that lost its leading zero to JSON's

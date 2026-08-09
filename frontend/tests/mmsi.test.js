@@ -87,8 +87,17 @@ test("flagForMmsi: AtoN (99MIDXXXX) reads the MID after the fixed 99 prefix", ()
   assert.deepEqual(flagForMmsi("992341234"), { mid: "234", country: "United Kingdom" });
 });
 
-test("flagForMmsi: craft associated with a parent ship (8MIDXXXXX) reads the MID after the leading 8", () => {
-  assert.deepEqual(flagForMmsi("823412345"), { mid: "234", country: "United Kingdom" });
+test("flagForMmsi: craft associated with a parent ship (98MIDXXXX) reads the MID after the fixed 98 prefix", () => {
+  assert.deepEqual(flagForMmsi("982341234"), { mid: "234", country: "United Kingdom" });
+});
+
+test("flagForMmsi: a bare leading 8 (not '98') is a handheld VHF allocation this module doesn't parse, not craft-associated", () => {
+  // "81..." starts with 8 but its second digit isn't 9, so this is not the
+  // 98MIDXXXX craft-associated form -- and reading it as one (treating "1"
+  // through "9" as if it were the fixed "9" of "98") would print a flag for
+  // a station this module has no business identifying. Must return null,
+  // never a guessed country.
+  assert.equal(flagForMmsi("812345678"), null);
 });
 
 test("flagForMmsi: an 8-digit value that doesn't start with a real MID digit is malformed, not a group call", () => {
