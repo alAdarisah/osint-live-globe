@@ -371,6 +371,32 @@ PORT_CALL_INTERVAL = int(os.getenv("PORT_CALL_INTERVAL", "900"))
 # table's own row count becomes the thing worth pruning.
 FLIGHT_LEG_RETENTION_DAYS = int(os.getenv("FLIGHT_LEG_RETENTION_DAYS", "90"))
 
+# How often backend/refine/vessel_profile.py reads the next slice of AIS
+# history. Slower than PORT_CALL_INTERVAL on purpose: a hull's laden/ballast
+# verdict is read off its own draught extremes over HISTORY_RETENTION_SECONDS
+# (3 days), so nothing about the inference is made more correct by revisiting
+# it every 15 minutes, and each pass also does one storage.port_calls_for()
+# lookup per hull touched that pass (see the module docstring) -- a slower
+# cadence keeps that fan-out proportional to genuinely new AIS traffic rather
+# than the same ships being re-queried four times an hour for no new evidence.
+VESSEL_PROFILE_INTERVAL = int(os.getenv("VESSEL_PROFILE_INTERVAL", "1800"))
+
+# The laden/ballast thresholds themselves -- named constants rather than
+# numbers inline in backend/refine/vessel_profile.py because Task 33's admin
+# panel exposes them in an "Inference" section, where a reader can see exactly
+# what turned a draught reading into a verdict. A hull's current draught above
+# this fraction of its own observed maximum is called laden.
+VESSEL_DRAUGHT_LADEN_RATIO = float(os.getenv("VESSEL_DRAUGHT_LADEN_RATIO", "0.85"))
+# Below this fraction of the observed maximum is called ballast. The gap
+# between the two (55-85%) is deliberately wide and reports as `unknown`
+# rather than guessing which side of a load a partial cargo falls on.
+VESSEL_DRAUGHT_BALLAST_RATIO = float(os.getenv("VESSEL_DRAUGHT_BALLAST_RATIO", "0.55"))
+# Fewer distinct draught readings than this over the retained window and the
+# "observed maximum" is just whatever this hull happened to report once or
+# twice -- not a range worth dividing anything by. See laden_state's
+# `insufficient_samples` reason.
+VESSEL_DRAUGHT_MIN_SAMPLES = int(os.getenv("VESSEL_DRAUGHT_MIN_SAMPLES", "5"))
+
 # The waters this map *claims* as watched, as "lat_min,lon_min,lat_max,lon_max"
 # boxes separated by ";". High-interest maritime chokepoints and conflict water.
 #

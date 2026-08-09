@@ -9,17 +9,20 @@ sharing an event loop with every request the map made.
 
 Several jobs, most self-paced rather than scheduled:
 
-  event_fusion  collapses ACLED + UCDP + GDELT into one record per incident
-  dark_vessels  derives AIS gaps and ship-to-ship pairs from position history
-  escalation    ranks regions running above their own recent baseline
-  port_calls    finds vessel dwells near a port in the AIS movement log
+  event_fusion    collapses ACLED + UCDP + GDELT into one record per incident
+  dark_vessels    derives AIS gaps and ship-to-ship pairs from position history
+  escalation      ranks regions running above their own recent baseline
+  port_calls      finds vessel dwells near a port in the AIS movement log
+  vessel_profile  reads cargo class and laden/ballast state off the same
+                   AIS movement log port_calls reads, per hull
 
 Unlike backend/ingest, there is no scheduler here. Each of these already owns a
 loop that carries real logic -- fusion waits for its inputs and rehydrates a
 3-day accumulator before its first pass, dark_vessels retries sooner after a
-failure than its normal 15 minutes, escalation and port_calls are a plain
-interval (a dwell has to run an hour before it is even a candidate, so nothing
-about port_calls is made more correct by retrying faster after a failure) --
+failure than its normal 15 minutes, escalation, port_calls and vessel_profile
+are a plain interval (a dwell has to run an hour before it is even a
+candidate and a draught-history verdict does not get more correct by retrying
+faster, so nothing about either is made more correct by a tighter loop) --
 and a scheduler would only be a second, weaker copy of pacing they already do
 correctly. APScheduler earns its place in the ingest process, where the
 intervals are fixed metered budgets; it would earn nothing here.
@@ -107,6 +110,19 @@ _JOBS = (
         # test_stream_health_cadence_matches_the_source_module).
         health_name="port_calls",
         health_every=config.PORT_CALL_INTERVAL,
+    ),
+    # Cargo class and laden/ballast state per hull, keyed by MMSI in
+    # reference_snapshots under "vessel_profiles" -- one document per hull
+    # rather than a point layer, since the coordinates already live on the
+    # ais layer these attach to. Nothing here for the backend to mirror.
+    Job(
+        module="backend.refine.vessel_profile",
+        entrypoint="derive_forever",
+        publishes=(),
+        # vessel_profile.HEALTH_NAME, copied for the same reason
+        # port_calls.HEALTH_NAME is copied above.
+        health_name="vessel_profiles",
+        health_every=config.VESSEL_PROFILE_INTERVAL,
     ),
 )
 

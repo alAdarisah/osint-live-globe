@@ -39,6 +39,10 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # no layer either -- it writes vessel_port_calls rows, read per
         # vessel or per port rather than served whole.
         "backend.refine.port_calls",
+        # Cargo class and laden/ballast state per hull. Publishes no layer
+        # either -- one reference_snapshots document keyed by MMSI, attached
+        # to the ais layer's own coordinates rather than carrying its own.
+        "backend.refine.vessel_profile",
     }
 
 
