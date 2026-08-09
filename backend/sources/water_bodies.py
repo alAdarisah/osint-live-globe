@@ -15,15 +15,25 @@ thing:
   ne_10m_geography_marine_polys -- named oceans, seas, gulfs, bays, straits,
     sounds, channels. The only one of the three with real nesting (the
     Mediterranean contains the Aegean, which contains the Saronic Gulf), which
-    is what area_deg2 exists to rank -- see _ring_area's docstring.
+    is what area_deg2 exists to rank -- see _ring_area's docstring. It is also
+    the only one with antimeridian-spanning features (Bering Sea, the North/
+    South Pacific, ...); see _bbox_and_area's docstring for how their bbox is
+    kept useful instead of collapsing to roughly the whole globe, and what
+    that means for a bbox-overlap test built on top of this.
   ne_10m_lakes -- named lakes, reservoirs and alkaline lakes.
   ne_10m_rivers_lake_centerlines -- river centrelines, including the segments
     Natural Earth draws through a lake a river flows into, so the line does
     not break where the water does.
 
-None of the three carries a stable id of its own -- Natural Earth is built for
-cartography, not for being joined against -- so one is synthesised per
-feature; see feature_id below.
+Marine and lakes carry Natural Earth's own `ne_id` -- a persistent identifier
+meant to survive exactly this, reused directly as `marine:{ne_id}` /
+`lake:{ne_id}` (see native_id below; one duplicate ne_id in the raw file,
+Great Barrier Reef published twice, is caught by the dedup pass rivers also
+needs -- see _dedupe_ids for why it does not actually collide today).
+Rivers carries no id of its own at all -- confirmed by fetching the live file
+while building this module, not assumed -- so its id is synthesised from name
+(or featurecla, where name is missing) and scalerank, in the file's own
+feature order; see feature_id below.
 
 Stored as three whole documents in reference_snapshots (water_marine /
 water_lakes / water_rivers), not entity_latest: none of this has a per-row
@@ -113,17 +123,23 @@ def _slug(text: str | None) -> str:
 
 
 def feature_id(prefix: str, props: dict, missing_name_seq: list[int]) -> str:
-    """id = "{prefix}:{scalerank}:{slug}".
+    """The positional id: "{prefix}:{scalerank}:{slug}".
 
-    Natural Earth carries no stable id for any of the three files, so one is
-    built from what a re-download of the same static file always repeats:
-    scalerank plus name, read in the file's own feature order. Where name is
-    missing (11 of 306 marine features, 610 of 1355 lakes, 88 of 1455 rivers)
-    featurecla stands in for it -- but featurecla alone collides, since many
-    unnamed features share both it and a scalerank, so a running index (per
-    call to _build_collection, in file order) is appended to break the tie.
-    That index is why id stability depends on the source file's feature order
-    staying fixed between runs, which a static download guarantees.
+    rivers.geojson carries no id of its own at all (checked against the live
+    file, not assumed -- see the module docstring), so this is what rivers
+    uses for every feature. It is built from what a re-download of the same
+    static file always repeats: scalerank plus name, read in the file's own
+    feature order. Where name is missing (88 of 1455 rivers) featurecla
+    stands in for it -- but featurecla alone collides, since many unnamed
+    features share both it and a scalerank, so a running index (per call to
+    _build_collection, in file order) is appended to break the tie. That
+    index is why this scheme's stability depends on the source file's feature
+    order staying fixed between runs, which a static download guarantees.
+
+    Also the fallback for native_id below, on the chance a marine or lakes
+    feature is ever published without the ne_id every feature in the live
+    files currently carries -- id synthesis degrading gracefully rather than
+    the poll failing outright over one missing field.
     """
     scalerank = props.get("scalerank")
     scalerank = int(scalerank) if scalerank is not None else 0
@@ -134,6 +150,22 @@ def feature_id(prefix: str, props: dict, missing_name_seq: list[int]) -> str:
         missing_name_seq[0] += 1
         slug = f"{_slug(props.get('featurecla'))}-{missing_name_seq[0]}"
     return f"{prefix}:{scalerank}:{slug}"
+
+
+def native_id(prefix: str, props: dict, missing_name_seq: list[int]) -> str:
+    """id = "{prefix}:{ne_id}" for marine and lakes, which both carry Natural
+    Earth's own cross-release identifier on every feature (verified against
+    the live files: 306/306 marine, 1355/1355 lakes). ne_id is not quite
+    unique on its own -- marine publishes Great Barrier Reef twice under one
+    ne_id, a real Polygon and a MultiPolygon of four degenerate slivers --
+    so this still goes through the same dedup pass feature_id's synthesised
+    ids need; see _dedupe_ids for why that particular pair does not actually
+    collide once thinning drops the slivers.
+    """
+    ne_id = props.get("ne_id")
+    if ne_id is not None:
+        return f"{prefix}:{ne_id}"
+    return feature_id(prefix, props, missing_name_seq)
 
 
 def _ring_area(ring: list[list[float]]) -> float:
@@ -154,11 +186,31 @@ def _ring_area(ring: list[list[float]]) -> float:
     return abs(total) / 2.0
 
 
-def _bbox_and_area(geometry: dict) -> tuple[list[float], float]:
-    """[south, west, north, east] plus area_deg2, over every polygon in the
-    geometry. 16 of the 306 marine features are MultiPolygon -- split across
-    the antimeridian or into separate named pieces -- so the bbox spans every
-    part and the area sums every part's outer ring."""
+def _bbox_and_area(geometry: dict) -> tuple[list[float], float, bool]:
+    """[south, west, north, east], area_deg2, and an antimeridian flag, over
+    every polygon in the geometry.
+
+    16 of the 306 marine features are MultiPolygon; measured against the live
+    file, 6 of those are split at the antimeridian (Bering Sea, Chukchi Sea,
+    Ross Sea, Gulf of Anadyr', and the North/South Pacific) rather than into
+    disjoint named pieces, and every one of the 6 spans exactly [-180, 180] in
+    raw longitude -- a flat min/max there would produce a box that matches
+    every bbox query on Earth rather than the strait or ocean it is actually
+    bounding, defeating the cheap rectangle-overlap test a later task builds
+    on this. None of the other 10 MultiPolygon features comes close (10.5
+    degrees wide at most), so "MultiPolygon whose flat longitude span exceeds
+    180 degrees" is a clean, cheap detector for the 6 that need it.
+
+    For those 6, west/east are recomputed by shifting every negative
+    longitude into [180, 360) before taking min/max -- unwrapping the seam --
+    then shifting the result back into [-180, 180]. That can leave west >
+    east (e.g. Bering Sea: west=162.76, east=-161.44): this is not a bug, it
+    is the standard convention for a box that wraps the antimeridian, and
+    `antimeridian` is set alongside it so a reader does not have to infer the
+    wrap from a numeric comparison. A later task's bbox-overlap test must
+    treat west > east as two ranges (west..180 and -180..east), not reject it
+    as an inverted box.
+    """
     if geometry["type"] == "Polygon":
         polygons = [geometry["coordinates"]]
     else:
@@ -174,16 +226,26 @@ def _bbox_and_area(geometry: dict) -> tuple[list[float], float]:
         lats.extend(pt[1] for pt in outer)
         area += _ring_area(outer)
     if not lats:
-        return [0.0, 0.0, 0.0, 0.0], 0.0
-    return [min(lats), min(lons), max(lats), max(lons)], area
+        return [0.0, 0.0, 0.0, 0.0], 0.0, False
+    west, east = min(lons), max(lons)
+    antimeridian = geometry["type"] == "MultiPolygon" and (east - west) > 180
+    if antimeridian:
+        shifted = [lon + 360 if lon < 0 else lon for lon in lons]
+        s_west, s_east = min(shifted), max(shifted)
+        west = s_west - 360 if s_west > 180 else s_west
+        east = s_east - 360 if s_east > 180 else s_east
+    return [min(lats), west, max(lats), east], area, antimeridian
 
 
-def _build_collection(features: list[dict], prefix: str) -> dict:
+def _build_collection(features: list[dict], prefix: str, id_fn) -> dict:
     """One dataset's raw features -> a thinned FeatureCollection.
 
-    A feature whose geometry collapses entirely under thinning (or carries
-    none to begin with) is dropped rather than stored with an invented shape
-    -- the same rule admin1_boundaries.py follows for the same reason.
+    id_fn is native_id for marine/lakes (ne_id-backed) and feature_id for
+    rivers (positional, rivers having no id of its own) -- see the module
+    docstring. A feature whose geometry collapses entirely under thinning (or
+    carries none to begin with) is dropped rather than stored with an
+    invented shape -- the same rule admin1_boundaries.py follows for the same
+    reason.
     """
     out = []
     missing_name_seq = [0]
@@ -193,7 +255,7 @@ def _build_collection(features: list[dict], prefix: str) -> dict:
         if not geometry:
             continue
         record_props = {
-            "id": feature_id(prefix, props, missing_name_seq),
+            "id": id_fn(prefix, props, missing_name_seq),
             "name": props.get("name") or None,
             "class": normalise_class(props.get("featurecla")),
             "featurecla": props.get("featurecla") or None,
@@ -202,21 +264,31 @@ def _build_collection(features: list[dict], prefix: str) -> dict:
         # bbox/area_deg2 are for ranking nested polygons on click, which is
         # only a marine problem -- lakes and river centrelines do not nest.
         if prefix == "marine":
-            bbox, area_deg2 = _bbox_and_area(geometry)
+            bbox, area_deg2, antimeridian = _bbox_and_area(geometry)
             record_props["bbox"] = bbox
             record_props["area_deg2"] = area_deg2
+            record_props["antimeridian"] = antimeridian
         out.append({"type": "Feature", "geometry": geometry, "properties": record_props})
     _dedupe_ids(out)
     return {"type": "FeatureCollection", "features": out}
 
 
 def _dedupe_ids(features: list[dict]) -> None:
-    """Break ties when two features land on the same synthesised id.
+    """Break ties when two features land on the same id.
 
-    feature_id's name+scalerank is not actually unique against the real
-    files: 11 pairs of distinct lakes share a name and scalerank (two lakes
-    named "Trout Lake" at scalerank 5, among others), and every "Lake
-    Centerline" segment in rivers.geojson pairs with a same-named,
+    Neither id scheme is quite unique against the real files. native_id's
+    ne_id has one collision in the raw file -- Great Barrier Reef published
+    twice under one ne_id, a real Polygon plus a MultiPolygon of four
+    degenerate slivers that thin_geometry discards (each ring collapses
+    below four points once rounded to COORD_PRECISION), so in practice only
+    the real polygon survives to be stored and this pair never actually
+    reaches this function today. The guard stays anyway: a future Natural
+    Earth release could ship coordinates fine enough that the sliver
+    survives thinning, and this is the only thing standing between that and
+    a silently overwritten id. feature_id's name+scalerank has many more
+    real collisions: 11 pairs of distinct lakes share a name and scalerank
+    (two lakes named "Trout Lake" at scalerank 5, among others), and every
+    "Lake Centerline" segment in rivers.geojson pairs with a same-named,
     same-scalerank "River" segment of the same watercourse -- 243 such pairs,
     because Natural Earth splits one river into a normal segment and a
     through-the-lake segment but gives both the river's own name. Suffixing
@@ -236,23 +308,25 @@ def _dedupe_ids(features: list[dict]) -> None:
 
 
 def parse_marine(payload: dict) -> dict:
-    return _build_collection((payload or {}).get("features"), "marine")
+    return _build_collection((payload or {}).get("features"), "marine", native_id)
 
 
 def parse_lakes(payload: dict) -> dict:
-    return _build_collection((payload or {}).get("features"), "lake")
+    return _build_collection((payload or {}).get("features"), "lake", native_id)
 
 
 def parse_rivers(payload: dict) -> dict:
-    return _build_collection((payload or {}).get("features"), "river")
+    return _build_collection((payload or {}).get("features"), "river", feature_id)
 
 
 def serialize(collection: dict, provenance: str) -> dict:
     """The stored document, carrying the same honesty payload railways.py
     does: which product this is, that it is public domain, and the 1:10m
-    scale caveat -- this will not sit exactly on a coastline drawn by a
-    higher-resolution source, and the popup a later task adds is expected to
-    say so."""
+    scale caveat, spelled out in `provenance` itself (see DATASETS below) so
+    a reader of the stored value -- not just this docstring -- sees it. Task
+    7 renders `provenance` verbatim in a "Sources & caveats" section; a scale
+    ratio and a licence with no warning attached would read as more precise
+    than this data actually is."""
     return {
         "attribution": PUBLISHER,
         "publisher": PUBLISHER,
@@ -261,14 +335,27 @@ def serialize(collection: dict, provenance: str) -> dict:
     }
 
 
-# (state key, snapshot name, source URL, id prefix, stored provenance string)
+# (state key, snapshot name, source URL, id prefix, id function, stored
+# provenance string). native_id for marine/lakes (both carry ne_id);
+# feature_id for rivers (carries no id of its own -- see the module
+# docstring). Every provenance string spells out the 1:10m caveat in words,
+# the way railways.py's "coarse basemap linework" does, rather than leaving a
+# reader to infer what a scale ratio means: this is schematic, generalised
+# geometry and will not align exactly with a coastline, shoreline or
+# watercourse drawn from a higher-resolution source.
 DATASETS = (
-    ("marine", "water_marine", MARINE_URL, "marine",
-     "Natural Earth 1:10m Geography Marine Polygons, public domain (CC0)"),
-    ("lakes", "water_lakes", LAKES_URL, "lake",
-     "Natural Earth 1:10m Lakes, public domain (CC0)"),
-    ("rivers", "water_rivers", RIVERS_URL, "river",
-     "Natural Earth 1:10m Rivers + Lake Centerlines, public domain (CC0)"),
+    ("marine", "water_marine", MARINE_URL, "marine", native_id,
+     "Natural Earth 1:10m Geography Marine Polygons -- schematic sea/gulf/bay/"
+     "strait/sound/channel outlines, generalised at 1:10,000,000 and not "
+     "aligned to any higher-resolution coastline, public domain (CC0)"),
+    ("lakes", "water_lakes", LAKES_URL, "lake", native_id,
+     "Natural Earth 1:10m Lakes -- schematic lake and reservoir outlines, "
+     "generalised at 1:10,000,000 and not aligned to any higher-resolution "
+     "shoreline, public domain (CC0)"),
+    ("rivers", "water_rivers", RIVERS_URL, "river", feature_id,
+     "Natural Earth 1:10m Rivers + Lake Centerlines -- schematic river "
+     "courses, generalised at 1:10,000,000 and not a surveyed centreline, "
+     "public domain (CC0)"),
 )
 
 
@@ -291,9 +378,9 @@ async def refresh_once() -> dict[str, int]:
     """
     counts: dict[str, int] = {}
     async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
-        for key, name, url, prefix, provenance in DATASETS:
+        for key, name, url, prefix, id_fn, provenance in DATASETS:
             payload = await _fetch(client, url)
-            collection = _build_collection(payload.get("features"), prefix)
+            collection = _build_collection(payload.get("features"), prefix, id_fn)
             await storage.record_reference(name, serialize(collection, provenance))
             counts[key] = len(collection["features"])
     log.info(
