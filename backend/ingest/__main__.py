@@ -19,7 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend import config, storage
 from backend.ingest import jobs, run_job, streams
-from backend.sources import airports, icao_blocks, sanctions
+from backend.sources import ais, airports, icao_blocks, sanctions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe.ingest")
@@ -123,6 +123,15 @@ async def main() -> None:
     await stopping.wait()
     log.info("Shutting down")
     scheduler.shutdown(wait=False)
+    # Before the cancellations below, not after: a cancelled task drops its
+    # socket without a close frame, and aisstream then holds the session until
+    # its own keepalive ping times out. Restart inside that window -- which is
+    # every `docker compose up --build` -- and the new process's connection is a
+    # second concurrent session to an account permitted very few, which is one of
+    # the ways this backend has earned an HTTP 429. Awaited here, where there is
+    # still a running loop and nothing has been cancelled, so the close handshake
+    # can actually complete.
+    await ais.aclose()
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

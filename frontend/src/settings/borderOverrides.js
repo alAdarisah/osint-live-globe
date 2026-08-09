@@ -13,7 +13,7 @@
 // Sparse -- only the rings someone actually dragged -- but each of those is
 // stored whole. A per-vertex delta keyed on index would be smaller still and
 // could not express the two gestures that matter most (inserting a vertex where
-// the 1:110m generalisation has none, deleting one it should not have), because
+// the 1:50m generalisation has none, deleting one it should not have), because
 // either shifts every index after it.
 //
 // `fp` is a fingerprint of the geometry the edit was made against: the polygon
@@ -32,22 +32,31 @@
 // on its own value. Store a rounded number while the neighbour keeps
 // -141.00000000000003 and the two stop matching one edit later.
 
-// 5 decimals is ~1.1 m. Measured over the 7,536 distinct coordinates in
-// ne_110m_admin_0_countries: 3dp collides 39 pairs, 4dp 35, 5dp 17, 6dp none.
-// Every one of those 17 is a sub-metre sliver artefact -- there are no distinct
-// coordinate pairs at all between 1e-4 and 1e-3 degrees -- so 5dp buys a clean
-// lattice for about one byte per number.
+// 5 decimals is ~1.1 m. Measured over the 78,539 distinct coordinates in
+// ne_50m_admin_0_countries: 3dp collides 23 pairs, 4dp 3, 5dp none. It is also
+// what sources/countries.py rounds to before storing, so the numbers that arrive
+// here are already on this lattice and quantizing them again is a no-op -- which
+// is the point. The two constants have to stay equal; if one moves, shared
+// boundary vertices stop matching and link mode tears gaps instead of closing
+// them.
 export const BORDER_PRECISION = 5;
 
-// The largest ring on Earth at this resolution is 556 points (Antarctica's
-// coastline); the largest country is Canada at 794 across 30 polygons.
-export const MAX_RING_POINTS = 2000;
+// The largest ring on Earth at this resolution is Russia's mainland coastline at
+// 4,574 points, then Canada at 3,317 and Antarctica at 2,805. The ceiling is
+// above all of them with room for inserted vertices; it exists to refuse a ring
+// that could only have come from a bug, not to refuse any real country.
+export const MAX_RING_POINTS = 6000;
 
-// ~5x every vertex on the planet (10,654). The ceiling exists because the whole
-// settings object is PUT as one document: a borders block that pushed it past
-// admin_config.py's MAX_BYTES would 413 the save of *every other setting* too,
-// and the panel would just say "not saved" with no hint as to which of them did
-// it. Refusing the ring that crosses the line is a failure someone can act on.
+// A byte budget wearing a vertex count: ~20 bytes per stored point puts 50,000
+// at about a megabyte. The ceiling exists because the whole settings object is
+// PUT as one document -- a borders block that pushed it past admin_config.py's
+// MAX_BYTES (2 MB) would 413 the save of *every other setting* too, and the
+// panel would just say "not saved" with no hint as to which of them did it.
+// Refusing the ring that crosses the line is a failure someone can act on.
+//
+// It is deliberately *not* scaled to the planet's 99,613 vertices the way it
+// once was to 1:110m's 10,654. Redrawing every border on Earth is not a thing
+// anyone does; storing half of them is a thing that would break saving.
 export const MAX_TOTAL_POINTS = 50000;
 
 const RING_KEY_RE = /^\d{1,3}:\d{1,3}$/;
@@ -282,10 +291,10 @@ export function borderStats(borders) {
 /**
  * Every coordinate in the world, mapped to every place it appears.
  *
- * This is what lets a shared border move as one line. Natural Earth's 1:110m
- * admin-0 set is generated from a topology and preserves it: 2,658 coordinates
- * are owned by more than one country, the owner histogram is 1 -> 4878,
- * 2 -> 2493, 3 -> 164, 4 -> 1, and those 164 triple-owned points are, to within
+ * This is what lets a shared border move as one line. Natural Earth's 1:50m
+ * admin-0 set is generated from a topology and preserves it: 19,267 coordinates
+ * are owned by more than one country, the owner histogram is 1 -> 59272,
+ * 2 -> 19096, 3 -> 170, 4 -> 1, and those 170 triple-owned points are, to within
  * noise, the world's land tripoints. Matching on the exact (quantized) value is
  * therefore a correct model of this data rather than a heuristic -- every
  * landlocked country is 100% shared, and the shortfall for a coastal one is

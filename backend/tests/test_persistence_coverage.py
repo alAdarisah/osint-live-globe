@@ -61,6 +61,10 @@ NOT_WARMED = {
     # holds only the per-country feature counts /api/health reports. A warm here
     # would restore a number, not a layer.
     "admin2_boundaries": "the layer is read from Postgres per request, not from registry state",
+    # Same arrangement, one admin level up: /api/admin1-boundaries reads
+    # storage.reference() per country, so the geometry is warm from Postgres
+    # without this module restoring anything into its registry state.
+    "admin1_boundaries": "the layer is read from Postgres per request, not from registry state",
 }
 
 _WRITE_CALLS = ("record_snapshot", "record_reference")

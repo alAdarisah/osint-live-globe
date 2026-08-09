@@ -11,6 +11,12 @@
 // the region they watch should not have to arrange it again after a reload.
 // Nothing else about a panel (open/collapsed, which section is expanded) is
 // stored here -- see useAccordion.js for that.
+//
+// Panels that opt in with `resizable` also get a corner grip, and their size is
+// stored in the same record as their position. A panel wide enough to read is
+// not a preference the shipped width can guess: the admin panel puts a colour
+// well, a name, a size slider and three selects on one row, and how much room
+// that needs depends on the reader's text scale as much as on their screen.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -23,6 +29,10 @@ const EDGE_MARGIN = 4;
 // click on a header into a one-pixel move and suppresses the click.
 const DRAG_THRESHOLD_PX = 4;
 const PANELS_RESET_EVENT = "osint-panels-reset";
+// Small enough to tuck a panel out of the way, large enough that the grip and
+// the header's close button are both still reachable at the floor.
+const MIN_PANEL_WIDTH = 260;
+const MIN_PANEL_HEIGHT = 140;
 
 function loadAll() {
   try {
@@ -34,16 +44,27 @@ function loadAll() {
   }
 }
 
-function saveOne(id, pos) {
+// `patch` merges into whatever that panel already has, because position and
+// size are written by two different gestures into one record -- a resize that
+// replaced the record would forget where the panel was dropped.
+function saveOne(id, patch) {
   try {
     const all = loadAll();
-    if (pos) all[id] = pos;
+    if (patch) all[id] = { ...all[id], ...patch };
     else delete all[id];
     localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
   } catch {
     // Storage full or disabled: the panel still moves, it just will not be
     // where it was left next time.
   }
+}
+
+function storedPos(rec) {
+  return rec && typeof rec.x === "number" && typeof rec.y === "number" ? { x: rec.x, y: rec.y } : null;
+}
+
+function storedSize(rec) {
+  return rec && typeof rec.w === "number" && typeof rec.h === "number" ? { w: rec.w, h: rec.h } : null;
 }
 
 function clampToViewport(x, y, width, height) {
@@ -55,6 +76,13 @@ function clampToViewport(x, y, width, height) {
   };
 }
 
+function clampSize(w, h) {
+  return {
+    w: Math.min(Math.max(Math.round(w), MIN_PANEL_WIDTH), window.innerWidth - 2 * EDGE_MARGIN),
+    h: Math.min(Math.max(Math.round(h), MIN_PANEL_HEIGHT), window.innerHeight - 2 * EDGE_MARGIN),
+  };
+}
+
 /**
  * @param {string} id        stable per panel -- it is the storage key
  * @param {object} [options]
@@ -62,31 +90,39 @@ function clampToViewport(x, y, width, height) {
  *   released without moving, so a header can stay a toggle as well as a handle
  * @param {boolean} [options.enabled]     false renders the panel undraggable and
  *   ignores any stored position (mobile, where panels are full-width overlays)
+ * @param {boolean} [options.resizable]   true also returns `resizeProps` for a
+ *   corner grip, and remembers the size it is dragged to
  *
  * @returns {{
  *   panelRef: object, style: object|undefined, handleProps: object,
- *   moved: boolean, resetPosition: () => void
+ *   resizeProps: object, moved: boolean, resetPosition: () => void
  * }}
  */
-export function useDraggablePanel(id, { onClick, enabled = true } = {}) {
+export function useDraggablePanel(id, { onClick, enabled = true, resizable = false } = {}) {
   const panelRef = useRef(null);
-  const [pos, setPos] = useState(() => (enabled ? loadAll()[id] || null : null));
+  const [pos, setPos] = useState(() => (enabled ? storedPos(loadAll()[id]) : null));
+  const [size, setSize] = useState(() => (enabled && resizable ? storedSize(loadAll()[id]) : null));
   const dragRef = useRef(null);
+  const resizeRef = useRef(null);
 
   // A stored position from a wider window can leave a panel entirely off-screen.
   // Re-clamping on resize is what stops a panel becoming unreachable -- it can
   // otherwise only be recovered by clearing storage.
+  // A stored size from a wider window is the same problem one step earlier: a
+  // panel held at 900px on a 700px screen would be clipped by the viewport
+  // rather than by its own max-width, so both are re-clamped together.
   useEffect(() => {
-    if (!pos) return undefined;
+    if (!pos && !size) return undefined;
     function onResize() {
       const el = panelRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
+      setSize((prev) => (prev ? clampSize(prev.w, prev.h) : prev));
       setPos((prev) => (prev ? clampToViewport(prev.x, prev.y, rect.width, rect.height) : prev));
     }
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [pos]);
+  }, [pos, size]);
 
   // "Reset panel layout" in the admin panel clears the stored positions, but
   // every mounted panel is still holding its own `pos` in state -- a window
@@ -95,6 +131,7 @@ export function useDraggablePanel(id, { onClick, enabled = true } = {}) {
   useEffect(() => {
     function onReset() {
       setPos(null);
+      setSize(null);
     }
     window.addEventListener(PANELS_RESET_EVENT, onReset);
     return () => window.removeEventListener(PANELS_RESET_EVENT, onReset);
@@ -166,15 +203,66 @@ export function useDraggablePanel(id, { onClick, enabled = true } = {}) {
     [id, onClick]
   );
 
+  // The grip sits inside the panel, so its pointer events would otherwise reach
+  // the panel's own handlers as well -- stopPropagation is what keeps a resize
+  // from also being read as the start of a drag.
+  const onResizeDown = useCallback(
+    (e) => {
+      if (!enabled || !resizable) return;
+      const el = panelRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      resizeRef.current = { startX: e.clientX, startY: e.clientY, width: rect.width, height: rect.height };
+      e.stopPropagation();
+      e.preventDefault();
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* resize still works, it just stops at the edge of the grip */
+      }
+    },
+    [enabled, resizable]
+  );
+
+  const onResizeMove = useCallback((e) => {
+    const rs = resizeRef.current;
+    if (!rs) return;
+    const next = clampSize(rs.width + (e.clientX - rs.startX), rs.height + (e.clientY - rs.startY));
+    rs.lastSize = next;
+    setSize(next);
+  }, []);
+
+  const onResizeUp = useCallback(
+    (e) => {
+      const rs = resizeRef.current;
+      resizeRef.current = null;
+      if (!rs) return;
+      if (e.currentTarget.hasPointerCapture?.(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+      if (rs.lastSize) saveOne(id, { w: rs.lastSize.w, h: rs.lastSize.h });
+    },
+    [id]
+  );
+
   const resetPosition = useCallback(() => {
     setPos(null);
+    setSize(null);
     saveOne(id, null);
   }, [id]);
 
   // `right`/`bottom` are cleared explicitly because most of these panels are
   // anchored to a corner in CSS -- leaving those set would fight the left/top
   // this hook applies and stretch the panel instead of moving it.
-  const style = pos ? { left: pos.x, top: pos.y, right: "auto", bottom: "auto" } : undefined;
+  //
+  // `maxWidth`/`maxHeight` are dropped for the same reason: those caps are what
+  // the panel is sized by until someone sizes it themselves, and leaving them
+  // set would silently ignore the last part of a drag past them.
+  const style =
+    pos || size
+      ? {
+          ...(pos ? { left: pos.x, top: pos.y, right: "auto", bottom: "auto" } : null),
+          ...(size ? { width: size.w, height: size.h, maxWidth: "none", maxHeight: "none" } : null),
+        }
+      : undefined;
 
   return {
     panelRef,
@@ -184,6 +272,16 @@ export function useDraggablePanel(id, { onClick, enabled = true } = {}) {
     handleProps: enabled
       ? { onPointerDown, onPointerMove, onPointerUp, title: "Drag to move", className: "panel-drag-handle" }
       : {},
+    resizeProps:
+      enabled && resizable
+        ? {
+            onPointerDown: onResizeDown,
+            onPointerMove: onResizeMove,
+            onPointerUp: onResizeUp,
+            title: "Drag to resize",
+            className: "panel-resize-grip",
+          }
+        : null,
   };
 }
 

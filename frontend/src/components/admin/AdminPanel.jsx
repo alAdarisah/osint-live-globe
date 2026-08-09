@@ -21,12 +21,13 @@
 // work when it is closed.
 
 import { useRef, useState } from "react";
-import { PALETTE_GROUPS, DEFAULT_COLORS, TOKEN_LAYER, tokenHasSize, tokenHasZoom } from "../../map/iconTheme";
+import { PALETTE_GROUPS, DEFAULT_COLORS, TOKEN_LAYER, tokenHasSize, tokenHasZoom, glyphChoicesFor } from "../../map/iconTheme";
 import { shippedDrawZoom } from "../../map/scene";
 import { SETTINGS_LAYERS, defaultSettings } from "../../settings/defaults";
 import { borderStats } from "../../settings/borderOverrides";
 import { useAccordion } from "../../hooks/useAccordion";
 import { useDraggablePanel, clearAllPanelPositions } from "../../hooks/useDraggablePanel";
+import { useIsMobileViewport } from "../../hooks/useIsMobileViewport";
 import { PanelGroup } from "../controlPanel/Collapsible";
 import { SliderField, ColorField, IconField, CheckField } from "./fields";
 import DataEditor from "./DataEditor";
@@ -37,7 +38,15 @@ const DEFAULTS = defaultSettings();
 
 export default function AdminPanel({ settings, actions, recordsFor, sync, staleBorders, onClose }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN, STORAGE_KEY);
-  const { panelRef, style, handleProps } = useDraggablePanel("adminPanel");
+  // Resizable, and off on mobile where the panel is a full-width overlay whose
+  // width the viewport already decides. A pin row here is a colour well, a
+  // name, a size slider and three selects on one line: on a narrow panel the
+  // name is the only part that can give, and it runs out.
+  const isMobile = useIsMobileViewport();
+  const { panelRef, style, handleProps, resizeProps } = useDraggablePanel("adminPanel", {
+    enabled: !isMobile,
+    resizable: true,
+  });
 
   return (
     <aside id="adminPanel" ref={panelRef} style={style}>
@@ -194,12 +203,64 @@ export default function AdminPanel({ settings, actions, recordsFor, sync, staleB
             checked={settings.ui.reduceMotion}
             onChange={(value) => actions.setUi({ reduceMotion: value })}
           />
+          <CheckField
+            label="Map cursor"
+            note="Draws the map's own pointer. Off gives you the system cursor back."
+            checked={settings.ui.cursorEnabled}
+            onChange={(value) => actions.setUi({ cursorEnabled: value })}
+          />
+          {/* Only shown when there is a cursor to configure -- three controls
+              that do nothing are worse than three controls that are absent. */}
+          {settings.ui.cursorEnabled && (
+            <>
+              <label className="admin-select-row">
+                <span>Cursor style</span>
+                <select
+                  value={settings.ui.cursorStyle}
+                  onChange={(event) => actions.setUi({ cursorStyle: event.target.value })}
+                >
+                  <option value="reticle">Reticle</option>
+                  <option value="dot">Dot and ring</option>
+                  <option value="halo">Halo on the system cursor</option>
+                </select>
+              </label>
+              <SliderField
+                label="Cursor size"
+                value={settings.ui.cursorScale}
+                defaultValue={1}
+                min={0.5}
+                max={2.5}
+                step={0.05}
+                format={(v) => `${Math.round(v * 100)}%`}
+                onChange={(value) => actions.setUi({ cursorScale: value })}
+              />
+              <ColorField
+                label="Cursor colour"
+                value={settings.ui.cursorColor || settings.ui.accent || "#6fe3ff"}
+                defaultValue="#6fe3ff"
+                onChange={(value) => actions.setUi({ cursorColor: value })}
+              />
+              {settings.ui.cursorColor && (
+                <button
+                  type="button"
+                  className="admin-wide-btn"
+                  onClick={() => actions.setUi({ cursorColor: null })}
+                >
+                  Follow the accent colour
+                </button>
+              )}
+            </>
+          )}
         </PanelGroup>
 
         <PanelGroup id="adm-config" title="Configuration file" open={isOpen("adm-config")} onToggle={setOpen}>
           <ConfigSection actions={actions} sync={sync} />
         </PanelGroup>
       </div>
+
+      {/* Last child so it paints over the body's scrollbar rather than under
+          it, and absent entirely on mobile (see useDraggablePanel). */}
+      {resizeProps && <div {...resizeProps} aria-hidden="true" />}
     </aside>
   );
 }
@@ -469,6 +530,22 @@ function LayerBlock({ layer, settings, actions, open, onToggle }) {
             actions.setLayerStyle(layer.key, { minZoom: value === shippedGate ? null : value })
           }
         />
+        {/* 19 is one past the map's deepest zoom, so the far right of the track
+            is "no ceiling" rather than a limit nobody could reach. Storing null
+            there is what makes dragging it back the reset, the same way the
+            floor above resets by returning to its shipped number. */}
+        <SliderField
+          label="Hides past zoom"
+          value={style.maxZoom ?? 19}
+          defaultValue={19}
+          min={1}
+          max={19}
+          step={1}
+          format={(v) => (v >= 19 ? "no limit" : `z${v}`)}
+          onChange={(value) =>
+            actions.setLayerStyle(layer.key, { maxZoom: value >= 19 ? null : value })
+          }
+        />
 
         {tokens.length > 0 && (
           <>
@@ -495,7 +572,12 @@ function LayerBlock({ layer, settings, actions, open, onToggle }) {
                 onSizeChange={(value) => actions.setTokenSize(token.id, value)}
                 zoom={perPinDials && tokenHasZoom(token.id) ? settings.icons.zooms[token.id] ?? null : undefined}
                 layerZoom={gateOf(token.id)}
+                zoomMax={perPinDials && tokenHasZoom(token.id) ? settings.icons.zoomMaxes[token.id] ?? null : undefined}
                 onZoomChange={(value) => actions.setTokenZoom(token.id, value)}
+                onZoomMaxChange={(value) => actions.setTokenZoomMax(token.id, value)}
+                glyph={settings.icons.glyphs[token.id] ?? null}
+                glyphChoices={glyphChoicesFor(token.id)}
+                onGlyphChange={(name) => actions.setTokenGlyph(token.id, name)}
               />
             ))}
           </>
@@ -532,6 +614,8 @@ function SharedColours({ settings, actions }) {
           size={null}
           onSizeChange={() => {}}
           onZoomChange={() => {}}
+          onZoomMaxChange={() => {}}
+          onGlyphChange={() => {}}
         />
       ))}
     </div>
@@ -576,8 +660,9 @@ function BorderSection({ settings, actions, staleKeys }) {
   return (
     <>
       <div className="admin-note">
-        Boundaries come from Natural Earth at 1:110m, where the average country is drawn with about
-        forty points &mdash; a generalisation for looking at the world, not a survey. An edit here
+        Boundaries come from Natural Earth at 1:50m, where the median country is drawn with about
+        a hundred and eighty points &mdash; a generalisation for looking at the world, not a survey.
+        It follows a coastline closely enough to zoom into; it is still not a cadastral line. An edit here
         redraws that line; it does not correct it. Every country whose border has been redrawn says so
         on its own card.
       </div>

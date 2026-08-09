@@ -86,10 +86,10 @@ test("a configured pin zoom", async (t) => {
   t.afterEach(() => setIconTheme({ zooms: {} }));
 
   await t.test("is read back, rounded and clamped", () => {
-    setIconTheme({ zooms: { "infra.nuclear": 8, "infra.refinery": 6.4, "city.marker": 99 } });
+    setIconTheme({ zooms: { "infra.nuclear": 8, "infra.refinery": 6.4, "city.town": 99 } });
     assert.equal(tokenZoom("infra.nuclear"), 8);
     assert.equal(tokenZoom("infra.refinery"), 6);
-    assert.equal(tokenZoom("city.marker"), 18);
+    assert.equal(tokenZoom("city.town"), 18);
   });
 
   await t.test("is absent for a token left on its layer", () => {

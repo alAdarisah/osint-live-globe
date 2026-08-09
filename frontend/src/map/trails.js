@@ -12,7 +12,7 @@
 // bookkeeping cost for the (often hundreds of) vehicles that aren't selected.
 
 import { L } from "./leafletGlobal";
-import { unwrapPath } from "../utils/geo";
+import { unwrapPath, shiftPathLon } from "../utils/geo";
 import { layerOpacity, scaledWeight } from "./iconTheme";
 
 // restrictTo semantics: omitted (undefined) tracks every reporting entity;
@@ -105,26 +105,35 @@ export function renderTrailLayer(trailLayer, trailMap, color, visibleIds, style)
   const refLon = style?.refLon;
   const layerKey = style?.layerKey;
   const dashArray = style?.dashArray;
+  // Which copies of the world to repeat the track on (worldCopyOffsets in
+  // utils/geo.js), defaulting to the camera's own so a caller that has not been
+  // taught about copies behaves exactly as before. A trail belongs to a sprite: the
+  // sprite is now drawn on every copy in view, and a selected ship showing three
+  // hulls and one wake is the same "it stops at the edge" complaint again.
+  const copies = style?.copies ?? [0];
   const colorFor = typeof color === "function" ? color : () => color;
   trailLayer.clearLayers();
   for (const [id, points] of trailMap) {
     if (!visibleIds.has(id) || points.length < 2) continue;
     const stroke = colorFor(id);
-    const path = Number.isFinite(refLon) ? unwrapPath(points, refLon) : points;
-    for (let i = 0; i < path.length - 1; i++) {
-      const t = (i + 1) / (path.length - 1); // 0 (oldest) .. 1 (newest)
-      L.polyline([path[i], path[i + 1]], {
-        color: stroke,
-        // `layerKey` is the trail's parent -- a trail is drawn wherever its
-        // parent is drawn (see TRAIL_PARENT in scene.js), so it answers to the
-        // same two dials. Without this the tanker layer could be turned right
-        // down and its trails would keep drawing at full strength, which reads
-        // as the control having missed something.
-        weight: scaledWeight(2, layerKey),
-        opacity: (0.08 + t * 0.42) * (maxOpacity / 0.5) * layerOpacity(layerKey),
-        dashArray,
-        interactive: false,
-      }).addTo(trailLayer);
+    const unwrapped = Number.isFinite(refLon) ? unwrapPath(points, refLon) : points;
+    for (const copy of copies) {
+      const path = shiftPathLon(unwrapped, copy);
+      for (let i = 0; i < path.length - 1; i++) {
+        const t = (i + 1) / (path.length - 1); // 0 (oldest) .. 1 (newest)
+        L.polyline([path[i], path[i + 1]], {
+          color: stroke,
+          // `layerKey` is the trail's parent -- a trail is drawn wherever its
+          // parent is drawn (see TRAIL_PARENT in scene.js), so it answers to the
+          // same two dials. Without this the tanker layer could be turned right
+          // down and its trails would keep drawing at full strength, which reads
+          // as the control having missed something.
+          weight: scaledWeight(2, layerKey),
+          opacity: (0.08 + t * 0.42) * (maxOpacity / 0.5) * layerOpacity(layerKey),
+          dashArray,
+          interactive: false,
+        }).addTo(trailLayer);
+      }
     }
   }
 }

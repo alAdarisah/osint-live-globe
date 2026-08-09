@@ -332,6 +332,17 @@ export const LAYER_MANIFEST = {
     fetch: FETCH_MANUAL,
     disposition: CORROBORATING,
   },
+  railways: {
+    // Coarse Natural Earth rail linework, theatre-clipped and drawn as whole
+    // polylines like cables -- so ungated once active. MANUAL and off by default:
+    // it is basemap context a reader opts into, not something the resolver should
+    // assert or a country focus should drag on. Fetched once at boot as a whole
+    // document (backend/sources/railways.py), same as cables, so FETCH_MANUAL
+    // keeps the poller out of it.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
   cableLandings: {
     // 1,922 landing points, most within a few km of another one.
     draw: { band: "THEATRE", z: 5 },
@@ -460,6 +471,21 @@ export const LAYER_MANIFEST = {
     disposition: CORROBORATING,
     scoped: true,
   },
+  deflock: {
+    // ~125,000 ALPR camera locations worldwide, 99.78% of them in the United
+    // States -- and backend/regions.py has no US theatre, so the layer is only
+    // ever meaningfully populated on the unfiltered World view (a named region
+    // clips it to almost nothing). MANUAL and gated deep, together: default off,
+    // and even once a reader switches it on it draws nothing until they are
+    // looking at one town, so 125k pins can never land on a theatre view or a
+    // cold world paint. The proximity collapse and the LOCAL cap thin whatever
+    // survives inside a city. Not scoped -- /api/deflock takes no viewport bbox.
+    draw: { band: "LOCAL", z: 9 },
+    fetch: "LOCAL",
+    cap: { LOCAL: 800 },
+    collapse: { mode: "proximity", maxZoom: 11 },
+    disposition: MANUAL,
+  },
   cities: {
     // Raised from 5 to the COUNTRY floor, and promoted a band under a country
     // focus so focusing a country brings its cities with it.
@@ -476,14 +502,6 @@ export const LAYER_MANIFEST = {
     draw: null,
     fetch: FETCH_ALWAYS,
     disposition: AUTO,
-  },
-  districts: {
-    // Six countries, published monthly, weeks old by construction. Its geometry
-    // already loads on switch-on rather than being polled, so a country focus
-    // simply becomes the switch-on.
-    draw: { band: "COUNTRY" },
-    fetch: FETCH_MANUAL,
-    disposition: CORROBORATING,
   },
   outagePoints: {
     // One pin per country, and the feed behind it also drives the choropleth
@@ -655,13 +673,13 @@ const MARITIME_DEMOTE = ["cities", "infra", "osmInfra", "airports", "dams"];
 // An active war under the camera, by the same thresholds updateCountryWarFlare
 // already uses -- not a second definition of "at war".
 const HOT_PROMOTE = [
-  "conflictHistory", "officials", "cities", "infra", "osmInfra", "districts",
+  "conflictHistory", "officials", "cities", "infra", "osmInfra",
 ];
 
 // A country the reader has clicked. Narrower than the war promotion because
 // focus is an explicit act: it may also make corroborating layers eligible,
 // which no camera position may do.
-const FOCUS_PROMOTE = ["cities", "districts", "conflictHistory", "infra", "osmInfra"];
+const FOCUS_PROMOTE = ["cities", "conflictHistory", "infra", "osmInfra"];
 
 /**
  * @param {object} ctx

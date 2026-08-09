@@ -13,7 +13,7 @@ const COUNT_KEYS = [
   "infraNuclear", "infraFab", "infraPipelineNode", "pipelineRoutes",
   "gfwGaps", "gfwDetections", "gfwDetMatched", "gfwDetUnmatched",
   "czib", "czibActive", "czibWithdrawn", "floods", "floodsCurrent",
-  "ports", "portsOil", "dams", "damsLarge",
+  "ports", "portsOil", "dams", "damsLarge", "deflock", "railways",
 ];
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
@@ -25,7 +25,7 @@ const EMPTY_COUNTS = Object.fromEntries(
 const EMPTY_ZOOM_NOTES = {
   adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false,
   ais: false, jamming: false, officials: false, capped: {}, eventsCapped: 0,
-  gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
+  gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false, deflock: false,
 };
 
 const NO_BORDER_EDIT = { active: false, countryKey: null, linkMode: true, canUndo: false };
@@ -73,11 +73,6 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // at a mostly-blank map needs to be told whether that means "no harm here" or
   // "nobody has measured here".
   const [choropleth, setChoropleth] = useState({ metricId: null, covered: 0, total: 0 });
-  // What the admin-2 layer is currently showing: which count, which month, and
-  // how many districts that month actually has a record for.
-  const [districts, setDistricts] = useState({
-    metricId: "fatalities", month: null, districts: 0, countries: [],
-  });
 
   // onRegionAutoReset changes identity across renders (it closes over
   // region state) -- keep the latest one in a ref so the controller (created
@@ -108,7 +103,6 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
         onBorderEditChange: (state) => setBorderEdit(state?.active ? state : NO_BORDER_EDIT),
         onCountryFingerprints: setCountryFingerprints,
         onChoroplethChange: setChoropleth,
-        onDistrictsChange: setDistricts,
         onLayerStateChange: setLayerState,
         onFocusChange: setFocus,
         onBorderRingCommit: (commits) => onBorderRingCommitRef.current?.(commits),
@@ -179,14 +173,6 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     controllerRef.current?.setChoroplethMetric(metricId);
   }, []);
 
-  const setDistrictMetric = useCallback((metricId) => {
-    controllerRef.current?.setDistrictMetric(metricId);
-  }, []);
-
-  const setDistrictMonth = useCallback((month) => {
-    controllerRef.current?.setDistrictMonth(month);
-  }, []);
-
   // Closing the card leaves the country highlighted -- the selection is cleared
   // by its own controls (the chips in CountrySelectionBar), never as a side
   // effect of shutting a panel.
@@ -213,6 +199,10 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
 
   const setLayerZoomOverrides = useCallback((next) => {
     controllerRef.current?.setLayerZoomOverrides(next);
+  }, []);
+
+  const setLayerZoomMaxOverrides = useCallback((next) => {
+    controllerRef.current?.setLayerZoomMaxOverrides(next);
   }, []);
 
   const setLayerWishes = useCallback((next) => {
@@ -264,9 +254,8 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     layerState, setSceneBypass, invalidateSize, focus,
     applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, setAgeReference,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
-    setIconTheme, setLayerZoomOverrides, setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
+    setIconTheme, setLayerZoomOverrides, setLayerZoomMaxOverrides, setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
     choropleth, setChoroplethMetric,
-    districts, setDistrictMetric, setDistrictMonth,
     borderEdit, countryFingerprints,
     refreshCountriesNow, beginBorderEdit, endBorderEdit, setBorderLinkMode, undoBorderEdit,
   };

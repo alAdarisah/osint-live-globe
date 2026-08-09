@@ -71,11 +71,11 @@ lack of a matching claim: 141,515 events in seven days.
 
 Global, not chokepoint-bounded
 ------------------------------
-config.AIS_BBOXES exists to bound *aisstream's* volume, which is a constraint on
-a websocket subscription and not on this. A seven-day global window is 2,795 gaps
-and three requests; the same window clipped to those boxes was two events. The
-boxes would throw away 99.9% of a payload that costs nothing extra to keep, so
-this fetches worldwide and lets the layer decide what to draw.
+config.WATCHED_WATERS bounds what this map will draw a conclusion from, which is
+a constraint on inference and not on a batch download. A seven-day global window
+is 2,795 gaps and three requests; the same window clipped to those boxes was two
+events. The boxes would throw away 99.9% of a payload that costs nothing extra to
+keep, so this fetches worldwide and lets the layer decide what to draw.
 
 Licence
 -------

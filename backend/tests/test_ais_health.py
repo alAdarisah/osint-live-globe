@@ -19,6 +19,8 @@ silently never fired, and a total outage read as every vessel in every watched
 box going dark at the same moment.
 """
 
+import asyncio
+
 import pytest
 
 from backend.sources import ais, dark_vessels
@@ -149,6 +151,141 @@ def test_silence_is_not_reported_as_a_key_problem():
     assert "accepted" in silent
     assert "outage" in silent
     assert issubclass(ais.StreamRefused, Exception)
+
+
+# --- restarts ---------------------------------------------------------------
+#
+# The backoff above is per-process, and this process restarts: rebuilds, crash
+# loops, `restart: unless-stopped`. Every restart used to reset the schedule to
+# 5 seconds, so four rebuilds in a morning was four bursts of 5/10/20/40s at a
+# service that had already answered 429 -- and aisstream rate-limits by IP, so
+# that is a self-inflicted block that outlives the outage that provoked it.
+
+
+def _failing(count, start=NOW, step=60.0):
+    return [(start + i * step, 0, False) for i in range(count)]
+
+
+def test_a_process_with_no_history_starts_at_the_bottom_of_the_schedule():
+    assert ais.resume_backoff([], NOW) == (ais.BACKOFF_START, 0.0)
+
+
+def test_a_stack_that_was_healthy_last_run_starts_fresh():
+    series = _failing(5) + [(NOW + 400, 900, True)]
+    assert ais.resume_backoff(series, NOW + 500) == (ais.BACKOFF_START, 0.0)
+
+
+def test_one_failure_is_a_blip_not_a_reason_to_wait():
+    backoff, _wait = ais.resume_backoff(_failing(1), NOW + 60)
+    assert backoff == ais.BACKOFF_START
+
+
+def test_the_schedule_resumes_where_it_left_off():
+    """Same doubling as _next_backoff, picked up rather than restarted."""
+    expected = ais.BACKOFF_START
+    for failures in range(1, 8):
+        backoff, _wait = ais.resume_backoff(_failing(failures), NOW + failures * 60)
+        assert backoff == expected
+        expected = ais._next_backoff(expected)
+
+
+def test_an_outage_measured_in_hours_resumes_at_the_cap():
+    """The case that matters: the heartbeat writes a failing row a minute, so an
+    hour of outage is 60 of them and the answer is the cap, immediately."""
+    backoff, _wait = ais.resume_backoff(_failing(60), NOW + 3600)
+    assert backoff == ais.BACKOFF_CAP
+
+
+def test_a_day_long_outage_does_not_build_an_astronomical_number():
+    backoff, _wait = ais.resume_backoff(_failing(1440), NOW + 86400)
+    assert backoff == ais.BACKOFF_CAP
+
+
+def test_the_remainder_of_the_delay_is_served_before_the_first_attempt():
+    """The whole point. A rebuild three seconds after a failure does not get a
+    free connection attempt -- it waits out what the previous process owed."""
+    series = _failing(60)
+    newest = series[-1][0]
+    _backoff, wait = ais.resume_backoff(series, newest + 3)
+    assert wait == pytest.approx(ais.BACKOFF_CAP - 3)
+
+
+def test_a_delay_already_served_is_not_served_twice():
+    series = _failing(60)
+    _backoff, wait = ais.resume_backoff(series, series[-1][0] + ais.BACKOFF_CAP + 10)
+    assert wait == 0.0
+
+
+# --- shutdown ---------------------------------------------------------------
+
+
+def test_the_socket_is_closed_before_the_process_goes(monkeypatch):
+    """aisstream holds a dropped session until its own ping times out, and a
+    rebuild inside that window is a second concurrent session on an account
+    permitted very few."""
+    closed = []
+
+    class _Socket:
+        async def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(ais, "_connection", _Socket(), raising=False)
+    asyncio.run(ais.aclose())
+    assert closed == [True]
+    assert ais._connection is None
+
+
+def test_closing_twice_is_harmless():
+    asyncio.run(ais.aclose())
+    asyncio.run(ais.aclose())
+
+
+def test_a_socket_that_refuses_to_close_does_not_stop_the_shutdown(monkeypatch):
+    class _Stuck:
+        async def close(self):
+            raise OSError("connection already gone")
+
+    monkeypatch.setattr(ais, "_connection", _Stuck(), raising=False)
+    asyncio.run(ais.aclose())  # must not raise
+    assert ais._connection is None
+
+
+def test_the_ingest_process_actually_calls_it():
+    """The function existing is not the fix; being on the shutdown path is, and
+    it has to run *before* the task cancellations rather than after."""
+    import inspect
+
+    from backend.ingest import __main__ as ingest_main
+
+    source = inspect.getsource(ingest_main.main)
+    assert "await ais.aclose()" in source
+    assert source.index("await ais.aclose()") < source.index("task.cancel()")
+
+
+# --- coverage ---------------------------------------------------------------
+
+
+def test_the_subscription_covers_the_whole_planet():
+    """Since 2026-08-08 the stream collects globally rather than from eight
+    chokepoint boxes. One box, and it is the world."""
+    assert ais._bboxes_payload() == [[[-90.0, -180.0], [90.0, 180.0]]]
+
+
+def test_collecting_globally_is_not_the_same_as_watching_globally():
+    """The split that made a global subscription affordable. WATCHED_WATERS is
+    what dark_vessels infers inside and what gfw_detections spends satellite
+    tiles on; re-coupling them to the subscription would put the tile sweep at
+    1,024 tiles and let a mid-ocean gap -- where the ordinary explanation is
+    that nobody was listening -- be reported as a vessel going dark."""
+    from backend import config
+
+    assert config.WATCHED_WATERS != config.AIS_BBOXES
+    assert len(config.WATCHED_WATERS) == 8
+    # Nothing in the watched set spans a hemisphere.
+    assert all(
+        lat_max - lat_min <= 30 and lon_max - lon_min <= 30
+        for lat_min, lon_min, lat_max, lon_max in config.WATCHED_WATERS
+    )
 
 
 # --- egress -----------------------------------------------------------------

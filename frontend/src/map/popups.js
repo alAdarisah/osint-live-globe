@@ -393,8 +393,9 @@ function buildHumanitarian(props, raw) {
 
 /** IODA's record for this country shape, by ISO2 where the shape has one.
  *
- *  Natural Earth ships "-99" as the ISO2 of five features in ne_110m -- Norway,
- *  France, Northern Cyprus, Somaliland and Kosovo -- so a code-only lookup left
+ *  Natural Earth ships "-99" as the ISO2 of eight features in ne_50m -- Norway,
+ *  France, Northern Cyprus, Somaliland, Kosovo, Siachen Glacier, and Australia's
+ *  Indian Ocean and Ashmore/Cartier territories -- so a code-only lookup left
  *  a French or Norwegian outage out of the card with nothing to show for it.
  *  Those shapes are keyed by name everywhere else in this app, and IODA names
  *  its entities too, so the name is the second way in. It is tried only when

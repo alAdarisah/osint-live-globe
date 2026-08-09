@@ -1,3 +1,4 @@
+import { SVG, GLYPH_CHOICES, shippedGlyph } from "./svgIcons.js";
 // Live marker appearance: the one place a glyph's colour and size are resolved.
 //
 // Everything that draws a pin -- decorators.js, the WebGL sprite styles, the
@@ -87,7 +88,19 @@ export const PALETTE_GROUPS = [
     id: "places",
     label: "Places & infrastructure",
     tokens: [
-      { id: "city.marker", label: "City / capital", value: "#ff6fb5" },
+      // One row per drawn city glyph rather than one row for the whole layer.
+      // The four population bands and the capital each draw a different shape
+      // (see CITY_TIERS in decorators.js), and a single "City / capital" token
+      // meant the shape picker could only set all five to the same glyph --
+      // which deletes the graduated-symbol distinction the tiers exist for.
+      // Same colour on all five, because that distinction was never carried by
+      // hue; splitting them is about being able to size, delay and re-shape a
+      // band on its own.
+      { id: "city.capital", label: "Capital city", value: "#ff6fb5" },
+      { id: "city.mega", label: "Megacity (5M+)", value: "#ff6fb5" },
+      { id: "city.large", label: "Large city (1M-5M)", value: "#ff6fb5" },
+      { id: "city.medium", label: "City (250k-1M)", value: "#ff6fb5" },
+      { id: "city.town", label: "Town (100k-250k)", value: "#ff6fb5" },
       { id: "infra.refinery", label: "Oil refinery", value: "#ff9500" },
       { id: "infra.lng_terminal", label: "LNG terminal", value: "#9be15d" },
       { id: "infra.port", label: "Port / oil terminal", value: "#d8b9ff" },
@@ -99,14 +112,25 @@ export const PALETTE_GROUPS = [
       { id: "infra.pipeline", label: "Pipeline node & routes", value: "#ffb347" },
       { id: "satellite.stations", label: "Space station", value: "#6fe3ff" },
       { id: "satellite.military", label: "Military satellite", value: "#ff4d4d" },
-      { id: "airfield.civil", label: "Airfield", value: "#7f93a8" },
+      // One row per runway layout, not one row for "civil". The three tiers
+      // draw three different glyphs (see AIRFIELD_STYLE in decorators.js), and
+      // under a single token the shape picker could only flatten them onto one
+      // -- a small strip and an international airport reading identically is
+      // exactly what the tiered glyphs were drawn to prevent.
+      { id: "airfield.large", label: "Large airport", value: "#7f93a8" },
+      { id: "airfield.medium", label: "Medium airport", value: "#7f93a8" },
+      { id: "airfield.small", label: "Small airfield", value: "#7f93a8" },
       { id: "airfield.military", label: "Airfield, military by name", value: "#ff8c3a" },
       { id: "cable.route", label: "Submarine cable route", value: "#4fd1c5" },
       { id: "cable.landing", label: "Cable landing point", value: "#4fd1c5" },
       { id: "cable.planned", label: "Planned cable landing", value: "#7f93a8" },
       { id: "launch.upcoming", label: "Upcoming launch", value: "#ffd60a" },
       { id: "launch.flown", label: "Recent launch (flown)", value: "#8aa0ad" },
-      { id: "osm.military", label: "Military site (OpenStreetMap)", value: "#ff8c3a" },
+      // Two shapes, two rows: a military airfield draws a runway and a military
+      // area draws a compound. They shared a token and so shared one shape
+      // picker, which could only make both of them the same thing.
+      { id: "osm.military_airfield", label: "Military airfield (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_area", label: "Military area (OpenStreetMap)", value: "#ff8c3a" },
       { id: "osm.power", label: "Power plant (OpenStreetMap)", value: "#9be15d" },
       { id: "osm.border", label: "Border crossing (OpenStreetMap)", value: "#c9b6ff" },
       // EASA airspace bulletins, coloured by status rather than by severity.
@@ -122,11 +146,31 @@ export const PALETTE_GROUPS = [
       // severity.js), so a warning is now the only thing on the map drawn in it.
       { id: "czib.active", label: "Airspace warning, active (EASA)", value: "#ff8c00" },
       { id: "czib.withdrawn", label: "Airspace warning, withdrawn", value: "#7f93a8" },
-      // Steel-teal, a sibling of airfield.civil above: the two are the same
+      // Steel-teal, a sibling of the civil airfields above: the two are the same
       // kind of thing -- a published gazetteer of places traffic goes -- in two
       // domains, and they should read that way.
       { id: "port.wpi", label: "Port (NGA World Port Index)", value: "#7fa8b8" },
       { id: "dam.barrier", label: "Dam / reservoir (Global Dam Watch)", value: "#4a9fd8" },
+      // Railway station/halt/yard/border nodes, riding the OpenStreetMap layer.
+      // Siblings of osm.border above -- same crowd-sourced provenance, the same
+      // muted slate so a station never reads as a border crossing.
+      //
+      // Four rows rather than one. They used to share a single "Railway node"
+      // token, which made every dial on them all-or-nothing: a halt is a
+      // request stop with a nameboard and a station is a building with a
+      // timetable, and "show the halts only once I am on top of them, keep the
+      // stations from further out" was unsayable. It is four pin types, so it
+      // is four rows.
+      { id: "osm.railway_station", label: "Railway station (OpenStreetMap)", value: "#8aa0c4" },
+      { id: "osm.railway_halt", label: "Railway halt (OpenStreetMap)", value: "#8aa0c4" },
+      { id: "osm.railway_yard", label: "Railway yard (OpenStreetMap)", value: "#8aa0c4" },
+      { id: "osm.railway_border", label: "Railway border crossing (OSM)", value: "#8aa0c4" },
+      // Coarse basemap rail *linework* (Natural Earth 1:10m, 2021). A muted grey,
+      // and colour-only like cable.route below -- it is a polyline, not a pin.
+      { id: "railway.line", label: "Railway line (Natural Earth, 2021)", value: "#6f7d92" },
+      // DeFlock ALPR camera locations. A muted violet, deliberately quiet: this is
+      // crowd-sourced surveillance-infrastructure metadata, not a live feed.
+      { id: "deflock.camera", label: "ALPR camera (DeFlock / OpenStreetMap)", value: "#a78bba" },
     ],
   },
   {
@@ -163,7 +207,7 @@ export const DEFAULT_COLORS = Object.freeze(
  * scaledSize, which is what a per-token multiplier acts on.
  */
 const COLOUR_ONLY_TOKENS = new Set([
-  "event.corroborated", "sanctions.designated", "cable.route",
+  "event.corroborated", "sanctions.designated", "cable.route", "railway.line",
   "choropleth.low", "choropleth.mid", "choropleth.high",
 ]);
 
@@ -211,7 +255,11 @@ export const TOKEN_LAYER = Object.freeze({
   "gfw.gap": "gfwGaps",
   "gfw.unmatched": "gfwDetections",
   "gfw.matched": "gfwDetections",
-  "city.marker": "cities",
+  "city.capital": "cities",
+  "city.mega": "cities",
+  "city.large": "cities",
+  "city.medium": "cities",
+  "city.town": "cities",
   "infra.refinery": "infra",
   "infra.lng_terminal": "infra",
   "infra.port": "infra",
@@ -221,15 +269,23 @@ export const TOKEN_LAYER = Object.freeze({
   "infra.pipeline": "infra",
   "satellite.stations": "satellites",
   "satellite.military": "satellites",
-  "airfield.civil": "airports",
+  "airfield.large": "airports",
+  "airfield.medium": "airports",
+  "airfield.small": "airports",
   "airfield.military": "airports",
   "cable.landing": "cableLandings",
   "cable.planned": "cableLandings",
   "launch.upcoming": "launches",
   "launch.flown": "launches",
-  "osm.military": "osmInfra",
+  "osm.military_airfield": "osmInfra",
+  "osm.military_area": "osmInfra",
   "osm.power": "osmInfra",
   "osm.border": "osmInfra",
+  "osm.railway_station": "osmInfra",
+  "osm.railway_halt": "osmInfra",
+  "osm.railway_yard": "osmInfra",
+  "osm.railway_border": "osmInfra",
+  "deflock.camera": "deflock",
   "czib.active": "czib",
   "czib.withdrawn": "czib",
   "port.wpi": "ports",
@@ -275,7 +331,8 @@ export const TOKEN_LAYER = Object.freeze({
 export const PIN_STACK = [
   "events", "conflictHistory", "czib", "hazards", "floods", "gdelt", "officials",
   "darkVessels", "gfwGaps", "gfwDetections", "satellites", "launches",
-  "cities", "infra", "osmInfra", "airports", "ports", "dams", "cables", "outagePoints",
+  "cities", "infra", "osmInfra", "deflock", "airports", "ports", "dams",
+  "railways", "cables", "outagePoints",
 ];
 export const WASH_STACK = ["vehicles", "jamming", "firms"];
 
@@ -299,6 +356,35 @@ export const DEFAULT_STACK = Object.freeze({ pins: [...PIN_STACK], washes: [...W
 
 /** How faint the bottom of a group is drawn, before any per-layer opacity. */
 export const DEFAULT_STACK_FADE_FLOOR = 0.55;
+
+/**
+ * Tokens that used to stand for several kinds of pin at once, and what they
+ * were split into.
+ *
+ * Each of these named one row in the panel that drew two, three or five
+ * different glyphs on the map, so every dial on it was all-or-nothing -- and
+ * the shape picker was worse than that, since choosing a glyph flattened a
+ * whole family onto it. They are now one row per pin type.
+ *
+ * A saved configuration still holds the old key, and dropping it would silently
+ * reset whatever an operator had set there. mergeSettings (see
+ * settings/defaults.js) fans the stored value out across the replacements
+ * instead: one colour becomes the same colour on each, one zoom becomes the
+ * same zoom on each, which is exactly what the single dial used to do.
+ *
+ * The glyph override is deliberately *not* carried across. It was the one
+ * setting that could not have meant what it now says: under the old shared
+ * token a chosen shape overwrote every member of the family, so replaying it
+ * would re-flatten the distinction this split exists to restore.
+ */
+export const SPLIT_TOKENS = Object.freeze({
+  "city.marker": ["city.capital", "city.mega", "city.large", "city.medium", "city.town"],
+  "airfield.civil": ["airfield.large", "airfield.medium", "airfield.small"],
+  "osm.military": ["osm.military_airfield", "osm.military_area"],
+  "osm.railway": [
+    "osm.railway_station", "osm.railway_halt", "osm.railway_yard", "osm.railway_border",
+  ],
+});
 
 /** The tokens that name a drawable pin, and so can be given a zoom of their own. */
 export function tokenHasZoom(token) {
@@ -340,6 +426,18 @@ let tokenSizes = {};
 // cannot afford.
 let tokenZooms = {};
 let layersWithTokenZoom = new Set();
+// The ceiling to tokenZooms' floor: the zoom past which this kind of pin stops
+// drawing. Kept in its own table and its own layer set rather than as a second
+// field on the first, because the two are set independently -- a pin type very
+// often has one and not the other -- and a combined table would have to store an
+// entry for every token that carries either.
+let tokenZoomMaxes = {};
+let layersWithTokenZoomMax = new Set();
+// Per-token glyph override, as a glyph *name* rather than an SVG string: the
+// name is what the config stores, what the picker offers and what survives a
+// build that redraws a glyph. Storing the markup would freeze a pin at whatever
+// the shape looked like on the day it was chosen.
+let tokenGlyphs = {};
 // The stack, resolved to what the two readers below need: a rank per key within
 // its own group, and the size of that group. Rebuilt on every order change
 // rather than recomputed per lookup -- layerOpacity is called once per marker
@@ -383,6 +481,28 @@ export function setIconTheme(next = {}) {
     }
     tokenZooms = merged;
     layersWithTokenZoom = layers;
+  }
+  if (next.zoomMaxes) {
+    const merged = {};
+    const layers = new Set();
+    for (const [token, value] of Object.entries(next.zoomMaxes)) {
+      if (!tokenHasZoom(token) || !Number.isFinite(value)) continue;
+      merged[token] = clampZoom(value);
+      layers.add(TOKEN_LAYER[token]);
+    }
+    tokenZoomMaxes = merged;
+    layersWithTokenZoomMax = layers;
+  }
+  if (next.glyphs) {
+    const merged = {};
+    for (const [token, name] of Object.entries(next.glyphs)) {
+      // Both halves checked: a token this build does not offer a choice for, and
+      // a glyph name it no longer draws, each fall back to the shipped shape
+      // rather than to nothing. An icon that renders empty is worse than one
+      // that ignores a stale preference.
+      if (GLYPH_CHOICES[token]?.includes(name) && SVG[name]) merged[token] = name;
+    }
+    tokenGlyphs = merged;
   }
   if (next.layers) layerStyles = next.layers;
   if (next.stack) setStack(next.stack);
@@ -496,9 +616,53 @@ export function tokenZoom(token) {
   return Number.isFinite(value) ? value : null;
 }
 
+/**
+ * The zoom this kind of pin stops drawing past, or null when it has none.
+ *
+ * The ceiling to tokenZoom's floor, and the narrow end of the same pair of dials
+ * the layer carries. Inclusive: a ceiling of 6 means the pin is still drawn at
+ * zoom 6 and gone at 7, which is what "up to zoom 6" means to the person setting
+ * it. Reading it the other way would make a range of 6 to 6 empty.
+ *
+ * Unlike the floor there is no shipped value anywhere -- nothing in
+ * LAYER_MANIFEST expresses a ceiling -- so a null here means "no ceiling" rather
+ * than "follow the layer". A layer-level ceiling is applied separately and
+ * independently; the two compose as "whichever is lower wins", the mirror of the
+ * floor's "whichever is later wins".
+ */
+export function tokenZoomMax(token) {
+  const value = token ? tokenZoomMaxes[token] : null;
+  return Number.isFinite(value) ? value : null;
+}
+
 /** Whether any pin type in this layer carries a zoom of its own. */
 export function layerHasTokenZoom(layerKey) {
   return layersWithTokenZoom.has(layerKey);
+}
+
+/**
+ * The glyph markup for a token: the operator's choice, or `fallback`.
+ *
+ * Mirrors paletteColor exactly, and sits in the same place in every decorator --
+ * the shipped shape is passed in so a token nobody has configured costs one
+ * failed lookup and returns what it was already going to draw.
+ */
+export function paletteGlyph(token, fallback) {
+  if (!token) return fallback;
+  const chosen = tokenGlyphs[token];
+  return (chosen && SVG[chosen]) || fallback;
+}
+
+/** The glyphs this token may be set to, shipped-first. Empty when it has none. */
+export function glyphChoicesFor(token) {
+  return GLYPH_CHOICES[token] || [];
+}
+
+export { shippedGlyph };
+
+/** Whether any pin type in this layer carries a ceiling of its own. */
+export function layerHasTokenZoomMax(layerKey) {
+  return layersWithTokenZoomMax.has(layerKey);
 }
 
 /** The colour for a token, or `fallback` if the token is unknown. */
@@ -609,6 +773,7 @@ export function themedStyle(style, layerKey) {
   return {
     ...style,
     color: paletteColor(style.token, style.color),
+    svg: paletteGlyph(style.token, style.svg),
     size: scaledSize(style.size, layerKey, style.token),
     opacity: layerOpacity(layerKey),
   };

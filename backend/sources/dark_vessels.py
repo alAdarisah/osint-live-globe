@@ -69,8 +69,15 @@ GAP_MIN_HOURS = 4.0
 # which says nothing about the vessel.
 GAP_MAX_HOURS = 36.0
 # A gap only counts inside the waters this map actually watches (see
-# config.AIS_BBOXES): elsewhere our own coverage is too thin for absence to mean
-# anything at all.
+# config.WATCHED_WATERS): elsewhere our own coverage is too thin for absence to
+# mean anything at all.
+#
+# The AIS subscription went global on 2026-08-08 and this deliberately did not
+# follow it. Receiving a position from mid-Pacific is not the same as being able
+# to say a hull that stopped reporting there went dark: aisstream's coverage far
+# from shore is satellite-assisted and sparse, so out there the ordinary reason
+# for a four-hour gap is that nobody was listening. Widen this only with evidence
+# about reception density, not because collection got wider.
 REQUIRE_CHOKEPOINT = True
 MAX_GAP_RECORDS = 120
 
@@ -109,7 +116,7 @@ FEED_HEALTH_MIN_RATIO = 0.5
 def _in_watched_waters(lat: float, lon: float) -> bool:
     return any(
         lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
-        for lat_min, lon_min, lat_max, lon_max in config.AIS_BBOXES
+        for lat_min, lon_min, lat_max, lon_max in config.WATCHED_WATERS
     )
 
 

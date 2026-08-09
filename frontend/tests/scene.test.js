@@ -150,7 +150,7 @@ test("shipped draw gates match the band table", async (t) => {
     firms: 4, firmsPoints: 6,
     airports: 7, dams: 7, ports: 5, cableLandings: 5,
     gfwGaps: 6, gfwDetections: 6,
-    launches: 4, districts: 6,
+    launches: 4,
   };
 
   await t.test("every gated layer draws from the zoom it says it does", () => {
@@ -231,7 +231,6 @@ test("disposition", async (t) => {
     assert.ok(tanker.active.has("gfwGaps"), "a tanker should reach the AIS disabling record");
     // A dam is not.
     assert.ok(!tanker.active.has("dams"), "a tanker should not reach dams");
-    assert.ok(!tanker.active.has("districts"), "a tanker should not reach the district archive");
   });
 
   await t.test("manual layers are never switched on by anything but an admin", () => {

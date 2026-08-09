@@ -231,7 +231,7 @@ def gap_row(mmsi="636014909", hours=6.0):
         "gap_seconds": hours * 3600,
         "from_ts": went_dark,
         "to_ts": NOW,
-        # Inside AIS_BBOXES' Persian Gulf box, so REQUIRE_CHOKEPOINT is satisfied.
+        # Inside WATCHED_WATERS' Persian Gulf box, so REQUIRE_CHOKEPOINT is satisfied.
         "from_lat": 26.26, "from_lon": 52.03,
         "to_lat": 26.90, "to_lon": 53.11,
     }

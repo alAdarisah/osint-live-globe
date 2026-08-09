@@ -1,28 +1,21 @@
-// The conflict record at admin-2, painted on district boundaries.
+// The conflict record at admin-2, read through the card a district opens.
 //
 // hapi_conflict.py has been collecting 56,000 district-months for 32 countries
 // across two years -- political violence, civilian targeting and demonstrations,
 // counted separately -- and every one of them reached the browser only as a
 // sentence in a country card, because the records carry no coordinates. This is
-// the layer that draws them, joined to OCHA boundaries on p-code.
+// what draws the districts themselves, joined to OCHA boundaries on p-code, and
+// what answers for one of them when it is clicked.
 //
-// Deliberately a separate module from choropleth.js even though both paint
-// polygons by a number. That one answers "how does this country compare to
-// other countries" over four national datasets; this one answers "where inside
-// this country" over one subnational dataset, and it has a month rather than a
-// present tense. Sharing the ramp is right; sharing the metric list would put
-// two unrelated vocabularies in one selector.
+// It deliberately paints nothing. A monthly archive that is weeks old by
+// construction, tinted across six countries, was a second choropleth competing
+// with the live map for the same eye -- and the number a reader actually wants
+// is the one for the district under the cursor, which is a card's question, not
+// a fill's. The counts are all still here; only the tint is gone.
 
 import { L } from "./leafletGlobal";
-import { rampColor, rampSwatches } from "./choropleth";
-import { countryContainsPoint } from "./countryHitTest";
+import { buildShapeIndex, countryContainsPoint } from "./countryHitTest";
 import { esc, fmtNumber } from "../utils/format";
-
-// Which countries have stored geometry. Kept in step with COUNTRIES in
-// backend/sources/admin2_boundaries.py -- asking for a country with no boundary
-// file returns an empty collection, so a drift here costs a wasted request
-// rather than a broken layer.
-export const DISTRICT_COUNTRIES = ["AFG", "VEN", "YEM", "SDN", "COD", "UKR"];
 
 // The three counts HAPI reports separately, kept separate here.
 //
@@ -57,12 +50,6 @@ export const DISTRICT_METRICS = [
   },
 ];
 
-export function districtMetricById(id) {
-  return DISTRICT_METRICS.find((m) => m.id === id) || DISTRICT_METRICS[0];
-}
-
-export { rampSwatches };
-
 /**
  * Index one month's district counts by p-code.
  *
@@ -81,62 +68,36 @@ export function indexDistrictCounts(records) {
   return byPcode;
 }
 
-// Log-scaled, like the national conflict metrics: district counts run from 0 to
-// several hundred within one country and a linear ramp leaves everything except
-// the worst district at the bottom of the scale.
-//
-// Zero is painted, at the very bottom of the ramp, and that is the point of
-// this layer as much as the peaks are: a district reporting zero deaths this
-// month is a fact, and it must not look like a district nobody reported on.
-// Districts with no record at all are left unpainted -- same distinction the
-// country choropleth draws, for the same reason.
-export function buildDistrictScale(metric, counts) {
-  const values = [];
-  for (const record of counts.values()) {
-    const v = Number(metric.valueOf(record));
-    if (Number.isFinite(v)) values.push(v);
-  }
-  const max = values.length ? Math.max(...values) : 0;
-  const span = Math.log1p(Math.max(max, 1));
-  return (value) => {
-    const v = Number(value);
-    if (!Number.isFinite(v)) return null;
-    return span > 0 ? Math.log1p(Math.max(v, 0)) / span : 0;
-  };
-}
-
-const MIN_FILL_OPACITY = 0.2;
-const MAX_FILL_OPACITY = 0.75;
-
 /**
- * @param getFill (pcode) => {fillColor, fillOpacity} | null
+ * The districts of the one state a reader has drilled into.
+ *
+ * The only district geometry drawn at all, and it is drawn as the last step of a
+ * selection: country, then state, then the districts inside it. So it appears
+ * only where the reader is looking, and it carries no fill -- over a state that
+ * is already outlined and possibly already shaded by the country choropleth, the
+ * one thing left to say is where the internal lines run. A fill here would
+ * invent a colour for a number nobody asked to see; the numbers are in the card
+ * a district opens.
  */
-export function createDistrictsLayer(map, getFill = () => null) {
-  // Between the country shapes (350) and the uncertainty circles (380): a
-  // district fill has to sit over its own country's fill, and under everything
-  // that marks a specific place.
-  if (!map.getPane("districtsPane")) {
-    map.createPane("districtsPane").style.zIndex = 360;
+export function createDistrictOutlineLayer(map) {
+  // Above the subdivisions (355) and below the choropleth fills (360): these are
+  // the more specific lines of the two below it, and they must not be painted
+  // over by a fill that is describing the same districts.
+  if (!map.getPane("districtOutlinePane")) {
+    map.createPane("districtOutlinePane").style.zIndex = 358;
   }
-  function districtStyle(feature) {
-    const fill = getFill(feature?.properties?.pcode);
-    return {
-      className: "district-shape",
-      // A hairline boundary at low opacity, unlike the country shapes' fully
-      // transparent stroke. Countries are legible from their coastlines; a
-      // district is only distinguishable from its neighbour by the line
-      // between them, and a choropleth of unseparated blobs cannot be read.
-      color: "rgba(255,255,255,0.18)",
-      weight: 0.5,
-      fillColor: (fill && fill.fillColor) || "#6fe3ff",
-      fillOpacity: fill ? fill.fillOpacity : 0,
-      // Same reasoning as the country shapes (see layers.js): hit-testing is
-      // done against the geometry from the map's own click handler, so a fill
-      // must never intercept a click meant for a pin on top of it.
-      interactive: false,
-    };
-  }
-  return L.geoJSON(null, { style: districtStyle, pane: "districtsPane" });
+  // One constant style, hover and selection toggled as classes on the element --
+  // same reason as the subdivisions layer: Leaflet applies `className` when it
+  // creates a path and never again.
+  const style = {
+    className: "district-outline",
+    color: "#6fe3ff",
+    weight: 1,
+    fillColor: "#6fe3ff",
+    fillOpacity: 0,
+    interactive: false,
+  };
+  return L.geoJSON(null, { style: () => style, pane: "districtOutlinePane" });
 }
 
 // ---------- hit-testing ----------
@@ -157,39 +118,13 @@ export function createDistrictsLayer(map, getFill = () => null) {
 // Cost is one bounding-box comparison per district -- 1,563 of them for the six
 // covered countries, and only the one or two that pass go on to a ring test.
 
-function polygonsOf(geometry) {
-  if (!geometry) return [];
-  if (geometry.type === "Polygon") return [geometry.coordinates];
-  if (geometry.type === "MultiPolygon") return geometry.coordinates;
-  return [];
-}
-
 export function buildDistrictIndex(features) {
-  const entries = [];
-  for (const feature of features || []) {
-    const polygons = polygonsOf(feature.geometry);
-    if (!polygons.length) continue;
-    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
-    for (const rings of polygons) {
-      for (const [lon, lat] of rings[0] || []) {
-        if (lat < minLat) minLat = lat;
-        if (lat > maxLat) maxLat = lat;
-        if (lon < minLon) minLon = lon;
-        if (lon > maxLon) maxLon = lon;
-      }
-    }
-    if (!Number.isFinite(minLat)) continue;
-    const props = feature.properties || {};
-    entries.push({
-      pcode: props.pcode,
-      name: props.name || "",
-      admin1: props.admin1 || "",
-      country_code: props.country_code || "",
-      polygons,
-      bbox: { minLat, maxLat, minLon, maxLon },
-    });
-  }
-  return entries;
+  return buildShapeIndex(features, (props) => ({
+    pcode: props.pcode,
+    name: props.name || "",
+    admin1: props.admin1 || "",
+    country_code: props.country_code || "",
+  }));
 }
 
 export function findDistrictAt(index, lat, lon) {
@@ -200,50 +135,70 @@ export function findDistrictAt(index, lat, lon) {
 }
 
 /**
+ * The month selector that rides on the card.
+ *
+ * This is the whole archive control now that nothing is painted: no metric to
+ * choose, because all four counts are shown at once, and no layer-wide coverage
+ * tally, because the card is answering about one district rather than about the
+ * layer. The change handler is bound by the controller after the content is set
+ * -- see bindDistrictMonthSelect in createMapController.js -- because this is a
+ * string of HTML and cannot carry one.
+ *
+ * Omitted entirely when the months list has not arrived: a selector with one
+ * option nobody chose is furniture.
+ */
+function monthPickerHtml(month, months) {
+  if (!months.length) return "";
+  const options = months
+    .map((m) => `<option value="${esc(m)}"${m === month ? " selected" : ""}>${esc(m)}</option>`)
+    .join("");
+  return `<label class="district-month">Month
+    <select class="district-month-select">${options}</select></label>`;
+}
+
+/**
  * What a clicked district says.
  *
- * All four counts, not only the one being painted. The metric selector chooses
- * what the *map* shades; a reader who has clicked a specific district is asking
- * about that district, and answering with one number out of four they can see
- * in the dropdown would make them change the shading and click again to read
- * the rest. The painted one is marked so the popup and the map agree about
- * which number produced the colour.
+ * All four counts, every time. They are three different things HAPI counts
+ * separately -- and deaths -- so showing one and hiding the rest behind a
+ * control would make a reader click twice to learn what one request already
+ * fetched.
  *
  * `record` is null for a district the archive has no row for in this month --
  * distinct from a row of zeros, and said in those words, because the whole
- * layer rests on that difference.
+ * archive rests on that difference. `loading` is the third state and is kept
+ * apart from both: a month whose counts are still in flight must not read as a
+ * month with no record.
  */
-export function districtPopupHtml(entry, record, month, metricId) {
+export function districtPopupHtml(entry, state = {}) {
+  const { record = null, month = null, months = [], loading = false } = state;
   const where = [entry.admin1, entry.country_code].filter(Boolean).join(" &middot; ");
   const head = `
     <h3>${esc(entry.name || entry.pcode)}</h3>
-    <div class="meta">${where}${entry.pcode ? ` &middot; ${esc(entry.pcode)}` : ""}</div>`;
+    <div class="meta">${where}${entry.pcode ? ` &middot; ${esc(entry.pcode)}` : ""}</div>
+    ${monthPickerHtml(month, months)}`;
+  const provenance = `<div class="meta">ACLED via HDX HAPI, joined to OCHA COD-AB boundaries on
+    p-code. A monthly archive that runs to the end of a past month &mdash; not the live conflict
+    layer, and not comparable to it.</div>`;
+  if (loading) {
+    return `${head}
+      <div class="meta district-loading">Loading ${esc(month || "the archive")}&hellip;</div>
+      ${provenance}`;
+  }
   if (!record) {
     return `${head}
       <div class="meta district-nodata">No record for ${esc(month || "this month")}.
         That is different from a reported zero &mdash; this district is not in the archive for this
         month, so nothing is claimed about it either way.</div>
-      <div class="meta">Source: ACLED via HDX HAPI &middot; boundary: OCHA COD-AB</div>`;
+      ${provenance}`;
   }
   const rows = DISTRICT_METRICS.map((m) => {
     const value = Number(m.valueOf(record)) || 0;
-    const active = m.id === metricId;
-    return `<div class="district-row${active ? " district-row-active" : ""}">
-      <span>${esc(m.label)}</span><b>${fmtNumber(value)}</b></div>`;
+    return `<div class="district-row"><span>${esc(m.label)}</span><b>${fmtNumber(value)}</b></div>`;
   }).join("");
   return `${head}
     <div class="meta">Reviewed record for <b>${esc(record.month || month || "")}</b></div>
     <div class="district-rows">${rows}</div>
     <div class="meta">Demonstrations are counted separately and are not part of the violence totals.</div>
-    <div class="meta">ACLED via HDX HAPI, joined to OCHA COD-AB boundaries on p-code. A monthly
-      archive that runs to the end of a past month &mdash; not the live conflict layer.</div>`;
-}
-
-/** The fill for one district's value, or null when it has no record. */
-export function districtFill(position) {
-  if (position === null) return null;
-  return {
-    fillColor: rampColor(position),
-    fillOpacity: MIN_FILL_OPACITY + (MAX_FILL_OPACITY - MIN_FILL_OPACITY) * position,
-  };
+    ${provenance}`;
 }

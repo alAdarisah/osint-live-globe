@@ -28,6 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { defaultSettings, mergeSettings, EDITABLE_SOURCES } from "../settings/defaults";
 import { borderStats, sanitizeRing, MAX_TOTAL_POINTS } from "../settings/borderOverrides";
 import { setIconTheme } from "../map/iconTheme";
+import { setCursorOptions } from "../map/cursor";
 
 const STORAGE_KEY = "osint-admin-settings";
 // When STORAGE_KEY was last written, in ms. See localIsNewerThan below.
@@ -248,6 +249,8 @@ export function useAppSettings() {
       colors: settings.icons.colors,
       sizes: settings.icons.sizes,
       zooms: settings.icons.zooms,
+      zoomMaxes: settings.icons.zoomMaxes,
+      glyphs: settings.icons.glyphs,
       layers: settings.layers,
       stack: settings.layerStack,
       stackFadeFloor: settings.ui.stackFadeFloor,
@@ -272,6 +275,16 @@ export function useAppSettings() {
     }
     root.classList.toggle("reduce-motion", settings.ui.reduceMotion);
     root.classList.toggle("hide-leaders", !settings.ui.showLeaderLines);
+    // Pushed into the module rather than passed down, for the reason setIconTheme
+    // above is: the map is imperative, the cursor is attached to a container
+    // React does not own, and threading this through the controller would make
+    // it a courier for something it never reads.
+    setCursorOptions({
+      enabled: settings.ui.cursorEnabled,
+      style: settings.ui.cursorStyle,
+      scale: settings.ui.cursorScale,
+      color: settings.ui.cursorColor,
+    });
   }, [settings.ui]);
 
   useEffect(() => {
@@ -324,8 +337,38 @@ export function useAppSettings() {
     [update]
   );
 
+  /** One kind of pin's own ceiling. Null hands it back to "no ceiling". */
+  const setTokenZoomMax = useCallback(
+    (token, value) =>
+      update((prev) => ({
+        ...prev,
+        icons: { ...prev.icons, zoomMaxes: { ...prev.icons.zoomMaxes, [token]: value } },
+      })),
+    [update]
+  );
+
+  /** One kind of pin's own glyph. Null hands it back to the shipped shape. */
+  const setTokenGlyph = useCallback(
+    (token, name) =>
+      update((prev) => {
+        const glyphs = { ...prev.icons.glyphs };
+        if (name == null) delete glyphs[token];
+        else glyphs[token] = name;
+        return { ...prev, icons: { ...prev.icons, glyphs } };
+      }),
+    [update]
+  );
+
   const resetZooms = useCallback(
-    () => update((prev) => ({ ...prev, icons: { ...prev.icons, zooms: defaultSettings().icons.zooms } })),
+    () =>
+      update((prev) => ({
+        ...prev,
+        icons: {
+          ...prev.icons,
+          zooms: defaultSettings().icons.zooms,
+          zoomMaxes: defaultSettings().icons.zoomMaxes,
+        },
+      })),
     [update]
   );
 
@@ -574,7 +617,7 @@ export function useAppSettings() {
   const actions = useMemo(
     () => ({
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
-      setTokenZoom, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
+      setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
       moveLayerInStack, resetLayerStack, setUi, setCityZones,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
@@ -582,7 +625,7 @@ export function useAppSettings() {
     }),
     [
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
-      setTokenZoom, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
+      setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
       moveLayerInStack, resetLayerStack, setUi, setCityZones,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,

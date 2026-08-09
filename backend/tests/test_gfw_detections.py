@@ -203,12 +203,24 @@ def test_the_measured_lag_is_carried_onto_every_record():
 # --- coverage and bounds ---------------------------------------------------
 
 
+def test_the_tile_budget_does_not_follow_the_ais_subscription():
+    """AIS went global on 2026-08-08; this sweep deliberately did not.
+
+    A z5 sweep of the whole planet is 1,024 tiles against a cap that keeps
+    12,000 records, so ~98% of a 40-fold payload increase would be downloaded
+    and discarded. The guard is that this reads WATCHED_WATERS, and the number
+    below is what that costs today.
+    """
+    assert len(gfw.tiles_for(config.WATCHED_WATERS, gfw.TILE_ZOOM)) == 23
+    assert len(gfw.tiles_for(config.AIS_BBOXES, gfw.TILE_ZOOM)) == 4 ** gfw.TILE_ZOOM
+
+
 def test_the_tile_set_covers_the_watched_boxes_and_is_deduped():
-    tiles = gfw.tiles_for(config.AIS_BBOXES, gfw.TILE_ZOOM)
+    tiles = gfw.tiles_for(config.WATCHED_WATERS, gfw.TILE_ZOOM)
     assert len(tiles) == len(set(tiles))
     assert all(z == gfw.TILE_ZOOM for z, _x, _y in tiles)
     # Every corner of every watched box falls inside a tile that was requested.
-    for lat_min, lon_min, lat_max, lon_max in config.AIS_BBOXES:
+    for lat_min, lon_min, lat_max, lon_max in config.WATCHED_WATERS:
         for lat in (lat_min, lat_max):
             for lon in (lon_min, lon_max):
                 corner = gfw.tiles_for([(lat, lon, lat, lon)], gfw.TILE_ZOOM)
