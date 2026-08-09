@@ -906,6 +906,14 @@ function buildWaterDark(feature, raw, bounds) {
 // is the whole of it, rather than a network round trip for eight boxes that
 // move once in a while. [south, west, north, east]; none of the eight wrap
 // the antimeridian.
+//
+// config.py reads `os.getenv("WATCHED_WATERS", _DEFAULT_WATCHED_WATERS)`, so
+// a deployment that overrides that env var desyncs this chokepoint fold from
+// what the Dark Vessels layer actually honours -- nothing here would catch
+// it. No override exists in this repo today, so this is a documented coupling
+// to watch, not a sync mechanism worth building for a problem that has not
+// happened: if backend/config.py:410 (WATCHED_WATERS) or its default at :384
+// ever changes, this list has to change with it by hand.
 const WATCHED_WATERS = [
   { label: "Black Sea", box: [40, 27, 47, 42] },
   { label: "Red Sea", box: [12, 32, 30, 43] },

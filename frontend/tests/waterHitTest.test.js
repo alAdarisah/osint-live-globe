@@ -3,14 +3,12 @@
 // lakes' ring-area fallback, and a combined marine+lakes index -- the real
 // runtime shape once the lakes sub-toggle is on.
 //
-// map/water.js pulls in map/decorators.js for its palette-driven colours,
-// which (like every marker decorator) imports map/leafletGlobal.js and reads
-// `window.L` at module scope -- so, exactly as webglHitTest.test.js documents
-// for the same reason, this file stubs just enough of `window.L` to satisfy
-// that import and teaches the loader to resolve water.js's extensionless
-// relative imports the way Vite does. Nothing here calls into Leaflet: only
-// the pure hit-test functions (buildWaterIndex, findWaterAt) and the popup
-// string builder (waterPopupHtml) are exercised.
+// map/water.js imports map/leafletGlobal.js and reads `window.L` at module
+// scope -- so, exactly as webglHitTest.test.js documents for the same
+// reason, this file stubs just enough of `window.L` to satisfy that import
+// and teaches the loader to resolve water.js's extensionless relative
+// imports the way Vite does. Nothing here calls into Leaflet: only the pure
+// hit-test functions (buildWaterIndex, findWaterAt) are exercised.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -27,7 +25,7 @@ registerHooks({
 
 globalThis.window = { L: { geoJSON: () => ({}) } };
 
-const { buildWaterIndex, findWaterAt, waterPopupHtml } = await import("../src/map/water.js");
+const { buildWaterIndex, findWaterAt } = await import("../src/map/water.js");
 
 const feature = (properties, geometry) => ({ type: "Feature", properties, geometry });
 
@@ -183,16 +181,4 @@ test("a combined marine + lakes index -- the real runtime shape once lakes are s
   assert.equal(findWaterAt(index, 3, 3).id, "marine:1", "outside the lake, the sea still answers");
   assert.equal(findWaterAt(index, 21, 21).id, "lake:2", "the unrelated lake answers for its own point");
   assert.equal(findWaterAt(index, 50, 50), null);
-});
-
-test("waterPopupHtml names the feature and its class", () => {
-  const html = waterPopupHtml({ name: "Aegean Sea", class: "sea" });
-  assert.match(html, /Aegean Sea/);
-  assert.match(html, /Sea/);
-  assert.match(html, /Natural Earth/);
-});
-
-test("waterPopupHtml falls back to the class label when a feature is unnamed", () => {
-  const html = waterPopupHtml({ name: "", class: "gulf" });
-  assert.match(html, /Gulf/);
 });

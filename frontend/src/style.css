@@ -1472,6 +1472,18 @@ html, body {
   z-index: 950;
   animation: popup-in 0.16s ease;
 }
+/* A country and a water body can be selected at once (water selection does
+   not clear a standing country selection -- see createMapController.js's
+   click handler), and the two cards can anchor near the same screen point.
+   Given no cheap way to track which of two independently-mounted components
+   was focused more recently, this is a static tie-break rather than one:
+   water wins. Reaching a water selection at all means the click fell where
+   the country hit-test already said no (water is the fallback tried only
+   after it -- see the click handler), so a water card on screen is always at
+   least as fresh as a country card that may be left over from an earlier
+   click; the reverse (a country card genuinely fresher than a standing water
+   card) is the case this ordering gets wrong, and is rarer in practice. */
+#waterInfoCard { z-index: 951; }
 .country-info-body {
   overflow-y: auto;
   padding: 8px 16px 14px;

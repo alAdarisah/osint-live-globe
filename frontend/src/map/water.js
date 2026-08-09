@@ -16,7 +16,6 @@
 
 import { L } from "./leafletGlobal";
 import { buildShapeIndex, countryContainsPoint } from "./countryHitTest";
-import { esc } from "../utils/format";
 
 /**
  * Per-feature style. Marine and lake polygons stay invisible (fillOpacity 0,
@@ -217,26 +216,10 @@ export const CLASS_LABEL = {
   channel: "Channel", sound: "Sound", lake: "Lake", river: "River", other: "Water",
 };
 
-// The 1:10m scale caveat, verbatim in both the quick popup below and the full
-// card's profile fold (map/popups.js) -- one string so the two can never say
-// something subtly different about the same limitation.
+// The 1:10m scale caveat, verbatim in the full card's profile fold
+// (map/popups.js's buildWaterProfile) -- kept as its own constant so a future
+// second caller can never say something subtly different about the same
+// limitation than the first one does.
 export const WATER_SCALE_CAVEAT =
   '<div class="meta">Boundary: Natural Earth 1:10m &mdash; generalised, schematic geometry, not ' +
   "aligned to any higher-resolution coastline or shoreline.</div>";
-
-/**
- * What a clicked water body says on first click, before the full card (Task
- * 7's waterCardSections in map/popups.js) has rendered -- deliberately as
- * short as subdivisionPopupHtml, this only ever confirms what was clicked and
- * names the source and its scale caveat. Superseded as the map's *click*
- * response by the full card, but kept and still tested as the short form: a
- * hover tooltip or any other place a one-line confirmation is wanted has no
- * reason to build the whole card just to read its first two lines.
- */
-export function waterPopupHtml(entry) {
-  const label = CLASS_LABEL[entry.class] || "Water";
-  return `
-    <h3>${esc(entry.name || label)}</h3>
-    <div class="meta">${esc(label)}</div>
-    ${WATER_SCALE_CAVEAT}`;
-}

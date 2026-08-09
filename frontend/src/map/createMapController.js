@@ -307,6 +307,18 @@ const COUNTRY_CARD_FEEDS = new Set([
   "energyFlows", "foodTrade", "foodPriceIndex",
 ]);
 
+// The water-card counterpart to COUNTRY_CARD_FEEDS above, same reasoning and
+// same exclusion: an open water card is built from `raw` at the moment it was
+// clicked, so without this it would keep showing the counts that were true
+// then, indefinitely, since the card outlives pans and zooms. `ais` is left
+// out on purpose, for the exact reason refreshFocusedCountryCard gives for
+// excluding it from the country set -- it polls every 10-20 seconds, and
+// re-rendering the traffic tally that often would fight anyone reading or
+// selecting text in the card. The curated infrastructure gazetteers (cables,
+// cableLandings, ports) are left out too: none of them refreshes more than
+// about once a day, so there is nothing here for a mid-session poll to move.
+const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps"]);
+
 // leaflet.heat's setLatLngs() always calls its own redraw(), which
 // dereferences `this._map._animating` with no null check -- harmless when
 // the heat layer is actually on the map, but a hard crash otherwise, and
@@ -4875,11 +4887,17 @@ export function createMapController(container, initial, callbacks) {
     const bounds = entry.bbox
       ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
       : null;
-    const { sections } = waterCardSections(entry, raw, bounds);
+    // `title`, not `entry.name` -- an unnamed bay or sound (routine in 1:10m
+    // Natural Earth marine data) has no `entry.name` at all, and
+    // waterCardSections already computed the right fallback (its own class
+    // label) into `title`. Building the header from `entry.name` directly
+    // here would silently throw that fallback away and open with a blank
+    // header on exactly the features Task 7's own tests construct.
+    const { title, sections } = waterCardSections(entry, raw, bounds);
     const layer = waterLayerFor(entry.id);
     return {
       id: entry.id,
-      name: entry.name,
+      name: title,
       sections,
       point: layer ? waterAnchorPoint(layer) : null,
     };
@@ -4893,6 +4911,18 @@ export function createMapController(container, initial, callbacks) {
   function reportWaterSelection() {
     const entry = waterEntryFor(selectedWaterId);
     callbacks.onWaterSelect?.(entry ? waterCardFor(entry) : null);
+  }
+
+  /** Rebuild the open water card against data that has just landed -- the
+   *  water-body counterpart to refreshFocusedCountryCard, wired from
+   *  applyData the same way through WATER_CARD_FEEDS. Just reportWaterSelection
+   *  again: that already rebuilds the card from whatever `raw` holds right
+   *  now and is a no-op (reports null to a caller that already has null) when
+   *  nothing is selected, but the guard here skips that pointless call on
+   *  every qualifying poll while no water card is open at all. */
+  function refreshFocusedWaterCard() {
+    if (selectedWaterId == null) return;
+    reportWaterSelection();
   }
 
   /** Clicking the already-selected water body deselects it -- same gesture
@@ -5525,6 +5555,9 @@ export function createMapController(container, initial, callbacks) {
       // was clicked -- indefinitely, since the card outlives pans and zooms
       // now. See refreshFocusedCountryCard for which feeds qualify.
       if (COUNTRY_CARD_FEEDS.has(key)) refreshFocusedCountryCard();
+      // Same property, same fix, for the water card -- see WATER_CARD_FEEDS
+      // and refreshFocusedWaterCard.
+      if (WATER_CARD_FEEDS.has(key)) refreshFocusedWaterCard();
     },
 
     flyToRegion,

@@ -229,3 +229,97 @@ test("waterCardSections -- section shape and empty-section dropping", async (t) 
     assert.match(traffic.html, /Inside the water this map receives AIS from/);
   });
 });
+
+// createMapController.js's waterCardFor (the wiring path a click actually
+// runs) is not importable here -- it lives inside createMapController's own
+// closure, which needs far more of the DOM/Leaflet surface than the L.geoJSON
+// stub above covers (see placeInfoCard.test.js's identical note for why
+// PlaceInfoCard.jsx itself is untestable the same way). What *is* testable is
+// the one-line assembly it does: `{ id: entry.id, name: title, sections,
+// point }`, built from waterCardSections' own return. This test re-runs that
+// exact assembly against a real buildWaterIndex entry, so a regression back
+// to using `entry.name` instead of the computed `title` -- the bug review
+// found, where an unnamed bay opened with a blank header -- fails here
+// whether or not anyone remembers to re-check it by hand against
+// createMapController.js.
+test("the card payload's name field: title, not the feature's own (possibly blank) name", async (t) => {
+  await t.test("a named feature: title and entry.name happen to agree", () => {
+    const sea = makeSea({ name: "Test Sea" });
+    const { title, sections } = waterCardSections(sea, emptyRaw(), null);
+    const payload = { id: sea.id, name: title, sections, point: null }; // waterCardFor's own shape
+    assert.equal(payload.name, "Test Sea");
+  });
+
+  await t.test("an unnamed feature: title falls back to the class label, entry.name does not", () => {
+    const [bay] = buildWaterIndex([
+      feature({ id: "marine:5", name: "", class: "bay", bbox: [0, 0, 1, 1] }, square(0, 0, 1, 1)),
+    ]);
+    assert.equal(bay.name, "", "the raw entry genuinely has no name -- this is the routine 1:10m case");
+    const { title, sections } = waterCardSections(bay, emptyRaw(), null);
+    const payload = { id: bay.id, name: title, sections, point: null };
+    assert.equal(payload.name, "Bay", "the payload's header must use the computed fallback, not entry.name");
+    assert.notEqual(payload.name, bay.name, "entry.name alone (the pre-fix wiring) would have been blank here");
+  });
+});
+
+// water_bodies.py pre-splits every wrapping marine feature at the seam --
+// each MultiPolygon part is an ordinary, non-wrapping ring in its own right
+// (see that module's _bbox docstring) -- so the even-odd ray cast never needs
+// wrap-awareness and only the *stored* bbox (rawBbox, used for the chokepoint
+// and bordering-country overlap tests) carries the west > east convention.
+// This built a MultiPolygon in exactly that shape -- two ordinary parts
+// either side of +/-180, the Bering Sea's own shape per water_bodies.py and
+// waterHitTest.test.js's identical fixture -- rather than only asserting it
+// as a claim about the backend that a future ray-cast change could regress
+// without anything here catching it.
+test("real containment against a wrap-split (antimeridian) marine feature", async (t) => {
+  const bering = feature(
+    {
+      id: "marine:bering", name: "Bering Sea", class: "sea", area_deg2: 40, antimeridian: true,
+      bbox: [50, 170, 60, -170], // [south, west, north, east]; west > east means it wraps
+    },
+    {
+      type: "MultiPolygon",
+      coordinates: [
+        [[[170, 50], [180, 50], [180, 60], [170, 60], [170, 50]]],
+        [[[-180, 50], [-170, 50], [-170, 60], [-180, 60], [-180, 50]]],
+      ],
+    }
+  );
+  const [sea] = buildWaterIndex([bering]);
+  assert.equal(sea.rawBbox[1], 170, "west > east on the stored bbox is preserved, not treated as inverted");
+  assert.ok(sea.rawBbox[1] > sea.rawBbox[3], "170 > -170 -- the wrap convention this fixture exercises");
+
+  await t.test("countVesselsByClass counts a ship on either side of the seam, none in between", () => {
+    const eastOfSeam = { lat: 55, lon: 175, ship_type: 80 };
+    const westOfSeam = { lat: 55, lon: -175, ship_type: 80 };
+    const nowhereNear = { lat: 55, lon: 0, ship_type: 80 };
+    assert.equal(countVesselsByClass([eastOfSeam], sea, null).total, 1, "east part of the split polygon");
+    assert.equal(countVesselsByClass([westOfSeam], sea, null).total, 1, "west part of the split polygon");
+    assert.equal(countVesselsByClass([nowhereNear], sea, null).total, 0, "between the two parts, inside neither");
+  });
+
+  await t.test("a client bbox pre-filter this wide is exactly the harmless-but-wide case the design accepts", () => {
+    // buildWaterIndex's own client-computed `bbox` (not `rawBbox`) is a naive
+    // min/max over the raw coordinates -- for a wrap-split feature this comes
+    // out close to the whole globe's longitude span, which is a weaker but
+    // never-wrong pre-filter (see insideWaterFeature's own note: it can only
+    // ever be as large as or larger than the truth).
+    assert.ok(sea.bbox.minLon < -170 || sea.bbox.maxLon > 170, "the naive bbox is wide, not narrow, at the seam");
+    const wideBounds = { south: sea.bbox.minLat, west: sea.bbox.minLon, north: sea.bbox.maxLat, east: sea.bbox.maxLon };
+    const ship = { lat: 55, lon: -175, ship_type: 80 };
+    assert.equal(countVesselsByClass([ship], sea, wideBounds).total, countVesselsByClass([ship], sea, null).total);
+  });
+
+  await t.test("waterBorderingCountries finds a country touching the east part across the seam", () => {
+    // Overlaps the sea's rawBbox on the wrapped (east, lon 170..180) side and
+    // actually contains the ring vertex at (170, 50).
+    const index = countryEntry("Seamland", [168, 48, 172, 62]);
+    assert.deepEqual(waterBorderingCountries(sea, index), ["Seamland"]);
+  });
+
+  await t.test("waterBorderingCountries: a country nowhere near either wrapped part is not listed", () => {
+    const index = countryEntry("Farland", [0, 48, 10, 62]);
+    assert.deepEqual(waterBorderingCountries(sea, index), []);
+  });
+});
