@@ -14,6 +14,7 @@ const COUNT_KEYS = [
   "gfwGaps", "gfwDetections", "gfwDetMatched", "gfwDetUnmatched",
   "czib", "czibActive", "czibWithdrawn", "floods", "floodsCurrent",
   "ports", "portsOil", "dams", "damsLarge", "deflock", "railways", "water",
+  "shippingLanes", "laneDensity",
 ];
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
@@ -26,6 +27,7 @@ const EMPTY_ZOOM_NOTES = {
   adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false,
   ais: false, jamming: false, officials: false, capped: {}, eventsCapped: 0,
   gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false, deflock: false,
+  laneDensity: false,
 };
 
 const NO_BORDER_EDIT = { active: false, countryKey: null, linkMode: true, canUndo: false };

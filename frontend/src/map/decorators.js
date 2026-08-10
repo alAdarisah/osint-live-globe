@@ -2388,6 +2388,75 @@ export function railwayRouteColor() {
   return paletteColor("railway.line", RAILWAY_ROUTE_COLOR);
 }
 
+// ---------- shipping lanes (backend/infrastructure.py's SHIPPING_LANES) ----------
+//
+// Task 20b. The ten named corridors -- hand-drawn schematic waypoints, not a
+// surveyed route and not derived from anything this map has observed. Same
+// "colour-only token, polyline not a pin" treatment as RAILWAY_STYLE above.
+export const SHIPPING_LANE_ROUTE_COLOR = "#5fb8c9";
+export const SHIPPING_LANE_STYLE = {
+  svg: SVG.shippingLane, color: SHIPPING_LANE_ROUTE_COLOR,
+  label: "Shipping corridor (schematic)", token: "lanes.route",
+};
+
+export function shippingLaneColor() {
+  return paletteColor("lanes.route", SHIPPING_LANE_ROUTE_COLOR);
+}
+
+// ---------- AIS traffic density (GET /api/lanes, backend/refine/lane_density.py) ----------
+//
+// Task 20a. Where this map's own AIS coverage has actually seen a hull over
+// the last thirty days -- never a claim about where shipping lanes run in
+// general (see lane_density.py's own module docstring and the `note` GET
+// /api/lanes serves, both reused verbatim in the layer's legend and popups
+// below). Colour-only, the same "legend swatch and click-target colour, not
+// a marker" role railway.line's token plays -- the heat gradient itself
+// stays a fixed multi-stop ramp (see createLaneDensityLayers in layers.js),
+// the same as FIRMS/jamming's own gradients, which the palette system has
+// never driven either.
+export const LANE_DENSITY_COLOR = "#5cc4f2";
+export const LANE_DENSITY_STYLE = {
+  svg: SVG.laneDensity, color: LANE_DENSITY_COLOR,
+  label: "AIS traffic density (this map's own coverage)", token: "lanes.density",
+};
+
+export function laneDensityColor() {
+  return paletteColor("lanes.density", LANE_DENSITY_COLOR);
+}
+
+/**
+ * How many recorded `sightings` in a lane_cells row map to "fully lit" on
+ * the density wash, clamped to [0, 1] the way leaflet.heat's own weight
+ * parameter expects.
+ *
+ * Log-scaled rather than linear, and this is the answer to the question the
+ * brief asked to be raised before writing this: `sightings` is a hit count
+ * across however many hourly passes have touched a cell (see
+ * backend/refine/lane_density.py's own docstring), so a lone hull sitting
+ * still for a month racks up roughly the number of hits an hour a busy
+ * strait crossed once every hour would -- a linear scale would let that
+ * loiterer paint its cell at exactly the strength of real, distinct
+ * traffic, which is precisely the false precision `sightings` (not
+ * `transits`) exists to avoid claiming. Log compresses the gap between
+ * "seen a handful of times" and "seen on nearly every pass" without
+ * pretending the two ever become the same claim -- that distinction is
+ * carried in words, by the layer's legend and every cell's popup, not by
+ * this function; this only keeps one loitering hull from maxing out the
+ * whole colour scale by itself.
+ *
+ * `cap` is the sightings count at which the wash reaches full intensity --
+ * exposed as a parameter (rather than a bare module constant) so this stays
+ * testable as a pure function of its inputs alone.
+ */
+export const LANE_DENSITY_CAP = 500;
+
+export function laneDensityIntensity(sightings, cap = LANE_DENSITY_CAP) {
+  const n = Number(sightings);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  if (!Number.isFinite(cap) || cap <= 1) return 1;
+  return Math.min(Math.log1p(n) / Math.log1p(cap), 1);
+}
+
 // ---- water bodies (Natural Earth, via backend/sources/water_bodies.py) ----
 //
 // Three colour-only tokens rather than one: a marine/lake polygon reads as

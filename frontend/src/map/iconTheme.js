@@ -168,6 +168,17 @@ export const PALETTE_GROUPS = [
       // Coarse basemap rail *linework* (Natural Earth 1:10m, 2021). A muted grey,
       // and colour-only like cable.route below -- it is a polyline, not a pin.
       { id: "railway.line", label: "Railway line (Natural Earth, 2021)", value: "#6f7d92" },
+      // The ten named corridors (Task 20b) -- colour-only, same reasoning as
+      // railway.line just above: a polyline, not a pin. A muted cyan-teal,
+      // deliberately unlike the severity/traffic reds and yellows so a
+      // schematic route never reads as a live finding.
+      { id: "lanes.route", label: "Shipping corridor (schematic)", value: "#5fb8c9" },
+      // The AIS density wash (Task 20a) -- colour-only in the same sense the
+      // two heat layers above are: this token colours the legend swatch and
+      // the wash's near-invisible click targets, not a marker. A cool blue so
+      // it never reads as either FIRMS' orange or jamming's purple, the two
+      // washes it shares a stack with.
+      { id: "lanes.density", label: "AIS traffic density (this map's own coverage)", value: "#5cc4f2" },
       // DeFlock ALPR camera locations. A muted violet, deliberately quiet: this is
       // crowd-sourced surveillance-infrastructure metadata, not a live feed.
       { id: "deflock.camera", label: "ALPR camera (DeFlock / OpenStreetMap)", value: "#a78bba" },
@@ -224,6 +235,7 @@ export const DEFAULT_COLORS = Object.freeze(
  */
 const COLOUR_ONLY_TOKENS = new Set([
   "event.corroborated", "sanctions.designated", "cable.route", "railway.line",
+  "lanes.route", "lanes.density",
   "choropleth.low", "choropleth.mid", "choropleth.high",
   "water.fill", "water.outline", "water.selected",
 ]);
@@ -357,9 +369,9 @@ export const PIN_STACK = [
   "events", "conflictHistory", "czib", "hazards", "floods", "gdelt", "officials",
   "darkVessels", "gfwGaps", "gfwDetections", "satellites", "launches",
   "cities", "infra", "osmInfra", "deflock", "airports", "ports", "dams",
-  "railways", "cables", "outagePoints",
+  "railways", "cables", "shippingLanes", "outagePoints",
 ];
-export const WASH_STACK = ["vehicles", "jamming", "firms"];
+export const WASH_STACK = ["vehicles", "jamming", "firms", "laneDensity"];
 
 // water carries no PIN_STACK/WASH_STACK entry, deliberately: like the country
 // and subdivision shapes it is drawn `interactive: false` in its own pane

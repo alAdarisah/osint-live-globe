@@ -203,6 +203,11 @@ function makeHeatResilient(heatLayer) {
  */
 export const FIRMS_HEAT_OPACITY = 0.3;
 export const JAMMING_HEAT_OPACITY = 1;
+// Task 20a: full strength, like jamming. This is a few hundred cells of this
+// map's own recorded AIS coverage, not a quarter-million-point background
+// feed like FIRMS -- a finding rather than a texture, so it earns the same
+// footing jamming has rather than FIRMS' deliberately faint one.
+export const LANE_DENSITY_HEAT_OPACITY = 1;
 
 export function createFirmsLayers(map) {
   // FIRMS runs to 100k+ points globally, which as individual icons is just
@@ -255,6 +260,41 @@ export function createJammingLayers(map) {
   // createMapController.js, same pattern as infraGroup+pipelinesGroup.
   const jammingLayer = L.layerGroup([jammingHeat, jammingPointsLayer]);
   return { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer };
+}
+
+// Task 20a: the AIS density grid (GET /api/lanes, backend/refine/
+// lane_density.py) -- the same "too many cells to be individual icons, show
+// density instead" shape as FIRMS/jamming above, and for the same reason: a
+// cell is a 0.05deg/0.02deg bin, not a point a reader would want a pin for.
+// No ping group here, unlike jamming: a jamming cell's ping marks a *new*
+// reading arriving, which means something for a signal that can start or
+// stop; a traffic cell decays continuously rather than switching on, so
+// there is no "just appeared" moment worth a ripple for.
+export function createLaneDensityLayers(map) {
+  const laneDensityHeat = makeHeatResilient(L.heatLayer([], {
+    radius: 18,
+    blur: 24,
+    maxZoom: 9,
+    minOpacity: 0.25,
+    // A cool blue-to-white ramp, deliberately distinct from FIRMS' orange/red
+    // (fire) and jamming's purple/pink (interference) -- this is neither, and
+    // borrowing either palette would read as a claim of kinship with what
+    // that colour already means on this map.
+    gradient: { 0.2: "#0a2e4d", 0.4: "#0d5c8c", 0.6: "#1f8fd6", 0.8: "#5cc4f2", 1: "#c9ecff" },
+  }));
+  const laneDensityCanvasRenderer = L.canvas({ padding: 0.25 });
+  const laneDensityPointsLayer = L.layerGroup();
+  const laneDensityLayer = L.layerGroup([laneDensityHeat, laneDensityPointsLayer]);
+  return { laneDensityHeat, laneDensityPointsLayer, laneDensityLayer, laneDensityCanvasRenderer };
+}
+
+// Task 20b: the ten named corridors (backend/infrastructure.py's
+// SHIPPING_LANES) -- lines, not points, the same "small curated set, drawn
+// once" treatment createPipelinesGroup/createRailwaysGroup get above. Not
+// added to the map here: MANUAL and off by default (see its entry in
+// map/scene.js), toggled on from the panel.
+export function createShippingLanesGroup() {
+  return L.layerGroup();
 }
 
 // Civilian/military (and, in createNavyAisGroup below, civilian/Navy) each

@@ -7,7 +7,7 @@ import {
   LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
   GFW_GAP_STYLE, GFW_DETECTION_STYLE, GFW_DETECTION_ORDER,
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
-  WATER_STYLE,
+  WATER_STYLE, SHIPPING_LANE_STYLE, LANE_DENSITY_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
@@ -100,8 +100,8 @@ const GROUP_LAYERS = {
   // it is a place layer, and the aircraft that need it already get their
   // nearest field named inside their own popup.
   ground: [
-    "infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "water", "cables",
-    "firms", "jamming",
+    "infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "shippingLanes",
+    "water", "cables", "firms", "jamming", "laneDensity",
   ],
   // Its own group rather than a ninth row under traffic: a regulator's ruling
   // about a volume of airspace is neither traffic nor infrastructure, and
@@ -1071,6 +1071,30 @@ export default function LayersSection({
           </div>
         </LayerDetails>
 
+        <label className="layer-row" data-layer="shippingLanes">
+          <LayerCheck
+            layerKey="shippingLanes"
+            on={layerVisibility.shippingLanes}
+            wish={layerWish?.shippingLanes}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SHIPPING_LANE_STYLE.svg} color={SHIPPING_LANE_STYLE.color} token={SHIPPING_LANE_STYLE.token} />
+          {" "}Shipping Corridors (schematic)
+          <span className="count">{counts.shippingLanes} ({counts.shippingLanesTotal})</span>
+        </label>
+        <LayerDetails id="det-shippingLanes" open={isOpen("det-shippingLanes")} onToggle={setOpen}>
+          <div className="sublegend">
+            <b>Hand-drawn, not surveyed.</b> The ten corridors people actually name &mdash; Suez, Hormuz,
+            Malacca, the Bosphorus and the rest &mdash; as a short curated list of schematic waypoints
+            (backend/infrastructure.py). This is a different claim from the AIS density wash below: it is
+            not derived from anything this map has observed, and every popup says so.
+          </div>
+          <div className="sublegend">
+            Where a transit figure is shown, it always carries its publisher, unit and year. A corridor
+            with no citable figure on hand simply shows none, rather than a number nobody can stand behind.
+          </div>
+        </LayerDetails>
+
         <label className="layer-row" data-layer="water">
           <LayerCheck
             layerKey="water"
@@ -1197,6 +1221,37 @@ export default function LayersSection({
         <LayerDetails id="det-jamming" open={isOpen("det-jamming")} onToggle={setOpen}>
           <div className="sublegend">
             Data: gpsjam.org, derived from ADS-B aircraft GPS-quality reports. Updated once/day, not real-time.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="laneDensity">
+          <LayerCheck
+            layerKey="laneDensity"
+            on={layerVisibility.laneDensity}
+            wish={layerWish?.laneDensity}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={LANE_DENSITY_STYLE.svg} color={LANE_DENSITY_STYLE.color} token={LANE_DENSITY_STYLE.token} />
+          {" "}AIS Traffic Density (this map&apos;s own coverage)
+          <span className="count">{counts.laneDensity} ({counts.laneDensityTotal})</span>
+        </label>
+        <div id="laneDensityZoomNote" className={`sublegend${zoomNotes.laneDensity ? " visible" : ""}`}>
+          Zoom in to inspect individual cells
+        </div>
+        <LayerDetails id="det-laneDensity" open={isOpen("det-laneDensity")} onToggle={setOpen}>
+          <div className="sublegend">
+            <b>This is where we have seen ships, not where shipping lanes run.</b> Every cell is built from
+            this map&apos;s own recorded AIS positions over roughly the last thirty days (see backend/refine/
+            lane_density.py). An empty stretch of ocean means this map has not observed traffic there
+            &mdash; never that there is none. It is a different claim from the schematic corridors above,
+            and the two are drawn as separate layers on purpose.
+          </div>
+          <div className="sublegend">
+            <b>Sightings, not distinct ships.</b> The number behind the colour counts how many times a hull
+            was recorded in a cell, not how many different vessels passed through it. A single ship sitting
+            still for weeks keeps adding to the same number a busy strait would produce by real traffic
+            &mdash; the wash cannot tell those two apart, and neither can you from the colour alone. Every
+            popup repeats this in words.
           </div>
         </LayerDetails>
       </PanelGroup>

@@ -65,6 +65,8 @@ export const SETTINGS_LAYERS = [
   { key: "water", label: "Water bodies (Natural Earth)" },
   { key: "firms", label: "Fires / thermal anomalies (FIRMS)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
+  { key: "shippingLanes", label: "Shipping corridors (schematic)" },
+  { key: "laneDensity", label: "AIS traffic density (this map's own coverage)" },
 ].map((layer) => ({ ...layer, zoomGate: shippedDrawZoom(layer.key) }));
 
 /**

@@ -343,6 +343,38 @@ export const LAYER_MANIFEST = {
     fetch: FETCH_MANUAL,
     disposition: MANUAL,
   },
+  shippingLanes: {
+    // Task 20b: the ten named corridors (backend/infrastructure.py's
+    // SHIPPING_LANES), drawn the same way as the pipeline/cable/railway
+    // routes above -- a small curated set of whole polylines, fetched once
+    // at boot (see useOsintData.js's /api/infrastructure fetch) rather than
+    // polled. MANUAL and off by default for the same reason railways is: this
+    // is a hand-drawn schematic a reader opts into, not a claim the resolver
+    // or a country focus should push at them -- see the layer's own popup,
+    // which says "schematic corridor, not a surveyed route" on every line.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  laneDensity: {
+    // Task 20a: the AIS traffic grid (backend/refine/lane_density.py via
+    // GET /api/lanes) -- where this map's own AIS coverage has actually seen
+    // a hull, drawn as a heat wash exactly like FIRMS/jamming above. THEATRE
+    // and z5, the same gate jamming ships with and for the same reason: a
+    // world-zoom heat blur reads as an assertion about global shipping
+    // lanes, which is precisely the claim the layer's own note (and its
+    // legend) exists to disclaim. AUTO rather than CORROBORATING -- this is
+    // a straight rendering of what this map recorded, not an inference drawn
+    // from an absence, so it earns the same footing jamming has.
+    draw: { band: "THEATRE", z: 5 },
+    fetch: "THEATRE",
+    disposition: AUTO,
+    // /api/lanes takes a bbox (see backend/app.py's lanes_endpoint) and the
+    // grid is unbounded in principle -- global AIS coverage, resolved to
+    // 0.05deg/0.02deg cells -- so this earns the same viewport clip FIRMS and
+    // jamming's own scoped siblings (ports, airports, gfwGaps...) do.
+    scoped: true,
+  },
   water: {
     // Natural Earth 1:10m marine polygons -- named oceans, seas, gulfs, bays,
     // straits, sounds, channels (backend/sources/water_bodies.py). The first

@@ -31,6 +31,9 @@ import {
   createJammingPingGroup,
   createCablesGroup,
   createRailwaysGroup,
+  createLaneDensityLayers,
+  LANE_DENSITY_HEAT_OPACITY,
+  createShippingLanesGroup,
   createImageryLayer,
   gibsUrlFor,
   GIBS_LAYERS,
@@ -86,6 +89,9 @@ import {
   cableLandingIconSize,
   cableRouteColor,
   railwayRouteColor,
+  shippingLaneColor,
+  laneDensityColor,
+  laneDensityIntensity,
   decorateLaunch,
   launchIconSize,
   decorateOsmInfra,
@@ -506,6 +512,13 @@ export function createMapController(container, initial, callbacks) {
   const { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer } = createJammingLayers(map);
   const jammingPingGroup = createJammingPingGroup();
   const jammingLayerWithPing = L.layerGroup([jammingLayer, jammingPingGroup]).addTo(map);
+  // Task 20a: the AIS density wash. Added at construction like firms/jamming
+  // above (AUTO disposition, see map/scene.js) -- applyLayerWishes below
+  // corrects visibility to whatever the resolver's initial answer is before
+  // the first paint, the same way it does for every other AUTO layer.
+  const { laneDensityHeat, laneDensityPointsLayer, laneDensityLayer, laneDensityCanvasRenderer } =
+    createLaneDensityLayers(map);
+  laneDensityLayer.addTo(map);
   const { groups } = createEntityClusterGroups(map);
   // The area a conflict event could actually be in, drawn under its pin. Tied
   // to the events layer rather than toggled separately -- it is the same claim
@@ -525,6 +538,9 @@ export function createMapController(container, initial, callbacks) {
   // Coarse Natural Earth railway linework. NOT added to the map here -- off by
   // default (MANUAL disposition, see map/scene.js), toggled on from the panel.
   const railwaysGroup = createRailwaysGroup();
+  // Task 20b: the ten named corridors. Same treatment as railwaysGroup above
+  // -- off by default (MANUAL, see map/scene.js), toggled on from the panel.
+  const shippingLanesGroup = createShippingLanesGroup();
   // Seas, lakes and rivers. Also NOT added to the map here, for the same
   // reason -- MANUAL and off by default, see map/scene.js's `water` entry.
   const waterLayer = createWaterLayer(map);
@@ -621,6 +637,11 @@ export function createMapController(container, initial, callbacks) {
     // railway linework (railways.py). Neither is a feed; the first is a worldwide
     // point layer gated deep by zoom, the second a whole-document set of lines.
     deflock: [], railways: { lines: [] },
+    // Task 20b's corridors (a plain array, like pipelines) and Task 20a's
+    // AIS density grid (a whole document -- {note, cells} -- like railways
+    // above, so the popup/legend can state the endpoint's own `note` rather
+    // than a copy of it kept in step by hand).
+    shippingLanes: [], laneDensity: { note: "", cells: [] },
     // Marine polygons only (water_bodies.py) -- lakes and rivers are fetched on
     // demand, the first time their own sub-toggle is switched on, and held in
     // waterLakesFeatures/waterRiversFeatures below rather than here, since they
@@ -911,6 +932,7 @@ export function createMapController(container, initial, callbacks) {
     const canvases = [
       [firmsHeat?._canvas, FIRMS_HEAT_OPACITY, "firms"],
       [jammingHeat?._canvas, JAMMING_HEAT_OPACITY, "jamming"],
+      [laneDensityHeat?._canvas, LANE_DENSITY_HEAT_OPACITY, "laneDensity"],
       [entityWebglLayer.canvas?.(), 1, "vehicles"],
     ];
     for (const [canvas, shipped, key] of canvases) {
@@ -946,6 +968,7 @@ export function createMapController(container, initial, callbacks) {
   const HEAT_KERNEL = {
     firms: { radius: 16, blur: 22 },
     jamming: { radius: 22, blur: 28 },
+    laneDensity: { radius: 18, blur: 24 },
   };
 
   function applyHeatKernel(heat, key) {
@@ -1986,11 +2009,13 @@ export function createMapController(container, initial, callbacks) {
     if (key === "infra") return infraLayer; // wraps infraGroup + pipelinesGroup together
     if (key === "cables") return cablesLayer; // wraps cablesGroup + the landing-point markers
     if (key === "railways") return railwaysGroup;
+    if (key === "shippingLanes") return shippingLanesGroup;
     if (key === "water") return waterLayer;
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
     if (key === "clouds") return weatherLayers.clouds;
     if (key === "jamming") return jammingLayerWithPing;
+    if (key === "laneDensity") return laneDensityLayer;
     if (key === "satellites") return satelliteGroup;
     return groups[key];
   }
@@ -2181,6 +2206,7 @@ export function createMapController(container, initial, callbacks) {
       if (key === "windArrows") refreshWindArrows();
       else if (key === "firms") renderFirms();
       else if (key === "jamming") renderJamming();
+      else if (key === "laneDensity") renderLaneDensity();
       else if (key === "cities") renderCities();
       else if (key === "infra") renderInfra();
       else if (MARKER_LAYER_KEYS.has(key)) renderMarkerLayer(key);
@@ -2475,7 +2501,7 @@ export function createMapController(container, initial, callbacks) {
   // on every moveend is exactly the cost these layers were written to avoid by
   // drawing once. Keyed per layer rather than shared, because each is also
   // redrawn on its own when its data arrives (see applyData).
-  const worldCopyKeys = { cables: null, pipelines: null, railways: null };
+  const worldCopyKeys = { cables: null, pipelines: null, railways: null, shippingLanes: null };
 
   /**
    * Redraw the whole-world layers when, and only when, the visible copies change.
@@ -2489,6 +2515,7 @@ export function createMapController(container, initial, callbacks) {
     if (worldCopyKeys.cables !== key) renderCables();
     if (worldCopyKeys.pipelines !== key) renderPipelines();
     if (worldCopyKeys.railways !== key) renderRailways();
+    if (worldCopyKeys.shippingLanes !== key) renderShippingLanes();
   }
 
   function applyStacking(marker, size, key) {
@@ -2681,7 +2708,7 @@ export function createMapController(container, initial, callbacks) {
     czib: 0, czibActive: 0, czibWithdrawn: 0,
     floods: 0, floodsCurrent: 0,
     ports: 0, portsOil: 0, dams: 0, damsLarge: 0,
-    deflock: 0, railways: 0,
+    deflock: 0, railways: 0, shippingLanes: 0, laneDensity: 0,
     // How many ships/aircraft in the currently-loaded feed match the filter
     // bar's query -- read together with the matching *Total key (see totals
     // below) for the "N / total" figure next to each filter bar. Deliberately
@@ -2713,7 +2740,7 @@ export function createMapController(container, initial, callbacks) {
     czib: 0, czibActive: 0, czibWithdrawn: 0,
     floods: 0, floodsCurrent: 0,
     ports: 0, portsOil: 0, dams: 0, damsLarge: 0,
-    deflock: 0, railways: 0,
+    deflock: 0, railways: 0, shippingLanes: 0, laneDensity: 0,
     // Reported as vesselFilterMatchTotal/aircraftFilterMatchTotal (see
     // reportCounts' *Total suffixing below) -- the denominator for the "N /
     // total" figure next to each filter bar. This is the whole loaded feed
@@ -2733,7 +2760,7 @@ export function createMapController(container, initial, callbacks) {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
     gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
-    deflock: false,
+    deflock: false, laneDensity: false,
     // czib is deliberately absent: it has no gate, so it can never have a note.
     // Not a zoom gate but a band-dependent thinning, so it travels with the
     // rest: { [layerKey]: howManyKept } for every layer capByRank is currently
@@ -3929,6 +3956,83 @@ export function createMapController(container, initial, callbacks) {
     scheduleReports({ counts: true });
   }
 
+  // Task 20a: the AIS traffic grid (GET /api/lanes, backend/refine/
+  // lane_density.py) -- a near-copy of renderJamming just above, same
+  // "heat canvas plus near-invisible click targets" shape. No ping group:
+  // see the comment on createLaneDensityLayers in layers.js for why a
+  // continuously-decaying cell has no "just appeared" moment worth one.
+  //
+  // The honesty framing is the whole point of this layer (Task 20's brief):
+  // this is where *we* have seen ships, over the window the grid actually
+  // covers, and an empty cell means no observation, never no traffic. That
+  // sentence is the backend's own `note` (lane_density.NOTE, served verbatim
+  // as raw.laneDensity.note), repeated on every single popup rather than
+  // summarised, so the wording on the map can never quietly drift from the
+  // one the endpoint promises.
+  function renderLaneDensity() {
+    if (skipHiddenLayer("laneDensity")) return;
+    const inView = viewportFilter();
+    const doc = raw.laneDensity || {};
+    const cells = Array.isArray(doc.cells) ? doc.cells : [];
+    const note = doc.note || "";
+    // Same "heat draws at every zoom, click targets wait for detail" split
+    // jamming uses -- a 0.05deg/0.02deg cell is a smear at world zoom and a
+    // real reading once a reader is looking at one stretch of water.
+    const belowLaneDensityDetailZoom = map.getZoom() < (minZoomFor("laneDensity") ?? -Infinity);
+    zoomNotes.laneDensity = belowLaneDensityDetailZoom;
+    scheduleReports({ notes: true });
+
+    const visible = cells.filter((d) => inView(d.lat, d.lon));
+
+    applyHeatKernel(laneDensityHeat, "laneDensity");
+    const placeLane = worldCopyPlacements();
+    const laneDensityHeatPoints = [];
+    for (const d of visible) {
+      const weight = laneDensityIntensity(d.sightings);
+      placeLane(d.lat, d.lon, (drawLon) => laneDensityHeatPoints.push([d.lat, drawLon, weight]));
+    }
+    safeHeatSetLatLngs(laneDensityHeat, laneDensityHeatPoints);
+    applyWashStack(); // see the note beside the FIRMS call
+
+    laneDensityPointsLayer.clearLayers();
+    if (!belowLaneDensityDetailZoom) {
+      for (const d of visible) {
+        const classEntries = Object.entries(d.by_class || {});
+        const classLine = classEntries.length
+          ? `<div>By class: ${classEntries.map(([cls, n]) => `${esc(cls)} ${fmtNumber(n)}`).join(", ")}</div>`
+          : "";
+        const courseLine = Number.isFinite(d.course_deg)
+          ? `<div>Net course: ${Math.round(d.course_deg)}&deg;</div>`
+          : '<div class="meta">No net directional evidence in this cell.</div>';
+        const tooltip = `<b>${fmtNumber(d.sightings)} sightings</b><br/>not a distinct-vessel count`;
+        const detail = `
+          <h3>AIS traffic density</h3>
+          <div>${fmtNumber(d.sightings)} sightings recorded in this cell</div>
+          ${classLine}
+          ${courseLine}
+          <p class="meta"><b>Not a count of distinct vessels.</b> A hull that sits still keeps adding to this
+          number, so a loitering ship and a busy strait can show the same figure -- see below.</p>
+          <p class="meta">${esc(note)}</p>`;
+        placeLane(d.lat, d.lon, (drawLon) => {
+          const marker = L.circleMarker([d.lat, drawLon], {
+            radius: Math.max(4, Math.round(10 * layerScale("laneDensity"))),
+            fillOpacity: 0.02,
+            opacity: 0,
+            color: laneDensityColor(),
+            renderer: laneDensityCanvasRenderer,
+          });
+          marker.bindTooltip(tooltip, { className: "map-tooltip", direction: "top" });
+          marker.bindPopup(detail, popupOptions(280));
+          laneDensityPointsLayer.addLayer(marker);
+        });
+      }
+    }
+
+    counts.laneDensity = visible.length;
+    totals.laneDensity = cells.length;
+    scheduleReports({ counts: true });
+  }
+
   // Country boundaries only actually change once/day server-side (see
   // countries.py), but the frontend re-polls every 5 minutes and a browser
   // HTTP cache hit still hands back a fresh-looking (but byte-identical)
@@ -5072,6 +5176,60 @@ export function createMapController(container, initial, callbacks) {
     scheduleReports({ counts: true });
   }
 
+  // Task 20b: the ten named corridors (backend/infrastructure.py's
+  // SHIPPING_LANES), a near-copy of renderRailways/renderPipelines just
+  // above -- a small curated set of whole polylines, fetched once and
+  // repeated across every visible world copy rather than viewport-filtered.
+  //
+  // The one thing this popup has to say, on every single corridor and in so
+  // many words, is the brief's own sentence: this is a hand-drawn schematic,
+  // not a surveyed route and not derived from anything this map has
+  // observed -- that claim belongs to the density wash (renderLaneDensity)
+  // instead, and the two are never allowed to blur into each other.
+  function renderShippingLanes() {
+    shippingLanesGroup.clearLayers();
+    const offsets = worldCopies();
+    worldCopyKeys.shippingLanes = offsets.join(",");
+    const color = shippingLaneColor();
+    for (const lane of raw.shippingLanes) {
+      if (!Array.isArray(lane.coords) || lane.coords.length < 2) continue;
+      // A transit figure only ever appears with its citation (see
+      // backend/tests/test_shipping_corridors.py) -- built once per lane
+      // rather than per copy, since it does not depend on the world offset.
+      const transitLine = lane.transits
+        ? `<div class="meta">${fmtNumber(lane.transits)} ${esc(lane.transits_unit || "")} ` +
+          `&mdash; ${esc(lane.transits_publisher || "")}, ${esc(String(lane.transits_year || ""))}</div>`
+        : "";
+      const popupHtml =
+        `<h3>${esc(lane.name)}</h3>` +
+        `<p class="meta"><b>Schematic corridor, not a surveyed route.</b> ${esc(lane.note || "")}</p>` +
+        transitLine +
+        '<div class="meta">Source: backend/infrastructure.py, hand-drawn reference waypoints</div>';
+      for (const offset of offsets) {
+        const line = L.polyline(shiftPathLon(lane.coords, offset), {
+          color,
+          // Same hairline-dashed treatment as railways/pipelines: a dial for
+          // "size" and one for opacity, dashed so it never reads as a
+          // surveyed route even before a reader opens the popup.
+          weight: scaledWeight(1.4, "shippingLanes"),
+          opacity: 0.6 * layerOpacity("shippingLanes"),
+          dashArray: "5 5",
+        });
+        line.bindTooltip(`${esc(lane.name)} (schematic corridor)`, {
+          className: "map-tooltip", direction: "top", sticky: true,
+        });
+        line.bindPopup(popupHtml, popupOptions(280));
+        shippingLanesGroup.addLayer(line);
+      }
+    }
+    // Per corridor in the document, not per drawn line -- the copies are the
+    // same ten corridors seen more than once, same reasoning as cables/
+    // railways/pipelines above.
+    counts.shippingLanes = raw.shippingLanes.length;
+    totals.shippingLanes = raw.shippingLanes.length;
+    scheduleReports({ counts: true });
+  }
+
   // ---------- water: seas, lakes, rivers ----------
   //
   // Marine arrives once at boot through applyData (see useOsintData.js's
@@ -5400,6 +5558,11 @@ export function createMapController(container, initial, callbacks) {
     // at the last poll left them empty until the next one (up to 30min for
     // jamming), which read as "not loading" even though the data was there.
     renderJamming();
+    // Same reasoning as jamming just above: bounds-filtered, and the grid
+    // itself only moves once an hour server-side, so without a pan/zoom
+    // re-render this would sit empty everywhere the map moved to since the
+    // last poll.
+    renderLaneDensity();
     renderSatellites();
     updateCountryWarFlare();
   }
@@ -5869,6 +6032,7 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "pipelines") renderPipelines();
     else if (key === "cables") renderCables();
     else if (key === "railways") renderRailways();
+    else if (key === "shippingLanes") renderShippingLanes();
     else if (key === "water") renderWater();
     // Served as a country-keyed dict (read as-is by the country card), drawn
     // from the derived point array -- same split as cables/cableLandings.
@@ -5877,6 +6041,7 @@ export function createMapController(container, initial, callbacks) {
       renderMarkerLayer("outagePoints");
     }
       else if (key === "jamming") renderJamming();
+      else if (key === "laneDensity") renderLaneDensity();
       else if (key === "satellites") renderSatellites();
       // Neither of these is a point array with a layer of its own, so both
       // would otherwise fall through to renderMarkerLayer and blow up on a

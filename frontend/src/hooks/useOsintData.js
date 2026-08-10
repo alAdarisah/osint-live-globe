@@ -106,6 +106,12 @@ const POLL_CONFIG = [
   // hole in a track can never be refilled.
   { key: "adsb", url: "/api/aircraft", intervalMs: 20000, intervalByBand: { WORLD: 60000, THEATRE: 60000 } },
   { key: "jamming", url: "/api/jamming", intervalMs: 30 * 60000 }, // gpsjam.org itself only updates once/day
+  // Task 20a: the AIS traffic grid (backend/refine/lane_density.py). The grid
+  // itself only moves once an hour (config.LANE_DENSITY_INTERVAL) and decays
+  // slowly on top of that, so a poll much faster than that would just re-serve
+  // the same cells -- five minutes is close enough to "current" for a heat wash
+  // that is honest about covering the last thirty days, not the last minute.
+  { key: "laneDensity", url: "/api/lanes", intervalMs: 5 * 60000 },
   // Earthquakes and volcanic activity. Paced to the faster of its two inputs:
   // USGS refreshes every ~5 minutes and a felt earthquake is the kind of thing
   // a reader expects to appear while they are watching. The volcano half of the
@@ -684,7 +690,16 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
         publishFetchOutcome(
           recordCoverageRef.current, onDataRef.current, "infra",
           { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false },
-          [["infra", (isLegacyArray ? data : data.sites) || []], ["pipelines", (isLegacyArray ? [] : data.pipelines) || []]]
+          [
+            ["infra", (isLegacyArray ? data : data.sites) || []],
+            ["pipelines", (isLegacyArray ? [] : data.pipelines) || []],
+            // Task 20b: the ten named corridors (backend/infrastructure.py's
+            // SHIPPING_LANES), riding the same one-shot payload as sites and
+            // pipelines -- a cached response from before this field existed
+            // is simply a document with no `lanes` key, same reasoning as
+            // the legacy-array guard above.
+            ["shippingLanes", (isLegacyArray ? [] : data.lanes) || []],
+          ]
         );
       })
       .catch((err) => console.warn("Failed to load infrastructure sites:", err));

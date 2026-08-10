@@ -1219,6 +1219,100 @@ PIPELINE_ROUTES: list[dict] = [
 ]
 
 
+# The ten shipping corridors people actually name -- Task 20b. Hand-drawn
+# schematic waypoints, not a surveyed route and not derived from anything this
+# map has observed (that claim belongs to lane_density.py's grid instead, see
+# /api/lanes). Every entry carries `name` and `note`; where a transit figure is
+# included it also carries `transits`, `transits_unit`, `transits_publisher`
+# and `transits_year` -- the global rule against uncited numbers applies to
+# this list as much as anywhere else, so a corridor with no figure this
+# project can actually stand behind simply omits the four transit fields
+# rather than guessing. test_shipping_corridors.py checks that pattern holds.
+SHIPPING_LANES: list[dict] = [
+    {
+        "id": "suez_approach",
+        "name": "Suez approach",
+        "region_keys": ["red_sea_yemen"],
+        "note": "Mediterranean-Red Sea shortcut via the Suez Canal -- schematic corridor, not a surveyed route.",
+        "coords": [[31.26, 32.31], [30.6, 32.35], [29.95, 32.55], [29.5, 32.6]],
+        "transits": 25887,
+        "transits_unit": "vessel transits",
+        "transits_publisher": "Suez Canal Authority",
+        "transits_year": 2023,
+    },
+    {
+        "id": "bab_el_mandeb",
+        "name": "Bab-el-Mandeb",
+        "region_keys": ["red_sea_yemen"],
+        "note": "Chokepoint linking the Red Sea/Suez route to the Gulf of Aden and Indian Ocean -- schematic corridor, not a surveyed route.",
+        "coords": [[14.0, 42.6], [12.6, 43.4], [11.6, 43.8], [11.0, 44.5]],
+    },
+    {
+        "id": "hormuz",
+        "name": "Strait of Hormuz",
+        "region_keys": ["persian_gulf_hormuz"],
+        "note": "The sole sea passage between the Persian Gulf and the Gulf of Oman -- schematic corridor, not a surveyed route.",
+        "coords": [[26.9, 51.5], [26.5, 55.0], [26.0, 56.3], [25.3, 57.0], [24.5, 58.5]],
+        "transits": 21,
+        "transits_unit": "million barrels/day, oil flow (not a vessel count)",
+        "transits_publisher": "U.S. Energy Information Administration, World Oil Transit Chokepoints",
+        "transits_year": 2023,
+    },
+    {
+        "id": "malacca",
+        "name": "Strait of Malacca",
+        "region_keys": ["south_china_sea"],
+        "note": "Shortest sea route between the Indian Ocean and the Pacific -- schematic corridor, not a surveyed route.",
+        "coords": [[5.8, 95.3], [4.0, 98.0], [2.5, 101.0], [1.3, 103.5], [1.15, 104.0]],
+    },
+    {
+        "id": "taiwan_strait_lane",
+        "name": "Taiwan Strait",
+        "region_keys": ["taiwan_strait"],
+        "note": "Separates mainland China from Taiwan; also the route of frequent freedom-of-navigation transits -- schematic corridor, not a surveyed route.",
+        "coords": [[25.3, 121.7], [24.5, 119.6], [23.5, 119.2], [22.0, 118.9]],
+    },
+    {
+        "id": "bosphorus",
+        "name": "Bosphorus",
+        "region_keys": ["russia_ukraine"],
+        "note": "Connects the Black Sea to the Sea of Marmara and the Mediterranean, regulated by the 1936 Montreux Convention -- schematic corridor, not a surveyed route.",
+        "coords": [[41.25, 29.1], [41.05, 29.0], [40.97, 28.98], [40.75, 28.9]],
+    },
+    {
+        "id": "panama_approach",
+        "name": "Panama approach",
+        "region_keys": [],
+        "note": "Connects the Atlantic and Pacific via the Panama Canal -- schematic corridor, not a surveyed route.",
+        "coords": [[9.6, -79.9], [9.35, -79.92], [9.08, -79.68], [8.9, -79.57], [8.4, -79.9]],
+        "transits": 13000,
+        "transits_unit": "vessel transits/year, approximate",
+        "transits_publisher": "Panama Canal Authority (ACP)",
+        "transits_year": 2023,
+    },
+    {
+        "id": "gibraltar",
+        "name": "Strait of Gibraltar",
+        "region_keys": [],
+        "note": "Connects the Atlantic Ocean to the Mediterranean Sea; narrowest point about 13km wide -- schematic corridor, not a surveyed route.",
+        "coords": [[36.1, -5.9], [35.95, -5.6], [35.9, -5.35], [35.85, -5.1]],
+    },
+    {
+        "id": "danish_straits",
+        "name": "Danish straits",
+        "region_keys": [],
+        "note": "The only sea connection between the Baltic Sea and the North Sea/Atlantic, via the Kattegat, the Great Belt and the Oresund -- schematic corridor, not a surveyed route.",
+        "coords": [[57.7, 10.6], [56.5, 12.2], [55.6, 12.6], [54.9, 12.9], [54.5, 13.0]],
+    },
+    {
+        "id": "cape_of_good_hope",
+        "name": "Cape of Good Hope route",
+        "region_keys": [],
+        "note": "The traditional detour around southern Africa, used more heavily whenever the Suez/Red Sea corridor is unsafe -- schematic corridor, not a surveyed route.",
+        "coords": [[-30.0, 15.0], [-34.0, 18.4], [-35.0, 20.5], [-33.0, 27.0], [-29.0, 32.0]],
+    },
+]
+
 
 # Military bases -- rendered through the same "sites" list/Infra toggle as
 # everything else above (type: "military", plus a `subtype` the frontend
@@ -1729,4 +1823,8 @@ MILITARY_BASES: list[dict] = [
 
 
 def serialize() -> dict:
-    return {"sites": INFRA_SITES + MILITARY_BASES, "pipelines": PIPELINE_ROUTES}
+    return {
+        "sites": INFRA_SITES + MILITARY_BASES,
+        "pipelines": PIPELINE_ROUTES,
+        "lanes": SHIPPING_LANES,
+    }

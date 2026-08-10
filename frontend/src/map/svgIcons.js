@@ -542,6 +542,28 @@ export const SVG = {
     'd="M2.5 14.5c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>' +
     '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
     'd="M2.5 20c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>',
+
+  // ---- shipping lanes (Task 20) ----
+  //
+  // A dashed diagonal with an arrowhead -- a schematic route, deliberately
+  // distinct from `pipeline`'s wavy curve and `railway`'s station-box glyph
+  // so a reader scanning the legend does not mistake one drawn line for
+  // another. Legend-row only, like railway/wave above: the corridors
+  // themselves are polylines drawn by renderShippingLanes, not markers this
+  // SVG is turned into.
+  shippingLane: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3" ' +
+    'stroke-linecap="round" d="M2.5 19.5 L17.5 6"/>' +
+    '<path fill="currentColor" d="M14.6 3.6 L21 4.8 L18 9.2 Z"/>',
+  // A small hull with two wake lines rising behind it -- "traffic density",
+  // built from the same wedge-hulled silhouette as `ship` so the family
+  // reads as maritime, plus `wave`'s stroke idiom for the density half of
+  // the claim. Legend-row only: the wash itself is a canvas
+  // (createLaneDensityLayers in layers.js), not a marker.
+  laneDensity: '<path fill="currentColor" d="M3 15 L21 15 L18 20 L6 20 Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ' +
+    'd="M2 9.5c1.6-1.6 3.2-1.6 4.8 0s3.2 1.6 4.8 0 3.2-1.6 4.8 0 3.2 1.6 4.8 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ' +
+    'd="M2 5.5c1.6-1.6 3.2-1.6 4.8 0s3.2 1.6 4.8 0 3.2-1.6 4.8 0 3.2 1.6 4.8 0"/>',
 };
 
 // Which glyph an Officials & Diplomacy record gets, keyed on the `kind` the
@@ -734,6 +756,12 @@ export const GLYPH_CHOICES = Object.freeze({
   "osm.railway_yard": ["railway", "logisticsBase", "borderCrossing", "cityMedium"],
   "osm.railway_border": ["railway", "borderCrossing", "cityTown", "recordMark"],
   "railway.line": ["railway", "borderCrossing", "pipeline"],
+  // Same "colour-only token, picker still offered" treatment as railway.line
+  // just above -- neither corridors nor the density wash draws a marker, but
+  // the legend swatch next to their checkbox can still be any shape from the
+  // same schematic-route/maritime family.
+  "lanes.route": ["shippingLane", "pipeline", "railway"],
+  "lanes.density": ["laneDensity", "ship", "tanker", "wave"],
   "dam.barrier": ["dam", "powerPlant", "raindrop", "desalination"],
   "deflock.camera": ["alprCamera", "radarBase", "jammingSignal", "hiddenRing"],
   "osm.military_airfield": [
