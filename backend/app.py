@@ -346,7 +346,17 @@ async def infrastructure_list():
     osm_doc = (await storage.reference("pipelines_osm")) or {}
     curated = await _curated_pipeline_records()
     pipelines = curated + (osm_doc.get("lines") or [])
-    payload = {**infrastructure.serialize(), "pipelines": pipelines}
+    payload = {
+        **infrastructure.serialize(),
+        "pipelines": pipelines,
+        # Review fix (Task 28, Critical): osm_infra.py computes and stores
+        # this exactly like power_lines_osm's own truncated_regions -- it was
+        # being read into `osm_doc` above and then dropped rather than
+        # served, so a theatre that hit MAX_PIPELINE_WAYS read as "OSM mapped
+        # less here" with nothing saying it was capped. Carried straight
+        # through, same as power_lines.py's own serialize() does for its half.
+        "pipelines_truncated_regions": sorted(osm_doc.get("truncated_regions") or []),
+    }
     return JSONResponse(payload, headers={"Cache-Control": "public, max-age=86400"})
 
 

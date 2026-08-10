@@ -853,6 +853,21 @@ export default function LayersSection({
             </div>
           ))}
         </div>
+        {/* Review fix (Task 28, Critical): Pipeline Routes above is the
+            curated schematic *and* real OSM pipeline geometry merged at
+            /api/infrastructure's own read time (see app.py's
+            infrastructure_list) -- the same MAX_PIPELINE_WAYS cap the
+            transmission-line note above already surfaces applies to the OSM
+            half of this one too, and was being computed and stored by
+            osm_infra.py and then silently dropped before it ever reached
+            here. Same mechanism, reused a third time, not reinvented. */}
+        <div
+          id="pipelinesCappedNote"
+          className={`sublegend${(zoomNotes.pipelinesTruncated || []).length ? " visible" : ""}`}
+        >
+          OSM pipeline coverage hit its per-sweep limit in: {(zoomNotes.pipelinesTruncated || []).join(", ")}
+          {" "}&mdash; showing a partial network there, not the whole thing OSM has.
+        </div>
         <LayerDetails id="det-infra" open={isOpen("det-infra")} onToggle={setOpen}>
           <div className="sublegend">
             Publicly documented sites relevant to the selected conflict zone; flares when a nearby event is reported.
@@ -864,6 +879,13 @@ export default function LayersSection({
                 {MILITARY_SUBTYPE_STYLE[subtype].label}
               </span>
             ))}
+          </div>
+          <div className="sublegend">
+            <b>Pipeline Routes is two claims sharing one line style.</b> The curated schematic
+            (backend/infrastructure.py) stays exactly what it always was; OpenStreetMap's real pipeline
+            geometry, swept daily and only across this map&apos;s eleven conflict theatres, is layered
+            over it and coloured by substance where OSM tags one. Every line&apos;s own popup says which
+            of the two it is.
           </div>
         </LayerDetails>
 

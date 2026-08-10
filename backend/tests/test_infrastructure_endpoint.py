@@ -62,3 +62,37 @@ def test_infrastructure_endpoint_serves_only_the_curated_routes_when_osm_has_not
     body = _body(_run(app_mod.infrastructure_list()))
     curated = _run(app_mod._curated_pipeline_records())
     assert body["pipelines"] == curated
+    assert body["pipelines_truncated_regions"] == []
+
+
+# --- review fix (Task 28, Critical): truncated_regions must reach the wire --
+
+
+def test_infrastructure_endpoint_carries_pipelines_truncated_regions_through(monkeypatch):
+    """osm_infra.py computes and stores this exactly like power_lines_osm's
+    own truncated_regions (see serialize_pipelines) -- it must not be read
+    into osm_doc here and then dropped on the floor before the response is
+    built, or a theatre that hit MAX_PIPELINE_WAYS reads as "OSM mapped less
+    here" with nothing saying it was capped."""
+    osm_doc = {"lines": [], "truncated_regions": ["sahel", "russia_ukraine"]}
+
+    async def reference(name):
+        return osm_doc
+
+    monkeypatch.setattr(app_mod.storage, "reference", reference)
+
+    body = _body(_run(app_mod.infrastructure_list()))
+    # Sorted, so two sweeps that found the same capped set in a different
+    # order never look like a change to a reader comparing two responses --
+    # same discipline serialize_pipelines/serialize_power_lines already apply.
+    assert body["pipelines_truncated_regions"] == ["russia_ukraine", "sahel"]
+
+
+def test_infrastructure_endpoint_truncated_regions_default_to_empty(monkeypatch):
+    async def reference(name):
+        return None
+
+    monkeypatch.setattr(app_mod.storage, "reference", reference)
+
+    body = _body(_run(app_mod.infrastructure_list()))
+    assert body["pipelines_truncated_regions"] == []

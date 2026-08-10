@@ -744,6 +744,15 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
           { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false },
           [
             ["infra", (isLegacyArray ? data : data.sites) || []],
+            // Review fix (Task 28, Critical): landed *before* "pipelines" so
+            // raw.pipelinesTruncatedRegions is already set by the time that
+            // publish triggers renderPipelines() (publishFetchOutcome calls
+            // onData for each tuple in array order, synchronously) -- the
+            // truncated-region note otherwise reads stale for one tick.
+            // osm_infra.py computes this exactly like power_lines_osm's own
+            // truncated_regions; a missing/legacy response just means "not
+            // swept yet" or "older cached copy", not an error.
+            ["pipelinesTruncatedRegions", (isLegacyArray ? [] : data.pipelines_truncated_regions) || []],
             ["pipelines", (isLegacyArray ? [] : data.pipelines) || []],
             // Task 20b: the ten named corridors (backend/infrastructure.py's
             // SHIPPING_LANES), riding the same one-shot payload as sites and

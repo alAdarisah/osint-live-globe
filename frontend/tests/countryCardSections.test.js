@@ -64,24 +64,31 @@ function fetchedScopedTo(box, at = Date.now()) {
 
 test("summarizePowerPlants -- the tagged-fraction sum, including all-untagged", async (t) => {
   await t.test("a mix of tagged and untagged plants sums only the tagged ones", () => {
+    // Every real record carries both the raw OSM tag and the backend's own
+    // normalised `fuel` (osm_infra.py's _fuel_category) -- both are given
+    // here, including a case where they visibly disagree (`source_tag:
+    // "natural gas"` vs. `fuel: "gas"`), the same review finding
+    // (Important 1) that moved bySource's grouping key from the former to
+    // the latter: three raw spellings of "gas" must read as one bucket.
     const plants = [
-      { output_mw: 1200, source_tag: "gas" },
-      { output_mw: 300, source_tag: "hydro" },
-      { output_mw: null, source_tag: "gas" }, // untagged: no output_mw at all
-      { source_tag: "solar" }, // untagged: field absent entirely
+      { output_mw: 1200, source_tag: "gas", fuel: "gas" },
+      { output_mw: 300, source_tag: "hydro", fuel: "hydro" },
+      { output_mw: null, source_tag: "natural gas", fuel: "gas" }, // untagged: no output_mw at all
+      { source_tag: "solar", fuel: "solar" }, // untagged: field absent entirely
     ];
     const summary = summarizePowerPlants(plants);
     assert.equal(summary.count, 4);
     assert.equal(summary.taggedCount, 2);
     assert.equal(summary.totalOutputMw, 1500, "sums only the two tagged plants, not all four");
-    assert.deepEqual(summary.bySource, [["gas", 2], ["hydro", 1], ["solar", 1]]);
+    assert.deepEqual(summary.byFuel, [["gas", 2], ["hydro", 1], ["solar", 1]],
+      "two raw tag spellings of gas ('gas', 'natural gas') collapse to one bucket via the normalised fuel");
   });
 
   await t.test("every plant untagged -- the sum is 0, not NaN, and the fraction says so", () => {
     // This is the case the brief calls out by name: OSM has the sites, not
     // the numbers, and the failure this guards against is a 0 MW total being
     // read as "confirmed zero capacity" instead of "nothing to sum".
-    const plants = [{ source_tag: "gas" }, { source_tag: "gas" }, { output_mw: undefined }];
+    const plants = [{ fuel: "gas" }, { fuel: "gas" }, { output_mw: undefined, fuel: "gas" }];
     const summary = summarizePowerPlants(plants);
     assert.equal(summary.count, 3);
     assert.equal(summary.taggedCount, 0);
@@ -90,14 +97,20 @@ test("summarizePowerPlants -- the tagged-fraction sum, including all-untagged", 
   });
 
   await t.test("no plants at all", () => {
-    assert.deepEqual(summarizePowerPlants([]), { count: 0, taggedCount: 0, totalOutputMw: 0, bySource: [] });
-    assert.deepEqual(summarizePowerPlants(null), { count: 0, taggedCount: 0, totalOutputMw: 0, bySource: [] });
+    assert.deepEqual(summarizePowerPlants([]), { count: 0, taggedCount: 0, totalOutputMw: 0, byFuel: [] });
+    assert.deepEqual(summarizePowerPlants(null), { count: 0, taggedCount: 0, totalOutputMw: 0, byFuel: [] });
   });
 
   await t.test("output_mw of exactly 0 counts as tagged -- a reported zero is not the same as absent", () => {
-    const summary = summarizePowerPlants([{ output_mw: 0, source_tag: "gas" }, { source_tag: "gas" }]);
+    const summary = summarizePowerPlants([{ output_mw: 0, fuel: "gas" }, { fuel: "gas" }]);
     assert.equal(summary.taggedCount, 1);
     assert.equal(summary.totalOutputMw, 0);
+  });
+
+  await t.test("a plant missing `fuel` entirely (an older cached record) buckets as unclassified, not crashes", () => {
+    const summary = summarizePowerPlants([{ output_mw: 5, source_tag: "gas" }]);
+    assert.equal(summary.count, 1);
+    assert.deepEqual(summary.byFuel, [], "no fuel field to group on -- tallyBy's unclassified bucket, not a fabricated one");
   });
 });
 
@@ -134,11 +147,11 @@ test("countryCardSections -- energy infrastructure: the mandatory OSM tagged-fra
     // raw.powerPlants array (see createMapController.js's applyData split).
     const raw = emptyRaw({
       powerPlants: [
-        { id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", output_mw: 800, source_tag: "gas" },
-        { id: "osm:way/2", kind: "power_plant", lat: 5, lon: 5, name: "Plant B", source_tag: "hydro" },
-        { id: "osm:way/3", kind: "power_plant", lat: 5, lon: 5, name: "Plant C", source_tag: "hydro" },
+        { id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", output_mw: 800, source_tag: "gas", fuel: "gas" },
+        { id: "osm:way/2", kind: "power_plant", lat: 5, lon: 5, name: "Plant B", source_tag: "hydro", fuel: "hydro" },
+        { id: "osm:way/3", kind: "power_plant", lat: 5, lon: 5, name: "Plant C", source_tag: "hydro", fuel: "hydro" },
         // Outside the bbox: must not be counted at all.
-        { id: "osm:way/4", kind: "power_plant", lat: 50, lon: 50, name: "Plant D", output_mw: 9999, source_tag: "gas" },
+        { id: "osm:way/4", kind: "power_plant", lat: 50, lon: 50, name: "Plant D", output_mw: 9999, source_tag: "gas", fuel: "gas" },
       ],
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
@@ -148,13 +161,16 @@ test("countryCardSections -- energy infrastructure: the mandatory OSM tagged-fra
     assert.match(energy.html, /800 MW/);
     assert.match(energy.html, /not this country's generation capacity/);
     assert.doesNotMatch(energy.html, /9999/, "the out-of-bounds plant must not contribute to the sum");
+    // Review fix (Task 28, Important 1): "By fuel" groups on the normalised
+    // fuel, shown with its display label, not the raw OSM tag text.
+    assert.match(energy.html, /By fuel: Hydro \(2\), Gas \(1\)/);
   });
 
   await t.test("every plant in view untagged: no capacity figure is printed at all", () => {
     const raw = emptyRaw({
       powerPlants: [
-        { id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", source_tag: "gas" },
-        { id: "osm:way/2", kind: "power_plant", lat: 5, lon: 5, name: "Plant B", source_tag: "solar" },
+        { id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", source_tag: "gas", fuel: "gas" },
+        { id: "osm:way/2", kind: "power_plant", lat: 5, lon: 5, name: "Plant B", source_tag: "solar", fuel: "solar" },
       ],
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);

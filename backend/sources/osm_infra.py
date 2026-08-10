@@ -391,6 +391,36 @@ def _megawatts(value: str | None) -> float | None:
     return None
 
 
+def _capped_point_kinds(payload: dict) -> set[str]:
+    """Which of the point sweep's per-class caps (_FEATURES) this region's
+    raw response looks like it hit -- the same >= cap heuristic
+    _ways_truncated uses for a line response, generalised to a query that
+    carries several classes in one payload instead of one.
+
+    Review note (Task 28, Important 2): MAX_INFRA_POINT_PER_FEATURE (4000,
+    for storage_tank/petroleum_well) is an unmeasured judgment call, in the
+    same file where every *line* cap already gets this treatment -- this is
+    the log-and-flag half of that for every point class, including the four
+    original ones (military_airfield/military_area/power_plant/
+    border_control), which never had it either. Not wired to a served API
+    field or a map note -- doing that would mean reshaping
+    /api/osm-infrastructure's flat array into a wrapped document, judged out
+    of scope for this pass (see the module's own review notes) -- so this is
+    visibility for an operator reading logs, not yet a reader-facing one.
+
+    Counted from the raw tags rather than from parse_overpass's output: an
+    element parse_overpass drops (no usable position) would otherwise make a
+    genuinely-capped class look like it stayed under its cap.
+    """
+    caps = {kind: cap for _selector, kind, cap in _FEATURES}
+    counts: dict[str, int] = {}
+    for element in (payload or {}).get("elements") or []:
+        kind = _kind_of(element.get("tags") or {})
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+    return {kind for kind, cap in caps.items() if counts.get(kind, 0) >= cap}
+
+
 async def _fetch_region(client: httpx.AsyncClient, key: str, bounds) -> list[dict]:
     resp = await client.post(OVERPASS_URL, content=build_query(bounds).encode("utf-8"))
     # Overpass answers "too busy" with 429 and "you exceeded the timeout" with
@@ -399,7 +429,14 @@ async def _fetch_region(client: httpx.AsyncClient, key: str, bounds) -> list[dic
     if resp.status_code in (429, 504):
         raise RuntimeError(f"Overpass busy ({resp.status_code}) for region {key}")
     resp.raise_for_status()
-    return parse_overpass(resp.json(), key)
+    payload = resp.json()
+    capped = _capped_point_kinds(payload)
+    if capped:
+        log.warning(
+            "OSM infrastructure: %s hit its per-class cap in %s -- results are partial for those classes there",
+            sorted(capped), key,
+        )
+    return parse_overpass(payload, key)
 
 
 def build_rail_line_query(bounds: tuple[float, float, float, float]) -> str:
@@ -876,6 +913,12 @@ async def sweep_forever():
                 for i, (key, bounds) in enumerate(_regions_to_sweep()):
                     if i:
                         await asyncio.sleep(BETWEEN_REGIONS_SECONDS)
+                    # This `continue` is the head of a chain: it skips the
+                    # rail-line and grid-line fetches below for this region
+                    # too, since both sit later in the same per-region loop
+                    # body. See the rail-line block's own note (Minor 2, Task
+                    # 28 review) for what that means for a region whose point
+                    # fetch alone fails.
                     try:
                         by_region[key] = await _fetch_region(client, key, bounds)
                         swept += 1
@@ -906,6 +949,20 @@ async def sweep_forever():
                     # (worst case ~11 x 600s for one pass) and non-corrupting
                     # (each theatre still only ever overwrites its own entry),
                     # but worth knowing before reading a slow pass as a stuck one.
+                    #
+                    # Review note (Minor 2): this `continue` exits the *outer*
+                    # per-region loop, not just this block -- so a rail-line
+                    # failure here also skips the grid-line fetch below for
+                    # this same region, this same pass. Inherited from the
+                    # points-to-rail coupling Task 27 already had (a failed
+                    # point fetch already skipped the rail-line fetch the same
+                    # way) rather than introduced fresh here, and the effect is
+                    # the same in both cases: that region's grid lines keep
+                    # whatever a previous successful pass left in
+                    # power_lines_by_region/pipelines_by_region (stale, not
+                    # emptied) until a later pass re-reaches it. Worth knowing
+                    # before adding a fourth per-region stage after this one --
+                    # it inherits the same coupling unless restructured.
                     try:
                         lines, truncated = await _fetch_rail_lines(client, key, bounds)
                         rail_lines_by_region[key] = lines

@@ -466,6 +466,56 @@ def test_rail_lines_truncation_still_delegates_to_the_shared_helper():
     assert osm_infra._ways_truncated({"elements": [{}] * 2}, 3) is False
 
 
+# --- Task 28 review (Important 2): the point sweep gets the same log-and-flag
+# treatment as the line caps, generalised across every _FEATURES class ------
+
+
+def test_capped_point_kinds_flags_a_class_at_its_own_cap():
+    # _FEATURES bakes its cap in at module import time from the *value* of
+    # MAX_INFRA_POINT_PER_FEATURE at that moment, not a live reference -- so,
+    # unlike _ways_truncated (which reads its cap as a plain function
+    # argument), this cannot be exercised by monkeypatching the constant.
+    # Real-sized payloads instead, the same way
+    # test_capped_point_kinds_covers_the_four_original_classes_too below does.
+    payload = {"elements": [element(tags={"man_made": "storage_tank"})] * osm_infra.MAX_INFRA_POINT_PER_FEATURE}
+    assert osm_infra._capped_point_kinds(payload) == {"storage_tank"}
+
+
+def test_capped_point_kinds_is_per_class_not_per_response():
+    """A dense storage-tank farm hitting its own cap says nothing about
+    whether a completely different class in the same box did too."""
+    payload = {
+        "elements": (
+            [element(tags={"man_made": "storage_tank"})] * osm_infra.MAX_INFRA_POINT_PER_FEATURE
+            + [element(tags={"power": "substation"})]
+        ),
+    }
+    assert osm_infra._capped_point_kinds(payload) == {"storage_tank"}
+
+
+def test_capped_point_kinds_covers_the_four_original_classes_too():
+    """Not just the two new dense ones -- every _FEATURES class is checked,
+    including the four that predate this task and never had this check
+    before (military_airfield/military_area/power_plant/border_control)."""
+    payload = {"elements": [element(tags={"military": "airfield"})] * osm_infra.MAX_PER_FEATURE}
+    assert osm_infra._capped_point_kinds(payload) == {"military_airfield"}
+
+
+def test_capped_point_kinds_is_empty_under_every_cap():
+    payload = {"elements": [element(tags={"military": "airfield"})]}
+    assert osm_infra._capped_point_kinds(payload) == set()
+
+
+def test_capped_point_kinds_is_never_flagged_on_an_empty_response():
+    assert osm_infra._capped_point_kinds({}) == set()
+    assert osm_infra._capped_point_kinds({"elements": []}) == set()
+
+
+def test_capped_point_kinds_ignores_an_element_matching_no_known_kind():
+    payload = {"elements": [element(tags={"amenity": "cafe"})]}
+    assert osm_infra._capped_point_kinds(payload) == set()
+
+
 # --- Task 27: mainline rail geometry ----------------------------------------
 
 

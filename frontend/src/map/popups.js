@@ -9,6 +9,7 @@ import {
   classifyAircraft, classifyShip, classifyVesselTraffic, isSanctioned,
   AIS_COVERAGE_CAVEAT, EMPTY_WATER_HEADLINE,
   OSM_INFRA_STYLE, OSM_INFRA_ORDER, AIRFIELD_STYLE, AIRFIELD_ORDER, MILITARY_ROLE_STYLE,
+  POWER_PLANT_FUEL_STYLE,
   satellitePassesSectionHtml,
 } from "./decorators";
 import { countryContainsPoint } from "./countryHitTest";
@@ -1012,17 +1013,24 @@ const ENERGY_SOURCE_CAP = 6;
  * generation capacity. Exported so that arithmetic -- including the case
  * where every plant in view is untagged -- is tested directly, without
  * building a card around it.
+ *
+ * Review fix (Task 28, Important 1): buckets on `p.fuel`, osm_infra.py's own
+ * normalised _fuel_category, not the raw `source_tag`. Grouping on the raw
+ * tag was the bug this fixes -- "gas", "gas;oil" and "natural gas" would
+ * have shown as three separate rows in the card while decorators.js drew all
+ * three as the same glyph, the exact place raw-tag noise was most likely to
+ * leak past the normalisation this task added and be read by a user.
  */
 export function summarizePowerPlants(plants) {
   const list = plants || [];
   const tagged = list.filter((p) => Number.isFinite(p.output_mw));
   const totalOutputMw = tagged.reduce((sum, p) => sum + p.output_mw, 0);
-  const { counts } = tallyBy(list, (p) => p.source_tag || null);
+  const { counts } = tallyBy(list, (p) => p.fuel || null);
   return {
     count: list.length,
     taggedCount: tagged.length,
     totalOutputMw,
-    bySource: Object.entries(counts).sort((a, b) => b[1] - a[1]),
+    byFuel: Object.entries(counts).sort((a, b) => b[1] - a[1]),
   };
 }
 
@@ -1047,7 +1055,7 @@ function buildEnergyInfrastructure(bounds, raw) {
     && !curatedEnergySites.length && !osmEnergySites.length && !substations.length) return "";
 
   const summary = summarizePowerPlants(plants);
-  const shownSources = summary.bySource.slice(0, ENERGY_SOURCE_CAP);
+  const shownFuels = summary.byFuel.slice(0, ENERGY_SOURCE_CAP);
 
   const damPower = dams.filter((d) => Number.isFinite(d.power_mw));
   const damPowerMw = damPower.reduce((sum, d) => sum + d.power_mw, 0);
@@ -1075,8 +1083,9 @@ function buildEnergyInfrastructure(bounds, raw) {
       : `<div class="meta">None of the ${summary.count} plant${summary.count === 1 ? "" : "s"} found here
           tag an output figure, so no capacity total can be shown &mdash; OpenStreetMap has the sites, not
           the numbers, for this country.</div>`}
-    ${shownSources.length
-      ? `<div class="meta">By source: ${shownSources.map(([src, n]) => `${esc(src || "unspecified")} (${n})`).join(", ")}</div>`
+    ${shownFuels.length
+      ? `<div class="meta">By fuel: ${shownFuels.map(([fuel, n]) =>
+          `${esc((POWER_PLANT_FUEL_STYLE[fuel] || POWER_PLANT_FUEL_STYLE.other).label)} (${n})`).join(", ")}</div>`
       : ""}
     ` : ""}
     ${dams.length ? `

@@ -759,7 +759,13 @@ export function createMapController(container, initial, callbacks) {
   // which aircraft is selected, so it never needs to be React state.
   const raw = {
     events: [], firms: [], ais: [], gdelt: [], adsb: [], officials: [],
-    countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
+    countries: { features: [] }, cities: [], infra: [], pipelines: [],
+    // Review fix (Task 28, Critical): osm_infra.py's own per-region cap flag
+    // for the OSM half of `pipelines`, threaded through /api/infrastructure
+    // and read by renderPipelines() below -- same shape and reason as
+    // raw.railways/raw.powerLines carrying their own truncated_regions.
+    pipelinesTruncatedRegions: [],
+    jamming: [], satellites: [],
     // buildCountryIndex's own output, cached here (not just in the `countryIndex`
     // local below) so the water body card's bordering-country match
     // (map/popups.js's waterBorderingCountries) can reach it through the same
@@ -3456,6 +3462,14 @@ export function createMapController(container, initial, callbacks) {
     // truncated theatre must not read as a complete one, the same principle
     // `capped` above already carries for a band-thinned point layer.
     railwaysTruncated: [],
+    // Review fix (Task 28, Minor 1): powerLinesTruncated/pipelinesTruncated
+    // had no default entry here, unlike railwaysTruncated just above --
+    // harmless since every reader guards with `|| []` (LayersSection.jsx,
+    // renderPowerLines/renderPipelines themselves), but inconsistent with
+    // the pattern this table otherwise follows for every other truncation
+    // flag and every other zoom note in it.
+    powerLinesTruncated: [],
+    pipelinesTruncated: [],
   };
 
   // Layers that report a breakdown as well as a total, so the control panel can
@@ -6230,7 +6244,13 @@ export function createMapController(container, initial, callbacks) {
     // and a count that triples when the reader zooms out would be a lie.
     counts.pipelineRoutes = raw.pipelines.length;
     totals.pipelineRoutes = raw.pipelines.length;
-    scheduleReports({ counts: true });
+    // Review fix (Task 28, Critical): same "a cap that truncates silently is
+    // a defect" treatment railways'/powerLines' own truncated-region notes
+    // get -- read straight from what the endpoint carried through rather
+    // than inferred, since only the backend knows the raw, pre-parse
+    // Overpass element count.
+    zoomNotes.pipelinesTruncated = Array.isArray(raw.pipelinesTruncatedRegions) ? raw.pipelinesTruncatedRegions : [];
+    scheduleReports({ counts: true, notes: true });
   }
 
   // Cable routes are never bounds-filtered: unlike every marker layer, a polyline
