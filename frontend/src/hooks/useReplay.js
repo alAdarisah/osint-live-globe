@@ -16,6 +16,34 @@ const RANGE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days, matches backend/history.py'
 const PLAYBACK_MIN_STEP_MS = 800;
 const PLAYBACK_STEPS = RANGE_MS / (60 * 60 * 1000); // one step per hour, so a sweep runs ~60s
 
+/**
+ * Whether leaving Admin Mode should snap replay back to live -- true only on
+ * a genuine "was on, now off" transition, never merely because Admin Mode
+ * happens to be off right now.
+ *
+ * Task 35 review (Critical 2): App.jsx seeds a restored deep link's replay
+ * moment straight into useReplay's initial state, so `isReplaying` can be
+ * true on the very first render while `adminMode` is (as it is for most
+ * visitors, by default) false. A predicate that only checked "not admin mode
+ * and replaying" could not tell that apart from an admin who had just
+ * switched Admin Mode off mid-replay -- and fired `goLive()` on mount for
+ * the first case as readily as the second, silently discarding the very
+ * moment a share link exists to hand a non-admin reader. The two need
+ * different answers: the first should keep showing the restored moment
+ * (nothing to exit -- the transition never happened), the second should go
+ * live.
+ *
+ * `prevAdminMode` is the *previous* render's value, not the current one --
+ * the caller (App.jsx) tracks it in a ref mutated inside the same effect
+ * that calls this, since only the caller knows what "previous" means across
+ * renders. A pure predicate rather than inline in that effect so the one
+ * seam this bug actually lived in has a headless test, even though the
+ * effect wiring around it does not.
+ */
+export function shouldExitReplayOnAdminModeChange(prevAdminMode, adminMode, isReplaying) {
+  return !!prevAdminMode && !adminMode && !!isReplaying;
+}
+
 export function useReplay({ applyData, currentRegionKey, onExitReplay, initialReplayAt = null }) {
   const [now, setNow] = useState(() => Date.now());
   // null == live (not scrubbed back); otherwise a specific past timestamp.

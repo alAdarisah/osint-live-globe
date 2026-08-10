@@ -1426,12 +1426,15 @@ html, body {
 }
 #titleBar .copy-link-button:hover { color: var(--text-bright); border-color: var(--accent); }
 
-/* UrlStateNotice.jsx: a link this app could not read. Sits under the title
-   bar, centred, the same "fixed, translateX(-50%)" placement #borderEditBar
-   uses for its own notice -- but standalone (this can appear whether or not
-   a border edit session, or anything else, is open) and coloured the same
-   amber .border-edit-warning uses for "something needs your attention", not
-   the red reserved for a border edit's own outright refusal. */
+/* UrlStateNotice.jsx. Sits under the title bar, centred, the same "fixed,
+   translateX(-50%)" placement #borderEditBar uses for its own notice -- but
+   standalone (this can appear whether or not a border edit session, or
+   anything else, is open). Two tones (review fix, Important 2): .tone-warn
+   for a link this app could not read at all, the same amber
+   .border-edit-warning uses for "something needs your attention" (not the
+   red reserved for a border edit's own outright refusal); .tone-info for a
+   link that *did* read but has known limits worth a one-time mention, in the
+   accent colour every other informational surface in this app already uses. */
 #urlStateNotice {
   position: fixed;
   top: 54px;
@@ -1445,12 +1448,12 @@ html, body {
   padding: 8px 12px;
   border-radius: 6px;
   background: var(--panel-bg);
-  border: 1px solid rgba(255, 196, 107, 0.5);
-  color: #ffc46b;
   font-size: 11.5px;
   line-height: 1.4;
   box-shadow: 0 4px 16px var(--shadow-color);
 }
+#urlStateNotice.tone-warn { border: 1px solid rgba(255, 196, 107, 0.5); color: #ffc46b; }
+#urlStateNotice.tone-info { border: 1px solid rgba(var(--accent-rgb), 0.45); color: var(--text-secondary); }
 #urlStateNotice button {
   flex: none;
   border: none;

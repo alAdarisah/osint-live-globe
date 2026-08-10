@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useLeafletMap } from "./map/useLeafletMap";
 import { useOsintData } from "./hooks/useOsintData";
-import { useReplay } from "./hooks/useReplay";
+import { useReplay, shouldExitReplayOnAdminModeChange } from "./hooks/useReplay";
 import { useTheme } from "./hooks/useTheme";
 import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
@@ -19,7 +19,9 @@ import { DEFAULT_EVENT_FILTER } from "./map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "./utils/entityFilter";
 import { makeCountryScope } from "./map/countryScope";
 import { boundsContainsPoint } from "./utils/geo";
-import { decodeViewState, encodeViewState } from "./urlState";
+import {
+  decodeViewState, encodeViewState, applyLayerOverrideChange, omittedSelectionNote, describeUrlStateNotice,
+} from "./urlState";
 
 import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
@@ -91,6 +93,25 @@ export default function App() {
   // nothing says so out loud. UrlStateNotice (rendered below) is that
   // something; this just tracks whether the reader has dismissed it.
   const [urlNoticeDismissed, setUrlNoticeDismissed] = useState(false);
+  // What UrlStateNotice actually says -- urlState.js's own decision (an
+  // error message, a one-time "this link has known limits" reminder for a
+  // real followed link, or nothing at all for a plain hash-less visit). See
+  // describeUrlStateNotice's own note for the Important 2 review fix this is
+  // half of.
+  const urlNoticeContent = useMemo(() => describeUrlStateNotice(urlState), [urlState]);
+
+  // Review fix (Criticals 1 and 3): the layer overrides a reader has
+  // actually chosen, seeded once from whatever link opened this tab and from
+  // then on updated only by onToggleLayer -- never by re-deriving from
+  // urlState.state.layers on every render, and never by spreading the whole
+  // of settings.layerWish. The first was a stale-forever bug (tick a layer
+  // the link had turned off, and the frozen link value kept winning every
+  // render after); the second was a privacy leak ("Copy link" republishing
+  // the deployment's admin-pinned layer set to a reader who never touched a
+  // checkbox). See applyLayerOverrideChange in urlState.js for the reducer
+  // and the full reasoning, and the layerWishes memo / onToggleLayer /
+  // buildShareUrl below for where this is read and written.
+  const [layerOverride, setLayerOverride] = useState(() => ({ ...urlState.state.layers }));
 
   // Admin Mode's configuration. Read here rather than in a context because
   // three separate consumers need it in three different forms -- the map wants
@@ -122,16 +143,20 @@ export default function App() {
   // answerable for, and handing it a shorter table on the second call would read
   // as "the reader has withdrawn these" rather than as "these are unchanged".
   // Task 35's own layer overrides ride last -- a restored link's layer state
+  // (or the reader's own explicit toggle since -- see layerOverride above)
   // outranks whatever this browser's Admin Mode settings say for this
   // session, the same way a URL parameter usually outranks a saved
   // preference elsewhere. They are folded in here, at the merge every other
   // consumer already reads, rather than pushed through actions.setLayerWish:
   // that function persists to the shared admin_config.json, and a link a
   // reader opens must never rewrite this deployment's configuration for
-  // everyone else who visits it.
+  // everyone else who visits it. `layerOverride` (not urlState.state.layers
+  // directly) is what rides last, so a checkbox click updates the very key
+  // this memo re-spreads instead of being permanently overruled by a frozen
+  // link value -- see applyLayerOverrideChange's own note in urlState.js.
   const layerWishes = useMemo(
-    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish, ...urlState.state.layers }),
-    [settings.layerWish, urlState.state.layers]
+    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish, ...layerOverride }),
+    [settings.layerWish, layerOverride]
   );
   const mapApi = useLeafletMap(mapContainerRef, {
     theme,
@@ -387,6 +412,12 @@ export default function App() {
     (key, visible) => {
       mapApi.setLayerVisible(key, visible);
       actions.setLayerWish(key, visible);
+      // Review fix: this is the reader's own explicit choice for this key,
+      // now -- it wins over whatever a followed link asked for, for the rest
+      // of this tab, and it is what a later "Copy link" click should carry
+      // instead of the link's original value. See applyLayerOverrideChange's
+      // own note in urlState.js.
+      setLayerOverride((prev) => applyLayerOverrideChange(prev, key, visible));
     },
     [mapApi.setLayerVisible, actions]
   );
@@ -646,8 +677,24 @@ export default function App() {
   // while the map stayed frozen on a snapshot from hours ago, with every live
   // feed still suppressed and nothing left to press to get back. The map goes
   // live with the control that drives it.
+  //
+  // Review fix (Critical 2): guarded on a genuine true-to-false transition
+  // now, not merely "adminMode is currently false" -- see
+  // shouldExitReplayOnAdminModeChange's own note in useReplay.js. Without the
+  // guard, a deep link that seeds useReplay's initial replayAt made
+  // isReplaying true on the very first render while adminMode was (its
+  // default, for the great majority of visitors this share button exists
+  // for) already false, and this effect read that as "Admin Mode was just
+  // switched off mid-replay" on mount and called goLive() -- silently
+  // snapping a freshly-restored replay link straight back to live before the
+  // reader who opened it ever saw the moment it pointed to.
+  const prevAdminModeRef = useRef(adminMode);
   useEffect(() => {
-    if (!adminMode && replayApi.isReplaying) replayApi.goLive();
+    const prevAdminMode = prevAdminModeRef.current;
+    prevAdminModeRef.current = adminMode;
+    if (shouldExitReplayOnAdminModeChange(prevAdminMode, adminMode, replayApi.isReplaying)) {
+      replayApi.goLive();
+    }
   }, [adminMode, replayApi.isReplaying, replayApi.goLive]);
 
   // --- Task 35: deep-linkable views --------------------------------------
@@ -712,13 +759,24 @@ export default function App() {
   // always matches whatever is on screen the moment the button is pressed.
   // See urlState.js's own module doc for exactly what this does and does not
   // capture, and why.
+  // Review fix (Critical 1): reads `layerOverride`, not
+  // `{...settings.layerWish, ...urlState.state.layers}` -- the old
+  // construction spread the *whole* of settings.layerWish, which is exactly
+  // what useAppSettings persists to the shared admin_config.json, into every
+  // link. A reader who never touched a layer checkbox still shipped this
+  // deployment's admin-pinned layer set to whoever they handed the link to.
+  // `layerOverride` holds only keys a reader has actually made a choice
+  // about -- inherited from the link that opened this tab, updated only by
+  // onToggleLayer since -- see applyLayerOverrideChange's own note.
+  //
+  // Review fix (Important 2): also returns `note`, a plain-language list of
+  // what this link will not carry (from urlState.js's own
+  // omittedSelectionNote) -- a multi-country selection narrowed to one, or
+  // an open subdivision/district/record card that has no field in this
+  // format at all. CopyLinkButton surfaces it alongside "Copied" so the
+  // person building the link is not left assuming it captured everything on
+  // their screen.
   const buildShareUrl = useCallback(() => {
-    // Session-only URL layer overrides ride on top of the persisted admin
-    // wishes, same precedence layerWishes above already applies -- so a link
-    // copied without ever touching a layer checkbox still carries whatever
-    // layer state the *opened* link asked for, not just this browser's own
-    // saved configuration.
-    const layers = { ...settings.layerWish, ...urlState.state.layers };
     // A country and a nearby water body can be selected at once (see
     // PlaceInfoCard's own note on why); country wins when both are open,
     // since a click on a country is the more deliberate of the two gestures
@@ -730,15 +788,22 @@ export default function App() {
         : null;
     const hash = encodeViewState({
       camera: mapApi.getCamera(),
-      layers,
+      layers: layerOverride,
       filters: { event: eventFilter, vessel: vesselFilter, aircraft: aircraftFilter },
       selection,
       replayAt: replayApi.isReplaying ? replayApi.replayAt : null,
     });
-    return `${window.location.origin}${window.location.pathname}${window.location.search}#${hash}`;
+    const url = `${window.location.origin}${window.location.pathname}${window.location.search}#${hash}`;
+    const note = omittedSelectionNote({
+      countrySelectionCount: mapApi.countrySelection.length,
+      hasSubdivision: !!mapApi.selectedSubdivision,
+      hasDistrict: !!mapApi.selectedDistrict,
+      hasOpenRecord: !!recordDetail,
+    });
+    return { url, note };
   }, [
-    settings.layerWish, mapApi, eventFilter, vesselFilter, aircraftFilter,
-    replayApi.isReplaying, replayApi.replayAt,
+    layerOverride, mapApi, eventFilter, vesselFilter, aircraftFilter,
+    replayApi.isReplaying, replayApi.replayAt, recordDetail,
   ]);
 
   return (
@@ -749,9 +814,11 @@ export default function App() {
 
       {/* Task 35: says so, once, if the link this page loaded with could not
           be read -- see decodeViewState's own contract for why that needs a
-          visible signal rather than just quietly falling back. */}
+          visible signal rather than just quietly falling back -- or, for a
+          link that *did* read, that this format has known limits (review
+          fix, Important 2). */}
       <UrlStateNotice
-        error={urlNoticeDismissed ? null : urlState.error}
+        content={urlNoticeDismissed ? null : urlNoticeContent}
         onDismiss={() => setUrlNoticeDismissed(true)}
       />
 
