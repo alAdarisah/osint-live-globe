@@ -136,6 +136,7 @@ export const FETCH_ALWAYS_BECAUSE = {
   escalation: "notable events, the choropleth",
   countries: "the hit-test index, choropleth, war flare, city scoping, border editing",
   outages: "the choropleth and the country card",
+  outagesRegions: "the state-target choropleth, the admin-1 badge layer, and the state/district cards",
   conflictStats: "the choropleth and the country card",
   conflictDistricts: "the choropleth and the country card",
   humanitarian: "the country card",
@@ -558,6 +559,18 @@ export const LAYER_MANIFEST = {
     // One pin per country, and the feed behind it also drives the choropleth
     // and the country card.
     draw: null,
+    fetch: FETCH_ALWAYS,
+    disposition: AUTO,
+  },
+  outageRegionPoints: {
+    // Gated the same as cities' own COUNTRY floor, and for the same reason: at
+    // WORLD or THEATRE a reader has not zoomed in far enough to place a small
+    // per-state badge meaningfully, and a bad week could otherwise paper the
+    // map in them before that. Unlike outagePoints above, this is never drawn
+    // ungated -- the country-level pin exists precisely because a national
+    // reading is worth seeing from anywhere; a state-level one is the detail
+    // a reader reaches by looking closer, not the headline.
+    draw: { band: "COUNTRY" },
     fetch: FETCH_ALWAYS,
     disposition: AUTO,
   },

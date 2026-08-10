@@ -813,6 +813,15 @@ async def outages_endpoint(request: Request):
     return _cached_source_response(request, "outages", None, lambda data, _bounds: data)
 
 
+@app.get("/api/outages/regions")
+async def outage_regions_endpoint(request: Request):
+    # {ISO2: {region_code_or_entity_code: record}} -- see outages.py's own
+    # docstring for the match-quality tiers. Unscoped like /api/outages above:
+    # a reader comparing regions across countries wants the whole set, not one
+    # bbox's worth of it, and the payload is small (a few hundred rows at most).
+    return _cached_source_response(request, "outages_regions", None, lambda data, _bounds: data)
+
+
 @app.get("/api/dark-vessels")
 async def dark_vessels_endpoint(request: Request, region: str | None = None):
     # Derived from this backend's own AIS history, not fetched from anywhere

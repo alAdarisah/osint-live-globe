@@ -25,31 +25,40 @@
 import { L } from "./leafletGlobal";
 import { buildShapeIndex, countryContainsPoint } from "./countryHitTest";
 
-export function createSubdivisionsLayer(map) {
+/**
+ * @param getFill  (properties) => {fillColor, fillOpacity} | null, the state
+ *   choropleth's own styleFor (see map/choropleth.js). Same contract as
+ *   createCountriesLayer's getFill in layers.js -- null leaves the shape
+ *   unpainted, which is how an unmeasured state stays visually distinct from
+ *   one measured at zero. Defaulted, so a caller that wants no fill (every
+ *   caller until Task 26 generalised the choropleth to a target) can omit it.
+ */
+export function createSubdivisionsLayer(map, getFill = () => null) {
   // Between the country shapes (350) and the district choropleth (360): a state
   // border is drawn over its own country's fill, and under a district fill,
   // which is the more specific statement of the two.
   if (!map.getPane("subdivisionsPane")) {
     map.createPane("subdivisionsPane").style.zIndex = 355;
   }
-  // One constant style, and every state that looks different from its
-  // neighbours looks different by CSS class -- hover and selection are toggled
-  // on the element by the controller, exactly as they are for countries. Not a
-  // style function returning a class per feature: Leaflet applies `className`
-  // when it first creates the path and never again, so a class computed in
-  // `style` cannot change afterwards. Stroke and fill live in the stylesheet
-  // for the same reason the country shapes' do -- a rule there beats the
-  // presentation attributes Leaflet sets here, which is what lets the selected
-  // outline win.
-  const style = {
-    className: "subdivision-shape",
-    color: "#6fe3ff",
-    weight: 1,
-    fillColor: "#6fe3ff",
-    fillOpacity: 0,
-    interactive: false,
-  };
-  return L.geoJSON(null, { style: () => style, pane: "subdivisionsPane" });
+  // Stroke and the CSS-toggled classes (.hovered, .subdivision-selected) still
+  // live in the stylesheet and still win over whatever is set here, exactly as
+  // the long comment above used to say -- fillColor/fillOpacity are the only
+  // things a metric may move, the same restriction createCountriesLayer's own
+  // countryStyle places on itself, and for the same reason: a metric that could
+  // reach the stroke or the interactive flag could break hover, selection or
+  // hit-testing from a dropdown.
+  function subdivisionStyle(feature) {
+    const fill = feature && feature.properties ? getFill(feature.properties) : null;
+    return {
+      className: "subdivision-shape",
+      color: "#6fe3ff",
+      weight: 1,
+      fillColor: (fill && fill.fillColor) || "#6fe3ff",
+      fillOpacity: fill ? fill.fillOpacity : 0,
+      interactive: false,
+    };
+  }
+  return L.geoJSON(null, { style: subdivisionStyle, pane: "subdivisionsPane" });
 }
 
 /**

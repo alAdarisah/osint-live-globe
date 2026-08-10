@@ -275,7 +275,8 @@ export const DEFAULT_SIZES = Object.freeze(
  * layer's -- the later of the two wins (see tokenZoom below and pinZoomGate in
  * createMapController.js). A token with no entry here is one with no pin of its
  * own to withhold: the three colour-only tokens, the choropleth ramp, and
- * outage.country, which names a colour the palette does not offer.
+ * outage.country/outage.region, which name a colour the palette does not
+ * offer.
  *
  * Deliberately not derived from the palette groups. Those group by subject --
  * "Air & sea traffic" holds three ship classes and four aircraft classes across
@@ -400,7 +401,7 @@ export const PIN_STACK = [
   // they draw on the WebGL entity canvas instead (see STACK_ALIAS below).
   "satNavigation", "satWeather", "satScience", "launches",
   "cities", "infra", "osmInfra", "deflock", "airports", "ports", "dams",
-  "railways", "cables", "shippingLanes", "outagePoints",
+  "railways", "cables", "shippingLanes", "outagePoints", "outageRegionPoints",
 ];
 export const WASH_STACK = ["vehicles", "jamming", "firms", "laneDensity"];
 

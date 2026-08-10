@@ -348,6 +348,13 @@ export function createEntityClusterGroups(map) {
     // the country tint it replaced was unconditional too -- a national blackout
     // is not something a reader should have to switch on to find out about.
     outagePoints: L.layerGroup().addTo(map),
+    // One badge per matched sub-national region IODA currently reports (see
+    // backend/sources/outages.py's region pass), at that state's own
+    // representative point. Also on by default, same reasoning as
+    // outagePoints above -- it is zoom-gated instead (see LAYER_MANIFEST in
+    // map/scene.js), which is what keeps it off the world view rather than a
+    // checkbox.
+    outageRegionPoints: L.layerGroup().addTo(map),
     // Global Fishing Watch's own record of AIS disabling (gfw_gaps.py). Off by
     // default for the same reason darkVessels is: every record is an inference
     // about intent. That the inference is somebody else's does not change what

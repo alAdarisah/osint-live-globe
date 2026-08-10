@@ -87,12 +87,13 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // so the admin panel can tell a stored edit that still fits from one made
   // against a geometry the source has since changed.
   const [countryFingerprints, setCountryFingerprints] = useState({});
-  // Which metric the country shapes are painted by, and how many of them the
-  // metric actually has a value for. The coverage half is not decoration: four
-  // of the six metrics know about only part of the world, and a reader looking
-  // at a mostly-blank map needs to be told whether that means "no harm here" or
+  // Which metric the shapes are painted by, which shapes -- "country" or
+  // "state" (Task 26) -- that metric applies to, and how many of them the
+  // metric actually has a value for. The coverage half is not decoration:
+  // most metrics know about only part of the world, and a reader looking at a
+  // mostly-blank map needs to be told whether that means "no harm here" or
   // "nobody has measured here".
-  const [choropleth, setChoropleth] = useState({ metricId: null, covered: 0, total: 0 });
+  const [choropleth, setChoropleth] = useState({ metricId: null, target: "country", covered: 0, total: 0 });
 
   // onRegionAutoReset changes identity across renders (it closes over
   // region state) -- keep the latest one in a ref so the controller (created

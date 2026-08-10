@@ -2563,6 +2563,54 @@ export function decorateOutage(d, { offset } = {}) {
   };
 }
 
+// ---------- sub-national internet outages (outages.py's region pass) ------
+//
+// A small badge, one admin level finer than OUTAGE_STYLE above, at the
+// state's own representative point (see rebuildOutageRegionPoints in
+// createMapController.js). Deliberately smaller than the country pin: this is
+// the detail a reader reaches by zooming in, not the headline the country pin
+// already is, and drawing it the same size would claim equal weight for a
+// reading IODA itself scores no differently in kind, only in scope.
+export const OUTAGE_REGION_STYLE = {
+  svg: SVG.connectivityLoss, color: "#38bdf8", size: 13,
+  label: "Internet disruption (IODA, sub-national)", token: "outage.region",
+};
+
+export function outageRegionStyle() {
+  return themedStyle(OUTAGE_REGION_STYLE, "outageRegionPoints");
+}
+
+export function outageRegionIconSize() {
+  return outageRegionStyle().size;
+}
+
+export function decorateOutageRegion(d, { offset } = {}) {
+  const style = outageRegionStyle();
+  const name = d.name || d.entity_code || "Unknown region";
+  const signals = Object.keys(d.signals || {}).map((key) => key.split(".")[0]);
+  const matchWord = d.matched === "exact" ? "an exact" : "a fuzzy (name-normalised)";
+  const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)}`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(style.label)}</div>
+    <div>IODA composite score: ${fmtNumber(Math.round(d.score || 0))}${
+      d.event_count ? ` &middot; ${esc(d.event_count)} event(s)` : ""
+    }</div>
+    ${signals.length ? `<div class="meta">Seen in: ${signals.map((s) => esc(s)).join(", ")}</div>` : ""}
+    <p class="meta"><b>Matched to this state by ${matchWord} name match</b> between IODA's own region name
+      and this admin-1 shape's own name (see backend/sources/outages.py). This pin sits at the state's own
+      representative point, not at the location of anything specific inside it.</p>
+    <p class="meta">The score is IODA's own composite and is unbounded &mdash; it is a comparison against the
+      same region's normal and against other regions in the same window, not a share of the region offline,
+      and it cannot distinguish a shutdown from a cable fault.</p>
+    <div class="meta">Source: IODA (Internet Outage Detection and Analysis, Georgia Tech)</div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "outage-region-marker", layerOpacity("outageRegionPoints"), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
 // ---------- dark vessels (backend/sources/dark_vessels.py) ----------
 //
 // The only layer on this map derived from our own recorded history rather than

@@ -102,6 +102,8 @@ import {
   osmInfraIconSize,
   decorateOutage,
   outageIconSize,
+  decorateOutageRegion,
+  outageRegionIconSize,
   decorateGfwGap,
   gfwGapIconSize,
   decorateGfwDetection,
@@ -297,13 +299,17 @@ const ID_FIELD = {
   // whose score changes between polls has to update its existing marker rather
   // than be torn down and rebuilt under a new key.
   outagePoints: "country_code",
+  // "country:key" (see rebuildOutageRegionPoints), because a bare region_code
+  // is not unique across the whole feed the way a country code is -- IODA's
+  // own entity code, the fallback for an unmatched region, isn't either.
+  outageRegionPoints: "id",
 };
 const DECORATORS = {
   events: decorateEvent, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
   conflictHistory: decorateHistoricalEvent, officials: decorateOfficials,
   hazards: decorateHazard, airports: decorateAirport, darkVessels: decorateDarkVessel,
   cableLandings: decorateCableLanding, launches: decorateLaunch,
-  osmInfra: decorateOsmInfra, outagePoints: decorateOutage,
+  osmInfra: decorateOsmInfra, outagePoints: decorateOutage, outageRegionPoints: decorateOutageRegion,
   gfwGaps: decorateGfwGap, gfwDetections: decorateGfwDetection,
   czib: decorateCzib, floods: decorateFlood, ports: decoratePort, dams: decorateDam,
   deflock: decorateDeflock,
@@ -316,6 +322,7 @@ const ICON_SIZE_FOR_GLYPH = {
   officials: officialsIconSize, hazards: hazardIconSize, airports: airportIconSize,
   darkVessels: darkVesselIconSize, cableLandings: cableLandingIconSize,
   launches: launchIconSize, osmInfra: osmInfraIconSize, outagePoints: outageIconSize,
+  outageRegionPoints: outageRegionIconSize,
   gfwGaps: gfwGapIconSize, gfwDetections: gfwDetectionIconSize,
   czib: czibIconSize, floods: floodIconSize, ports: portIconSize, dams: damIconSize,
   deflock: deflockIconSize,
@@ -407,8 +414,12 @@ const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps"]);
 // applyData's per-key dispatch. "cities" is here for both -- GeoNames rarely
 // moves mid-session, but a card opened before that boot fetch lands should
 // not keep saying zero once it does.
-const SUBDIVISION_CARD_FEEDS = new Set(["events", "cities", "osmInfra", "dams", "airports", "ports"]);
-const DISTRICT_CARD_FEEDS = new Set(["cities", "osmInfra", "dams", "airports", "ports"]);
+// "outagesRegions" (Task 26) is on both: the district card reads it too, via
+// its parent state (see popups.js's regionOutageFor and the districtStateByPcode
+// join), so a card opened before that feed's first delivery lands should stop
+// saying "no disruption" the moment it does, same as every other feed here.
+const SUBDIVISION_CARD_FEEDS = new Set(["events", "cities", "osmInfra", "dams", "airports", "ports", "outagesRegions"]);
+const DISTRICT_CARD_FEEDS = new Set(["cities", "osmInfra", "dams", "airports", "ports", "outagesRegions"]);
 
 // leaflet.heat's setLatLngs() always calls its own redraw(), which
 // dereferences `this._map._animating` with no null check -- harmless when
@@ -752,6 +763,12 @@ export function createMapController(container, initial, callbacks) {
     // boundaries are in (see rebuildOutagePoints). Same two-keys-one-source
     // split as cables/cableLandings above.
     cables: [], cableLandings: [], outages: {}, outagePoints: [],
+    // Task 26's sub-national counterpart: `outagesRegions` is the
+    // {ISO2: {code: record}} dict as served, read straight out of here by the
+    // state/district cards and the state-target choropleth;
+    // `outageRegionPoints` is the badge array derived from it once the
+    // relevant admin-1 boundaries are in (see rebuildOutageRegionPoints).
+    outagesRegions: {}, outageRegionPoints: [],
     // Country-keyed humanitarian aggregates (ISO3), read by the country card
     // only -- see backend/sources/humanitarian.py for why none of it is drawn.
     humanitarian: {},
@@ -813,7 +830,7 @@ export function createMapController(container, initial, callbacks) {
     satNavigation: new Map(), satWeather: new Map(), satScience: new Map(),
     conflictHistory: new Map(), officials: new Map(), hazards: new Map(), airports: new Map(), darkVessels: new Map(),
     cableLandings: new Map(), launches: new Map(), osmInfra: new Map(),
-    outagePoints: new Map(),
+    outagePoints: new Map(), outageRegionPoints: new Map(),
     gfwGaps: new Map(), gfwDetections: new Map(),
     czib: new Map(), floods: new Map(), ports: new Map(), dams: new Map(),
     deflock: new Map(),
@@ -1823,12 +1840,20 @@ export function createMapController(container, initial, callbacks) {
   // sitting above the countries pane made every country unclickable from the
   // first zoom-in onwards, and no pane ordering fixes that without breaking
   // marker clicks instead.
-  // Which country-level number, if any, the shapes are painted by. Null is the
-  // shipped default: the fill is opt-in, because a permanently-tinted world
-  // would compete with every pin drawn on top of it.
+  // Which number, if any, the shapes are painted by, and which shapes --
+  // countries or states -- that number is painted onto (Task 26 generalised
+  // this from countries-only). Null metric is the shipped default in either
+  // target: the fill is opt-in, because a permanently-tinted world would
+  // compete with every pin drawn on top of it. `choropleth.styleFor` is one
+  // function shared by both layers below; which of them actually calls it on
+  // any given feature is decided by `choroplethTarget` in each layer's own
+  // getFill closure, so switching target never paints two layers at once.
+  let choroplethTarget = "country";
   let choroplethMetricId = null;
   let choropleth = { metric: null, styleFor: () => null, covered: 0, total: 0 };
-  const countriesLayer = createCountriesLayer(map, (props) => choropleth.styleFor(props));
+  const countriesLayer = createCountriesLayer(
+    map, (props) => (choroplethTarget === "country" ? choropleth.styleFor(props) : null)
+  );
 
   // ---------- admin-2 district record ----------
   // A historical monthly archive over six countries, and it draws nothing of its
@@ -1870,6 +1895,12 @@ export function createMapController(container, initial, callbacks) {
   // Earth name 325 times out of 401. A district in neither layer's hands is
   // drawn exactly like sea.
   const districtStateByPcode = new Map();
+  // Published by reference -- a Map's own .set mutates in place, so this needs
+  // assigning only once, here, rather than every time assignDistrictStates adds
+  // to it. Read by popups.js's admin-2 Connectivity fold (Task 26): IODA has no
+  // district-level reading, so a district card shows its parent state's, found
+  // through this same geometric join rather than a second, name-based one.
+  raw.districtStateByPcode = districtStateByPcode;
   const districtStatesAssigned = new Set();  // ISO3s already worked out
   let selectedDistrictPcode = null;
   let hoveredDistrictPcode = null;
@@ -1885,12 +1916,18 @@ export function createMapController(container, initial, callbacks) {
   // layer with a checkbox. Everything here is per-session: geometry fetched
   // once per country and kept (administrative borders do not move while a tab
   // is open), selection dropped the moment its country stops being selected.
-  const subdivisionsLayer = createSubdivisionsLayer(map);
+  const subdivisionsLayer = createSubdivisionsLayer(
+    map, (props) => (choroplethTarget === "state" ? choropleth.styleFor(props) : null)
+  );
   // ISO3 -> FeatureCollection, or null while a request is in flight. A country
   // the source has no subdivisions for is stored as an empty collection rather
   // than left absent, so it is asked for once per session and not once a click.
   const subdivisionGeometry = new Map();
   let subdivisionIndex = [];        // every country loaded so far, flat
+  // Published by reference on every reassignment below (see the state-target
+  // choropleth and popups.js's regionOutageFor/buildAdminConnectivity, Task
+  // 26) -- read the same way raw.countryIndex is for the country layer.
+  raw.subdivisionIndex = subdivisionIndex;
   let selectedSubdivisionKey = null;
   let hoveredSubdivisionKey = null;
   let drawnSubdivisionCountries = "";  // signature of what is currently drawn
@@ -3223,7 +3260,7 @@ export function createMapController(container, initial, callbacks) {
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
     osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0, osmRailway: 0,
-    outagePoints: 0,
+    outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
     czib: 0, czibActive: 0, czibWithdrawn: 0,
@@ -3257,7 +3294,7 @@ export function createMapController(container, initial, callbacks) {
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
     osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0, osmRailway: 0,
-    outagePoints: 0,
+    outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
     czib: 0, czibActive: 0, czibWithdrawn: 0,
@@ -4993,6 +5030,10 @@ export function createMapController(container, initial, callbacks) {
   // adding it here would run the pass twice on every boundary refresh.
   const CHOROPLETH_FEEDS = new Set([
     "conflictStats", "humanitarian", "outages", "energyFlows", "foodTrade",
+    // The state-target metric's own feed (Task 26). `subdivisions` is absent
+    // for the same reason `countries` is: drawSubdivisions repaints itself
+    // after rebuilding the state shapes.
+    "outagesRegions",
   ]);
 
   /**
@@ -5200,6 +5241,7 @@ export function createMapController(container, initial, callbacks) {
         // Extended rather than rebuilt -- each country arrives on its own
         // request and the ones already indexed are still valid.
         subdivisionIndex = subdivisionIndex.concat(buildSubdivisionIndex(collection.features));
+        raw.subdivisionIndex = subdivisionIndex;
       }
     }));
     drawSubdivisions();
@@ -5220,6 +5262,13 @@ export function createMapController(container, initial, callbacks) {
       drawnSubdivisionCountries = signature;
       subdivisionsLayer.clearLayers();
       for (const iso3 of ready) subdivisionsLayer.addData(subdivisionGeometry.get(iso3));
+      // The badges are positioned against these shapes and the state fill
+      // paints them, so both are stale the instant the shapes themselves are
+      // rebuilt -- same reasoning renderCountries applies to outagePoints and
+      // the country choropleth after a boundary rebuild.
+      rebuildOutageRegionPoints();
+      renderMarkerLayer("outageRegionPoints");
+      refreshChoropleth();
     }
     const any = subdivisionsLayer.getLayers().length > 0;
     // Added and removed rather than left empty on the map: an empty GeoJSON
@@ -5530,12 +5579,27 @@ export function createMapController(container, initial, callbacks) {
     return { iso3, state, district };
   }
 
+  /** Every currently-*drawn* state's own GeoJSON feature, flattened across
+   *  however many countries are selected right now -- not the whole of
+   *  subdivisionGeometry, which keeps every country ever selected this
+   *  session (see drawSubdivisions) and would paint states no longer on
+   *  screen. */
+  function drawnSubdivisionFeatures() {
+    const ready = drawnSubdivisionCountries ? drawnSubdivisionCountries.split(",") : [];
+    return ready.flatMap((iso3) => subdivisionGeometry.get(iso3)?.features || []);
+  }
+
   function refreshChoropleth() {
-    const features = raw.countries?.features || [];
+    const features = choroplethTarget === "state" ? drawnSubdivisionFeatures() : (raw.countries?.features || []);
     choropleth = buildChoropleth(choroplethMetricId, features, raw);
-    if (features.length) countriesLayer.resetStyle();
+    // Both layers are reset, not only the active target's: switching target
+    // has to clear whichever one just lost the fill, and a resetStyle on an
+    // empty/off layer is a no-op rather than an error.
+    if (raw.countries?.features?.length) countriesLayer.resetStyle();
+    if (subdivisionsLayer.getLayers().length) subdivisionsLayer.resetStyle();
     callbacks.onChoroplethChange?.({
       metricId: choropleth.metric ? choropleth.metric.id : null,
+      target: choroplethTarget,
       covered: choropleth.covered,
       total: choropleth.total,
     });
@@ -6447,6 +6511,40 @@ export function createMapController(container, initial, callbacks) {
     raw.outagePoints = points;
   }
 
+  // IODA's sub-national scores (backend/sources/outages.py's region pass) ->
+  // one small badge per matched region, at that state's own representative
+  // point -- same technique as rebuildOutagePoints above, one admin level
+  // finer. Restricted to the states actually drawn right now: unlike the
+  // country boundaries, admin-1 geometry is fetched per selection (see
+  // drawSubdivisions), so a badge over a shape that is not on screen would
+  // have nothing to anchor to and no state highlight to sit beside.
+  //
+  // Matched purely on `region_code` against a state's own `code` -- no
+  // ISO2/ISO3 translation needed here, unlike popups.js's regionOutageFor,
+  // because an ISO 3166-2 code already names its country and two different
+  // countries can never collide on one. An unmatched record (region_code is
+  // null) never reaches this loop at all: see outages.py's own docstring on
+  // why it stays in the payload anyway, just not drawn.
+  function rebuildOutageRegionPoints() {
+    const drawnIso3 = drawnSubdivisionCountries ? new Set(drawnSubdivisionCountries.split(",")) : null;
+    const points = [];
+    if (drawnIso3 && drawnIso3.size) {
+      for (const [countryCode, regions] of Object.entries(raw.outagesRegions || {})) {
+        for (const [key, record] of Object.entries(regions || {})) {
+          if (record.matched === "unmatched") continue;
+          const entry = subdivisionIndex.find(
+            (e) => e.code === record.region_code && drawnIso3.has(e.country_code)
+          );
+          if (!entry) continue;
+          const point = representativePointOf(entry);
+          if (!point) continue;
+          points.push({ ...record, id: `${countryCode}:${key}`, name: entry.name, lat: point.lat, lon: point.lon });
+        }
+      }
+    }
+    raw.outageRegionPoints = points;
+  }
+
   function renderAll() {
     // One placement pass for the whole map, at the end. Without the
     // suspension each of the eight renderers below would settle on its own,
@@ -6492,6 +6590,10 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("darkVessels");
     renderMarkerLayer("cableLandings");
     renderMarkerLayer("outagePoints");
+    // Zoom-gated (unlike outagePoints above), so it needs the same pan/zoom
+    // re-render every bounds-filtered layer here gets -- see its own draw
+    // band in scene.js.
+    renderMarkerLayer("outageRegionPoints");
     renderMarkerLayer("launches");
     renderMarkerLayer("osmInfra");
     // Same reasoning as hazards above -- all six bounds-filter to the viewport
@@ -7019,6 +7121,13 @@ export function createMapController(container, initial, callbacks) {
       rebuildOutagePoints();
       renderMarkerLayer("outagePoints");
     }
+    // Same split, one admin level finer: {ISO2: {code: record}} read as-is by
+    // the state/district cards and the state-target choropleth, drawn from the
+    // derived badge array.
+    else if (key === "outagesRegions") {
+      rebuildOutageRegionPoints();
+      renderMarkerLayer("outageRegionPoints");
+    }
       else if (key === "jamming") renderJamming();
       else if (key === "laneDensity") renderLaneDensity();
       else if (key === "satellites") renderSatellites();
@@ -7114,11 +7223,14 @@ export function createMapController(container, initial, callbacks) {
       renderAdsbLayer();
     },
 
-    /** Which country-level number the shapes are painted by; null clears it. */
-    setChoroplethMetric(metricId) {
+    /** Which number the shapes are painted by (null clears it), and which
+     *  shapes -- "country" or "state" -- that number paints (Task 26). */
+    setChoroplethMetric(metricId, target = "country") {
+      const nextTarget = target === "state" ? "state" : "country";
       const next = metricId || null;
-      if (next === choroplethMetricId) return;
+      if (next === choroplethMetricId && nextTarget === choroplethTarget) return;
       choroplethMetricId = next;
+      choroplethTarget = nextTarget;
       refreshChoropleth();
     },
 

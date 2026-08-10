@@ -538,6 +538,45 @@ export function energyRecordFor(props, raw) {
   return record && !record.aggregate ? record : null;
 }
 
+// --- sub-national outages (backend/sources/outages.py's region pass) ------
+//
+// Admin-1 features (subdivisions.js's buildSubdivisionIndex) carry only their
+// ISO3 country_code (see backend/sources/admin1_boundaries.py) -- no ISO2 at
+// all -- while outages.py's region payload is keyed `{ISO2: {code: record}}`
+// to match the country pass's own key. So this join needs one more step than
+// outageFor's does: ISO3 -> ISO2, through the same country features (and the
+// same "-99" fallback table) energyRecordFor above already uses, for exactly
+// the same reason.
+function iso2ForIso3(iso3, raw) {
+  const code = (iso3 || "").toUpperCase();
+  if (!code) return null;
+  const features = raw.countries?.features || [];
+  const feature = features.find((f) => (f.properties?.iso_a3 || "").toUpperCase() === code);
+  const direct = feature?.properties?.iso_a2;
+  if (direct && direct !== "-99") return direct;
+  return ISO2_BY_ISO3[code] || null;
+}
+
+/**
+ * IODA's region record for this admin-1 shape, or null.
+ *
+ * Only an exact or fuzzy match ever resolves here. An unmatched region has no
+ * `region_code` to join on by construction (see outages.py's own docstring on
+ * why it is kept in the payload anyway) -- there is no admin-1 shape for it to
+ * be the record of, so a card built from a shape can never reach it. That is
+ * the correct outcome, not a gap: the unmatched record is still visible to
+ * anyone reading the raw `/api/outages/regions` feed, which is the audience it
+ * exists for.
+ */
+export function regionOutageFor(props, raw) {
+  if (!props?.country_code || !props?.code) return null;
+  const iso2 = iso2ForIso3(props.country_code, raw);
+  if (!iso2) return null;
+  const byCountry = (raw.outagesRegions || {})[iso2];
+  if (!byCountry) return null;
+  return Object.values(byCountry).find((r) => r.matched !== "unmatched" && r.region_code === props.code) || null;
+}
+
 // ISO3, the same key humanitarian uses -- so this one joins on props.iso_a3
 // directly, with no name matching and no "-99" problem at all.
 export function foodRecordFor(props, raw) {
@@ -2186,6 +2225,64 @@ const ADMIN2_COUNTRIES = [
 ];
 
 /**
+ * The record buildAdminConnectivity actually reads, resolved once so the
+ * state and district cards can share one fold body.
+ *
+ * A state card's `props` already carries `code` (its own ISO 3166-2) and
+ * `regionOutageFor` reads it directly. A district card's does not -- IODA has
+ * no district-level reading at all, so a district's connectivity is its
+ * parent state's, found through the exact same geometric join
+ * assignDistrictStates already computed for the drill-down
+ * (raw.districtStateByPcode, createMapController.js) rather than a second,
+ * fragile name match against `admin1` built here. See that function's own
+ * comment on why a geometric join was chosen over a name one in the first
+ * place: OCHA and Natural Earth spell the same province differently often
+ * enough to lose a fifth of them.
+ */
+function adminOutageRecord(props, raw) {
+  if (props?.code) return regionOutageFor(props, raw);
+  if (!props?.pcode) return null;
+  const stateKey = (raw.districtStateByPcode || new Map()).get(props.pcode);
+  if (stateKey == null) return null;
+  const state = (raw.subdivisionIndex || []).find((e) => e.key === stateKey);
+  return state ? regionOutageFor(state, raw) : null;
+}
+
+/**
+ * The Connectivity fold both admin-1 and admin-2 cards share (Task 26) --
+ * same shape and same wording discipline as the country card's own
+ * buildConnectivity above, just matched to this one boundary (or, for a
+ * district, its parent state -- see adminOutageRecord) instead of the whole
+ * country. Empty, like buildConnectivity, when there is nothing to show: a
+ * state IODA has not scored is not different enough from a state nobody has
+ * looked at to be worth a fold saying so, which is the same call the country
+ * card already makes for this exact feed.
+ */
+function buildAdminConnectivity(props, raw) {
+  const isDistrict = !props?.code && !!props?.pcode;
+  const outage = adminOutageRecord(props, raw);
+  if (!outage) return "";
+  const signals = Object.keys(outage.signals || {});
+  const windowText = formatOutageWindow(outage.window_start, outage.window_end);
+  const matchWord = outage.matched === "exact" ? "an exact" : "a fuzzy (name-normalised)";
+  const scopeLine = isDistrict
+    ? "IODA has no district-level reading &mdash; this is the state this district sits in."
+    : `Matched to this boundary by ${matchWord} match between IODA's region name and this admin-1 shape's own name.`;
+  return `
+    <div class="outage-block">
+      <div class="outage-head">Internet disruption detected</div>
+      <div>IODA composite score: ${fmtNumber(Math.round(outage.score))}${
+        outage.event_count ? ` &middot; ${esc(outage.event_count)} event(s)` : ""
+      }</div>
+      ${signals.length ? `<div class="meta">Seen in: ${signals.map((k) => esc(k.split(".")[0])).join(", ")}</div>` : ""}
+    </div>
+    <p class="meta">Over the ${esc(windowText || "reporting window")}, reported by IODA (Georgia Tech). ${scopeLine}
+      The score is a composite that is only meaningful <b>in comparison</b> &mdash; against this region's own
+      normal and against other regions in the same window. It is not a percentage of the region offline, and
+      it cannot distinguish a shutdown from a cable fault.</p>`;
+}
+
+/**
  * The honesty fold both cards share: which six countries have admin-2
  * boundaries at all, the Natural Earth 1:10m subdivision caveat verbatim, and
  * the "a missing row is not a reported zero" caveat verbatim -- see
@@ -2216,7 +2313,9 @@ function buildAdminCoverage() {
  * @param props   a buildSubdivisionIndex entry: key/code/name/postal/kind/
  *                country_code/country, plus the `{polygons, bbox}` pair
  *                buildShapeIndex attaches to every entry.
- * @param raw     the map controller's live data buckets.
+ * @param raw     the map controller's live data buckets, plus `outagesRegions`
+ *                ({ISO2: {code: record}}, backend/sources/outages.py) the
+ *                Connectivity fold reads through regionOutageFor.
  * @param bounds  the entry's own bbox, converted to {south,west,north,east}
  *                -- a cheap pre-filter ahead of the real polygon tests above,
  *                same role it plays for waterCardSections. Optional.
@@ -2228,6 +2327,7 @@ export function subdivisionCardSections(props, raw, bounds) {
     { id: "cities", title: "Cities", html: buildAdminCities(props, raw, bounds) },
     { id: "live", title: "Live picture", html: buildAdminLive(props, raw, bounds) },
     { id: "infrastructure", title: "Infrastructure", html: buildAdminInfrastructure(props, raw, bounds) },
+    { id: "connectivity", title: "Connectivity", html: buildAdminConnectivity(props, raw) },
     { id: "coverage", title: "Data coverage", html: buildAdminCoverage() },
   ];
   return { title: props.name || "State", sections: sections.filter((s) => s.html && s.html.trim()) };
@@ -2244,7 +2344,11 @@ export function subdivisionCardSections(props, raw, bounds) {
  *                pcode -> this month's record), `districtMonthLoading`
  *                (whether that month's counts are still in flight) and
  *                `districtSeries` ({ISO3: record[]}, this country's own slice
- *                of the archive across every month fetched so far).
+ *                of the archive across every month fetched so far). Also
+ *                `districtStateByPcode` (pcode -> parent state's subdivision
+ *                key) and `subdivisionIndex`, which the Connectivity fold
+ *                uses to find the state IODA actually scored -- see
+ *                adminOutageRecord.
  * @param bounds  the entry's own bbox, converted to {south,west,north,east}.
  *                Optional.
  * @param month   the archive month currently selected ("YYYY-MM"), or null
@@ -2263,6 +2367,7 @@ export function districtCardSections(props, raw, bounds, month) {
     { id: "cities", title: "Cities", html: buildAdminCities(props, raw, bounds) },
     { id: "live", title: "Live picture", html: buildAdminLive(props, raw, bounds) },
     { id: "infrastructure", title: "Infrastructure", html: buildAdminInfrastructure(props, raw, bounds) },
+    { id: "connectivity", title: "Connectivity", html: buildAdminConnectivity(props, raw) },
     { id: "coverage", title: "Data coverage", html: buildAdminCoverage() },
   ];
   return { title: props.name || props.pcode || "District", sections: sections.filter((s) => s.html && s.html.trim()) };

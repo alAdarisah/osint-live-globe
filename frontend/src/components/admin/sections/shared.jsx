@@ -25,6 +25,7 @@ export const STACK_LABEL = {
   vehicles: "Ships, aircraft & bulk satellites (one canvas)",
   cables: "Submarine cables & landings",
   outagePoints: "Internet disruption (IODA)",
+  outageRegionPoints: "Internet disruption, sub-national (IODA)",
   firms: "Fires / thermal anomalies (FIRMS)",
   jamming: "GPS/radio jamming (GPSJam)",
 };

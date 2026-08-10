@@ -137,6 +137,10 @@ const POLL_CONFIG = [
   // Country-level internet outage scores (IODA). Recomputed server-side every
   // 15 minutes over a trailing 24h window -- see backend/sources/outages.py.
   { key: "outages", url: "/api/outages", intervalMs: 5 * 60000 },
+  // The same poll's sub-national pass -- IODA's region-level scores, matched
+  // to admin-1 boundaries by name server-side (Task 26). Same cadence as
+  // "outages" above, since it comes off the same backend poller.
+  { key: "outagesRegions", url: "/api/outages/regions", intervalMs: 5 * 60000 },
   // Orbital launches. The backend refetches every 30 minutes and no faster --
   // Launch Library rate-limits anonymous callers to roughly 15 requests an hour
   // (see backend/sources/launches.py).
