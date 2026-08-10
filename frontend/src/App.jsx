@@ -62,7 +62,7 @@ export default function App() {
   // three separate consumers need it in three different forms -- the map wants
   // an icon theme, the fetch layer wants a record-override function, and the
   // admin panel wants the object itself.
-  const { settings, adminMode, toggleAdminMode, actions, sync, borderNotice } = useAppSettings();
+  const { settings, adminMode, readOnly, toggleAdminMode, actions, sync, borderNotice } = useAppSettings();
 
   // The control drawer is an operator's instrument, so it exists only in Admin
   // Mode now. A reader gets a map: what is drawn is decided by how far in they
@@ -563,6 +563,7 @@ export default function App() {
         onToggleTheme={toggleTheme}
         adminMode={adminMode}
         onToggleAdminMode={toggleAdminMode}
+        readOnly={readOnly}
       />
 
       {/* The reader's way in. Picking a theatre is not an operator's adjustment

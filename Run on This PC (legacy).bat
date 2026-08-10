@@ -50,7 +50,7 @@ if errorlevel 1 (
 )
 
 REM Pass --build (or any other compose flag) through to this script when the
-REM images need rebuilding after a code change:  run-stack.bat --build
+REM images need rebuilding after a code change:  "Run on This PC (legacy).bat" --build
 echo Bringing up the stack...
 wsl -d %DISTRO% -e sh -lc "cd '%REPO%' && docker compose up -d %*"
 if errorlevel 1 (

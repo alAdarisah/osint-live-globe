@@ -75,6 +75,12 @@ _SOURCE_MODULES = (
     # visible only on the unfiltered World view, by design. See
     # backend/sources/deflock.py.
     "deflock",
+    # Fintraffic / Digitraffic (Finland): live Baltic/Finnish AIS, live train
+    # positions plus the station gazetteer, and weather-camera locations. All
+    # keyless and unmetered, so backend-polled like the rest here. The AIS layer
+    # lives in its own kind ("ais_digitraffic"), never aisstream's "ais" -- see
+    # backend/sources/digitraffic_ais.py.
+    "digitraffic_ais", "digitraffic_rail", "digitraffic_weathercams",
     "hdx_conflict_stats", "hapi_conflict", "humanitarian", "food_trade",
     "official_feeds", "officials",
     # Weekly, and only for the countries hapi_conflict covers in volume: the
@@ -842,6 +848,44 @@ async def ships(request: Request, region: str | None = None):
     # backend/sources/ais.py) -- ETag/304 still saves the body bytes, `no-cache`
     # (see _cached_source_response) just means every poll actually asks.
     return _cached_source_response(request, "ais", region, regions.filter_points)
+
+
+@app.get("/api/ais-digitraffic")
+async def ais_digitraffic(request: Request, region: str | None = None):
+    # Live AIS from Fintraffic/Digitraffic, Finnish and Baltic waters (see
+    # backend/sources/digitraffic_ais.py). A separate layer from /api/ships
+    # (aisstream) because they are different networks: every record here carries
+    # source="digitraffic" and its own kind, so the two never share a (kind,
+    # mmsi) key and neither can silently overwrite the other.
+    return _cached_source_response(request, "ais_digitraffic", region, regions.filter_points)
+
+
+@app.get("/api/rail-live")
+async def rail_live(request: Request, region: str | None = None):
+    # Live Finnish train positions (see backend/sources/digitraffic_rail.py).
+    # Identity is the synthetic departureDate:trainNumber, since trainNumber is
+    # reused daily; all in Finland, so the region filter is offered only for
+    # consistency with the other point sources.
+    return _cached_source_response(request, "rail_live", region, regions.filter_points)
+
+
+@app.get("/api/rail-stations")
+async def rail_stations(request: Request):
+    # Finnish railway stations as static reference metadata (see
+    # backend/sources/digitraffic_rail.py) -- stored as a whole document, not
+    # per-row entity rows, and served whole for the client to place. No region
+    # filter (a station gazetteer is reference data, not a scoped point layer),
+    # and a longer cache since it refreshes only every few hours.
+    return _cached_source_response(request, "rail_stations", None, lambda data, _bounds: data, max_age=3600)
+
+
+@app.get("/api/weathercams")
+async def weathercams(request: Request, region: str | None = None):
+    # Finnish road weather-camera LOCATIONS only (see
+    # backend/sources/digitraffic_weathercams.py) -- pins plus the public preset
+    # image URLs, never the imagery itself. A DeFlock-shaped location layer; all
+    # in Finland, so this is really a World-view layer.
+    return _cached_source_response(request, "weathercams", region, regions.filter_points)
 
 
 def _gdelt_filter(items: list[dict], bounds) -> list[dict]:

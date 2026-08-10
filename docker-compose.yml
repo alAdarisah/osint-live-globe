@@ -26,7 +26,7 @@ services:
     ports:
       # Exposed so the migration script and psql/GUI clients can reach it
       # from the host. Drop this line if you don't need that.
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       # The backend depends on this rather than on the container merely
       # existing -- Postgres accepts connections only after initdb finishes,
@@ -59,7 +59,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       # Read-write, unlike the migrate service's copy below: Admin Mode saves
       # its configuration to data/admin_config.json (see backend/admin_config.py)
@@ -236,7 +236,7 @@ services:
       - prometheus-data:/prometheus
     ports:
       # For ad-hoc PromQL and checking Status -> Targets when a panel is empty.
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - postgres-exporter
     restart: unless-stopped
@@ -264,7 +264,7 @@ services:
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
     restart: unless-stopped
@@ -280,7 +280,18 @@ services:
         # than one that has not finished starting.
         condition: service_healthy
     ports:
-      - "8080:80"
+      # Both on localhost: nothing here is meant to be reachable from the
+      # internet directly. What differs is who gets to the two listeners.
+      #
+      # 8080 -> :80    the app with full access, including the admin panel.
+      #                Reached by `ssh -L 8080:localhost:8080`, so the gate is
+      #                possession of the server's SSH key.
+      # 8081 -> :8081  the read-only listener, which is what the Cloudflare
+      #                tunnel points at. Writes to /api/admin-config are refused
+      #                there -- see frontend/nginx.conf for why that endpoint in
+      #                particular.
+      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8081:8081"
     restart: unless-stopped
 
   # One-off SQLite -> Postgres import. Not part of the default stack (it sits

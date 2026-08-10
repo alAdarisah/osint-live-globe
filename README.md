@@ -204,10 +204,40 @@ Stop with `docker compose down`. Use `docker compose down -v` **only** if you
 mean to throw the collected history away — that is the one command that deletes
 the volume.
 
-**`run-stack.bat`** is the same thing for a Windows host whose Docker lives
+**`Run on This PC (legacy).bat`** is the same thing for a Windows host whose Docker lives
 inside WSL rather than Docker Desktop. It starts the daemon in the distro,
 brings the stack up, holds a WSL session open so `localhost` keeps forwarding,
-and opens the map. Pass compose flags straight through: `run-stack.bat --build`.
+and opens the map. Pass compose flags straight through: `"Run on This PC (legacy).bat" --build`.
+
+### Running it on a server instead
+
+Since 2026-08-10 the collectors live on a Hetzner host rather than a PC, because
+a PC that sleeps stops collecting and live positions cannot be backfilled. Five
+scripts cover the whole workflow from a Windows machine. They are named for what
+they do rather than for what they are, because the folder is the only
+documentation anyone reads at the moment they need it:
+
+| Script | Does |
+|---|---|
+| `Open Map - Admin.bat` | The map **with** Admin Mode, over an SSH tunnel, on `localhost:8090`. `--close` tears the tunnel down |
+| `Open Map - Public View.bat` | The map as a stranger sees it — the real Cloudflare link, over the internet, no admin controls. Run it before sharing |
+| `Show Public Link.bat` | Prints the current public link and checks it answers, without opening a browser |
+| `Deploy Code to Server.bat` | Packs this working tree, uploads it, rebuilds whatever image is behind its source, then verifies both listeners and the read-only boundary. `--ingest` to also rebuild the metered collector, `--force` to rebuild regardless |
+| `Download Backups.bat` | Copies the server's nightly database dumps down to this PC |
+
+The two `Open Map` scripts are the pair worth understanding, because they are the
+security boundary made visible: the admin one reaches the server's private
+listener through SSH, the public one goes over the internet to a listener that
+does not render Admin Mode and answers 403 to any attempt to write the
+configuration. Same app, same container, two doors.
+
+`deploy.sh` is the server half of `Deploy Code to Server.bat` — the staleness check and rebuild,
+in bash rather than batch. It replaces the old `update-link.bat`, which assumed
+the source tree and Docker were on the same machine.
+
+The split matters for one thing in particular: `Deploy Code to Server.bat` syncs the working
+tree rather than doing `git pull` on the server. A deploy that shipped only
+committed changes would silently omit whatever you were actually testing.
 
 A one-off SQLite → Postgres import exists for upgrading from an older layout:
 
@@ -829,6 +859,7 @@ Everything lives in `.env` at the project root. All values are optional.
 |---|---|
 | `FIRMS_MAP_KEY` | NASA FIRMS VIIRS |
 | `AISSTREAM_API_KEY` | Live AIS |
+| `MARINESIA_API_KEY` | Vessel positions, second supplier — free "Trial" key at [marinesia.com](https://marinesia.com), 5 req/min |
 | `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` | Authenticated OpenSky (60 s instead of 15 min) |
 | `ACLED_EMAIL` / `ACLED_PASSWORD` | myACLED login for the point-level feed |
 | `OWM_API_KEY` | OpenWeatherMap cloud/wind tiles |
@@ -867,6 +898,34 @@ live AIS stream would continuously evict a city index refetched once a day.
 | `NEWS_URL_DATE_GATE` | off | Stricter recency gate on news URLs |
 | `OFFICIALS_SNAP_REGION` | off | Snap region-level diplomacy geocodes |
 | `PORT` | 8000 | Set by PaaS hosts; its presence switches the bind to `0.0.0.0` and skips auto-opening a browser |
+
+### Two suppliers for ships
+
+The vessel layer had one source until aisstream stopped delivering for days in
+August 2026 — socket accepted, subscription accepted, zero frames — with no
+fallback behind it. `backend/sources/marinesia.py` is the second supplier.
+
+It is deliberately **not** merged into the `ais` layer. Marinesia advertise
+~100k AIS messages a day worldwide; the eight watched chokepoints alone were
+producing ~140k movement rows a day through aisstream. Merging feeds of such
+different density would make "the ships layer" mean something different
+depending on which supplier was up — including to `dark_vessels.py`, which reads
+the AIS movement log to decide whether a hull went quiet. So it publishes its own
+kind, and every record carries `source` and `attribution`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MARINESIA_API_KEY` | unset | Free "Trial" key. Unset leaves the layer empty and says so |
+| `MARINESIA_BBOXES` | `WATCHED_WATERS` | One request per box, so the box list *is* the request count |
+| `MARINESIA_POLL_INTERVAL` | 300 | A sweep is ~100s of paced requests; the 5/min budget binds, not data freshness |
+| `MARINESIA_STALE_AFTER` | 3600 | Wider than AIS's 1800 — polled every 5 min, so hulls skip sweeps |
+
+One advantage over aisstream: identity and position arrive together — name, IMO,
+flag, type and hull dimensions on the same record as the fix. aisstream splits
+those into `ShipStaticData` messages that arrive minutes apart and sometimes
+never, which is the entire reason `ais.py` maintains a static cache. An IMO on
+every record also makes the OFAC cross-reference a hull match rather than an
+MMSI guess.
 
 ### Egress proxies
 
@@ -980,6 +1039,28 @@ depends on them, so stopping all three costs the graphs and nothing else:
 ```bash
 docker compose stop prometheus postgres-exporter grafana
 ```
+
+### Watching it run from the terminal: `cc`
+
+Grafana answers *is the database coping, and what did it do overnight?* — from a
+browser, which on a headless server means a tunnel. `ops/cc` answers the
+question you actually have while sitting on the box: *is it all up, and is it
+doing anything?* Container state, what each source is producing, the half-dozen
+database numbers worth a glance, and the live log, on one screen.
+
+It exists because the alternative was four SSH sessions, and the failures worth
+catching are the ones where two of them disagree — a container that is up while
+the source it feeds has stopped producing.
+
+```bash
+./ops/cc/install.sh /opt/osint
+cc
+```
+
+It reads `docker compose ps`, `/api/health` and Prometheus, and shells out to
+`deploy.sh` for rebuilds rather than repeating its staleness rules — so there
+stays one definition of which image is behind its source. `--read-only` disables
+every key that changes something. Full key list in `ops/cc/README.md`.
 
 ### What the Postgres dashboard shows
 

@@ -14,6 +14,18 @@ ACLED_EMAIL = os.getenv("ACLED_EMAIL", "").strip()
 ACLED_PASSWORD = os.getenv("ACLED_PASSWORD", "").strip()
 OWM_API_KEY = os.getenv("OWM_API_KEY", "").strip()
 GFW_API_TOKEN = os.getenv("GFW_API_TOKEN", "").strip()
+# Marinesia (see backend/sources/marinesia.py) -- the ships layer's second
+# supplier, after aisstream went dark for days in August 2026 and there was
+# nothing to fall back to. Their free "Trial" key is self-service and allows
+# 5 requests a minute, which the sweep below paces itself under.
+MARINESIA_API_KEY = os.getenv("MARINESIA_API_KEY", "").strip()
+
+# Fintraffic / Digitraffic (Finland) collectors -- see backend/sources/
+# digitraffic_*.py. The API is keyless but asks every caller to name itself in a
+# `Digitraffic-User` request header, for their own traffic analytics: a courtesy
+# identifier, not a secret and not gated on, so it defaults to the project name
+# rather than requiring an env var. Nothing here stays empty without it.
+DIGITRAFFIC_USER = os.getenv("DIGITRAFFIC_USER", "osint-live-globe").strip() or "osint-live-globe"
 
 # Poll intervals, in seconds. Tuned to each source's data freshness and rate limits.
 FIRMS_POLL_INTERVAL = int(os.getenv("FIRMS_POLL_INTERVAL", "900"))       # FIRMS updates a few times/day
@@ -48,6 +60,23 @@ GFW_POLL_INTERVAL = int(os.getenv("GFW_POLL_INTERVAL", str(6 * 3600)))
 # sweep is ~20 paged requests for a 30-day window, which is small enough that
 # the interval is about courtesy rather than quota.
 GFW_GAPS_POLL_INTERVAL = int(os.getenv("GFW_GAPS_POLL_INTERVAL", str(6 * 3600)))
+
+# Fintraffic / Digitraffic poll cadences (see backend/sources/digitraffic_*.py).
+# Every one is far inside their shared 60-requests/minute-per-IP limit.
+#   AIS: Digitraffic's own recommendedFetchInterval is PT5M and the locations
+#     feed carries Cache-Control max-age 60, so five minutes reads it at the rate
+#     the product actually refreshes.
+DIGITRAFFIC_AIS_POLL_INTERVAL = int(os.getenv("DIGITRAFFIC_AIS_POLL_INTERVAL", "300"))
+#   Rail live positions: there is no update-times route to pace against (that
+#     path 404s), so 60s is a deliberate judgment call -- live-position cadence,
+#     matching the other live layers and comfortably inside the throttle.
+DIGITRAFFIC_RAIL_POLL_INTERVAL = int(os.getenv("DIGITRAFFIC_RAIL_POLL_INTERVAL", "60"))
+#   Rail stations: static reference metadata, refreshed on a slow clock inside
+#     the live-position loop (the way hazards.py refetches its weekly report).
+DIGITRAFFIC_RAIL_STATIONS_INTERVAL = int(os.getenv("DIGITRAFFIC_RAIL_STATIONS_INTERVAL", str(6 * 3600)))
+#   Weather-camera locations: the station metadata updates hourly (PT1H), so an
+#     hourly poll re-reads it exactly as often as it moves.
+DIGITRAFFIC_WEATHERCAM_POLL_INTERVAL = int(os.getenv("DIGITRAFFIC_WEATHERCAM_POLL_INTERVAL", "3600"))
 
 # event_fusion.py doesn't fetch anything itself -- it re-derives from
 # acled.py's (ACLED + UCDP rows) and gdelt.py's already-fetched state.data,
@@ -84,6 +113,10 @@ ADSB_STALE_AFTER = int(os.getenv("ADSB_STALE_AFTER", "1800"))
 # back to ENTITY_STALE_AFTER_DEFAULT.
 ENTITY_STALE_AFTER = {
     "ais": AIS_STALE_AFTER,
+    # Polled every 5 minutes rather than streamed, so a hull legitimately goes
+    # several sweeps without a fresh fix. Wider than "ais" for that reason, and
+    # still short enough that nothing on the layer is an hour old.
+    "marinesia": int(os.getenv("MARINESIA_STALE_AFTER", "3600")),
     "adsb": ADSB_STALE_AFTER,
     "satellites": 3600,
     "gdelt": 86400,
@@ -179,6 +212,21 @@ ENTITY_STALE_AFTER = {
     # that do not move, so the window must clear the 24h refresh by a wide margin
     # or a single missed fetch evicts the layer.
     "deflock_alpr": 30 * 86400,
+    # --- Fintraffic / Digitraffic (see backend/sources/digitraffic_*.py) ------
+    # Live AIS on the Digitraffic network (Finnish/Baltic waters), kept in its
+    # own kind so it never shares a (kind, mmsi) key with aisstream's "ais". 30
+    # minutes matches aisstream's window: the 5-minute poll rewrites every hull
+    # it sees, so this only governs a hull that has dropped off the feed.
+    "ais_digitraffic": 1800,
+    # Live train positions. 10 minutes: at a 60s cadence a train silent for ten
+    # minutes has ended its run, and its synthetic departureDate:trainNumber id
+    # cannot recur (the number is reused only the next day, under a new date).
+    "rail_live": 600,
+    # Weather-camera locations: reference-grade metadata refreshed hourly, so a
+    # day-long window clears the refresh by a wide margin the way the other
+    # location layers (cities, airports, deflock) do. Equal to the default, set
+    # explicitly so the intent is legible rather than inherited.
+    "weathercam": 86400,
 }
 ENTITY_STALE_AFTER_DEFAULT = int(os.getenv("ENTITY_STALE_AFTER_DEFAULT", "86400"))
 
@@ -372,6 +420,16 @@ WATCHED_WATERS = _parse_bboxes(os.getenv("WATCHED_WATERS", _DEFAULT_WATCHED_WATE
 # dead feed can be asked. Watch /api/health's item_count on the first day back.
 _DEFAULT_AIS_BBOXES = "-90,-180,90,180"
 AIS_BBOXES = _parse_bboxes(os.getenv("AIS_BBOXES", _DEFAULT_AIS_BBOXES))
+
+# Which boxes the Marinesia sweep asks for. The watched theatres rather than
+# AIS_BBOXES' whole planet, and this one is not a free choice: that API is a
+# request per box against a 5-per-minute budget, so the box list is the request
+# count. Eight is a sweep of roughly 100 seconds; the planet as one box is
+# untested and their response is undocumented in size.
+MARINESIA_BBOXES = _parse_bboxes(os.getenv("MARINESIA_BBOXES", "")) or WATCHED_WATERS
+# Minutes, not seconds: a sweep already takes ~100s of paced requests, and the
+# free tier's budget is the binding constraint rather than the data's freshness.
+MARINESIA_POLL_INTERVAL = int(os.getenv("MARINESIA_POLL_INTERVAL", "300"))
 
 # airplanes.live has no world/bbox endpoint, only point+radius (max 250nm) --
 # these regional centers stand in for global coverage. As "lat,lon,radius_nm"

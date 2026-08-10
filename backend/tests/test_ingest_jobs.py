@@ -33,6 +33,12 @@ def test_scheduled_jobs_are_exactly_the_metered_pollers():
         # returns against a paged 30-day event window -- that fail
         # independently. One state per Job is what lets /api/health say which.
         "gfw_gaps",
+        # Keyed, and metered tightly: the free tier allows 5 requests a minute
+        # and a sweep is one request per watched box, so it is paced rather than
+        # concurrent. Scheduled rather than streamed -- it is REST, which is
+        # half the reason for choosing it after ais.py's websocket spent three
+        # days unable to tell an outage from a rate limit.
+        "marinesia",
     }
 
 
