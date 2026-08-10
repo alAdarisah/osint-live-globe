@@ -503,6 +503,15 @@ export default function App() {
     [mapApi.flyTo]
   );
 
+  // Task 34's place search picks its own zoom per result (a town versus an
+  // administrative division -- see PlaceSearch.jsx's pick()), unlike
+  // onLocateNewsItem above which always flies to the same fixed zoom, so
+  // this passes it through rather than hard-coding a second value here.
+  const onLocatePlace = useCallback(
+    (lat, lon, zoom) => mapApi.flyTo(lat, lon, zoom),
+    [mapApi.flyTo]
+  );
+
   // Clicking a country narrows the two read-out panels to that country. The
   // map keeps drawing everything -- this scopes what is *said*, not what is
   // fetched or painted, so dropping the selection restores the world view with
@@ -604,6 +613,7 @@ export default function App() {
         onToggleTheme={toggleTheme}
         adminMode={adminMode}
         onToggleAdminMode={toggleAdminMode}
+        onLocatePlace={onLocatePlace}
       />
 
       {/* The reader's way in. Picking a theatre is not an operator's adjustment

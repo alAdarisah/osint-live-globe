@@ -28,7 +28,7 @@ from backend.refine import flight_legs, lane_density, naval_presence, port_call_
 # so an unaliased import here would be shadowed by it for every reference
 # below the route, the same reason admin1_boundaries/water_bodies's own
 # route handlers are named *_endpoint rather than reusing their module's name.
-from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, sat_passes, water_bodies
+from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, gazetteer, sat_passes, water_bodies
 from backend.sources import satellites as satellites_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1650,6 +1650,89 @@ async def airports_endpoint(request: Request, region: str | None = None, bbox: s
     # every poll. Only the served slice is here -- the wider index ADS-B popups
     # query never leaves the backend (see backend/sources/airports.py).
     return _cached_source_response(request, "airports", region, regions.filter_points, max_age=3600, bbox=bbox)
+
+
+# Task 34: place search. gazetteer_places/gazetteer_alternates (see
+# backend/sources/gazetteer.py) are a Postgres-backed kind, but unlike every
+# _cached_source_response source above there is no warmed registry.SourceState
+# holding the full ~270k-place list for a filter_fn to run over -- the
+# "gazetteer" registry entry gazetteer.py registers is deliberately just a
+# summary count (`[{"places": N}]`, read by /api/health), not the list itself,
+# because publishing 270k rows behind that would turn a status check into a
+# several-megabyte response. So this is the same mismatch /api/water (Task 5)
+# hit, but not the same fix: water_bodies.py holds nothing in memory between
+# requests, so /api/water reads storage.reference() fresh each time. Gazetteer
+# is the opposite case -- it already keeps the *entire* index resident (see
+# the module's own docstring: "Lookups are served entirely from memory ...
+# Postgres is the cache that avoids [rebuilding it], never the thing a lookup
+# goes through"), rebuilt from that Postgres table on every refresh and warmed
+# from it at boot. Querying Postgres again here would mean parsing the same
+# ~270k JSONB rows a second time, in the request path, for data already
+# sitting folded and indexed in this process's memory.
+#
+# So /api/places issues no Postgres query and needs no new storage.py index:
+# Gazetteer.search() (added for this task, see gazetteer.py) runs one pass
+# over the live index's own name map, which already carries every alternate
+# name folded the same diacritic-insensitive way gazetteer.normalize() folds
+# the query below -- one in-memory scan covers both "on name" and "on the
+# stored alternates" the brief asks for. See search()'s docstring for the
+# measured cost of that scan (synthetic 270k-place index: 10-70ms typical,
+# up to ~200ms for a very common two-character prefix).
+#
+# MIN_PLACE_QUERY_LENGTH exists because of that last number: a one- or
+# two-character query starts to match a meaningful fraction of the whole
+# gazetteer, which is real CPU spent computing a ranking for a result list
+# capped at PLACE_SEARCH_LIMIT anyway -- nobody scans past 20 hits typed "s".
+MIN_PLACE_QUERY_LENGTH = 2
+PLACE_SEARCH_LIMIT = 20
+
+
+@app.get("/api/places")
+async def places_endpoint(q: str = "", limit: int = PLACE_SEARCH_LIMIT):
+    """GeoNames cities500 place search: type a few characters, fly to a town.
+
+    Every result is GeoNames' record, not a placement judgement -- 'reported'
+    evidence in this project's four-word provenance vocabulary (see
+    global-constraints.md): GeoNames states this place is here, at this
+    population, in this country and admin-1. country_code, admin1, population
+    and feature_class all come back with every result specifically so two
+    identically-named places (there are two Tripolis, three dozen
+    Springfields) can be told apart in the list, not just picked between by
+    whichever the ranking happens to prefer.
+
+    `limit` is clamped to PLACE_SEARCH_LIMIT regardless of what is asked for,
+    and `total_matches` says how many places matched before truncation -- so a
+    capped list reads as "20 of 214 matches", never silently as if those were
+    the only 20 places on Earth called that.
+    """
+    query = q.strip()
+    if len(gazetteer.normalize(query)) < MIN_PLACE_QUERY_LENGTH:
+        # Not an error: an empty or still-being-typed query is the normal
+        # resting state of a search box, exactly like gazetteer.resolve("")
+        # returning no candidates rather than raising.
+        return JSONResponse({"query": query, "limit": PLACE_SEARCH_LIMIT, "total_matches": 0, "results": []})
+
+    capped_limit = max(1, min(limit, PLACE_SEARCH_LIMIT))
+    hits, total_matches = gazetteer.search(query, limit=capped_limit)
+    results = [
+        {
+            "geonameid": hit.place.geonameid,
+            "name": hit.place.name,
+            "matched_name": hit.matched_name,
+            "is_alternate": hit.is_alternate,
+            "country_code": hit.place.country_code,
+            "admin1": hit.place.admin1,
+            "population": hit.place.population,
+            "feature_class": hit.place.feature_class,
+            "feature_code": hit.place.feature_code,
+            "lat": hit.place.lat,
+            "lon": hit.place.lon,
+        }
+        for hit in hits
+    ]
+    return JSONResponse({
+        "query": query, "limit": capped_limit, "total_matches": total_matches, "results": results,
+    })
 
 
 # The ranking is computed by the refine process now, so this is a read of one

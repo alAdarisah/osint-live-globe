@@ -504,6 +504,84 @@ html, body {
   pointer-events: auto;
 }
 
+/* Task 34: place search. A flex item of its own between the title and the
+   admin/theme controls (see TitleBar.jsx) -- it needs pointer-events back on
+   since #titleBar itself is none, same reason .titleBar-right needs it. */
+.place-search {
+  position: relative;
+  flex: 1 1 auto;
+  max-width: 320px;
+  min-width: 120px;
+  pointer-events: auto;
+}
+
+.place-search-input {
+  width: 100%;
+  padding: 5px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-bright);
+  font-family: inherit;
+  font-size: 11.5px;
+}
+.place-search-input::placeholder { color: var(--text-dim); }
+.place-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.place-search-results {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  margin: 0;
+  list-style: none;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 1001;
+  animation: popup-in 0.16s ease;
+}
+
+.place-search-result {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.place-search-result:hover,
+.place-search-result.highlighted { background: rgba(var(--accent-rgb), 0.12); }
+
+.place-search-title {
+  font-size: 11.5px;
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.place-search-subtitle {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: capitalize;
+}
+
+.place-search-status {
+  padding: 6px 8px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
 #clock {
   font-size: 12px;
   color: var(--text-dim);
@@ -2827,6 +2905,9 @@ html, body {
   #titleBar .title { font-size: 11px; letter-spacing: 1.5px; }
   #clock { font-size: 9.5px; }
   #themeToggle { width: 30px; height: 30px; }
+  /* The title's letters and the admin/theme controls need to keep their
+     room on a narrow screen -- the search box is what gives, not them. */
+  .place-search { min-width: 60px; max-width: 120px; }
 
   #regionBar {
     top: 46px;

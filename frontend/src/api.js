@@ -118,3 +118,16 @@ export function portCallsUrl(portId) {
 export function aircraftDetailUrl(icao24) {
   return `/api/aircraft/${encodeURIComponent(icao24)}`;
 }
+
+/**
+ * Task 34's place search: /api/places?q=&limit=. A distinct URL per
+ * keystroke (like vesselDetailUrl/aircraftDetailUrl above, not a filtered
+ * source), so fetchJson's ETag cache never has anything to reuse between
+ * queries -- there is nothing worth sharing an ETag for here, since the
+ * whole point is a fresh answer for whatever the reader just typed.
+ */
+export function placesSearchUrl(query, limit) {
+  const params = new URLSearchParams({ q: query });
+  if (limit) params.set("limit", String(limit));
+  return `/api/places?${params.toString()}`;
+}

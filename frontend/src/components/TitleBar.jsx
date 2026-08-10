@@ -1,11 +1,16 @@
 import { useClock } from "../hooks/useClock";
+import PlaceSearch from "./PlaceSearch";
 
-export default function TitleBar({ theme, onToggleTheme, adminMode, onToggleAdminMode }) {
+export default function TitleBar({ theme, onToggleTheme, adminMode, onToggleAdminMode, onLocatePlace }) {
   const clock = useClock();
 
   return (
     <header id="titleBar">
       <span className="title">OSINT LIVE GLOBE</span>
+      {/* Task 34: type a few characters of a place name, fly to it. Its own
+          flex item (not folded into titleBar-right) so it can grow/shrink
+          independently of the fixed-width admin/theme controls next to it. */}
+      <PlaceSearch onLocate={onLocatePlace} />
       <span className="titleBar-right">
         <span id="clock">{clock}</span>
         {/* The one way in and out of Admin Mode. Deliberately a plain labelled
