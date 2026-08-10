@@ -1626,13 +1626,13 @@ async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: 
 #
 # The combined FROM unnest($a, $b, $c) AS t(...) form, matching
 # _UPSERT_LATEST/_INSERT_HISTORY/_UPSERT_LANE_CELLS above rather than three
-# independent unnest() calls in the SELECT list: the latter is legacy
-# multi-SRF "lock-step" behaviour that silently pads a shorter array with
-# NULLs instead of erroring on a length mismatch, where the combined form
-# raises. Harmless today -- idx/ids/befores are all built from the same
-# Python list in speed_stats_before below -- but there is no reason to leave
-# the weaker form sitting next to three call sites that already use the
-# stronger one.
+# independent unnest() calls in the SELECT list. Both forms actually pad a
+# shorter array with NULLs on a length mismatch rather than raising -- that
+# is not the reason to prefer this one. The reason is consistency: every
+# other batched query in this file already writes it this way, and there is
+# no cause for the next one written to have two idioms to choose between.
+# Harmless either way today, since idx/ids/befores are all built from the
+# same Python list in speed_stats_before below.
 #
 # The speed cast excludes AIS's own "not available" sentinel (102.3 kn, the
 # raw SOG field's all-ones value) so a decoder that ever forwards it raw does

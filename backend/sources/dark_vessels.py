@@ -130,23 +130,43 @@ rather than reverse-engineer the code:
      never once per band.** All three bands' vertices at a given angle are
      collinear with the dead-reckoned centre (same direction, different
      radius, because all three are the same base ellipse scaled by the
-     band's own quantile) -- so searching from the *outermost* point inward
-     and capping every band's own raw radius at whatever water boundary that
-     one search finds (`min(band's own radius, the shared boundary)`) can
-     only ever preserve the three bands' original order, never invert it.
-     Searching once per band instead -- the first version of this code did
-     -- samples the *same* physical ray at three different step sizes (each
-     band's search divides its own, differently-sized segment into
-     LAND_MASK_STEPS equal pieces), which can and did produce a narrower band
-     landing on a *different* water crossing than a wider one at the same
-     bearing, putting the 50% ring outside the 80% ring on an ordinary strait
-     shape. `masked_by_land` is set when that one shared search found land at
-     all, which is also exactly when any band's vertex could have been
-     pulled in. If neither water document has landed yet (a fresh
-     deployment, before backend/sources/water_bodies.py's first sweep),
-     masking is skipped rather than run against an empty mask -- an empty
-     WaterMask would otherwise read as "the whole world is land" and pull
-     every vertex down to a single point.
+     band's own quantile) -- so walking that one shared ray and capping every
+     band's own raw radius at whatever water boundary the walk finds
+     (`min(band's own radius, the shared boundary)`) can only ever preserve
+     the three bands' original order, never invert it. Searching once per
+     band instead -- the first version of this code did -- samples the
+     *same* physical ray at three different step sizes (each band's search
+     divides its own, differently-sized segment into LAND_MASK_STEPS equal
+     pieces), which can and did produce a narrower band landing on a
+     *different* water crossing than a wider one at the same bearing,
+     putting the 50% ring outside the 80% ring on an ordinary strait shape.
+
+     **The walk samples every step from the centre outward, not only the
+     endpoint.** Testing only the 95% band's own vertex -- an earlier version
+     of this fix did exactly that -- missed an island sitting *between* the
+     centre and that vertex on the same bearing: open water on both sides of
+     it passes an endpoint-only check, and the search that would have found
+     it never runs. `_ray_water_bound` now walks from the centre outward in
+     LAND_MASK_STEPS (12) equal steps and stops at the first non-water
+     sample, so land nearer than the outer vertex on the same ray is caught
+     regardless of what the vertex itself sits on. `masked_by_land` is set
+     whenever that walk stopped short of the full ray, which is also exactly
+     when any band's vertex could have been pulled in. If neither water
+     document has landed yet (a fresh deployment, before
+     backend/sources/water_bodies.py's first sweep), masking is skipped
+     rather than run against an empty mask -- an empty WaterMask would
+     otherwise read as "the whole world is land" and pull every vertex down
+     to a single point.
+
+     **What this still does not claim.** LAND_MASK_STEPS samples per bearing
+     means a coastline feature narrower than roughly `outer_km / 12` along
+     one ray can fall between two samples and go undetected -- the same
+     coarse-sampling limitation that already applies *between* the
+     CONTOUR_VERTICES (48) bearings themselves, now also true *within* one.
+     This is a per-bearing walk toward one interior point, not a true
+     shoreline search or a polygon clip of the ellipse against the water
+     mask; a coastline with detail finer than either sampling grid can still
+     produce a locally jagged edge no per-vertex correction catches.
   5. **Destination prior.** When the hull's own declared destination -- as
      broadcast before it went dark, never whatever it has since retyped --
      resolves to an indexed port (see `destination_index`) by an exact,
@@ -313,11 +333,16 @@ CONTOUR_BANDS = ((50, 0.6745), (80, 1.2816), (95, 1.9600))
 # draws it at.
 CONTOUR_VERTICES = 48
 
-# How far back toward the ellipse's own centre a land search walks, in equal
-# steps, before giving up and treating the centre itself as the boundary --
-# see _ray_water_bound. Run once per bearing against the 95% band's own
-# vertex, not once per band; see the module docstring's "Land masking" point
-# for why searching per band instead breaks contour nesting.
+# How many evenly-spaced samples a land search walks, from the ellipse's own
+# centre out toward the 95% band's own vertex, before treating a bearing with
+# no land found as clear -- see _ray_water_bound, which walks every one of
+# these rather than testing only the endpoint (an earlier version of this
+# fix did, and missed an island sitting between the centre and the vertex).
+# Run once per bearing, shared by all three bands, not once per band; see the
+# module docstring's "Land masking" point for why searching per band instead
+# breaks contour nesting, and for the coarse-sampling limitation this number
+# still leaves -- a feature wider than a bearing's own current spread but
+# narrower than outer_km / LAND_MASK_STEPS can sit between two samples.
 LAND_MASK_STEPS = 12
 
 # Blend weight for the destination-bearing nudge described in the module
@@ -767,7 +792,7 @@ def _ray_water_bound(
     still count as water, in km from `center` (never more than `outer_km`).
 
     Run **once per bearing**, against the outermost (95%) band's own raw
-    vertex -- never once per band. That is the whole fix for contour nesting
+    vertex -- never once per band. That is the fix for contour nesting
     surviving land masking (see the module docstring's "Land masking" point,
     and the review that caught the earlier per-band version breaking it on an
     ordinary strait): every band's own vertex at this bearing is collinear
@@ -778,30 +803,55 @@ def _ray_water_bound(
     is what makes that true; three independent searches at three different
     step sizes along the same physical ray is what did not.
 
-    If `outer` is already water, nothing needs pulling in and the answer is
-    `outer_km` itself. Otherwise the search walks toward `center` in
-    LAND_MASK_STEPS equal steps and stops at the first water point found -- a
-    cheap correction toward one interior point, not a true nearest-shore
-    search, which would need a shoreline index this module has no other
-    reason to build. If nothing along the line is water either (the centre
-    itself sits on land, or the whole segment does), the bound collapses to
-    0 -- every band's vertex at this bearing lands on the centre itself,
-    which is safe only because dr_lat/dr_lon is never itself masked (see the
-    module docstring's point 1), so "the centre" is never a guess this
-    function invented.
+    **Walks outward from `center`, testing every sample, not just `outer`.**
+    A first version of this function tested only `outer` and, if that alone
+    was water, returned immediately -- cheap, but wrong: an island sitting
+    between `center` and `outer` on the same bearing (open water on both
+    sides of it) went undetected, because nothing closer in was ever
+    checked. `masked_by_land` could then read False for a record whose
+    inner band's own vertex sat squarely on that island. Walking from the
+    centre outward and stopping at the *first* non-water sample -- the
+    bound is the last sample that was still water -- catches that: land
+    nearer than `outer` on the same ray is exactly what this now looks for
+    on every bearing, not only the ones where the 95% band's own vertex
+    itself happens to land on it.
+
+    Resolution and cost, stated rather than left implicit: LAND_MASK_STEPS
+    (12) samples per bearing, evenly spaced from the centre to `outer`, so a
+    feature narrower than `outer_km / 12` along this one ray can still fall
+    between two samples and go undetected -- the same coarse-sampling
+    admission the module docstring's "what is not claimed" paragraph already
+    makes for coastlines varying *between* bearings, now also true *within*
+    one. Unlike the single-sample version this replaced, the common case (no
+    land anywhere near this bearing) now costs the full 12 `covers()` calls
+    rather than 1, because nothing shy of reaching `outer` can prove the
+    whole ray is clear. Bounded regardless: MAX_GAP_RECORDS (120) x
+    CONTOUR_VERTICES (48) x LAND_MASK_STEPS (12) is 69,120 `covers()` calls
+    per refine pass at the absolute worst, each one a bbox pre-check over at
+    most a couple of thousand water features before the rare expensive ring
+    walk (see WaterMask.covers) -- seconds, not minutes, against a
+    REFRESH_INTERVAL of 15 minutes, so the accuracy this buys is not fighting
+    the loop for time.
+
+    If nothing along the line is water at all (the centre itself sits on
+    land, or the whole segment does), the bound collapses to 0 -- every
+    band's vertex at this bearing lands on the centre itself, which is safe
+    only because dr_lat/dr_lon is never itself masked (see the module
+    docstring's point 1), so "the centre" is never a guess this function
+    invented.
 
     Returns (bound_km, moved) -- `moved` is what feeds a record's
     `masked_by_land` flag.
     """
-    if water_mask.covers(outer_lat, outer_lon):
-        return outer_km, False
+    if outer_km <= 0:
+        return 0.0, False
     for step in range(1, LAND_MASK_STEPS + 1):
         frac = step / LAND_MASK_STEPS
-        test_lat = outer_lat + (center_lat - outer_lat) * frac
-        test_lon = outer_lon + (center_lon - outer_lon) * frac
-        if water_mask.covers(test_lat, test_lon):
-            return outer_km * (1.0 - frac), True
-    return 0.0, True
+        test_lat = center_lat + (outer_lat - center_lat) * frac
+        test_lon = center_lon + (outer_lon - center_lon) * frac
+        if not water_mask.covers(test_lat, test_lon):
+            return outer_km * (step - 1) / LAND_MASK_STEPS, True
+    return outer_km, False
 
 
 def _ellipse_offset(along_km: float, cross_km: float, theta: float, bearing_rad: float) -> tuple[float, float]:

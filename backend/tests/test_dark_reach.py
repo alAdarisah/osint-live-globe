@@ -216,13 +216,13 @@ def _sea_box(south, west, north, east):
     }
 
 
-def test_an_already_water_outer_point_needs_no_pull_back():
+def test_a_whole_ray_of_water_needs_no_pull_back():
     mask = dv.WaterMask(_sea_box(20.0, 50.0, 30.0, 60.0))
     bound_km, moved = dv._ray_water_bound(26.0, 56.0, 26.0, 56.0, 10.0, mask)
     assert (bound_km, moved) == (10.0, False)
 
 
-def test_a_land_outer_point_is_pulled_back_toward_the_centre():
+def test_land_at_the_outer_point_is_pulled_back_toward_the_centre():
     """_ray_water_bound is what replaced _pull_to_water -- run once per
     bearing against the outermost band's own vertex rather than once per
     band, which is the fix for the nesting failure below."""
@@ -231,11 +231,53 @@ def test_a_land_outer_point_is_pulled_back_toward_the_centre():
     bound_km, moved = dv._ray_water_bound(26.0, 56.0, 26.0, 70.0, 1400.0, mask)
     assert moved is True
     assert 0.0 < bound_km < 1400.0
-    # The bound is honest: walking that fraction of the way back from the
-    # outer point toward the centre really does land in water.
-    frac = 1.0 - bound_km / 1400.0
-    test_lon = 70.0 + (56.0 - 70.0) * frac
+    # The bound is honest: walking that fraction of the way *from* the
+    # centre really does stop in water, not already on land.
+    frac_from_centre = bound_km / 1400.0
+    test_lon = 56.0 + (70.0 - 56.0) * frac_from_centre
     assert mask.covers(26.0, test_lon)
+
+
+def test_land_partway_along_the_ray_is_caught_even_though_the_outer_point_is_water():
+    """The regression this module's own review caught: a first version of
+    _ray_water_bound tested only the outer (95%-band) vertex and returned
+    immediately once that alone was water, so an island sitting between the
+    centre and that vertex -- open water on both sides of it -- went
+    undetected. Walking every sample from the centre outward, not just the
+    endpoint, is what this test pins down: land at a third of the way out
+    must still shorten the bound, even though the outer point itself is
+    fine.
+    """
+    # A sea box with a hole (an island) between 51.7E and 52.7E -- the
+    # centre (50E) is well west of it, the outer point (56E) is well east.
+    # outer_km=600 over 6 degrees of longitude puts each of the
+    # LAND_MASK_STEPS samples 0.5 degrees (~50 km) apart, which is what
+    # keeps the island (a full degree wide) from being straddled by a
+    # single step and gives the assertion below real headroom either side.
+    outer_ring = [[40.0, 20.0], [70.0, 20.0], [70.0, 32.0], [40.0, 32.0], [40.0, 20.0]]
+    island_hole = [[51.7, 24.0], [52.7, 24.0], [52.7, 28.0], [51.7, 28.0], [51.7, 24.0]]
+    mask = dv.WaterMask({
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [outer_ring, island_hole]},
+            "properties": {"bbox": [20.0, 40.0, 32.0, 70.0], "antimeridian": False},
+        }],
+    })
+    outer_km = 600.0
+    bound_km, moved = dv._ray_water_bound(26.0, 50.0, 26.0, 56.0, outer_km, mask)
+    assert moved is True
+    # The island's near edge sits ~190 km east of the centre at this
+    # latitude -- the bound must stop well short of the outer point's full
+    # 600 km, in the neighbourhood of that shore, not near it.
+    assert 100.0 < bound_km < 250.0
+    frac_from_centre = bound_km / outer_km
+    test_lon = 50.0 + (56.0 - 50.0) * frac_from_centre
+    assert mask.covers(26.0, test_lon)
+    # And the outer point itself really was water all along -- the whole
+    # point of this test is that an endpoint-only check would have missed
+    # the island entirely.
+    assert mask.covers(26.0, 56.0)
 
 
 def test_land_masking_changes_a_contour_that_pokes_past_the_coastline():
@@ -277,6 +319,58 @@ def test_a_contour_entirely_inside_the_sea_box_is_never_flagged_masked():
     stats = {"p_kn": 15.0, "stdev_kn": 1.0, "sample_count": 50}
     out = dv.build_reachability(base_record(gap_hours=6.0), stats, mask, None, NOW)
     assert out["masked_by_land"] is False
+
+
+def test_an_island_between_the_centre_and_the_outer_band_pulls_the_inner_band_back():
+    """build_reachability-level regression for the same finding: a hole in
+    the sea polygon (the island) sits on the model's own east-pointing
+    bearing (theta=0, since the last known course is due east and the hull
+    is stationary), close enough in that the 50% band's own raw vertex
+    would have landed on it while the 80%/95% bands' raw vertices already
+    reach open water beyond it. The whole ray is capped at the island's
+    near shore for every band (see _ray_water_bound's docstring on why a
+    shared per-bearing bound cannot try to detect "clear again beyond the
+    island" from a handful of samples), so what this pins down is narrower
+    and more directly testable: the 50% band's vertex on that bearing is
+    strictly closer to the centre than its own raw (unmasked) radius would
+    have put it, and it lands in water.
+    """
+    outer_ring = [[40.0, 20.0], [70.0, 20.0], [70.0, 32.0], [40.0, 32.0], [40.0, 20.0]]
+    island_hole = [[51.5, 24.0], [52.5, 24.0], [52.5, 28.0], [51.5, 28.0], [51.5, 24.0]]
+    mask = dv.WaterMask({
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [outer_ring, island_hole]},
+            "properties": {"bbox": [20.0, 40.0, 32.0, 70.0], "antimeridian": False},
+        }],
+    })
+    stats = {"p_kn": 25.0, "stdev_kn": 8.0, "sample_count": 50}
+    record = base_record(
+        lat=26.0, lon=50.0, last_known_speed_kn=0.0, last_known_course_deg=90.0, gap_hours=20.0,
+    )
+    out = dv.build_reachability(record, stats, mask, None, NOW)
+    assert out["masked_by_land"] is True
+
+    dr_lat, dr_lon = out["dr_lat"], out["dr_lon"]
+    p50 = out["contours"][0]
+    assert p50["properties"]["percentile"] == 50
+    lon50, lat50 = _ring_points(p50)[0]  # vertex 0 is theta == 0, the due-east bearing
+    masked_d50 = haversine_km(dr_lat, dr_lon, lat50, lon50)
+
+    # The raw (unmasked) radius on this bearing, recomputed independently of
+    # build_reachability's own internals so this is a real check and not a
+    # tautology: along-track half-width at the 50% band, capped by the same
+    # reach_radius_km rule Critical 1 added (harmless here -- nowhere near
+    # binding at these numbers, but included so the two fixes are checked
+    # together rather than one silently assuming the other never fires).
+    hours = record["gap_hours"]
+    along_base_km = stats["stdev_kn"] * dv.KN_TO_KMH * hours
+    z_50 = dv.CONTOUR_BANDS[0][1]
+    raw_d50 = min(z_50 * along_base_km, out["reach_radius_km"])
+
+    assert masked_d50 < raw_d50 - 1.0  # pulled back by a real margin, not a rounding wobble
+    assert mask.covers(lat50, lon50)
 
 
 def _touches_or_is_inside(outer_ring_closed, lat, lon):
