@@ -835,6 +835,48 @@ html, body {
 }
 .infra-filter-input:focus { outline: none; border-color: var(--accent); }
 
+/* Vessel/aircraft filter bars (Task 18). Same input styling as
+   .infra-filter-input directly above, plus the two things that box doesn't
+   need: a one-click clear (shown only once there is something to clear) and
+   the match/total readout every filter bar in the brief has to show. */
+.entity-filter-bar { margin: 0 0 10px 20px; }
+.entity-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.entity-filter-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  background: var(--control-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  color: var(--text-primary);
+}
+.entity-filter-input:focus { outline: none; border-color: var(--accent); }
+.entity-filter-clear {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 1;
+  font-size: 13px;
+  background: var(--control-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.entity-filter-clear:hover { color: var(--text-primary); border-color: var(--accent); }
+.entity-filter-count {
+  padding: 4px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+.entity-filter-prefix { padding: 2px 0 0; color: var(--text-secondary); }
+
 /* ---------- country card: live situational snapshot ----------
    Built by popups.js's countryPopupHtml and hosted in #countryInfoCard.
    Compact by design: the card is 320px wide and pops out of the clicked

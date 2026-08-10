@@ -16,6 +16,7 @@ import { applyOverrides } from "./settings/applyOverrides";
 import { EDITABLE_SOURCES } from "./settings/defaults";
 import { applyBorderOverrides, staleBorderKeys } from "./settings/borderOverrides";
 import { DEFAULT_EVENT_FILTER } from "./map/severity";
+import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "./utils/entityFilter";
 import { makeCountryScope } from "./map/countryScope";
 import { boundsContainsPoint } from "./utils/geo";
 
@@ -443,6 +444,33 @@ export default function App() {
     mapApi.setEventFilter(eventFilter);
   }, [eventFilter, mapApi.setEventFilter]);
 
+  // The vessel and aircraft filter bars (Task 18, LayersSection.jsx). Same
+  // shape as eventFilter just above, and for the same reason: the map
+  // controller is the only thing that can actually decide which ships/
+  // aircraft draw, but the state has to live in exactly one place or a
+  // second copy could disagree with it -- the failure Task 12 spent two
+  // review rounds fixing for the conflict-event filters. Held here, synced
+  // to the map from an effect (not from inside the setter -- see the
+  // eventFilter effect above for why), and read back for the filter bar's
+  // own "N / total" figure from mapApi.counts.vesselFilterMatch/
+  // aircraftFilterMatch.
+  const [vesselFilter, setVesselFilter] = useState(DEFAULT_VESSEL_FILTER);
+  const [aircraftFilter, setAircraftFilter] = useState(DEFAULT_AIRCRAFT_FILTER);
+  const onVesselFilterChange = useCallback(
+    (patch) => setVesselFilter((prev) => ({ ...prev, ...patch })),
+    []
+  );
+  const onAircraftFilterChange = useCallback(
+    (patch) => setAircraftFilter((prev) => ({ ...prev, ...patch })),
+    []
+  );
+  useEffect(() => {
+    mapApi.setVesselFilter(vesselFilter);
+  }, [vesselFilter, mapApi.setVesselFilter]);
+  useEffect(() => {
+    mapApi.setAircraftFilter(aircraftFilter);
+  }, [aircraftFilter, mapApi.setAircraftFilter]);
+
   const onInfraFilterChange = useCallback(
     (text) => {
       setInfraFilterText(text);
@@ -671,6 +699,10 @@ export default function App() {
             historyAsOf={historyAsOf}
             onEventFilterChange={onEventFilterChange}
             onInfraFilterChange={onInfraFilterChange}
+            vesselFilter={vesselFilter}
+            onVesselFilterChange={onVesselFilterChange}
+            aircraftFilter={aircraftFilter}
+            onAircraftFilterChange={onAircraftFilterChange}
             imageryKey={imageryKey}
             imageryDate={imageryDate}
             onImageryChange={setImageryKey}

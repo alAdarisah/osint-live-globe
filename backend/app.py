@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import time
 import uuid
 import webbrowser
@@ -1097,11 +1098,66 @@ async def satellites(region: str | None = None):
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
+def _matches_callsign_query(value, query: str) -> bool:
+    """Case-insensitive, `*`-as-wildcard, implicit-prefix match on a callsign.
+
+    The same rule frontend/src/utils/entityFilter.js's matchQuery applies to
+    the client-side vessel filter, kept in step by hand (there is no shared
+    module between a Python process and a browser bundle) rather than by
+    import -- see `callsign` on the /api/ships endpoint below for which of
+    the two filters is authoritative and why keeping this one narrow to
+    *only* callsign, rather than growing it to match the client's callsign/
+    name/mmsi/imo, is deliberate.
+    """
+    if not value:
+        return False
+    haystack = str(value).strip().upper()
+    needle = query.strip().upper()
+    if not needle:
+        return True
+    if "*" not in needle:
+        return haystack.startswith(needle)
+    pattern = "^" + re.escape(needle).replace(r"\*", ".*") + "$"
+    return re.match(pattern, haystack) is not None
+
+
+def _ships_callsign_filter(query: str):
+    # A closure rather than a top-level function so _cached_source_response's
+    # filter_fn(items, bounds) signature doesn't have to grow a third
+    # argument just for this one caller -- same shape _gdelt_filter and
+    # _aircraft_priority_filter above already use for a fixed predicate.
+    def _filter(items: list[dict], bounds) -> list[dict]:
+        matched = [d for d in items if _matches_callsign_query(d.get("callsign"), query)]
+        return regions.filter_points(matched, bounds)
+    return _filter
+
+
 @app.get("/api/ships")
-async def ships(request: Request, region: str | None = None):
+async def ships(request: Request, region: str | None = None, callsign: str | None = None):
     # AIS is a live websocket stream snapshotted every few seconds (see
     # backend/sources/ais.py) -- ETag/304 still saves the body bytes, `no-cache`
     # (see _cached_source_response) just means every poll actually asks.
+    #
+    # `callsign` is an *independent* narrowing, not a second copy of the
+    # client-side vessel filter (frontend/src/utils/entityFilter.js), and the
+    # two are not meant to be composed. This map's own poller
+    # (useOsintData.js's POLL_CONFIG entry for "ais") never sends it -- the
+    # client-side filter is what decides what a reader sees and what the
+    # filter bar's own "N / total" count reads, and it matches four fields
+    # (callsign, name, mmsi, imo) this parameter deliberately does not try to
+    # widen to match. Composing the two would risk exactly the bug Task 12
+    # spent two review rounds on for the conflict-event filters: a client
+    # holding the *full* feed while believing it holds a server-narrowed one
+    # (or vice versa) would show a match count measured against the wrong
+    # total. This parameter exists for a caller that wants the server to do
+    # the narrowing before the payload leaves it -- fetching the global feed
+    # from outside this map's own client, where four-field client-side
+    # filtering over the whole thing isn't an option in the first place.
+    if callsign:
+        return _cached_source_response(
+            request, "ais", region, _ships_callsign_filter(callsign),
+            variant=f"callsign:{callsign.strip().upper()}",
+        )
     return _cached_source_response(request, "ais", region, regions.filter_points)
 
 

@@ -17,6 +17,7 @@ const DEFAULT_OPEN = { "grp-conflict": true };
 export default function ControlPanel({
   open, counts, zoomNotes, layerVisibility, layerWish, sceneBypass, onSceneBypassChange,
   onToggleLayer, health, owmConfigured, windStatus, infraFilterText, onInfraFilterChange, eventFilter, onEventFilterChange, historyAsOf,
+  vesselFilter, onVesselFilterChange, aircraftFilter, onAircraftFilterChange,
   imageryKey, imageryDate, onImageryChange,
   choropleth, onChoroplethChange,
 }) {
@@ -61,6 +62,10 @@ export default function ControlPanel({
         onEventFilterChange={onEventFilterChange}
         historyAsOf={historyAsOf}
         onInfraFilterChange={onInfraFilterChange}
+        vesselFilter={vesselFilter}
+        onVesselFilterChange={onVesselFilterChange}
+        aircraftFilter={aircraftFilter}
+        onAircraftFilterChange={onAircraftFilterChange}
         isOpen={isOpen}
         setOpen={setOpen}
       />

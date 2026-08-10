@@ -10,8 +10,11 @@ import {
   WATER_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
+import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
+import { countryForCallsign } from "../../utils/callsignPrefix";
 import LayerIcon from "./LayerIcon";
 import LayerCheck from "./LayerCheck";
+import FilterBar from "./FilterBar";
 import { PanelGroup, LayerDetails } from "./Collapsible";
 
 // What each conflict glyph means. Drawn from the same SVG table the map pins
@@ -133,6 +136,12 @@ const LAYER_LABEL = {
 export default function LayersSection({
   counts, zoomNotes, layerVisibility, layerWish, onToggleLayer, infraFilterText, onInfraFilterChange,
   eventFilter, onEventFilterChange, historyAsOf,
+  // Defaulted the same way infraFilterText's onChange pair isn't (it always
+  // arrives from App.jsx) -- vesselFilter/aircraftFilter are new enough that
+  // a stale caller (an old test render, a half-applied hot reload) should
+  // see "match everything" rather than throw reading .text off undefined.
+  vesselFilter = DEFAULT_VESSEL_FILTER, onVesselFilterChange = () => {},
+  aircraftFilter = DEFAULT_AIRCRAFT_FILTER, onAircraftFilterChange = () => {},
   // See Collapsible.jsx: defaulted so a half-applied hot reload cannot take the
   // whole panel down through the error boundary.
   isOpen = () => true, setOpen = () => {},
@@ -362,6 +371,57 @@ export default function LayersSection({
 
       <PanelGroup id="grp-traffic" title="Air & Sea Traffic" count={groupCount("traffic")}
         open={isOpen("grp-traffic")} onToggle={setOpen}>
+        {/* Vessel filter bar (Task 18): free text against callsign, name,
+            mmsi and imo -- `*` as an explicit wildcard, an implicit prefix
+            match otherwise (see entityFilter.js's matchQuery) -- plus the
+            two flags the vessel record already carries a field for. Applied
+            client-side inside createMapController.js's renderAisLayer,
+            before the navy/tanker/civilian split below, so it combines with
+            those three toggles and with the sanction ring rather than
+            fighting either. A ship this filter rejects simply never reaches
+            any of the three buckets underneath.
+
+            The callsign-prefix "grouping" the brief asks for is this same
+            box: typing (or clearing to) a real ITU call sign prefix both
+            narrows the fleet by it (implicit prefix matching, above) and
+            resolves the flag state it points to, shown as the line below
+            the box -- no separate control, since a second box would just be
+            two ways to write the same query. */}
+        <FilterBar
+          text={vesselFilter.text}
+          onTextChange={(text) => onVesselFilterChange({ text })}
+          matched={counts.vesselFilterMatch}
+          total={counts.vesselFilterMatchTotal}
+          placeholder="Filter ships: callsign, name, MMSI, IMO..."
+        >
+          {/* Reuses the conflict-filter checkbox styling (.event-filters
+              label) rather than inventing a second one -- same visual
+              register the infra name filter already borrows it for. */}
+          <div className="event-filters">
+            <label className="event-filter-check">
+              <input
+                type="checkbox"
+                checked={vesselFilter.sanctionedOnly}
+                onChange={(e) => onVesselFilterChange({ sanctionedOnly: e.target.checked })}
+              />
+              OFAC-designated only
+            </label>
+            <label className="event-filter-check">
+              <input
+                type="checkbox"
+                checked={vesselFilter.watchlistedOnly}
+                onChange={(e) => onVesselFilterChange({ watchlistedOnly: e.target.checked })}
+              />
+              Watchlisted only
+            </label>
+          </div>
+          {(() => {
+            const country = countryForCallsign(vesselFilter.text);
+            return country ? (
+              <div className="sublegend entity-filter-prefix">Callsign prefix: {country}</div>
+            ) : null;
+          })()}
+        </FilterBar>
         <label className="layer-row" data-layer="aisNavy">
           <LayerCheck
             layerKey="aisNavy"
@@ -579,6 +639,30 @@ export default function LayersSection({
           </div>
         </LayerDetails>
 
+        {/* Aircraft filter bar (Task 18): free text against callsign,
+            registration, ICAO hex, operator, type code and squawk, plus a
+            military-only toggle. Same application point as the vessel bar
+            above -- inside renderAdsbLayer, before the military/flagged/
+            civilian split -- so it combines with those toggles rather than
+            overriding them. */}
+        <FilterBar
+          text={aircraftFilter.text}
+          onTextChange={(text) => onAircraftFilterChange({ text })}
+          matched={counts.aircraftFilterMatch}
+          total={counts.aircraftFilterMatchTotal}
+          placeholder="Filter aircraft: callsign, registration, ICAO, operator..."
+        >
+          <div className="event-filters">
+            <label className="event-filter-check">
+              <input
+                type="checkbox"
+                checked={aircraftFilter.militaryOnly}
+                onChange={(e) => onAircraftFilterChange({ militaryOnly: e.target.checked })}
+              />
+              Military only
+            </label>
+          </div>
+        </FilterBar>
         <label className="layer-row" data-layer="adsbMilitary">
           <LayerCheck
             layerKey="adsbMilitary"

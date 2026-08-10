@@ -183,6 +183,14 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     controllerRef.current?.setEventFilter(next);
   }, []);
 
+  const setVesselFilter = useCallback((next) => {
+    controllerRef.current?.setVesselFilter(next);
+  }, []);
+
+  const setAircraftFilter = useCallback((next) => {
+    controllerRef.current?.setAircraftFilter(next);
+  }, []);
+
   const setAgeReference = useCallback((ts) => {
     controllerRef.current?.setAgeReference(ts);
   }, []);
@@ -300,7 +308,8 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     selectedWater, closeWaterCard,
     selectedSubdivision, closeSubdivisionCard, selectedDistrict, closeDistrictCard, setDistrictMonth,
     layerState, setSceneBypass, invalidateSize, focus,
-    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, setAgeReference,
+    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter,
+    setVesselFilter, setAircraftFilter, setAgeReference,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
     setIconTheme, setLayerZoomOverrides, setLayerZoomMaxOverrides, setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
     choropleth, setChoroplethMetric,
