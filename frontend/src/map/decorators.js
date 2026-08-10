@@ -2644,8 +2644,11 @@ function reachabilityDetail(d) {
     : "";
   return `
     <div class="inferred-block">
-      <div>Could have reached up to <b>${esc(fmtNumber(Number(d.reach_radius_km)))} km</b> from where it went
-        dark, using ${basis}.</div>
+      <div>Could have reached up to <b>${esc(fmtNumber(Number(d.reach_radius_km)))} km</b> away in a straight
+        line at its own top speed, using ${basis}.</div>
+      <div class="meta">The shaded region on the map is narrower than that outer figure -- it is built from
+        the course and speed this hull was actually holding when it went quiet, not the full circle its top
+        speed alone would allow.</div>
       ${scored}
       ${d.masked_by_land
         ? '<div class="meta">The region shown is pulled back off dry land using Natural Earth\'s sea/lake outlines.</div>'

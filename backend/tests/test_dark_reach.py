@@ -11,6 +11,8 @@ model score itself honestly against the answer it already has". Those three
 are the ones this file spends the most weight on.
 """
 
+import math
+
 from backend.sources import dark_vessels as dv
 from backend.sources.proximity import haversine_km
 
@@ -136,6 +138,67 @@ def test_a_stationary_hull_still_gets_a_contour_around_its_last_fix():
         assert len(_ring_points(contour)) == dv.CONTOUR_VERTICES
 
 
+# --- reach_radius_km is an absolute bound from the last known fix -------------
+#
+# Regression coverage for a review finding: an earlier version of this module
+# capped each band's own along/cross half-width at reach_radius_km, which
+# bounds distance *from the dead-reckoned centre* -- and the centre itself
+# already sits `travel_km` away from the last known fix, so a vertex could
+# land at `travel_km + reach_radius_km` from where the vessel actually went
+# dark. Every case below checks distance from the *last known fix*
+# (record["lat"]/["lon"]), which is the promise the module docstring makes.
+
+
+def _worst_vertex_km_from_origin(out, origin_lat, origin_lon):
+    worst = 0.0
+    for contour in out["contours"]:
+        for lon, lat in _ring_points(contour):
+            worst = max(worst, haversine_km(origin_lat, origin_lon, lat, lon))
+    return worst
+
+
+def test_no_contour_vertex_exceeds_reach_radius_km_from_the_last_known_fix():
+    # The exact figures a review reproduced the bug with: v_max=20kn,
+    # last_known_speed=12kn (below v_max, the ordinary case), gap_hours=20,
+    # stdev=6kn -- which used to put a 95%-band vertex 18% past the ceiling.
+    v_max, hours = 20.0, 20.0
+    stats = {"p_kn": v_max, "stdev_kn": 6.0, "sample_count": 50}
+    record = base_record(last_known_speed_kn=12.0, gap_hours=hours)
+    out = dv.build_reachability(record, stats, EMPTY_WATER, None, NOW)
+    worst = _worst_vertex_km_from_origin(out, record["lat"], record["lon"])
+    # Checked against the exact, unrounded bound -- out["reach_radius_km"]
+    # itself is rounded to 1 decimal place for display, which can sit up to
+    # 0.05 below the true figure the geometry was actually built against.
+    exact_radius_km = v_max * dv.KN_TO_KMH * hours
+    assert worst <= exact_radius_km + 1e-6
+
+
+def test_no_contour_vertex_exceeds_reach_radius_km_across_a_spread_of_cases():
+    origin_lat, origin_lon = 26.0, 56.0
+    cases = [
+        # (last_known_speed_kn, v_max_kn, stdev_kn, gap_hours)
+        (0.0, 15.0, 1.0, 4.0),      # stationary hull, short gap
+        (12.0, 20.0, 6.0, 20.0),    # the review's own repro
+        (5.0, 30.0, 15.0, 36.0),    # huge variance, the longest gap allowed
+        (18.0, 18.0, 0.5, 4.0),     # last-known speed at v_max, short gap
+        (30.0, 16.0, 4.0, 12.0),    # last-known speed *above* v_max (edge case)
+        (0.5, 32.0, 20.0, 36.0),    # naval-class ceiling, near-stationary last fix
+    ]
+    for last_speed, v_max, stdev, hours in cases:
+        stats = {"p_kn": v_max, "stdev_kn": stdev, "sample_count": 50}
+        record = base_record(
+            lat=origin_lat, lon=origin_lon,
+            last_known_speed_kn=last_speed, gap_hours=hours,
+        )
+        out = dv.build_reachability(record, stats, EMPTY_WATER, None, NOW)
+        worst = _worst_vertex_km_from_origin(out, origin_lat, origin_lon)
+        exact_radius_km = v_max * dv.KN_TO_KMH * hours
+        assert worst <= exact_radius_km + 1e-6, (last_speed, v_max, stdev, hours)
+        # The dead-reckoned point itself is part of the same promise.
+        dr_km = haversine_km(origin_lat, origin_lon, out["dr_lat"], out["dr_lon"])
+        assert dr_km <= exact_radius_km + 1e-6, (last_speed, v_max, stdev, hours)
+
+
 # --- land masking against a hand-built coastline ------------------------------
 
 
@@ -153,20 +216,26 @@ def _sea_box(south, west, north, east):
     }
 
 
-def test_a_vertex_inside_the_sea_box_is_left_alone():
+def test_an_already_water_outer_point_needs_no_pull_back():
     mask = dv.WaterMask(_sea_box(20.0, 50.0, 30.0, 60.0))
-    lat, lon, moved = dv._pull_to_water(26.0, 56.0, 26.0, 56.0, mask)
-    assert (lat, lon, moved) == (26.0, 56.0, False)
+    bound_km, moved = dv._ray_water_bound(26.0, 56.0, 26.0, 56.0, 10.0, mask)
+    assert (bound_km, moved) == (10.0, False)
 
 
-def test_a_vertex_outside_the_sea_box_is_pulled_back_toward_the_centre():
+def test_a_land_outer_point_is_pulled_back_toward_the_centre():
+    """_ray_water_bound is what replaced _pull_to_water -- run once per
+    bearing against the outermost band's own vertex rather than once per
+    band, which is the fix for the nesting failure below."""
     mask = dv.WaterMask(_sea_box(20.0, 50.0, 30.0, 60.0))
     # 70E is well outside the box; the centre (56E) is well inside it.
-    lat, lon, moved = dv._pull_to_water(26.0, 70.0, 26.0, 56.0, mask)
+    bound_km, moved = dv._ray_water_bound(26.0, 56.0, 26.0, 70.0, 1400.0, mask)
     assert moved is True
-    assert mask.covers(lat, lon)
-    # Pulled *toward* the centre, not to some unrelated point.
-    assert 56.0 <= lon < 70.0
+    assert 0.0 < bound_km < 1400.0
+    # The bound is honest: walking that fraction of the way back from the
+    # outer point toward the centre really does land in water.
+    frac = 1.0 - bound_km / 1400.0
+    test_lon = 70.0 + (56.0 - 70.0) * frac
+    assert mask.covers(26.0, test_lon)
 
 
 def test_land_masking_changes_a_contour_that_pokes_past_the_coastline():
@@ -208,6 +277,65 @@ def test_a_contour_entirely_inside_the_sea_box_is_never_flagged_masked():
     stats = {"p_kn": 15.0, "stdev_kn": 1.0, "sample_count": 50}
     out = dv.build_reachability(base_record(gap_hours=6.0), stats, mask, None, NOW)
     assert out["masked_by_land"] is False
+
+
+def _touches_or_is_inside(outer_ring_closed, lat, lon):
+    """Point-in-polygon, tolerant of a point that lands exactly on the outer
+    ring's own boundary -- which happens routinely once masking is involved:
+    two bands can both get pulled back to the *same* shared water crossing
+    (see _ray_water_bound, run once per bearing for every band), landing a
+    smaller band's vertex exactly on top of the larger band's own vertex at
+    that bearing. Ray casting has no defined answer for a point exactly on an
+    edge or vertex; an exact coincidence is checked directly rather than left
+    to an algorithm that is not obliged to say yes to it.
+    """
+    if dv._ring_contains(outer_ring_closed, lat, lon):
+        return True
+    return any(math.isclose(lat, y, abs_tol=1e-9) and math.isclose(lon, x, abs_tol=1e-9)
+               for x, y in outer_ring_closed)
+
+
+def _strait_mask():
+    """Two water bodies with a land gap between them -- an ordinary strait
+    shape, not a single convex "sea" -- which is what a review used to catch
+    the earlier per-band land-masking search inverting contour nesting."""
+    west_sea = _sea_box(20.0, 40.0, 32.0, 55.0)["features"][0]
+    east_sea = _sea_box(20.0, 57.0, 32.0, 90.0)["features"][0]
+    return {"type": "FeatureCollection", "features": [west_sea, east_sea]}
+
+
+def test_nesting_survives_land_masking_on_a_strait():
+    """The dead-reckoned centre sits just inside the west sea, close enough
+    to its own shore that a wide cross-track spread pokes into the land gap
+    and, for the outermost band, out the far side into the east sea --
+    forcing a real correction, not a no-op."""
+    mask = dv.WaterMask(_strait_mask())
+    stats = {"p_kn": 25.0, "stdev_kn": 8.0, "sample_count": 50}
+    record = base_record(
+        lat=26.0, lon=54.5, last_known_speed_kn=0.0, last_known_course_deg=90.0, gap_hours=20.0,
+    )
+    out = dv.build_reachability(record, stats, mask, None, NOW)
+    assert out["masked_by_land"] is True
+
+    p50, p80, p95 = out["contours"]
+    r80_closed = _ring_points(p80) + [_ring_points(p80)[0]]
+    r95_closed = _ring_points(p95) + [_ring_points(p95)[0]]
+    for lon, lat in _ring_points(p50):
+        assert _touches_or_is_inside(r80_closed, lat, lon)
+    for lon, lat in _ring_points(p80):
+        assert _touches_or_is_inside(r95_closed, lat, lon)
+
+    # The invariant the containment check above rests on, checked directly:
+    # at every one of the CONTOUR_VERTICES shared bearings, the masked
+    # distance from the centre is non-decreasing across the three bands.
+    dr_lat, dr_lon = out["dr_lat"], out["dr_lon"]
+    r50, r80, r95 = (_ring_points(c) for c in out["contours"])
+    for (lon50, lat50), (lon80, lat80), (lon95, lat95) in zip(r50, r80, r95):
+        d50 = haversine_km(dr_lat, dr_lon, lat50, lon50)
+        d80 = haversine_km(dr_lat, dr_lon, lat80, lon80)
+        d95 = haversine_km(dr_lat, dr_lon, lat95, lon95)
+        assert d50 <= d80 + 1e-6
+        assert d80 <= d95 + 1e-6
 
 
 def test_bbox_hit_handles_an_antimeridian_wrapping_box():

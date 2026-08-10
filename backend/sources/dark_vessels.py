@@ -94,19 +94,55 @@ rather than reverse-engineer the code:
          band (CONTOUR_BANDS: 0.6745/1.2816/1.9600 for 50/80/95%), which is
          *why* the bands nest by construction: multiplying both axes of one
          ellipse by a larger number can only enclose the smaller ellipse,
-         never cross it. Both axes are also capped at `reach_radius_km`
-         itself -- the model must never draw a contour claiming the hull
-         travelled further than its own top speed allows, however large a
-         speed variance the arithmetic above would otherwise produce.
+         never cross it.
+       - **The reach_radius_km bound is enforced globally, not per band, and
+         not measured from the dead-reckoned centre.** An earlier version of
+         this module capped each band's own along/cross half-width at
+         `reach_radius_km`, which bounds distance *from the dead-reckoned
+         point* -- and the dead-reckoned point already sits `travel_km` away
+         from the last known fix, so a vertex could land at
+         `travel_km + reach_radius_km` from where the vessel actually went
+         dark, past the ceiling the model claims never to cross. The fix:
+         `travel_km` itself is capped at `reach_radius_km` (a single
+         last-known-speed reading cannot imply more distance than the hull's
+         own top-speed ceiling allows), and the raw ellipse's *base* axes are
+         scaled by one shared factor, derived from the triangle inequality
+         (`distance(origin, vertex) <= travel_km + distance(centre, vertex)`,
+         and the farthest any point on an ellipse can sit from its own centre
+         is its semi-major axis), so that the 95% band's own worst-case
+         vertex cannot exceed `reach_radius_km` from the last known fix
+         before land masking is even applied. One shared factor for all three
+         bands, not a per-vertex clamp after the fact: shrinking the same
+         shape uniformly cannot change which band nests inside which, where
+         clamping each of three already-built vertices independently could
+         (and very nearly did -- see the land-masking note below for the
+         mechanism, and test_dark_reach.py for a coastline that forces both
+         corrections and asserts nesting survives them).
   4. **Land masking.** A contour vertex the ellipse math places on dry land is
-     walked back, in a straight line toward the dead-reckoned centre, until it
-     first crosses into a Task 4 water polygon (water_marine, water_lakes;
-     water_rivers is linework, not area, and is not consulted). A cheap
-     per-vertex correction toward one interior point, not a real
-     nearest-shore search -- a contour that is mostly on land and only clips
-     a strait is pulled in from every direction toward the same centre rather
-     than modelled specially. `masked_by_land` is set only when at least one
-     vertex actually moved. If neither water document has landed yet (a fresh
+     walked back toward the dead-reckoned centre until it first crosses into
+     a Task 4 water polygon (water_marine, water_lakes; water_rivers is
+     linework, not area, and is not consulted). A cheap correction toward one
+     interior point, not a real nearest-shore search -- a contour that is
+     mostly on land and only clips a strait is pulled in from every direction
+     toward the same centre rather than modelled specially.
+
+     **The search runs once per bearing, against the 95% band's own vertex,
+     never once per band.** All three bands' vertices at a given angle are
+     collinear with the dead-reckoned centre (same direction, different
+     radius, because all three are the same base ellipse scaled by the
+     band's own quantile) -- so searching from the *outermost* point inward
+     and capping every band's own raw radius at whatever water boundary that
+     one search finds (`min(band's own radius, the shared boundary)`) can
+     only ever preserve the three bands' original order, never invert it.
+     Searching once per band instead -- the first version of this code did
+     -- samples the *same* physical ray at three different step sizes (each
+     band's search divides its own, differently-sized segment into
+     LAND_MASK_STEPS equal pieces), which can and did produce a narrower band
+     landing on a *different* water crossing than a wider one at the same
+     bearing, putting the 50% ring outside the 80% ring on an ordinary strait
+     shape. `masked_by_land` is set when that one shared search found land at
+     all, which is also exactly when any band's vertex could have been
+     pulled in. If neither water document has landed yet (a fresh
      deployment, before backend/sources/water_bodies.py's first sweep),
      masking is skipped rather than run against an empty mask -- an empty
      WaterMask would otherwise read as "the whole world is land" and pull
@@ -128,6 +164,20 @@ rather than reverse-engineer the code:
      real resumption point, computed the moment this record is built;
      `prediction_scored_at` is when that happened. Nothing here waits for a
      future event, because there is not one left to wait for.
+
+**Why `gfw_gaps`' ais_disabling records get the went-dark -> resumed line on
+the map (see the frontend's uncertaintyPane rendering) but never a contour of
+their own.** The line only needs two points GFW's own record already
+carries. A contour needs this module's own machinery -- a course, a speed
+history, a v_max -- and GFW's gap events carry none of that; building one
+would mean reaching back into *our* AIS history for the same hull and
+pretending the result describes GFW's event, when the two are not
+describing the same moment at all (see the module docstring above on the
+five-or-more-day publication lag between GFW's batch and the three days of
+history this module can even see). A contour built that way would look just
+as confident as one built from this module's own gap and be answering a
+different question -- which is exactly the kind of confident-looking wrong
+answer this module exists to avoid producing.
 
 `inferred: True` covers every field this section adds, the same as it already
 covers the gap itself: none of it is a detection, a forecast in the ordinary
@@ -263,8 +313,11 @@ CONTOUR_BANDS = ((50, 0.6745), (80, 1.2816), (95, 1.9600))
 # draws it at.
 CONTOUR_VERTICES = 48
 
-# How far back toward the ellipse's own centre a land-masked vertex is walked
-# before giving up and using the centre itself -- see _pull_to_water.
+# How far back toward the ellipse's own centre a land search walks, in equal
+# steps, before giving up and treating the centre itself as the boundary --
+# see _ray_water_bound. Run once per bearing against the 95% band's own
+# vertex, not once per band; see the module docstring's "Land masking" point
+# for why searching per band instead breaks contour nesting.
 LAND_MASK_STEPS = 12
 
 # Blend weight for the destination-bearing nudge described in the module
@@ -706,62 +759,70 @@ class WaterMask:
         return False
 
 
-def _pull_to_water(
-    lat: float, lon: float, center_lat: float, center_lon: float, water_mask: WaterMask
-) -> tuple[float, float, bool]:
-    """A vertex already in water is returned unchanged. One on land is walked,
-    in LAND_MASK_STEPS even steps, back along the straight line toward the
-    ellipse's own centre until the first water point is found -- a cheap
-    correction toward one interior point, not a true nearest-shore search,
-    which would need a shoreline index this module has no other reason to
-    build. If nothing along that line is water either (the centre itself sits
-    on land, or the whole segment does), the centre is returned rather than
-    the original land-locked vertex -- safe only because dr_lat/dr_lon is
-    itself never masked (see the module docstring), so "the centre" is never
-    itself a guess this function invented.
+def _ray_water_bound(
+    center_lat: float, center_lon: float, outer_lat: float, outer_lon: float,
+    outer_km: float, water_mask: WaterMask,
+) -> tuple[float, bool]:
+    """How far along the ray from `center` toward `outer` a vertex may sit and
+    still count as water, in km from `center` (never more than `outer_km`).
 
-    Returns (lat, lon, moved) -- `moved` is what feeds a record's
+    Run **once per bearing**, against the outermost (95%) band's own raw
+    vertex -- never once per band. That is the whole fix for contour nesting
+    surviving land masking (see the module docstring's "Land masking" point,
+    and the review that caught the earlier per-band version breaking it on an
+    ordinary strait): every band's own vertex at this bearing is collinear
+    with `center` and `outer`, so build_reachability later caps each band's
+    own raw radius at `min(that band's own radius, this one shared bound)` --
+    and capping three different numbers against one shared ceiling can only
+    ever preserve their original order, never invert it. Sharing the search
+    is what makes that true; three independent searches at three different
+    step sizes along the same physical ray is what did not.
+
+    If `outer` is already water, nothing needs pulling in and the answer is
+    `outer_km` itself. Otherwise the search walks toward `center` in
+    LAND_MASK_STEPS equal steps and stops at the first water point found -- a
+    cheap correction toward one interior point, not a true nearest-shore
+    search, which would need a shoreline index this module has no other
+    reason to build. If nothing along the line is water either (the centre
+    itself sits on land, or the whole segment does), the bound collapses to
+    0 -- every band's vertex at this bearing lands on the centre itself,
+    which is safe only because dr_lat/dr_lon is never itself masked (see the
+    module docstring's point 1), so "the centre" is never a guess this
+    function invented.
+
+    Returns (bound_km, moved) -- `moved` is what feeds a record's
     `masked_by_land` flag.
     """
-    if water_mask.covers(lat, lon):
-        return lat, lon, False
+    if water_mask.covers(outer_lat, outer_lon):
+        return outer_km, False
     for step in range(1, LAND_MASK_STEPS + 1):
         frac = step / LAND_MASK_STEPS
-        test_lat = lat + (center_lat - lat) * frac
-        test_lon = lon + (center_lon - lon) * frac
+        test_lat = outer_lat + (center_lat - outer_lat) * frac
+        test_lon = outer_lon + (center_lon - outer_lon) * frac
         if water_mask.covers(test_lat, test_lon):
-            return test_lat, test_lon, True
-    return center_lat, center_lon, True
+            return outer_km * (1.0 - frac), True
+    return 0.0, True
 
 
-def _ellipse_ring(
-    center_lat: float, center_lon: float, along_km: float, cross_km: float, bearing_deg: float,
-    n: int = CONTOUR_VERTICES,
-) -> list[list[float]]:
-    """n+1 [lon, lat] vertices (closed) of an ellipse in a local flat-earth
-    projection around (center_lat, center_lon): semi-major `along_km` oriented
-    along `bearing_deg`, semi-minor `cross_km` perpendicular to it.
+def _ellipse_offset(along_km: float, cross_km: float, theta: float, bearing_rad: float) -> tuple[float, float]:
+    """The (north_km, east_km) offset from an ellipse's own centre at
+    parameter `theta` (radians): semi-major `along_km` oriented along
+    `bearing_rad`, semi-minor `cross_km` perpendicular to it.
 
-    Degrees-per-km is evaluated once at the ellipse's own centre (111.32 km
-    per degree of latitude; longitude scaled by cos(centre latitude)) rather
-    than per vertex, the same flat-earth approximation water_bodies.py notes
-    is fine at this scale and gets rougher the larger the ellipse -- accepted
-    here because land masking (see _pull_to_water) corrects any vertex the
-    approximation pushes onto dry land regardless of why it landed there.
+    Factored out on its own, rather than folded into a function that also
+    walks every `theta` and returns a whole ring the way an earlier version
+    of this module did, because build_reachability needs the *same* `theta`
+    evaluated at several different (along_km, cross_km) pairs -- one per
+    contour band, all sharing one centre and one bearing -- and comparing
+    those offsets directly (they are collinear for a fixed theta; see
+    _ray_water_bound) is what both the reach-radius cap and the land mask
+    now lean on to keep the three bands nested.
     """
-    bearing = math.radians(bearing_deg)
-    km_per_deg_lat = 111.32
-    km_per_deg_lon = max(111.32 * math.cos(math.radians(center_lat)), 1.0)
-    ring: list[list[float]] = []
-    for i in range(n):
-        theta = 2 * math.pi * i / n
-        x_along = along_km * math.cos(theta)
-        y_cross = cross_km * math.sin(theta)
-        north_km = x_along * math.cos(bearing) - y_cross * math.sin(bearing)
-        east_km = x_along * math.sin(bearing) + y_cross * math.cos(bearing)
-        ring.append([center_lon + east_km / km_per_deg_lon, center_lat + north_km / km_per_deg_lat])
-    ring.append(ring[0])
-    return ring
+    x_along = along_km * math.cos(theta)
+    y_cross = cross_km * math.sin(theta)
+    north_km = x_along * math.cos(bearing_rad) - y_cross * math.sin(bearing_rad)
+    east_km = x_along * math.sin(bearing_rad) + y_cross * math.cos(bearing_rad)
+    return north_km, east_km
 
 
 def _blend_bearing(course_deg: float, dest_bearing_deg: float, weight: float) -> float:
@@ -843,7 +904,13 @@ def build_reachability(
 
     last_speed_kn = record.get("last_known_speed_kn")
     travel_speed_kn = max(last_speed_kn, 0.0) if isinstance(last_speed_kn, (int, float)) else 0.0
-    travel_km = travel_speed_kn * KN_TO_KMH * hours
+    # Capped at reach_radius_km: a single last-known-speed reading is one
+    # real number, not a guess, but if it alone implies more distance than
+    # the hull's *own* top-speed ceiling allows, the dead-reckoned point
+    # would already sit outside the region this module promises never to
+    # exceed (see the module docstring's point 3) -- and no amount of
+    # scaling the *spread* around it, below, could fix that on its own.
+    travel_km = min(travel_speed_kn * KN_TO_KMH * hours, reach_radius_km)
     last_course_deg = record.get("last_known_course_deg")
     base_bearing = last_course_deg if isinstance(last_course_deg, (int, float)) else 0.0
     dr_lat, dr_lon = destination_point(from_lat, from_lon, base_bearing, travel_km)
@@ -867,29 +934,74 @@ def build_reachability(
     # narrower along its own axis of travel than across it.
     along_base_km = max(along_base_km, 0.5 * cross_base_km)
 
+    # One shared scale factor, applied to both base axes before any per-band
+    # vertex is built -- not a per-vertex clamp against reach_radius_km after
+    # the fact, which is what the earlier version of this code did and which
+    # bounded distance from the *dead-reckoned centre* rather than from the
+    # last known fix (see the module docstring's point 3 for the full
+    # reasoning and the numbers that exposed it).
+    #
+    # The bound is the triangle inequality, not an exact fit:
+    # distance(origin, vertex) <= travel_km + distance(centre, vertex), and
+    # the farthest any point on an ellipse can sit from its own centre is its
+    # semi-major axis -- so scaling the *raw* 95% band's semi-major down
+    # until travel_km plus it no longer exceeds reach_radius_km bounds every
+    # vertex of every band before land masking is even considered (masking
+    # only ever pulls a vertex closer to the centre afterwards, which cannot
+    # increase that distance -- see _ray_water_bound). One factor for both
+    # axes and all three bands is also what keeps this from disturbing
+    # nesting: shrinking one shape uniformly cannot change which band ends up
+    # inside which.
+    outer_z = CONTOUR_BANDS[-1][1]
+    raw_outer_radius_km = outer_z * max(along_base_km, cross_base_km)
+    budget_km = max(reach_radius_km - travel_km, 0.0)
+    if raw_outer_radius_km > budget_km:
+        scale = (budget_km / raw_outer_radius_km) if raw_outer_radius_km > 0 else 1.0
+        along_base_km *= scale
+        cross_base_km *= scale
+
     apply_mask = len(water_mask) > 0
     masked_by_land = False
-    contours = []
-    for percentile, z in CONTOUR_BANDS:
-        # Capped at reach_radius_km itself on both axes: the model must never
-        # draw a contour claiming the hull travelled further than its own top
-        # speed allows, however large a speed variance the arithmetic above
-        # would otherwise produce.
-        along_km = min(z * along_base_km, reach_radius_km)
-        cross_km = min(z * cross_base_km, reach_radius_km)
-        ring = _ellipse_ring(dr_lat, dr_lon, along_km, cross_km, lobe_bearing)
-        masked_ring = []
-        for lon, lat in ring:
-            if apply_mask:
-                new_lat, new_lon, moved = _pull_to_water(lat, lon, dr_lat, dr_lon, water_mask)
-            else:
-                new_lat, new_lon, moved = lat, lon, False
+    km_per_deg_lat = 111.32
+    km_per_deg_lon = max(111.32 * math.cos(math.radians(dr_lat)), 1.0)
+    bearing_rad = math.radians(lobe_bearing)
+    band_rings: list[list[list[float]]] = [[] for _ in CONTOUR_BANDS]
+    for i in range(CONTOUR_VERTICES):
+        theta = 2 * math.pi * i / CONTOUR_VERTICES
+        # z == 1 offset; every band's own offset at this theta is this one
+        # times its own z (see _ellipse_offset's docstring), which is what
+        # keeps all three collinear with the centre and lets one shared land
+        # search (below) bound every one of them without breaking their
+        # order.
+        base_north, base_east = _ellipse_offset(along_base_km, cross_base_km, theta, bearing_rad)
+        base_radius_km = math.hypot(base_north, base_east)
+        outer_radius_km = outer_z * base_radius_km
+
+        if apply_mask and outer_radius_km > 0:
+            outer_lat = dr_lat + (outer_z * base_north) / km_per_deg_lat
+            outer_lon = dr_lon + (outer_z * base_east) / km_per_deg_lon
+            water_bound_km, moved = _ray_water_bound(
+                dr_lat, dr_lon, outer_lat, outer_lon, outer_radius_km, water_mask
+            )
             masked_by_land = masked_by_land or moved
-            masked_ring.append([new_lon, new_lat])
+        else:
+            water_bound_km = outer_radius_km
+
+        for band_index, (_percentile, z) in enumerate(CONTOUR_BANDS):
+            band_radius_km = z * base_radius_km
+            final_radius_km = min(band_radius_km, water_bound_km)
+            ratio = (final_radius_km / band_radius_km) if band_radius_km > 0 else 0.0
+            lat = dr_lat + (z * base_north * ratio) / km_per_deg_lat
+            lon = dr_lon + (z * base_east * ratio) / km_per_deg_lon
+            band_rings[band_index].append([lon, lat])
+
+    contours = []
+    for (percentile, _z), ring in zip(CONTOUR_BANDS, band_rings):
+        ring.append(ring[0])  # closed, matching every other GeoJSON ring this module writes
         contours.append({
             "type": "Feature",
             "properties": {"percentile": percentile},
-            "geometry": {"type": "Polygon", "coordinates": [masked_ring]},
+            "geometry": {"type": "Polygon", "coordinates": [ring]},
         })
 
     resumed_lat, resumed_lon = record.get("resumed_lat"), record.get("resumed_lon")

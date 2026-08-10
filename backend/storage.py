@@ -1624,14 +1624,22 @@ async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: 
 # two different `before_ts` windows for the same hull (a vessel with two
 # separate gaps in the retained window) into one answer.
 #
+# The combined FROM unnest($a, $b, $c) AS t(...) form, matching
+# _UPSERT_LATEST/_INSERT_HISTORY/_UPSERT_LANE_CELLS above rather than three
+# independent unnest() calls in the SELECT list: the latter is legacy
+# multi-SRF "lock-step" behaviour that silently pads a shorter array with
+# NULLs instead of erroring on a length mismatch, where the combined form
+# raises. Harmless today -- idx/ids/befores are all built from the same
+# Python list in speed_stats_before below -- but there is no reason to leave
+# the weaker form sitting next to three call sites that already use the
+# stronger one.
+#
 # The speed cast excludes AIS's own "not available" sentinel (102.3 kn, the
 # raw SOG field's all-ones value) so a decoder that ever forwards it raw does
 # not pull a hull's 95th-percentile speed up to a value nothing measured.
 _SPEED_STATS_BEFORE = """
 WITH targets AS (
-  SELECT unnest($2::int[])       AS idx,
-         unnest($3::text[])      AS entity_id,
-         unnest($4::timestamptz[]) AS before_ts
+  SELECT * FROM unnest($2::int[], $3::text[], $4::timestamptz[]) AS t(idx, entity_id, before_ts)
 )
 SELECT t.idx,
        percentile_cont($5) WITHIN GROUP (ORDER BY (h.payload->>'speed')::float) AS p,
