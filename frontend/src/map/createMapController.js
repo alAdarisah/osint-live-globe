@@ -703,6 +703,11 @@ export function createMapController(container, initial, callbacks) {
   // finish before the popup itself opens (see selectShip), so the popup is
   // first drawn without the Cargo/Port calls sections and then updated.
   let shipPopup = null;
+  // Same reason, same shape, for the aircraft popup: decorateAdsb's vertical
+  // trend (Task 22) needs the recorded track, which arrives after the popup
+  // itself is already open -- see selectAircraft's onPoints callback below,
+  // which reuses loadRecordedTrack's existing /api/track/adsb fetch.
+  let aircraftPopup = null;
   // Keyed by mmsi/port_id, so a fetch that lands out of order (an ordinary
   // flaky-connection case, not a hypothetical one) never overwrites a
   // popup with data older than what it already shows -- see
@@ -713,6 +718,10 @@ export function createMapController(container, initial, callbacks) {
   // users.
   const vesselDetailGuard = createGenerationGuard();
   const portTrafficGuard = createGenerationGuard();
+  // Same race, same fix, for the aircraft track fetch: reselecting the same
+  // icao24 before an earlier /api/track/adsb request for it resolves must not
+  // let that earlier response overwrite the popup with an older track.
+  const aircraftTrackGuard = createGenerationGuard();
   // port_id -> {status: "loading"|"ready"|"error", data} for the port card's
   // "recent arrivals and departures" fetch -- not a request cache (see
   // loadPortTraffic, which refetches on every open), just the hand-off
@@ -2249,17 +2258,31 @@ export function createMapController(container, initial, callbacks) {
   // Guarded on the selection still being the same entity when the response
   // lands. A reader clicking through three aircraft in quick succession would
   // otherwise get the first one's track painted under the third one's pin.
-  async function loadRecordedTrack(kind, id, trailMap, maxPoints, stillSelected, redraw) {
+  //
+  // `onPoints`, when given, is handed the raw points array once the fetch has
+  // settled -- an empty array on failure or on a genuinely empty response,
+  // never skipped, so a caller using it for more than the trail (see
+  // selectAircraft's onPoints callback below) can tell "checked, nothing
+  // there" from "still loading" rather than waiting forever on a silent
+  // failure. Ships don't pass it and see no change: the trail-only behaviour
+  // below is exactly what ran before this parameter existed.
+  async function loadRecordedTrack(kind, id, trailMap, maxPoints, stillSelected, redraw, onPoints) {
+    let points = [];
     try {
       const data = await fetchJson(`/api/track/${kind}/${encodeURIComponent(id)}?points=${maxPoints}`);
-      if (!stillSelected() || !data?.points?.length) return;
-      seedTrailFromTrack(trailMap, id, data.points, maxPoints);
-      redraw();
+      points = Array.isArray(data?.points) ? data.points : [];
     } catch {
       // A track is an enhancement to a trail that already draws. Failing loudly
       // here would put an error in front of a reader who just clicked a plane
-      // and can already see where it has been since they did.
+      // and can already see where it has been since they did -- points stays
+      // empty and onPoints below still gets called with that fact.
     }
+    if (!stillSelected()) return;
+    if (points.length) {
+      seedTrailFromTrack(trailMap, id, points, maxPoints);
+      redraw();
+    }
+    if (onPoints) onPoints(points);
   }
 
   // Fetches /api/vessel/{mmsi} (Task 17) and refreshes the open ship popup
@@ -2294,6 +2317,17 @@ export function createMapController(container, initial, callbacks) {
     shipPopup.setContent(d.detail);
   }
 
+  // Refreshes the open aircraft popup once /api/track/adsb/{icao} answers,
+  // the same follow-up loadVesselDetail does for the ship card (Task 17).
+  // decorateAdsb's vertical trend (Task 22) is derived from this recorded
+  // track rather than anything watched client-side -- the endpoint already
+  // gets fetched here for the trail, so this spends no second request, only
+  // the popup refresh that request's answer didn't used to get.
+  //
+  // aircraftTrackGuard guards the same race vesselDetailGuard does: reselecting
+  // the *same* icao24 before an earlier request for it resolves must not let
+  // that earlier response land after the later one and overwrite the popup
+  // with an older track.
   function selectAircraft(item) {
     selectedIcao = selectedIcao === item.icao24 ? null : item.icao24;
     if (selectedIcao) {
@@ -2302,14 +2336,24 @@ export function createMapController(container, initial, callbacks) {
       // looked like flight history didn't work.
       updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
       const chosen = selectedIcao;
+      const trackToken = aircraftTrackGuard.start(chosen);
       loadRecordedTrack(
         "adsb", chosen, aircraftTrails, AIRCRAFT_TRAIL_MAX_POINTS,
-        () => selectedIcao === chosen, renderAdsbLayer
+        () => selectedIcao === chosen, renderAdsbLayer,
+        (points) => {
+          if (!aircraftTrackGuard.isCurrent(chosen, trackToken) || selectedIcao !== chosen || !aircraftPopup) return;
+          const d = decorateAdsb(item, { selectedIcao, track: points });
+          aircraftPopup.setContent(d.detail);
+        }
       );
+      // track is omitted (undefined) on this first, synchronous render --
+      // decorateAdsb reads that as "still fetching" and says so, the same way
+      // vesselDetail starts undefined in selectShip below.
       const d = decorateAdsb(item, { selectedIcao });
-      L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+      aircraftPopup = L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
     } else {
       aircraftTrails.clear();
+      aircraftPopup = null;
       map.closePopup();
     }
     renderAdsbLayer(); // re-decorate every visible aircraft so the highlight moves

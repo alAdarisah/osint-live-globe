@@ -3223,24 +3223,40 @@ export function displayLimitedNote(d) {
     "publishes it anyway; the request is a fact about the registry entry and says nothing about this flight.";
 }
 
-// ---------- vertical trend (client-recorded, this session only) ----------
+// ---------- vertical trend (from the recorded track) ----------
 //
 // Neither feed's merged record carries a rate of climb or descent (see
-// backend/sources/adsb.py) -- the only honest source for "is this aircraft
-// climbing" is the altitude this tab has itself watched go by across polls,
-// the same "recorded since we started watching" idea map/trails.js already
-// uses for position. That makes this a *derived* value, never a measured
-// one, and the card says so rather than dressing it up as a transponder
-// field.
+// backend/sources/adsb.py) -- the honest source for "is this aircraft
+// climbing" is the altitude actually recorded for it over time, which is
+// exactly what /api/track/{kind}/{id} answers (backend/app.py's
+// TRACK_FIELDS includes "altitude" for adsb). createMapController.js's
+// selectAircraft fetches that endpoint on selection via loadRecordedTrack --
+// the same request that already seeds the trail -- and its onPoints callback
+// hands the raw points to decorateAdsb as `track`. This function stays pure
+// and reads nothing of its own: no module-held history, so no state that can
+// outlive a selection, survive a viewport exit and reappear stale, or need a
+// cache eviction policy.
 //
-// Held as a small per-aircraft history inside this module rather than wired
-// through a second fetch of /api/track: that endpoint exists and Task 23
-// (flight legs) is the task that owns spending a fetch and a popup refresh on
-// it. This task only has to say what today's own polls already show, and
-// decorateAdsb already runs once per aircraft per poll for the tooltip.
-const VERTICAL_TREND_WINDOW = 6; // altitude fixes kept per aircraft
-const VERTICAL_TREND_MIN_INTERVAL_MS = 3000; // collapses a tooltip+detail double-call within one poll into one fix
-const VERTICAL_TREND_MAX_TRACKED = 3000; // bounds memory against aircraft turnover over a long session
+// `track` is oldest-first, each point shaped `{altitude, ts, ...}` (`ts` a
+// unix-seconds timestamp -- see backend/storage.py's entity_track).
+//
+// entity_history only gains a row when an entity actually moved, so the
+// track can have real holes in it (out of range, or simply not airborne):
+// pairing an altitude from before a hole with one from after it would derive
+// a climb or descent that never happened. This walks backward from the
+// newest point and stops at the first gap wider than
+// VERTICAL_TREND_MAX_GAP_SECONDS, so only a genuinely contiguous run of
+// recent fixes ever contributes to the delta -- and stops altogether once it
+// reaches something older than VERTICAL_TREND_MAX_GAP_SECONDS behind the
+// newest point, so a trend from an hour ago never reads as "now" just
+// because every fix in between happened to be closely spaced.
+//
+// One constant serves both jobs on purpose, rather than two similarly-named
+// numbers that could drift apart: it is set comfortably above the slow end
+// of the ADS-B poll cadence (config.ADSB_POLL_INTERVAL_ANON = 900s, when no
+// OpenSky credentials are configured) so an ordinary poll-to-poll gap is
+// never mistaken for a hole in coverage, with headroom for one missed poll.
+const VERTICAL_TREND_MAX_GAP_SECONDS = 20 * 60;
 // A real climb or descent moves altitude hundreds of feet a minute; readsb's
 // barometric altitude is quantised to 25 ft and jitters well under 100 ft
 // fix-to-fix at a steady cruise. 60 m (~200 ft) clears that noise floor with
@@ -3249,44 +3265,35 @@ const VERTICAL_TREND_MAX_TRACKED = 3000; // bounds memory against aircraft turno
 // value chosen; there was nothing upstream to derive it from.
 const VERTICAL_TREND_THRESHOLD_M = 60;
 
-const altitudeHistory = new Map(); // icao24 -> [{altitude, t}], oldest first
-
-function recordAltitude(icao24, altitude) {
-  if (!icao24 || !Number.isFinite(altitude)) return;
-  const now = Date.now();
-  let history = altitudeHistory.get(icao24);
-  if (!history) {
-    if (altitudeHistory.size >= VERTICAL_TREND_MAX_TRACKED) {
-      altitudeHistory.delete(altitudeHistory.keys().next().value); // longest-tracked aircraft, evicted first
-    }
-    history = [];
-    altitudeHistory.set(icao24, history);
-  }
-  const last = history[history.length - 1];
-  if (last && now - last.t < VERTICAL_TREND_MIN_INTERVAL_MS) return;
-  history.push({ altitude, t: now });
-  if (history.length > VERTICAL_TREND_WINDOW) history.shift();
-}
-
 /**
- * "climbing" | "descending" | "level" | null (not enough recorded track yet).
+ * "climbing" | "descending" | "level" | null (not enough recently, contiguously
+ * recorded track to say).
  *
- * Pure -- takes the track directly rather than reading module state, so it
- * is testable with a synthetic array. `track` is oldest-first, the same
- * order /api/track/{kind}/{id} returns points in (see backend/app.py's
- * TRACK_FIELDS).
+ * Pure -- takes the track directly, so it is testable with a synthetic array
+ * and carries no state of its own between calls.
  */
 export function verticalTrend(track) {
-  const points = (Array.isArray(track) ? track : []).filter((p) => Number.isFinite(p?.altitude));
+  const points = (Array.isArray(track) ? track : [])
+    .filter((p) => Number.isFinite(p?.altitude) && Number.isFinite(p?.ts))
+    .sort((a, b) => a.ts - b.ts);
   if (points.length < 2) return null;
-  const delta = points[points.length - 1].altitude - points[0].altitude;
+  const latest = points[points.length - 1];
+  let start = points.length - 1;
+  for (let i = points.length - 2; i >= 0; i--) {
+    const sinceLatest = latest.ts - points[i].ts;
+    const gapToNext = points[i + 1].ts - points[i].ts;
+    if (sinceLatest > VERTICAL_TREND_MAX_GAP_SECONDS || gapToNext > VERTICAL_TREND_MAX_GAP_SECONDS) break;
+    start = i;
+  }
+  if (start === points.length - 1) return null; // nothing else survived the walk
+  const delta = latest.altitude - points[start].altitude;
   if (Math.abs(delta) < VERTICAL_TREND_THRESHOLD_M) return "level";
   return delta > 0 ? "climbing" : "descending";
 }
 
 const VERTICAL_TREND_LABEL = { climbing: "Climbing", descending: "Descending", level: "Level" };
 
-export function decorateAdsb(d, { selectedIcao } = {}) {
+export function decorateAdsb(d, { selectedIcao, track } = {}) {
   const type = classifyAircraft(d);
   const base = (type === "military" && d.military_role && MILITARY_ROLE_STYLE[d.military_role]) || AIRCRAFT_STYLE[type];
   const style = withAircraftFlag(themedStyle(base, AIRCRAFT_LAYER_KEY[type]), d);
@@ -3313,11 +3320,14 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
   const airfield = d.nearest_airfield;
   const displayLimitedText = displayLimitedNote(d);
 
-  // Recorded as a side effect of decorating -- see the vertical-trend note
-  // above for why this lives here rather than behind a second fetch.
-  recordAltitude(d.icao24, d.altitude);
-  const altitudeTrack = altitudeHistory.get(d.icao24);
-  const trend = d.on_ground ? null : verticalTrend(altitudeTrack);
+  // The vertical trend only ever applies to the aircraft whose card is open:
+  // `track` is the recorded history createMapController.js's selectAircraft
+  // fetched for *this* selection, never every visible aircraft's (that would
+  // be a per-request fetch storm, not a detail route). isSelected also
+  // distinguishes "not selected, trend not
+  // applicable" from "selected, still waiting on the fetch" below.
+  const isSelected = d.icao24 === selectedIcao;
+  const trend = !d.on_ground && Array.isArray(track) ? verticalTrend(track) : null;
 
   const tooltip = `<b>${esc(d.callsign || d.icao24)}</b>${aircraftLine ? ` &middot; ${esc(aircraftLine)}` : ` &middot; ${esc(label)}`}` +
     `${emergencyLine ? `<br/><span class="aircraft-emergency">${emergencyLine}</span>` : ""}` +
@@ -3339,6 +3349,9 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
       ? '<p class="meta">Aircraft type/description from airplanes.live reference data.</p>'
       : ""}
     ${d.operator ? `<div>Operator: ${esc(d.operator)}</div>` : ""}
+    <div>${d.origin_country
+      ? `Origin country per the feed: <b>${esc(d.origin_country)}</b>`
+      : '<span class="meta">Origin country: not stated by the feed</span>'}</div>
     ${icaoHexDetail(d)}
     <div>Classification: ${esc(label)}${roleLabel ? ` &middot; role: ${esc(roleLabel)}` : ""}</div>
     ${type === "military"
@@ -3346,24 +3359,32 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
           ? "Military status is a real flag from airplanes.live's own database (dbFlags), not a guess."
           : "No confirmed military flag on this airframe &mdash; classified from its callsign prefix instead, which can be wrong in either direction."
         }${roleLabel ? ` The role (${esc(roleLabel)}) is a best-effort read of the type description or callsign, not a confirmed mission type.` : ""}</p>`
-      : ""}
+      : `<p class="meta">Classification (${esc(label)}) is a best-effort guess from callsign pattern and ADS-B ` +
+        "emitter category, not a confirmed identification -- see classifyAircraft in map/decorators.js.</p>"}
 
     <div class="csection-h">Flight now</div>
     <div>Callsign: ${d.callsign ? esc(d.callsign) : '<span class="meta">not broadcast</span>'}</div>
     <div>Altitude: ${esc(Math.round(d.altitude || 0))} m</div>
-    ${d.on_ground
-      ? ""
-      : `<div>Vertical trend: ${trend
-          ? `<b>${esc(VERTICAL_TREND_LABEL[trend])}</b> <span class="meta">&mdash; derived from ${esc((altitudeTrack || []).length)} altitude fixes this tab has recorded since it started watching this aircraft; not the transponder's own rate, and it resets on reload.</span>`
-          : '<span class="meta">not enough recorded track yet</span>'
-        }</div>`}
+    ${!d.on_ground && isSelected
+      ? `<div>Vertical trend: ${
+          Array.isArray(track)
+            ? (trend
+                ? `<b>${esc(VERTICAL_TREND_LABEL[trend])}</b> <span class="meta">&mdash; derived from this aircraft's recorded track (server-side position history), not the transponder's own rate</span>`
+                : '<span class="meta">not enough recently, contiguously recorded track to say</span>')
+            : '<span class="meta">recorded track loading&hellip;</span>'
+        }</div>`
+      : ""}
     <div>Ground speed: ${esc(Math.round((d.velocity || 0) * 3.6))} km/h &middot; Heading: ${
       Number.isFinite(d.heading) ? `${esc(Math.round(d.heading))}&deg;` : "n/a"
     }</div>
     <div>On ground: ${d.on_ground ? "yes" : "no"}</div>
     ${lastPingDetail(d.updated)}
     <div>Squawk: ${d.squawk
-      ? `${esc(d.squawk)}${squawkEmergencyLabel ? ` &mdash; <b>${esc(squawkEmergencyLabel)}</b>` : ' <span class="meta">(no special meaning)</span>'}`
+      ? `${esc(d.squawk)}${
+          squawkEmergencyLabel
+            ? ' <span class="meta">(see Emergency, above)</span>'
+            : ' <span class="meta">(no special meaning)</span>'
+        }`
       : '<span class="meta">not broadcast</span>'}</div>
 
     <div class="csection-h">Flags</div>
@@ -3384,7 +3405,7 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
     )} (ADS-B) &mdash; position, altitude, speed and heading <i>measured</i> by the aircraft's own transponder;
       identity fields (registration, operator, type) <i>reported</i> by airplanes.live's reference data, where it
       has an entry; ICAO allocation country <i>derived</i> from the Mode-S address block; vertical trend
-      <i>derived</i> from altitude this tab has itself recorded${airfield ? "; airfields: OurAirports" : ""}</div>`;
+      <i>derived</i> from this aircraft's own recorded track${airfield ? "; airfields: OurAirports" : ""}</div>`;
   let cls = "aircraft-marker";
   if (type === "military") cls += " military-marker";
   if (flag) cls += ` aircraft-flagged aircraft-${flag === "emergency" ? "emergency" : "hidden"}`;
