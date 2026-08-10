@@ -1228,6 +1228,28 @@ PIPELINE_ROUTES: list[dict] = [
 # this list as much as anywhere else, so a corridor with no figure this
 # project can actually stand behind simply omits the four transit fields
 # rather than guessing. test_shipping_corridors.py checks that pattern holds.
+#
+# Task 20 review (Critical): this list shipped with three `transits` figures
+# (Suez, Hormuz, Panama) that were all wrong when checked against the
+# publisher's own page -- Suez off by 547, Panama off by ~1,000 (a 7% gap the
+# "approximate" label didn't cover), Hormuz a 2022-vs-2023 year mix-up. None
+# were re-derived and re-added: a hand-maintained statistic in a Python
+# literal has no refresh path, no owner and no way to signal staleness, which
+# is exactly what this project's rule against presenting a number it did not
+# receive is for. The bar for a transit figure to earn its way back in:
+# verified against the publisher's own page (not an aggregator), with the
+# source URL and access date stored beside the number so the next reader can
+# check it and see how old the check is. All ten corridors below carry none
+# until that bar is met.
+#
+# Task 20 review (Minor 1): the shipped `transits` field also conflated two
+# different quantities under one name -- Hormuz's figure was an oil-flow rate
+# (million barrels/day), everything else a vessel count. If a transit figure
+# returns for a chokepoint, keep a genuine vessel count under `transits` and
+# give a non-vessel quantity (barrels/day, tonnage, whatever the publisher
+# actually reports) its own differently-named field instead of sharing this
+# one -- `transits_unit` disambiguates it for a popup reader, but the schema
+# itself should not need a unit string to say what kind of number it holds.
 SHIPPING_LANES: list[dict] = [
     {
         "id": "suez_approach",
@@ -1235,10 +1257,6 @@ SHIPPING_LANES: list[dict] = [
         "region_keys": ["red_sea_yemen"],
         "note": "Mediterranean-Red Sea shortcut via the Suez Canal -- schematic corridor, not a surveyed route.",
         "coords": [[31.26, 32.31], [30.6, 32.35], [29.95, 32.55], [29.5, 32.6]],
-        "transits": 25887,
-        "transits_unit": "vessel transits",
-        "transits_publisher": "Suez Canal Authority",
-        "transits_year": 2023,
     },
     {
         "id": "bab_el_mandeb",
@@ -1253,10 +1271,6 @@ SHIPPING_LANES: list[dict] = [
         "region_keys": ["persian_gulf_hormuz"],
         "note": "The sole sea passage between the Persian Gulf and the Gulf of Oman -- schematic corridor, not a surveyed route.",
         "coords": [[26.9, 51.5], [26.5, 55.0], [26.0, 56.3], [25.3, 57.0], [24.5, 58.5]],
-        "transits": 21,
-        "transits_unit": "million barrels/day, oil flow (not a vessel count)",
-        "transits_publisher": "U.S. Energy Information Administration, World Oil Transit Chokepoints",
-        "transits_year": 2023,
     },
     {
         "id": "malacca",
@@ -1275,6 +1289,12 @@ SHIPPING_LANES: list[dict] = [
     {
         "id": "bosphorus",
         "name": "Bosphorus",
+        # Tagged to the Russia/Ukraine theatre rather than left unscoped
+        # (Task 20 review, Minor 2): the strait is the Montreux-governed
+        # chokepoint Russia's Black Sea Fleet and its grain/oil-export traffic
+        # both have to pass, and Turkey has restricted transit of belligerent
+        # warships through it since the 2022 invasion -- a live fact about
+        # that conflict, not the Turkey/Bosphorus theatre in general.
         "region_keys": ["russia_ukraine"],
         "note": "Connects the Black Sea to the Sea of Marmara and the Mediterranean, regulated by the 1936 Montreux Convention -- schematic corridor, not a surveyed route.",
         "coords": [[41.25, 29.1], [41.05, 29.0], [40.97, 28.98], [40.75, 28.9]],
@@ -1285,10 +1305,6 @@ SHIPPING_LANES: list[dict] = [
         "region_keys": [],
         "note": "Connects the Atlantic and Pacific via the Panama Canal -- schematic corridor, not a surveyed route.",
         "coords": [[9.6, -79.9], [9.35, -79.92], [9.08, -79.68], [8.9, -79.57], [8.4, -79.9]],
-        "transits": 13000,
-        "transits_unit": "vessel transits/year, approximate",
-        "transits_publisher": "Panama Canal Authority (ACP)",
-        "transits_year": 2023,
     },
     {
         "id": "gibraltar",

@@ -28,6 +28,26 @@ EXPECTED_NAMES = {
 TRANSIT_CITATION_FIELDS = ("transits_publisher", "transits_unit", "transits_year")
 
 
+def _transit_citation_is_complete(lane: dict) -> bool:
+    """The rule this whole file exists to enforce, factored out so it can be
+    checked against synthetic fixtures as well as the shipped list -- see
+    test_a_well_cited_transit_figure_is_accepted and its sibling below for
+    why a synthetic case, not just the real data, has to exercise this."""
+    if "transits" not in lane:
+        return all(field not in lane for field in TRANSIT_CITATION_FIELDS)
+    if not (isinstance(lane["transits"], (int, float)) and lane["transits"] > 0):
+        return False
+    for field in TRANSIT_CITATION_FIELDS:
+        if lane.get(field) in (None, ""):
+            return False
+    return (
+        isinstance(lane["transits_publisher"], str)
+        and isinstance(lane["transits_unit"], str)
+        and isinstance(lane["transits_year"], int)
+        and 1990 <= lane["transits_year"] <= 2100
+    )
+
+
 def test_exactly_the_ten_named_corridors():
     assert len(infrastructure.SHIPPING_LANES) == 10
     assert {lane["name"] for lane in infrastructure.SHIPPING_LANES} == EXPECTED_NAMES
@@ -72,30 +92,46 @@ def test_every_popup_note_says_schematic_not_surveyed():
 def test_a_transit_figure_always_carries_its_publisher_unit_and_year():
     """The global rule ("no uncited numbers") applied to this one list: a
     corridor either states no transit figure at all, or states one alongside
-    who published it, what unit it's in, and what year it's from."""
+    who published it, what unit it's in, and what year it's from.
+
+    Task 20 review (Critical): all three transit figures this list shipped
+    with (Suez, Hormuz, Panama) turned out to be wrong when checked against
+    the publisher's own page, and the controller ruling was to drop them
+    rather than chase corrected numbers -- see SHIPPING_LANES' own comment in
+    backend/infrastructure.py. So every corridor here currently takes the
+    "no figure" branch; the two tests below exercise the "figure present"
+    branch against synthetic fixtures instead, so the rule stays covered
+    (both ways) whether or not the shipped list currently carries a number.
+    """
     for lane in infrastructure.SHIPPING_LANES:
-        if "transits" not in lane:
-            # No figure at all is honest too -- most of these ten carry none,
-            # because this project does not have a citable number for every
-            # chokepoint's traffic.
-            for field in TRANSIT_CITATION_FIELDS:
-                assert field not in lane, (lane["id"], field)
-            continue
-        assert isinstance(lane["transits"], (int, float)) and lane["transits"] > 0, lane["id"]
-        for field in TRANSIT_CITATION_FIELDS:
-            value = lane.get(field)
-            assert value not in (None, ""), (lane["id"], field)
-        assert isinstance(lane["transits_publisher"], str)
-        assert isinstance(lane["transits_unit"], str)
-        assert isinstance(lane["transits_year"], int)
-        assert 1990 <= lane["transits_year"] <= 2100, lane["id"]
+        assert _transit_citation_is_complete(lane), lane["id"]
 
 
-def test_at_least_one_corridor_actually_carries_a_cited_transit_figure():
-    # Guards against the citation test above passing vacuously -- some
-    # corridor in the shipped list has to exercise the "figure present"
-    # branch, not just the "figure absent" one.
-    assert any("transits" in lane for lane in infrastructure.SHIPPING_LANES)
+def test_a_well_cited_transit_figure_is_accepted():
+    # The positive case the review flagged as missing from real data: a
+    # transit figure with all three citation fields, verified against the
+    # rule a future corridor would actually have to meet.
+    lane = {
+        "id": "fixture_lane",
+        "transits": 1000,
+        "transits_unit": "vessel transits",
+        "transits_publisher": "Example Canal Authority",
+        "transits_year": 2024,
+    }
+    assert _transit_citation_is_complete(lane)
+
+
+def test_a_transit_figure_missing_any_one_citation_field_is_rejected():
+    base = {
+        "id": "fixture_lane",
+        "transits": 1000,
+        "transits_unit": "vessel transits",
+        "transits_publisher": "Example Canal Authority",
+        "transits_year": 2024,
+    }
+    for field in TRANSIT_CITATION_FIELDS:
+        incomplete = {k: v for k, v in base.items() if k != field}
+        assert not _transit_citation_is_complete(incomplete), field
 
 
 def test_serialize_includes_lanes_alongside_sites_and_pipelines():
