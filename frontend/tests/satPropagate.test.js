@@ -258,18 +258,72 @@ test("a tick for one group's cadence never re-propagates another group's satelli
 
   // Only the fast group's timer has fired so far.
   tracker.tick(T0, "fast");
-  assert.notEqual(tracker.positionAt(fastId, T0), null, "the fast group's satellite must have a fix");
-  assert.equal(tracker.positionAt(slowId, T0), null, "the slow group's satellite must not have been touched");
+  assert.notEqual(tracker.positionAt(fastId, T0, "fast"), null, "the fast group's satellite must have a fix");
+  assert.equal(tracker.positionAt(slowId, T0, "slow"), null, "the slow group's satellite must not have been touched");
 
   // A second fast-cadence tick, still before the slow group's own cadence
   // has elapsed: the slow satellite must still be untouched.
   const tenSecondsLater = new Date(T0.getTime() + 10_000);
   tracker.tick(tenSecondsLater, "fast");
-  assert.equal(tracker.positionAt(slowId, tenSecondsLater), null);
+  assert.equal(tracker.positionAt(slowId, tenSecondsLater, "slow"), null);
 
   // Only once the slow group's own timer fires does it get a fix.
   tracker.tick(tenSecondsLater, "slow");
-  assert.notEqual(tracker.positionAt(slowId, tenSecondsLater), null);
+  assert.notEqual(tracker.positionAt(slowId, tenSecondsLater, "slow"), null);
+});
+
+test("the same NORAD id under two groups gets two independent entries -- neither steals the other's fix history", () => {
+  // The regression this guards: backend/sources/satellites.py's
+  // ELEMENT_LAYER_GROUPS maps both the weather and geo toggles to real
+  // CelesTrak groups that share members (GOES satellites appear in both),
+  // so the same NORAD id legitimately arrives tagged with two different
+  // groups. Keying the tracker on noradId alone meant whichever layer
+  // registered it last owned the only entry -- the other layer's tick()
+  // saw a `group` that didn't match its own, skipped the entry forever, and
+  // it never accumulated the two fixes interpolateFixes needs. Keyed on
+  // (group, noradId) instead, both layers get their own entry, their own
+  // satrec, and their own fix history for what is physically one satellite.
+  const sharedId = 43226; // e.g. a GOES satellite, real member of both groups
+  const tracker = createPropagationTracker();
+  tracker.setElements(sharedId, ISS_OMM, "satWeather");
+  tracker.setElements(sharedId, ISS_OMM, "satGeo");
+
+  const tA = T0;
+  const tB = new Date(T0.getTime() + 60_000);
+  const mid = new Date(T0.getTime() + 30_000);
+
+  // Both groups tick on their own schedule -- satWeather twice (its 10s
+  // cadence), satGeo once so far (its 60s cadence). Registering the same
+  // element set under two groups must not make one tick() call answer for
+  // both.
+  tracker.tick(tA, "satWeather");
+  tracker.tick(tB, "satWeather");
+  tracker.tick(tA, "satGeo");
+
+  // satWeather has two fixes, so positionAt interpolates.
+  const weatherPos = tracker.positionAt(sharedId, mid, "satWeather");
+  assert.notEqual(weatherPos, null);
+  const satrec = satrecFromElements(ISS_OMM);
+  const expectedInterpolated = interpolateFixes(propagateEci(satrec, tA), propagateEci(satrec, tB), mid);
+  assert.ok(Math.abs(weatherPos.lat - expectedInterpolated.lat) < 1e-6);
+  assert.ok(Math.abs(weatherPos.lon - expectedInterpolated.lon) < 1e-6);
+
+  // satGeo has only its one fix so far -- answered as-is, not interpolated,
+  // and it must not have been advanced by satWeather's two ticks above.
+  const geoPos = tracker.positionAt(sharedId, tA, "satGeo");
+  assert.notEqual(geoPos, null);
+  const expectedSingleFix = propagateToLatLonAlt(satrec, tA);
+  assert.ok(Math.abs(geoPos.lat - expectedSingleFix.lat) < 1e-6);
+  assert.ok(Math.abs(geoPos.lon - expectedSingleFix.lon) < 1e-6);
+
+  // Both entries are real and counted separately, even though it is one
+  // physical satellite.
+  assert.equal(tracker.size("satWeather"), 1);
+  assert.equal(tracker.size("satGeo"), 1);
+  assert.equal(tracker.size(), 2);
+
+  // A group this id was never registered under has no entry for it at all.
+  assert.equal(tracker.positionAt(sharedId, tA, "satImaging"), null);
 });
 
 test("size(group) counts only the satellites tagged with that group", () => {

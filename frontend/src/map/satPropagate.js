@@ -135,45 +135,69 @@ export function interpolateFixes(fixA, fixB, date) {
  * so a busy layer's render loop never has to run SGP4 more often than its
  * own cadence calls for (backend/sources/satellites.py's cadence_seconds).
  *
- * One tracker shared across every layer, tagged per satellite with the
- * `group` its own layer passes to setElements/tick, rather than one tracker
- * per layer: CelesTrak's own groups never overlap (a NORAD id belongs to
- * exactly one of them), so nothing is gained by seven separate Maps, and a
- * caller that wants "just this layer's satellites" gets it by passing that
- * layer's own key as `group` to tick()/size() -- entries tagged with a
- * different group are left completely untouched.
+ * One tracker shared across every layer, keyed by (group, noradId) rather
+ * than by noradId alone -- every caller must pass the group it belongs to.
+ * CelesTrak's *groups* never overlap, but the *toggles* this app puts on top
+ * of them can: backend/sources/satellites.py's ELEMENT_LAYER_GROUPS maps
+ * both "weather" and "geo" toggles to real CelesTrak groups that each
+ * contain the GOES satellites, so the same NORAD id legitimately arrives
+ * under two different `group` tags at once. Keying on the id alone meant
+ * whichever layer registered it last owned the only entry that existed --
+ * the other layer's tick() saw a different `group` on that entry, silently
+ * skipped it every time, and it never accumulated the two fixes
+ * interpolateFixes needs. Keying on the pair gives the two layers two
+ * independent entries (independent satrecs, independent fix history) for
+ * what is, physically, one satellite -- more memory for the handful of ids
+ * this ever applies to, and the only way neither layer's timeline can
+ * clobber the other's.
  *
- * That tagging is not optional decoration: tick()'s whole reason to take a
- * `group` argument is that calling it with none would re-run SGP4 for every
- * satellite ever registered, on whichever layer's cadence happened to ask
- * first -- which would mean switching on Starlink (its own sixty-second
- * cadence) got its ~7,000 objects re-propagated every time a ten-second
- * layer like satNavigation ticked. That defeats the entire reason
- * cadence_seconds distinguishes small groups from large ones in the first
- * place, so every caller in this codebase must pass its own layer key.
+ * A caller that wants "just this layer's satellites" passes that layer's
+ * own key as `group` to tick()/size() -- entries under a different group
+ * are left completely untouched. That is not optional decoration: tick()'s
+ * whole reason to take a `group` argument is that calling it with none
+ * would re-run SGP4 for every satellite ever registered, on whichever
+ * layer's cadence happened to ask first -- which would mean switching on
+ * Starlink (its own sixty-second cadence) got its ~7,000 objects
+ * re-propagated every time a ten-second layer like satNavigation ticked.
+ * That defeats the entire reason cadence_seconds distinguishes small groups
+ * from large ones in the first place, so every caller in this codebase must
+ * pass its own layer key to every method here.
  */
 export function createPropagationTracker() {
-  const bySatnum = new Map(); // norad_id -> { satrec, epoch, group, prev: fix|null, last: fix }
+  const entries = new Map(); // "group|noradId" -> { satrec, epoch, group, noradId, prev: fix|null, last: fix }
+
+  // `group` is always one of this app's own layer keys (satNavigation,
+  // satWeather, ...) -- no "|" in any of them -- and noradId is a plain
+  // integer, so a bare join can never collide between two distinct pairs.
+  const keyOf = (noradId, group) => `${group}|${noradId}`;
 
   return {
     /**
      * Registers or refreshes one satellite's element set under `group`. A
-     * satrec is only rebuilt when the epoch (or the group it's tagged with)
-     * actually changed -- rebuilding it on every call would be free, but the
-     * fix history it carries would not survive a rebuild that didn't need to
-     * happen every time a layer's steady poll hands the same elements back
-     * again.
+     * satrec is only rebuilt when the epoch has actually changed --
+     * rebuilding it on every call would be free, but the fix history it
+     * carries would not survive a rebuild that didn't need to happen every
+     * time a layer's steady poll hands the same elements back again.
      */
     setElements(noradId, omm, group) {
-      const existing = bySatnum.get(noradId);
-      if (existing && existing.epoch === omm.EPOCH && existing.group === group) return;
-      bySatnum.set(noradId, { satrec: satrecFromElements(omm), epoch: omm.EPOCH, group, prev: null, last: null });
+      const key = keyOf(noradId, group);
+      const existing = entries.get(key);
+      if (existing && existing.epoch === omm.EPOCH) return;
+      entries.set(key, { satrec: satrecFromElements(omm), epoch: omm.EPOCH, group, noradId, prev: null, last: null });
     },
 
-    /** Drops satellites no longer in `noradIds` -- a layer toggled off, or narrowed by a filter. */
-    prune(noradIds) {
+    /**
+     * Drops `group`'s satellites that are no longer in `noradIds` -- that
+     * layer toggled off, or narrowed by a filter. Scoped to `group` so
+     * pruning one layer's entry for a shared id (see this function's own
+     * doc above) can never remove a different layer's entry for the same
+     * physical satellite.
+     */
+    prune(noradIds, group) {
       const keep = new Set(noradIds);
-      for (const id of bySatnum.keys()) if (!keep.has(id)) bySatnum.delete(id);
+      for (const [key, entry] of entries) {
+        if (entry.group === group && !keep.has(entry.noradId)) entries.delete(key);
+      }
     },
 
     /**
@@ -187,7 +211,7 @@ export function createPropagationTracker() {
      * not visited at all, not merely skipped after being read.
      */
     tick(date, group) {
-      for (const entry of bySatnum.values()) {
+      for (const entry of entries.values()) {
         if (entry.group !== group) continue;
         const fix = propagateEci(entry.satrec, date);
         if (!fix) continue; // decayed/unpropagable -- keep whatever fix history it had, draw nothing new
@@ -197,23 +221,27 @@ export function createPropagationTracker() {
     },
 
     /**
-     * The drawn geodetic position for one satellite at `date` -- interpolated
-     * between its last two fixes when there are two, the single fix as-is
-     * when there is only one (e.g. the first tick after setElements), or
-     * null if tick() has never produced a usable fix for it at all.
+     * The drawn geodetic position for one satellite, under `group`, at
+     * `date` -- interpolated between its last two fixes when there are two,
+     * the single fix as-is when there is only one (e.g. the first tick
+     * after setElements), or null if tick() has never produced a usable fix
+     * for it at all. `group` is required for the same reason it is on
+     * setElements/tick: a shared NORAD id has one entry per group, each on
+     * its own fix history, and omitting it would leave positionAt no way to
+     * say which one it means.
      */
-    positionAt(noradId, date) {
-      const entry = bySatnum.get(noradId);
+    positionAt(noradId, date, group) {
+      const entry = entries.get(keyOf(noradId, group));
       if (!entry || !entry.last) return null;
       if (!entry.prev) return eciToLatLonAlt(entry.last.position, date);
       return interpolateFixes(entry.prev, entry.last, date);
     },
 
-    /** Total tracked satellites, or just those tagged with `group` if given. */
+    /** Total tracked (group, satellite) pairs, or just those tagged with `group` if given. */
     size(group) {
-      if (group === undefined) return bySatnum.size;
+      if (group === undefined) return entries.size;
       let n = 0;
-      for (const entry of bySatnum.values()) if (entry.group === group) n += 1;
+      for (const entry of entries.values()) if (entry.group === group) n += 1;
       return n;
     },
   };

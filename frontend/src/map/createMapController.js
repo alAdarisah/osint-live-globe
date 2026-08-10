@@ -4259,7 +4259,11 @@ export function createMapController(container, initial, callbacks) {
     const now = new Date();
     const out = [];
     for (const omm of elements) {
-      const pos = satElementTracker.positionAt(omm.NORAD_CAT_ID, now);
+      // `layerKey` as the group: a NORAD id shared between two toggles (e.g.
+      // a GOES satellite under both satWeather and satGeo -- see
+      // satPropagate.js's own note on why) has one tracker entry per group,
+      // so this has to say which one it means.
+      const pos = satElementTracker.positionAt(omm.NORAD_CAT_ID, now, layerKey);
       if (!pos) continue; // no fix yet (still loading), or the element set doesn't propagate at all
       out.push({ norad_id: omm.NORAD_CAT_ID, name: omm.OBJECT_NAME, lat: pos.lat, lon: pos.lon, alt_km: pos.alt_km });
     }
