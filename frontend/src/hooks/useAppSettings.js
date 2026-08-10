@@ -29,6 +29,8 @@ import { defaultSettings, mergeSettings, EDITABLE_SOURCES } from "../settings/de
 import { borderStats, sanitizeRing, MAX_TOTAL_POINTS } from "../settings/borderOverrides";
 import { setIconTheme } from "../map/iconTheme";
 import { setCursorOptions } from "../map/cursor";
+import { buildTileFilter, TILE_TINT_PRESETS } from "../map/tileTint";
+import { setTileTintAtRest } from "../map/tileTintMotion";
 
 const STORAGE_KEY = "osint-admin-settings";
 // When STORAGE_KEY was last written, in ms. See localIsNewerThan below.
@@ -295,6 +297,21 @@ export function useAppSettings() {
       scale: settings.ui.cursorScale,
       color: settings.ui.cursorColor,
     });
+    // Task 30: one filter value and three tint values per target, the same
+    // "state in, custom property out" shape --accent/--ui-text-scale already
+    // use above -- style.css's own rules for .leaflet-tile-pane/
+    // .leaflet-imagery-pane/.leaflet-weather-pane read these, never this file
+    // reaching into the DOM to restyle a pane directly.
+    for (const target of ["basemap", "imagery", "weather"]) {
+      const dial = settings.ui.tiles[target];
+      root.style.setProperty(`--tile-${target}-filter`, buildTileFilter(dial));
+      root.style.setProperty(`--tile-${target}-tint-color`, dial.tintColor);
+      root.style.setProperty(`--tile-${target}-tint-strength`, String(dial.tintStrength));
+      root.style.setProperty(`--tile-${target}-tint-blend`, dial.blendMode);
+    }
+    // Read from createMapController.js's movestart/moveend handlers -- see
+    // map/tileTintMotion.js for why that is a module flag rather than a prop.
+    setTileTintAtRest(settings.ui.tiles.applyAtRest);
   }, [settings.ui]);
 
   useEffect(() => {
@@ -444,6 +461,45 @@ export function useAppSettings() {
 
   const setUi = useCallback(
     (patch) => update((prev) => ({ ...prev, ui: { ...prev.ui, ...patch } })),
+    [update]
+  );
+
+  /** One tile-tint target's dial (basemap/imagery/weather), patched in place. */
+  const setTileDial = useCallback(
+    (target, patch) =>
+      update((prev) => ({
+        ...prev,
+        ui: {
+          ...prev.ui,
+          tiles: { ...prev.ui.tiles, [target]: { ...prev.ui.tiles[target], ...patch } },
+        },
+      })),
+    [update]
+  );
+
+  /**
+   * One target's dial, replaced wholesale by a shipped preset.
+   *
+   * A full replacement rather than a patch -- a preset is a complete
+   * statement ("this is what Night looks like"), and patching would leave
+   * behind whatever the reader had set before under fields the preset does
+   * not mention, silently producing a result nobody chose.
+   */
+  const setTilePreset = useCallback(
+    (target, presetKey) =>
+      update((prev) => {
+        const preset = TILE_TINT_PRESETS[presetKey];
+        if (!preset) return prev;
+        return {
+          ...prev,
+          ui: { ...prev.ui, tiles: { ...prev.ui.tiles, [target]: { ...preset.dial } } },
+        };
+      }),
+    [update]
+  );
+
+  const setTilesApplyAtRest = useCallback(
+    (value) => update((prev) => ({ ...prev, ui: { ...prev.ui, tiles: { ...prev.ui.tiles, applyAtRest: value } } })),
     [update]
   );
 
@@ -628,7 +684,7 @@ export function useAppSettings() {
     () => ({
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
       setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
-      moveLayerInStack, resetLayerStack, setUi, setCityZones,
+      moveLayerInStack, resetLayerStack, setUi, setTileDial, setTilePreset, setTilesApplyAtRest, setCityZones,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,
@@ -636,7 +692,7 @@ export function useAppSettings() {
     [
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
       setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
-      moveLayerInStack, resetLayerStack, setUi, setCityZones,
+      moveLayerInStack, resetLayerStack, setUi, setTileDial, setTilePreset, setTilesApplyAtRest, setCityZones,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,

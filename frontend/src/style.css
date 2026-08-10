@@ -108,6 +108,92 @@ html, body {
   font-family: "Segoe UI", Consolas, monospace;
 }
 
+/* Task 30: tile tint (see map/tileTint.js and BasemapSection.jsx).
+   --tile-<target>-* are set on <html> by useAppSettings.js, the same
+   "settings in, custom property out" path --accent/--ui-text-scale already
+   use -- this file never re-reads settings, it only ever reads the
+   properties.
+
+   Leaflet's own stylesheet gives every pane `position: absolute; left: 0;
+   top: 0;` and nothing else, which leaves width/height to shrink-to-fit --
+   and a pane whose only children are themselves absolutely positioned tiles
+   shrinks to zero. That costs the *filter* nothing (it paints an element's
+   composited output, overflowing descendants included, regardless of the
+   element's own box), but it means a `::after` sized with `inset: 0` has no
+   box to inset into and collapses to nothing. Adding the missing right/bottom
+   edge -- all the way up through .leaflet-map-pane, since that is every
+   pane's own containing block -- is what gives the ::after overlays below a
+   real box, without changing anything about how panning/zooming already
+   worked (that is still the pane's own transform; overflow: hidden on
+   .leaflet-container still clips it to the visible viewport exactly as
+   before). Nothing in this codebase reads these panes' own
+   getBoundingClientRect, so widening their box has no other effect. */
+.leaflet-map-pane,
+.leaflet-tile-pane,
+.leaflet-imagery-pane,
+.leaflet-weather-pane {
+  right: 0;
+  bottom: 0;
+}
+
+/* The filter dial: saturate/brightness/contrast/invert/blur, pre-joined into
+   one value by map/tileTint.js's buildTileFilter (so this file never has to
+   know the function order or which ones are at their identity value and can
+   be dropped). `none` -- the shipped default -- costs nothing to paint. */
+.leaflet-tile-pane { filter: var(--tile-basemap-filter, none); }
+.leaflet-imagery-pane { filter: var(--tile-imagery-filter, none); }
+.leaflet-weather-pane { filter: var(--tile-weather-filter, none); }
+
+/* The colour tint: a full-pane wash in `tintColor` at `tintStrength` opacity,
+   composited with `blendMode` -- deliberately a blended overlay rather than
+   `hue-rotate` (see tileTint.js's own note on why: hue-rotate spins every hue
+   in the tile by the same angle, so the sea turns the same off-colour as the
+   land; a blended tint pushes everything toward one target colour instead,
+   which is what "tinted red for night ops" actually means). `pointer-events:
+   none` keeps a fully-opaque tint from swallowing map drags and clicks --
+   the overlay is decoration, never a hit target. */
+.leaflet-tile-pane::after,
+.leaflet-imagery-pane::after,
+.leaflet-weather-pane::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.leaflet-tile-pane::after {
+  background: var(--tile-basemap-tint-color, transparent);
+  opacity: var(--tile-basemap-tint-strength, 0);
+  mix-blend-mode: var(--tile-basemap-tint-blend, multiply);
+}
+.leaflet-imagery-pane::after {
+  background: var(--tile-imagery-tint-color, transparent);
+  opacity: var(--tile-imagery-tint-strength, 0);
+  mix-blend-mode: var(--tile-imagery-tint-blend, multiply);
+}
+.leaflet-weather-pane::after {
+  background: var(--tile-weather-tint-color, transparent);
+  opacity: var(--tile-weather-tint-strength, 0);
+  mix-blend-mode: var(--tile-weather-tint-blend, multiply);
+}
+
+/* The "apply tint only at rest" escape hatch (settings.ui.tiles.applyAtRest,
+   off by default -- see map/tileTintMotion.js for what it trades away and
+   why it is opt-in). tileTintMotion.js toggles this class on the map's own
+   container from movestart/zoomstart to moveend/zoomend; while it is
+   present, every pane above paints as if untinted, which is what stops a
+   continuously-changing filter competing with the pan/zoom animation itself
+   for the same frame budget. */
+.leaflet-container.tile-tint-panning .leaflet-tile-pane,
+.leaflet-container.tile-tint-panning .leaflet-imagery-pane,
+.leaflet-container.tile-tint-panning .leaflet-weather-pane {
+  filter: none;
+}
+.leaflet-container.tile-tint-panning .leaflet-tile-pane::after,
+.leaflet-container.tile-tint-panning .leaflet-imagery-pane::after,
+.leaflet-container.tile-tint-panning .leaflet-weather-pane::after {
+  opacity: 0;
+}
+
 /* The reticle (see map/cursor.js). `cursor: none` is scoped to the map and
    nothing else on purpose: everywhere the reticle is not drawn -- the control
    panel, the admin panel, every input and its text caret -- keeps the native
@@ -3279,6 +3365,12 @@ html, body {
 .admin-wide-btn, .admin-add-btn { width: 100%; margin-top: 6px; }
 .admin-wide-btn.danger { border-color: rgba(255, 61, 61, 0.5); color: #ff8080; }
 .admin-wide-btn.danger:hover { border-color: #ff3d3d; color: #ffb3b3; }
+
+/* Task 30: the six preset buttons wrap rather than overflow -- .admin-row's
+   own `nowrap` default is right for a pair of buttons (Export/Import) but
+   six names ("High contrast", "Soft light"'s neighbours) do not fit one line
+   at panel width. */
+.admin-preset-row { flex-wrap: wrap; }
 
 /* --- data editor --- */
 .admin-record-list {

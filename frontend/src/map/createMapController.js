@@ -49,6 +49,7 @@ import {
   createTrailLayers,
   createWindFlowLayer,
 } from "./layers";
+import { attachTileTintMotionGate } from "./tileTintMotion";
 import {
   decorateEvent,
   decorateHistoricalEvent,
@@ -620,6 +621,10 @@ export function createMapController(container, initial, callbacks) {
   // DOM cursor and what it reads is the DOM under the pointer. Returns its own
   // teardown, called from destroy() below.
   const detachCursor = attachCursor(container);
+  // Task 30: the class style.css keys the "tint off while panning" escape
+  // hatch on -- see tileTintMotion.js for why the flag it reads lives at
+  // module scope instead of arriving as a parameter here.
+  const detachTileTintMotion = attachTileTintMotionGate(map);
   const baseLayer = createBaseLayer(map, initial.theme);
   const weatherLayers = createWeatherLayers(map);
   const { firmsHeat, firmsPointsLayer, firmsLayer, firmsCanvasRenderer } = createFirmsLayers(map);
@@ -7917,6 +7922,7 @@ export function createMapController(container, initial, callbacks) {
       // Holds a container listener and possibly a queued frame, and appends an
       // element to the container -- none of which map.remove() knows about.
       detachCursor();
+      detachTileTintMotion();
       document.removeEventListener("visibilitychange", onVisibilityChange);
       // Aborts any pan/zoom animation still in flight. Leaflet's own animation
       // frame keeps running after remove() otherwise, and then reads panes that

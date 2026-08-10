@@ -14,12 +14,21 @@ import { shippedDrawZoom, SCENE_APPLY_KEYS, TRAIL_PARENT } from "../map/scene";
 import { CURSOR_STYLES } from "../map/cursor";
 import { glyphChoicesFor } from "../map/iconTheme";
 import { sanitizeBorders } from "./borderOverrides";
+import { DEFAULT_TILE_DIAL, mergeTileDial } from "../map/tileTint";
 
 // Bumped only when a saved config could no longer be merged onto the defaults
 // safely. Every load runs through mergeSettings below, which takes the shipped
 // default for anything missing or malformed, so an older file is normally just
 // a subset rather than a migration problem.
-export const SETTINGS_VERSION = 1;
+//
+// 2 (Task 30): added ui.tiles (basemap/imagery/weather filter dials, see
+// map/tileTint.js). No destructive change to migrate -- a config saved before
+// this key existed simply has no `stored.ui.tiles`, and mergeSettings' own
+// `isPlainObject(stored.ui.tiles)` guard below leaves defaultSettings()'
+// shipped dials in place for it, the same "additive key, absence means
+// unset" rule every other field in this file already follows. The bump is a
+// record of the shape changing, not a sign a converter had to be written.
+export const SETTINGS_VERSION = 2;
 
 /**
  * The layers whose appearance can be configured, in the order the admin panel
@@ -461,6 +470,21 @@ export function defaultSettings() {
       cursorStyle: "reticle", // see CURSOR_STYLES
       cursorScale: 1,
       cursorColor: null, // null == follow the UI accent
+      // Task 30: filter + colour-overlay dials for the raster tile panes --
+      // basemap, GIBS imagery and the weather rasters, kept independent
+      // because tinting a road map and tinting a satellite mosaic are
+      // different jobs (see map/tileTint.js and BasemapSection.jsx). Every
+      // dial ships at DEFAULT_TILE_DIAL, i.e. inert -- Admin Mode's own
+      // "Default" preset button and this shipped state are the same object.
+      tiles: {
+        // Off by default -- see map/tileTintMotion.js's own note on what
+        // this trades away and why it does not need to be on for a map that
+        // ships with blur at 0 everywhere.
+        applyAtRest: false,
+        basemap: { ...DEFAULT_TILE_DIAL },
+        imagery: { ...DEFAULT_TILE_DIAL },
+        weather: { ...DEFAULT_TILE_DIAL },
+      },
     },
     // { [sourceKey]: { edits: { [id]: {field: value, __hidden?: true} }, added: [record] } }
     data: Object.fromEntries(EDITABLE_SOURCES.map((s) => [s.key, { edits: {}, added: [] }])),
@@ -621,6 +645,19 @@ export function mergeSettings(stored) {
     base.ui.cursorColor = typeof stored.ui.cursorColor === "string" && /^#[0-9a-f]{6}$/i.test(stored.ui.cursorColor)
       ? stored.ui.cursorColor
       : null;
+    // Task 30 (see SETTINGS_VERSION's own note above). A config saved before
+    // this key existed has no `stored.ui.tiles` at all, isPlainObject fails
+    // the guard, and base.ui.tiles is left exactly as defaultSettings() set
+    // it -- every dial shipped and inert. mergeTileDial applies the same
+    // per-field range-checking every other stored value in this function
+    // gets, so a hand-edited file with e.g. `"blur": 99` clamps to 3 rather
+    // than reaching the pane at all.
+    if (isPlainObject(stored.ui.tiles)) {
+      base.ui.tiles.applyAtRest = stored.ui.tiles.applyAtRest === true;
+      base.ui.tiles.basemap = mergeTileDial(stored.ui.tiles.basemap);
+      base.ui.tiles.imagery = mergeTileDial(stored.ui.tiles.imagery);
+      base.ui.tiles.weather = mergeTileDial(stored.ui.tiles.weather);
+    }
   }
 
   // Repaired rather than validated: an order that has lost a layer is worse than

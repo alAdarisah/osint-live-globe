@@ -108,14 +108,24 @@ export function gibsUrlFor(layerKey, date) {
   return `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layer.id}/default/${day}/${layer.matrix}/{z}/{y}/{x}.${layer.format}`;
 }
 
+// Task 30: its own pane, not the shared 'tilePane' the base layer draws into.
+// Admin Mode tints basemap/imagery/weather independently (see map/tileTint.js
+// and BasemapSection.jsx), and a CSS filter or ::after applies to a whole
+// pane at once -- so three independent dial sets need three separate panes to
+// land on, or tinting the basemap would tint GIBS and the weather rasters
+// right along with it. zIndex 205 keeps it exactly where it always visually
+// sat: above the basemap's default tilePane (200) and below the weather pane
+// this file creates next (210), both still well under the countries pane
+// (350) so nothing here starts painting over vector overlays.
 export function createImageryLayer(map) {
+  if (!map.getPane("imageryPane")) {
+    map.createPane("imageryPane").style.zIndex = 205;
+  }
   // Starts with no URL and unattached: the layer only exists once a reader
   // picks one, same "the real URL arrives later" shape the precip layer has.
   return L.tileLayer("", {
     opacity: 0.85,
-    // Above the vector basemap (which has no explicit zIndex, so 1) and below
-    // the weather rasters at 5, so imagery never covers precipitation or cloud.
-    zIndex: 3,
+    pane: "imageryPane",
     maxNativeZoom: 9,
     noWrap: true, // see createBaseLayer above
     bounds: WORLD_TILE_BOUNDS,
@@ -124,7 +134,18 @@ export function createImageryLayer(map) {
   });
 }
 
+// Task 30: precip and clouds share one pane (rather than each getting their
+// own) because the brief's three dial sets are basemap/imagery/weather, not
+// four -- a reader tinting "weather" expects the radar and the cloud layer to
+// move together, not to have to find and match two separate colour pickers
+// for what is, on screen, one kind of thing. zIndex 210 keeps it above the
+// imagery pane (205) the same way `zIndex: 5` used to keep it above imagery's
+// old `zIndex: 3` inside the shared tile pane -- see createImageryLayer above
+// for the rest of that ordering.
 export function createWeatherLayers(map) {
+  if (!map.getPane("weatherPane")) {
+    map.createPane("weatherPane").style.zIndex = 210;
+  }
   // URL starts empty -- RainViewer has no fixed tile path, it's a frame
   // timestamp that changes every ~10min, so the real URL is filled in by
   // refreshPrecipRadar() in createMapController.js right after this layer is
@@ -132,7 +153,7 @@ export function createWeatherLayers(map) {
   // Leaflet has nothing to request, which is expected, not a bug.
   const precipLayer = L.tileLayer("", {
     opacity: 0.55,
-    zIndex: 5,
+    pane: "weatherPane",
     noWrap: true, // see createBaseLayer above
     bounds: WORLD_TILE_BOUNDS,
     maxNativeZoom: 7, // RainViewer's radar tiles don't exist past z7 -- beyond that
@@ -143,7 +164,7 @@ export function createWeatherLayers(map) {
 
   const cloudsLayer = L.tileLayer("/api/weather/tile/clouds_new/{z}/{x}/{y}.png", {
     opacity: 0.45,
-    zIndex: 5,
+    pane: "weatherPane",
     noWrap: true, // see createBaseLayer above
     bounds: WORLD_TILE_BOUNDS,
     // OWM's clouds_new tiles are only meaningfully distinct up to about z9 --

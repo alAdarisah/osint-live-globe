@@ -13,6 +13,8 @@
 //            its zoom gate, and the colour of every kind of pin in it. Grouped
 //            by layer rather than split across two sections, because split is
 //            how the same dial ended up offered twice (see LayerDialsSection)
+//   Tiles    filter + colour tint for the raster basemap/imagery/weather panes
+//            (see BasemapSection.jsx and map/tileTint.js)
 //   Data     the records themselves (see DataEditor.jsx)
 //   Display  panel opacity, accent, text size, motion, leader lines
 //   Config   export / import / reset, and the panel layout
@@ -30,6 +32,7 @@ import IconsSection, { SEARCH_TERMS as ICONS_TERMS } from "./sections/IconsSecti
 import StackSection, { SEARCH_TERMS as STACK_TERMS } from "./sections/StackSection";
 import LayerDialsSection, { SEARCH_TERMS as LAYERS_TERMS } from "./sections/LayerDialsSection";
 import CityZonesSection, { SEARCH_TERMS as ZONES_TERMS } from "./sections/CityZonesSection";
+import BasemapSection, { SEARCH_TERMS as TILES_TERMS } from "./sections/BasemapSection";
 import DataSection, { SEARCH_TERMS as DATA_TERMS } from "./sections/DataSection";
 import BordersSection, { SEARCH_TERMS as BORDERS_TERMS } from "./sections/BordersSection";
 import InterfaceSection, { SEARCH_TERMS as UI_TERMS } from "./sections/InterfaceSection";
@@ -48,6 +51,7 @@ const SECTIONS = [
   { Component: StackSection, terms: STACK_TERMS },
   { Component: LayerDialsSection, terms: LAYERS_TERMS },
   { Component: CityZonesSection, terms: ZONES_TERMS },
+  { Component: BasemapSection, terms: TILES_TERMS },
   { Component: DataSection, terms: DATA_TERMS },
   { Component: BordersSection, terms: BORDERS_TERMS },
   { Component: InterfaceSection, terms: UI_TERMS },
