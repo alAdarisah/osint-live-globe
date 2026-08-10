@@ -13,11 +13,12 @@
 // indirection existed only because a Leaflet popup's content is a DOM string
 // with no React underneath it; a card has no such excuse.
 import PlaceInfoCard from "./PlaceInfoCard";
+import CopyLinkButton from "./CopyLinkButton";
 
 const DEFAULT_OPEN = { profile: true, conflict: true };
 const STORAGE_KEY = "osint-district-card-accordion";
 
-export default function DistrictInfoCard({ district, onClose, onOpenRecord, onMonthChange, cardSettings }) {
+export default function DistrictInfoCard({ district, onClose, onOpenRecord, onMonthChange, cardSettings, getShareUrl }) {
   const place = district
     ? { id: district.pcode, title: district.name, subtitle: null, point: district.point, sections: district.sections }
     : null;
@@ -26,19 +27,26 @@ export default function DistrictInfoCard({ district, onClose, onOpenRecord, onMo
   // with one option nobody chose is furniture, same reasoning the old
   // monthPickerHtml gave for the same case.
   const months = district?.months || [];
-  const headerExtra = months.length > 0 && (
-    <label className="district-month">
-      Month
-      <select
-        className="district-month-select"
-        value={district.month || ""}
-        onChange={(e) => onMonthChange(e.target.value)}
-      >
-        {months.map((m) => (
-          <option key={m} value={m}>{m}</option>
-        ))}
-      </select>
-    </label>
+  const headerExtra = (
+    <>
+      {months.length > 0 && (
+        <label className="district-month">
+          Month
+          <select
+            className="district-month-select"
+            value={district.month || ""}
+            onChange={(e) => onMonthChange(e.target.value)}
+          >
+            {months.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      {/* Task 35: admin-2 (district), same as SubdivisionInfoCard's own
+          note -- not carried in the link, only the view underneath it. */}
+      <CopyLinkButton getShareUrl={getShareUrl} />
+    </>
   );
 
   return (

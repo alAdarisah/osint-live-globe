@@ -16,10 +16,14 @@ const RANGE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days, matches backend/history.py'
 const PLAYBACK_MIN_STEP_MS = 800;
 const PLAYBACK_STEPS = RANGE_MS / (60 * 60 * 1000); // one step per hour, so a sweep runs ~60s
 
-export function useReplay({ applyData, currentRegionKey, onExitReplay }) {
+export function useReplay({ applyData, currentRegionKey, onExitReplay, initialReplayAt = null }) {
   const [now, setNow] = useState(() => Date.now());
   // null == live (not scrubbed back); otherwise a specific past timestamp.
-  const [replayAt, setReplayAt] = useState(null);
+  // Task 35: a restored deep link starts scrubbed back rather than live --
+  // seeded straight into the initial state (a state initializer, not an
+  // effect) so the very first render already reads as replaying, instead of
+  // painting live data for one frame and then jumping back.
+  const [replayAt, setReplayAt] = useState(initialReplayAt);
   const [isPlaying, setIsPlaying] = useState(false);
 
   const regionRef = useRef(currentRegionKey);
@@ -59,6 +63,22 @@ export function useReplay({ applyData, currentRegionKey, onExitReplay }) {
     },
     [applyData]
   );
+
+  // Task 35: a restored deep link seeded replayAt above but has not actually
+  // fetched that moment's snapshot yet -- seekTo's own fetch is debounced for
+  // a scrub gesture, which there is none of here, so this issues the one
+  // fetch directly, once, on mount. Deliberately not in seekTo/scrubTo's own
+  // path: those exist for the *scrubber*, and folding a "first paint" case
+  // into a debounced, ticket-guarded function built for a drag gesture would
+  // be exactly the kind of one function serving two unrelated callers this
+  // codebase avoids elsewhere (see onEventFilterChange's own note in App.jsx
+  // for the general shape of that argument).
+  useEffect(() => {
+    if (initialReplayAt != null) fetchAt(initialReplayAt);
+    // Mount-only by design -- see the comment above. fetchAt/initialReplayAt
+    // are not expected to change identity in a way that should re-fire this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Debounced so dragging the slider doesn't fire a request per pixel --
   // only the settled position actually fetches. Playback doesn't come

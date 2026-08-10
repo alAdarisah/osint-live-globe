@@ -7143,6 +7143,26 @@ export function createMapController(container, initial, callbacks) {
     map.flyTo([lat, lon], allowedZoom(Math.max(map.getZoom(), minZoom)), { duration: 1.2 });
   }
 
+  // Task 35: putting the camera back exactly where a deep link says it was.
+  // Deliberately not flyTo -- that function takes the *max* of the current
+  // zoom and its argument (it is a locate gesture, "at least this far in"),
+  // which would refuse to zoom back out to a wider link than whatever the
+  // map happened to boot at. This is an immediate setView instead: no
+  // animation (there is nothing to animate from on a fresh load, and
+  // restoring mid-session should not visibly fly either), clamped through
+  // the same allowedZoom every other camera move on this map already is.
+  function setCamera(lat, lon, zoom) {
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(zoom)) return;
+    map.setView([lat, lon], allowedZoom(zoom), { animate: false });
+  }
+
+  /** What a "copy link" button reads to build one -- the map's own answer,
+   *  not a React copy that could fall out of step with it. */
+  function getCamera() {
+    const center = map.getCenter();
+    return { lat: center.lat, lon: center.lng, zoom: map.getZoom() };
+  }
+
   // ---------- event wiring ----------
 
   map.on("moveend", () => {
@@ -7650,6 +7670,28 @@ export function createMapController(container, initial, callbacks) {
 
     flyToRegion,
     flyTo,
+    setCamera,
+    getCamera,
+
+    // Task 35's deep-link restore for the two selection kinds it carries
+    // (see urlState.js for why only these two made the cut). Both look their
+    // target up before touching any state, so a link naming a country/water
+    // id that is not in the currently-loaded feed -- because it has not
+    // landed yet, or no longer exists -- selects nothing rather than
+    // half-applying. The caller (App.jsx) is the one that retries while the
+    // boot fetches are still in flight.
+    selectCountryByKey(key) {
+      const entry = countryEntryFor(key);
+      if (!entry) return false;
+      selectCountryEntry(entry, false);
+      return true;
+    },
+
+    selectWaterById(id) {
+      if (!waterEntryFor(id)) return false;
+      selectWater(id);
+      return true;
+    },
 
     // Task 33: the alert strip's own "click to fly and select" -- reuses the
     // same selectAircraft the marker-click path already uses, rather than

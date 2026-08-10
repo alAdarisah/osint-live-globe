@@ -1394,6 +1394,74 @@ html, body {
 .country-info-edit:disabled { opacity: 0.42; cursor: not-allowed; }
 .country-info-edit.active { background: var(--accent); color: #04121a; font-weight: 600; }
 
+/* Task 35: "copy a link to this view" -- CopyLinkButton.jsx, shared by every
+   info/detail card's header (through headerExtra) and the title bar. Same
+   look as .country-info-edit just above, the button it stands next to on the
+   country and district cards, but with no margin-left: auto of its own --
+   .country-info-name's/.event-detail-title's own flex-grow already pushes
+   the whole headerExtra group to the right, so a second auto margin here
+   would only split that white space with the one already claiming it. */
+.copy-link-button {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.82em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.copy-link-button:hover { background: rgba(var(--accent-rgb), 0.16); }
+
+/* The title bar's own copy, sized to sit next to #adminToggle/#themeToggle
+   rather than the smaller card-header buttons above. */
+#titleBar .copy-link-button {
+  font-size: 9.5px;
+  letter-spacing: 0.6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+#titleBar .copy-link-button:hover { color: var(--text-bright); border-color: var(--accent); }
+
+/* UrlStateNotice.jsx: a link this app could not read. Sits under the title
+   bar, centred, the same "fixed, translateX(-50%)" placement #borderEditBar
+   uses for its own notice -- but standalone (this can appear whether or not
+   a border edit session, or anything else, is open) and coloured the same
+   amber .border-edit-warning uses for "something needs your attention", not
+   the red reserved for a border edit's own outright refusal. */
+#urlStateNotice {
+  position: fixed;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, 92vw);
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--panel-bg);
+  border: 1px solid rgba(255, 196, 107, 0.5);
+  color: #ffc46b;
+  font-size: 11.5px;
+  line-height: 1.4;
+  box-shadow: 0 4px 16px var(--shadow-color);
+}
+#urlStateNotice button {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
 /* Says a boundary is not what the source serves -- the country-card twin of
    the edited-record note on a pin. */
 .edited-note { color: #ffc46b; }

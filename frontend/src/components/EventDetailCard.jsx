@@ -22,8 +22,9 @@
 // to give the blocks room; the render path itself does not fork.
 import { useEffect } from "react";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
+import CopyLinkButton from "./CopyLinkButton";
 
-export default function EventDetailCard({ detail, onClose }) {
+export default function EventDetailCard({ detail, onClose, getShareUrl }) {
   // Escape closes it. Registered here rather than on the card so it works
   // without the card having taken focus -- this opens from a click on a row in
   // another panel, and focus is still over there.
@@ -52,6 +53,11 @@ export default function EventDetailCard({ detail, onClose }) {
             Show on map
           </button>
         )}
+        {/* Task 35: this record's own kind/id (a ship, an aircraft, a fused
+            event...) is not one urlState.js carries -- see its own note on
+            why -- so this copies the view underneath the card, not a link
+            back to this exact record. CopyLinkButton's title text says so. */}
+        <CopyLinkButton getShareUrl={getShareUrl} />
         <button type="button" className="event-detail-close" onClick={onClose} aria-label="Close">
           &times;
         </button>

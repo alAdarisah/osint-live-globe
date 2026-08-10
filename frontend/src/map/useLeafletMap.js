@@ -175,6 +175,27 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     controllerRef.current?.flyTo(lat, lon, minZoom);
   }, []);
 
+  // Task 35: exact camera restore/read for a deep link -- see setCamera's
+  // own note in createMapController.js for why this is not flyTo.
+  const setCamera = useCallback((lat, lon, zoom) => {
+    controllerRef.current?.setCamera(lat, lon, zoom);
+  }, []);
+
+  const getCamera = useCallback(() => controllerRef.current?.getCamera() ?? null, []);
+
+  // Both look their target up before selecting anything and say whether they
+  // found it, so a restore effect that runs before the countries/water feed
+  // has landed can retry rather than silently doing nothing forever.
+  const selectCountryByKey = useCallback(
+    (key) => controllerRef.current?.selectCountryByKey(key) ?? false,
+    []
+  );
+
+  const selectWaterById = useCallback(
+    (id) => controllerRef.current?.selectWaterById(id) ?? false,
+    []
+  );
+
   // Task 33: SquawkAlertStrip's "click to fly and select". Returns false when
   // the airframe is no longer in the feed (a rare race: it dropped out
   // between the strip's last render and the click), which is a no-op rather
@@ -338,7 +359,8 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     selectedWater, closeWaterCard,
     selectedSubdivision, closeSubdivisionCard, selectedDistrict, closeDistrictCard, setDistrictMonth,
     layerState, setSceneBypass, invalidateSize, focus,
-    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter,
+    applyData, flyToRegion, flyTo, setCamera, getCamera, selectCountryByKey, selectWaterById,
+    setLayerVisible, setInfraFilter, setEventFilter,
     setVesselFilter, setAircraftFilter, setAgeReference,
     emergencySquawks, selectAircraftByIcao,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,

@@ -7,11 +7,12 @@
 // DOM id and drag-position storage key. Section ids come from
 // subdivisionCardSections in map/popups.js.
 import PlaceInfoCard from "./PlaceInfoCard";
+import CopyLinkButton from "./CopyLinkButton";
 
 const DEFAULT_OPEN = { profile: true, conflict: true };
 const STORAGE_KEY = "osint-subdivision-card-accordion";
 
-export default function SubdivisionInfoCard({ subdivision, onClose, onOpenRecord, cardSettings }) {
+export default function SubdivisionInfoCard({ subdivision, onClose, onOpenRecord, cardSettings, getShareUrl }) {
   // Recomputed every render rather than memoised, same reasoning
   // CountryInfoCard/WaterInfoCard give for their own `place`: a cheap object
   // literal whose only dependency is `subdivision` itself.
@@ -26,6 +27,11 @@ export default function SubdivisionInfoCard({ subdivision, onClose, onOpenRecord
       onOpenRecord={onOpenRecord}
       accordionKey={STORAGE_KEY}
       defaultOpen={DEFAULT_OPEN}
+      // Task 35: this card's own selection is admin-1, which urlState.js does
+      // not carry (see its own note on why) -- the link this copies still
+      // restores the camera/layers/filters/replay it captures, just not this
+      // particular drill-down. CopyLinkButton's own title text says so.
+      headerExtra={<CopyLinkButton getShareUrl={getShareUrl} />}
       panelId="subdivisionInfoCard"
       cardType="subdivision"
       cardSettings={cardSettings}

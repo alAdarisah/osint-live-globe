@@ -11,6 +11,7 @@
 // place: the map keeps panning/zooming freely while it's open, instead of
 // the popup auto-closing/panning on every interaction.
 import PlaceInfoCard, { GROUP_ACCORDION_PREFIX } from "./PlaceInfoCard";
+import CopyLinkButton from "./CopyLinkButton";
 
 // Identity and the live conflict tally open by default; everything else starts
 // shut. Section ids come from countryCardSections in map/popups.js.
@@ -29,7 +30,7 @@ const DEFAULT_OPEN = {
 };
 const STORAGE_KEY = "osint-country-card-accordion";
 
-export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRecord, cardSettings }) {
+export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRecord, cardSettings, getShareUrl }) {
   // `place` is recomputed every render rather than memoised: it is a cheap
   // object literal, and memoising it would need a dependency list that is
   // just `country` anyway, since that's the only thing it's built from.
@@ -37,16 +38,24 @@ export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRe
     ? { id: country.key, title: country.name, subtitle: null, point: country.point, sections: country.sections }
     : null;
 
-  const headerExtra = borderEdit?.offered && (
-    <button
-      type="button"
-      className={`country-info-edit${borderEdit.active ? " active" : ""}`}
-      onClick={borderEdit.active ? borderEdit.onEnd : borderEdit.onBegin}
-      disabled={!borderEdit.active && !!borderEdit.blockedReason}
-      title={borderEdit.blockedReason || "Drag this country's boundary"}
-    >
-      {borderEdit.active ? "Done" : "Edit border"}
-    </button>
+  const headerExtra = (
+    <>
+      {borderEdit?.offered && (
+        <button
+          type="button"
+          className={`country-info-edit${borderEdit.active ? " active" : ""}`}
+          onClick={borderEdit.active ? borderEdit.onEnd : borderEdit.onBegin}
+          disabled={!borderEdit.active && !!borderEdit.blockedReason}
+          title={borderEdit.blockedReason || "Drag this country's boundary"}
+        >
+          {borderEdit.active ? "Done" : "Edit border"}
+        </button>
+      )}
+      {/* Task 35: the country a reader has open is exactly Task 35's
+          `selection` field, so a link copied from here restores this same
+          card, not just the camera underneath it. */}
+      <CopyLinkButton getShareUrl={getShareUrl} />
+    </>
   );
 
   return (

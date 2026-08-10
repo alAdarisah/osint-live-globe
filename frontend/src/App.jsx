@@ -19,6 +19,7 @@ import { DEFAULT_EVENT_FILTER } from "./map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "./utils/entityFilter";
 import { makeCountryScope } from "./map/countryScope";
 import { boundsContainsPoint } from "./utils/geo";
+import { decodeViewState, encodeViewState } from "./urlState";
 
 import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
@@ -40,6 +41,7 @@ import EventDetailCard from "./components/EventDetailCard";
 import CountrySelectionBar from "./components/CountrySelectionBar";
 import BorderEditBar from "./components/BorderEditBar";
 import AdminPanel from "./components/admin/AdminPanel";
+import UrlStateNotice from "./components/UrlStateNotice";
 
 // What a layer's checkbox starts as used to be decided here, by a table of
 // forty booleans with a paragraph of justification each. Those arguments were
@@ -58,10 +60,37 @@ const DEFAULT_LAYER_VISIBILITY = {
   aisTankerTrails: true, adsbMilitaryTrails: true, satellitesTrails: true,
 };
 
+// Task 35: how long a restored deep link's country/water selection keeps
+// trying before giving up. Countries are a boot source (LoadingScreen waits
+// on them) but water is a one-shot fetch off that list -- a link opened on a
+// slow connection can genuinely land before either has arrived, so this
+// retries rather than making one attempt at mount and calling it done. Not
+// indefinite: a key that is never going to resolve (a stale link, a body the
+// source has since dropped) should stop trying rather than poll forever.
+const SELECTION_RESTORE_ATTEMPTS = 8;
+const SELECTION_RESTORE_INTERVAL_MS = 500;
+
 export default function App() {
   const mapContainerRef = useRef(null);
   const { theme, toggleTheme } = useTheme();
   const isMobileViewport = useIsMobileViewport();
+
+  // Task 35: decoded once, synchronously, from whatever hash the page loaded
+  // with -- a state initializer rather than an effect, so every piece of
+  // state below that a link can seed (the filters, the layer wishes fed to
+  // useLeafletMap's construction, useReplay's own initial replayAt) already
+  // reflects it on the very first render, instead of painting the default
+  // view for one frame and then snapping to the linked one. The camera and
+  // the country/water selection restore later, from effects further down,
+  // because both need something that does not exist yet at this point in the
+  // render (the map itself; loaded reference data) -- see the two effects
+  // near mapApi's construction below.
+  const [urlState] = useState(() => decodeViewState(window.location.hash));
+  // decodeViewState never throws and always hands back a usable default view
+  // -- which is exactly the silent-failure mode the brief warns against if
+  // nothing says so out loud. UrlStateNotice (rendered below) is that
+  // something; this just tracks whether the reader has dismissed it.
+  const [urlNoticeDismissed, setUrlNoticeDismissed] = useState(false);
 
   // Admin Mode's configuration. Read here rather than in a context because
   // three separate consumers need it in three different forms -- the map wants
@@ -92,9 +121,17 @@ export default function App() {
   // effect that replays it -- because the controller tracks which keys it is
   // answerable for, and handing it a shorter table on the second call would read
   // as "the reader has withdrawn these" rather than as "these are unchanged".
+  // Task 35's own layer overrides ride last -- a restored link's layer state
+  // outranks whatever this browser's Admin Mode settings say for this
+  // session, the same way a URL parameter usually outranks a saved
+  // preference elsewhere. They are folded in here, at the merge every other
+  // consumer already reads, rather than pushed through actions.setLayerWish:
+  // that function persists to the shared admin_config.json, and a link a
+  // reader opens must never rewrite this deployment's configuration for
+  // everyone else who visits it.
   const layerWishes = useMemo(
-    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish }),
-    [settings.layerWish]
+    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish, ...urlState.state.layers }),
+    [settings.layerWish, urlState.state.layers]
   );
   const mapApi = useLeafletMap(mapContainerRef, {
     theme,
@@ -180,6 +217,8 @@ export default function App() {
     applyData: mapApi.applyData,
     currentRegionKey: dataApi.currentRegionKey,
     onExitReplay: dataApi.refetchAllNow,
+    // Task 35: a restored deep link opens already scrubbed back, not live.
+    initialReplayAt: urlState.state.replayAt,
   });
   replayActiveRef.current = replayApi.isReplaying;
 
@@ -440,7 +479,12 @@ export default function App() {
   // the zone briefing read the same feed and have to agree with the map about
   // what is in scope; the predicate they all apply lives in map/severity.js.
 
-  const [eventFilter, setEventFilter] = useState(DEFAULT_EVENT_FILTER);
+  // Task 35: seeded from the decoded link's sparse diff on top of the
+  // shipped default, the same "base, then only what differs" shape
+  // urlState.js itself stores these as.
+  const [eventFilter, setEventFilter] = useState(
+    () => ({ ...DEFAULT_EVENT_FILTER, ...urlState.state.filters.event })
+  );
   // The map is told in an effect rather than from inside the state updater.
   // An updater runs during render, and mapApi.setEventFilter redraws the layer
   // synchronously, which reaches reportCounts/reportZoomNotes and so sets state
@@ -465,8 +509,12 @@ export default function App() {
   // eventFilter effect above for why), and read back for the filter bar's
   // own "N / total" figure from mapApi.counts.vesselFilterMatch/
   // aircraftFilterMatch.
-  const [vesselFilter, setVesselFilter] = useState(DEFAULT_VESSEL_FILTER);
-  const [aircraftFilter, setAircraftFilter] = useState(DEFAULT_AIRCRAFT_FILTER);
+  const [vesselFilter, setVesselFilter] = useState(
+    () => ({ ...DEFAULT_VESSEL_FILTER, ...urlState.state.filters.vessel })
+  );
+  const [aircraftFilter, setAircraftFilter] = useState(
+    () => ({ ...DEFAULT_AIRCRAFT_FILTER, ...urlState.state.filters.aircraft })
+  );
   const onVesselFilterChange = useCallback(
     (patch) => setVesselFilter((prev) => ({ ...prev, ...patch })),
     []
@@ -602,11 +650,110 @@ export default function App() {
     if (!adminMode && replayApi.isReplaying) replayApi.goLive();
   }, [adminMode, replayApi.isReplaying, replayApi.goLive]);
 
+  // --- Task 35: deep-linkable views --------------------------------------
+  //
+  // Layers, filters and replay were folded into their own state's initial
+  // value above (layerWishes, eventFilter/vesselFilter/aircraftFilter,
+  // useReplay's initialReplayAt) -- they need no effect of their own. Camera
+  // and selection do, because each needs something that only exists after
+  // mount: the map itself, and (for selection) reference data that is still
+  // arriving.
+
+  // The camera restores exactly once, the instant the map is ready to accept
+  // it -- not on every mapApi.ready re-render (it only ever flips false to
+  // true once) and not repeated the way selection is below, since the map
+  // itself is not something that "hasn't arrived yet": mapApi.ready already
+  // means it is sitting there waiting for a setView call.
+  const cameraRestoredRef = useRef(false);
+  useEffect(() => {
+    if (cameraRestoredRef.current || !mapApi.ready) return;
+    cameraRestoredRef.current = true;
+    const camera = urlState.state.camera;
+    if (camera) mapApi.setCamera(camera.lat, camera.lon, camera.zoom);
+  }, [mapApi.ready, mapApi.setCamera, urlState.state.camera]);
+
+  // The one selection a link carries (see urlState.js for why only country
+  // and water qualify). Both are reference layers, but neither is guaranteed
+  // to have landed the instant the map reports ready -- countries are a boot
+  // source LoadingScreen waits on, water is a one-shot fetch that is not --
+  // so this retries a handful of times rather than making one attempt and
+  // giving up. A key that never resolves (a stale link, a body the source
+  // has since dropped) stops trying after SELECTION_RESTORE_ATTEMPTS rather
+  // than polling forever.
+  useEffect(() => {
+    const selection = urlState.state.selection;
+    if (!mapApi.ready || !selection) return undefined;
+    let cancelled = false;
+    let attempts = 0;
+    let timer = null;
+    const attempt = () => {
+      if (cancelled) return;
+      attempts += 1;
+      const found = selection.kind === "country"
+        ? mapApi.selectCountryByKey(selection.id)
+        : mapApi.selectWaterById(selection.id);
+      if (found || attempts >= SELECTION_RESTORE_ATTEMPTS) return;
+      timer = setTimeout(attempt, SELECTION_RESTORE_INTERVAL_MS);
+    };
+    attempt();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // Mount-once (gated on mapApi.ready flipping true): urlState.state.selection
+    // is a fixed object for the life of this session, and the callbacks are
+    // stable useCallbacks -- re-running this on their identity would be a
+    // no-op at best and a restarted retry sequence at worst.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapApi.ready]);
+
+  // What every "Copy link" button (the title bar, every info/detail card)
+  // actually copies -- read live at click time, not memoised, so the link
+  // always matches whatever is on screen the moment the button is pressed.
+  // See urlState.js's own module doc for exactly what this does and does not
+  // capture, and why.
+  const buildShareUrl = useCallback(() => {
+    // Session-only URL layer overrides ride on top of the persisted admin
+    // wishes, same precedence layerWishes above already applies -- so a link
+    // copied without ever touching a layer checkbox still carries whatever
+    // layer state the *opened* link asked for, not just this browser's own
+    // saved configuration.
+    const layers = { ...settings.layerWish, ...urlState.state.layers };
+    // A country and a nearby water body can be selected at once (see
+    // PlaceInfoCard's own note on why); country wins when both are open,
+    // since a click on a country is the more deliberate of the two gestures
+    // and this only carries one selection at all -- see urlState.js.
+    const selection = mapApi.selectedCountry
+      ? { kind: "country", id: mapApi.selectedCountry.key }
+      : mapApi.selectedWater
+        ? { kind: "water", id: mapApi.selectedWater.id }
+        : null;
+    const hash = encodeViewState({
+      camera: mapApi.getCamera(),
+      layers,
+      filters: { event: eventFilter, vessel: vesselFilter, aircraft: aircraftFilter },
+      selection,
+      replayAt: replayApi.isReplaying ? replayApi.replayAt : null,
+    });
+    return `${window.location.origin}${window.location.pathname}${window.location.search}#${hash}`;
+  }, [
+    settings.layerWish, mapApi, eventFilter, vesselFilter, aircraftFilter,
+    replayApi.isReplaying, replayApi.replayAt,
+  ]);
+
   return (
     <>
       <LoadingScreen sources={dataApi.bootSources} />
 
       <MapView containerRef={mapContainerRef} panelOpen={panelOpen} />
+
+      {/* Task 35: says so, once, if the link this page loaded with could not
+          be read -- see decodeViewState's own contract for why that needs a
+          visible signal rather than just quietly falling back. */}
+      <UrlStateNotice
+        error={urlNoticeDismissed ? null : urlState.error}
+        onDismiss={() => setUrlNoticeDismissed(true)}
+      />
 
       <TitleBar
         theme={theme}
@@ -614,6 +761,7 @@ export default function App() {
         adminMode={adminMode}
         onToggleAdminMode={toggleAdminMode}
         onLocatePlace={onLocatePlace}
+        getShareUrl={buildShareUrl}
       />
 
       {/* The reader's way in. Picking a theatre is not an operator's adjustment
@@ -778,6 +926,7 @@ export default function App() {
         borderEdit={borderEditProps}
         onOpenRecord={openRecordDetail}
         cardSettings={settings.cards}
+        getShareUrl={buildShareUrl}
       />
 
       <WaterInfoCard
@@ -785,6 +934,7 @@ export default function App() {
         onClose={mapApi.closeWaterCard}
         onOpenRecord={openRecordDetail}
         cardSettings={settings.cards}
+        getShareUrl={buildShareUrl}
       />
 
       <SubdivisionInfoCard
@@ -792,6 +942,7 @@ export default function App() {
         onClose={mapApi.closeSubdivisionCard}
         onOpenRecord={openRecordDetail}
         cardSettings={settings.cards}
+        getShareUrl={buildShareUrl}
       />
 
       <DistrictInfoCard
@@ -800,9 +951,14 @@ export default function App() {
         onOpenRecord={openRecordDetail}
         onMonthChange={mapApi.setDistrictMonth}
         cardSettings={settings.cards}
+        getShareUrl={buildShareUrl}
       />
 
-      <EventDetailCard detail={recordDetail} onClose={() => setRecordDetail(null)} />
+      <EventDetailCard
+        detail={recordDetail}
+        onClose={() => setRecordDetail(null)}
+        getShareUrl={buildShareUrl}
+      />
 
       <BorderEditBar
         state={mapApi.borderEdit}
