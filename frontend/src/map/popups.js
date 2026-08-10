@@ -1330,8 +1330,10 @@ function buildMilitary(bounds, raw, props) {
     ${militaryBaseRows(basesInBounds)}` : ""}
     ${militaryAreas.length ? `<div class="csection-h">Military areas (OpenStreetMap)</div>${
       infraListRows(militaryAreas, "osmInfra", (d) => d.name)
-    }<p class="meta">${OSM_SWEEP_CAVEAT} Recent conflict activity within 75km of any of the pins above shows on
-      that pin's own popup, not repeated here.</p>` : ""}
+    }<p class="meta">${OSM_SWEEP_CAVEAT}</p>` : ""}
+    ${basesInBounds.some((s) => s.source === "curated") ? `<p class="meta">A curated base's own popup
+      (click its pin, or the row above) shows recent conflict activity within 75km, the same hot-zone flare
+      every curated infrastructure site carries -- OpenStreetMap-sourced pins do not carry that flare yet.</p>` : ""}
     ${airActivity.length ? `<div class="csection-h">Airfields with recent military movements</div>
     ${airActivity.slice(0, 6).map((entry) => `<div class="event-row">${esc(entry.name || entry.code)}
       <div class="event-meta">${entry.military_aircraft} of ${entry.aircraft} movements in the last 24h were
