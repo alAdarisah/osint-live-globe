@@ -1292,9 +1292,34 @@ inference switch's persistence.
    "we looked and found nothing" or "we did not look here" applies. The scene
    resolver knows which.
 
+**This last item is the most important thing in the task, and it is a sweep, not
+a feature.** Confusing "found nothing" with "did not look" has been the single
+most repeated defect across this whole plan — caught and fixed separately in
+Tasks 7, 9, 11, 16, 23 and 26, each time in a different component, each time by a
+reviewer rather than by the code. Fixing it once more in one more place is not
+what this task is for.
+
+So: before writing anything, **enumerate every surface that can render an empty
+or absent result** — card sections, folds, layer counts, badges, panel lists,
+summary tiles — and classify each as already-honest, silently-empty, or
+wrongly-claiming. Put that inventory in the report; it is the main deliverable.
+Then fix the silently-empty ones through **one shared mechanism**, so the seventh
+occurrence cannot happen in a component nobody thought to check.
+
+The pieces already exist and must be reused rather than re-invented:
+`coverageStateFor` and `coverageReason` in `frontend/src/map/popups.js`,
+`raw.fetchCoverage[key]` carrying `{status, fetchedAt, bbox}` written by
+`publishFetchOutcome` before the data publishes, and the scene resolver's own
+knowledge of whether a layer's fetch gate has lifted at this zoom. Known
+silently-empty surfaces to start the inventory from, all found during review:
+`buildAdminLive`, `buildAdminCities`, `buildAdminInfrastructure`,
+`buildLivePicture`, `buildWaterTraffic`, `buildWaterInfrastructure`, and
+`buildAdminConnectivity`'s unmatched-region case.
+
 **Tests:** `frontend/tests/units.test.js` — every conversion in both directions
 at a known value, and the timezone formatter across a DST boundary.
-`frontend/tests/emptyState.test.js` — both messages selected correctly.
+`frontend/tests/emptyState.test.js` — both messages selected correctly, and one
+case per surface in the inventory that the sweep changed.
 
 **Verify:** frontend suite green.
 
