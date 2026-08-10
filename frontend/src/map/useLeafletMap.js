@@ -30,6 +30,10 @@ const EMPTY_ZOOM_NOTES = {
   ais: false, jamming: false, officials: false, capped: {}, eventsCapped: 0,
   gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false, deflock: false,
   laneDensity: false,
+  // Task 24: navigation/weather/imaging are THEATRE-gated (see map/scene.js
+  // and createMapController.js's SAT_ELEMENT_ZOOM_NOTE_KEYS); the other four
+  // client-propagated groups are ungated and never report a note.
+  satNavigation: false, satWeather: false, satImaging: false,
 };
 
 const NO_BORDER_EDIT = { active: false, countryKey: null, linkMode: true, canUndo: false };

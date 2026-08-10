@@ -604,45 +604,63 @@ export const LAYER_MANIFEST = {
   },
 
   // Task 24: client-propagated satellite layers. Stored CelesTrak element
-  // sets, never fetched through the generic poller (see useOsintData.js's
-  // POLL_CONFIG) -- `fetch: FETCH_MANUAL` here just means "not on that
-  // table", not "never fetched": createMapController.js fetches
-  // /api/satellites/elements itself, the same way it already fetches
-  // lakes/rivers on demand (see setLayerVisible). All seven are `draw: null`
-  // (ungated), matching `satellites` above -- a handful to a few thousand
-  // objects is legible at any zoom once a reader has the layer on, and what
-  // changes between them is object count and cadence (see
-  // backend/sources/satellites.py's cadence_seconds), not whether zooming in
-  // is what earns them the right to appear.
+  // sets, propagated in the browser (see map/satPropagate.js).
+  //
+  // The three on-by-default groups below (navigation/weather/imaging) are
+  // zoom-gated at THEATRE, unlike `satellites` above. That is a deliberate
+  // departure from `satellites`' own "ungated, because ~46 curated objects
+  // is legible at any zoom" argument: navigation+weather+imaging land ~875
+  // objects on the map together (~225 DOM markers, ~650 WebGL sprites) with
+  // no cap and no collapse, on by default, at world zoom -- roughly the
+  // count aisCivilian's own "raised from WORLD to THEATRE... a texture, not
+  // a layer" argument was written about, not the ~46 stations/military is.
+  // Reusing `satellites`' ungated treatment here would have been the map's
+  // own stated philosophy (thin the presentation, never delete the data)
+  // asking for an argument this task never made. `fetch: FETCH_ALWAYS`
+  // still applies regardless of the draw gate -- elements have to already
+  // be in hand, propagating, when a reader crosses into THEATRE, or the
+  // gate would feel like a load spinner instead of an instant reveal (see
+  // `floods`' identical fetch-always/draw-gated split just above for the
+  // same reasoning already established in this file).
+  //
+  // The four off-by-default groups (science/geo/starlink/oneweb) are left
+  // ungated: a reader who has already opted into one of them (starlink/
+  // oneweb additionally past the control panel's own hard-gate warning
+  // about their object count) has already made the "I want to see this"
+  // decision a zoom gate exists to make on a reader's behalf for a layer
+  // that is on without being asked. Gating a layer nobody sees until they
+  // choose to enable it would not thin anything a reader has not already
+  // chosen to look at.
   satNavigation: {
-    // GPS/Galileo/GLONASS/Beidou, ~150 objects. On by default, same footing
-    // as `satellites` -- a navigation constellation is small enough to just
-    // show.
-    draw: null,
-    fetch: FETCH_MANUAL,
+    // GPS/Galileo/GLONASS/Beidou, ~150 objects, DOM markers. On by default.
+    draw: { band: "THEATRE" },
+    fetch: FETCH_ALWAYS,
     disposition: AUTO,
   },
   satWeather: {
     // ~75 objects (weather + goes -- see satellites.py's note on why "noaa"
-    // is not a real CelesTrak group). On by default.
-    draw: null,
-    fetch: FETCH_MANUAL,
+    // is not a real CelesTrak group), DOM markers. On by default.
+    draw: { band: "THEATRE" },
+    fetch: FETCH_ALWAYS,
     disposition: AUTO,
   },
   satImaging: {
-    // resource/sarsat/spire/planet, several hundred objects. On by default
-    // per the task brief, which is exactly why this one draws on the WebGL
-    // entity path rather than as DOM markers (see createMapController.js) --
-    // "on by default" and "hundreds of markers" cannot coexist on the DOM
-    // path without becoming the clutter this map's declutter philosophy
-    // exists to prevent.
-    draw: null,
-    fetch: FETCH_MANUAL,
+    // resource/sarsat/spire/planet, ~650 objects. On by default per the task
+    // brief, which is exactly why this one draws on the WebGL entity path
+    // rather than as DOM markers (see createMapController.js) -- "on by
+    // default" and "hundreds of markers" cannot coexist on the DOM path
+    // without becoming the clutter this map's declutter philosophy exists
+    // to prevent, and it is the single largest contributor to the ~875
+    // ungated-at-world-zoom count the THEATRE gate above answers.
+    draw: { band: "THEATRE" },
+    fetch: FETCH_ALWAYS,
     disposition: AUTO,
   },
   satScience: {
     // Off by default (task brief): a curated-interest set (Hubble, Terra,
-    // ...) a reader opts into rather than one the resolver asserts.
+    // ...) a reader opts into rather than one the resolver asserts. Ungated
+    // once on -- see this block's own note above on why the four
+    // off-by-default groups stay that way.
     draw: null,
     fetch: FETCH_MANUAL,
     disposition: MANUAL,

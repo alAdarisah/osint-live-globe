@@ -80,20 +80,28 @@ const INFRA_ROWS = [
 const MILITARY_SUBTYPE_ORDER = ["air", "naval", "army", "missile", "joint", "logistics", "radar"];
 
 // Task 24: the seven client-propagated satellite toggles, in the order the
-// panel lists them. `hardGate`, where present, is the object-count warning
-// shown under the row -- only starlink and oneweb carry one, per the task
-// brief. Object counts here are the roughly-known scale of each CelesTrak
-// group at the time this was written (see backend/sources/satellites.py's
-// comments on each group), not a live count the panel could otherwise show
-// before the layer has ever been switched on.
+// panel lists them.
+//
+// `hardGate`, where present, is the object-count warning shown under the
+// row -- only starlink and oneweb carry one, per the task brief. Written as
+// an order-of-magnitude word ("thousands"/"hundreds") rather than a specific
+// figure like "~7,000": a constellation's real count drifts as satellites
+// launch and decay, and the row already shows the live total once the layer
+// has loaded (the "N (total)" figure next to the checkbox) -- restating a
+// number here would just be a second, staler copy of that same fact.
+//
+// `gated: true` marks the three groups THEATRE-gated in map/scene.js
+// (navigation/weather/imaging, all on by default) -- see
+// createMapController.js's SAT_ELEMENT_ZOOM_NOTE_KEYS for why only these
+// three ever set zoomNotes[key].
 const SAT_ELEMENT_ROWS = [
-  { key: "satNavigation", label: "Navigation (GPS, Galileo, GLONASS, Beidou)" },
-  { key: "satWeather", label: "Weather" },
-  { key: "satImaging", label: "Earth imaging" },
+  { key: "satNavigation", label: "Navigation (GPS, Galileo, GLONASS, Beidou)", gated: true },
+  { key: "satWeather", label: "Weather", gated: true },
+  { key: "satImaging", label: "Earth imaging", gated: true },
   { key: "satScience", label: "Science" },
   { key: "satGeo", label: "Geostationary" },
-  { key: "satStarlink", label: "Starlink", hardGate: "~7,000" },
-  { key: "satOneweb", label: "OneWeb", hardGate: "~650" },
+  { key: "satStarlink", label: "Starlink", hardGate: "thousands of" },
+  { key: "satOneweb", label: "OneWeb", hardGate: "hundreds of" },
 ];
 
 // How many of a group's layers are currently on, shown on the group's own
@@ -1469,7 +1477,7 @@ export default function LayersSection({
             default; science/geo/starlink/oneweb are off, and the last two
             carry a hard-gate warning about their object count -- see the
             task brief and SAT_ELEMENT_LAYERS in map/decorators.js. */}
-        {SAT_ELEMENT_ROWS.map(({ key, label, hardGate }) => (
+        {SAT_ELEMENT_ROWS.map(({ key, label, hardGate, gated }) => (
           <label className="layer-row sub-row" data-layer={key} key={key}>
             <LayerCheck
               layerKey={key}
@@ -1480,10 +1488,16 @@ export default function LayersSection({
             <LayerIcon svg={SAT_ELEMENT_LAYERS[key].svg} color={SAT_ELEMENT_LAYERS[key].color} token={SAT_ELEMENT_LAYERS[key].token} />
             {" "}{label}
             <span className="count">{counts[key]} ({counts[`${key}Total`]})</span>
+            {gated ? (
+              <div id={`${key}ZoomNote`} className={`sublegend${zoomNotes[key] ? " visible" : ""}`}>
+                Zoom in to show {label.toLowerCase()} satellites
+              </div>
+            ) : null}
             {hardGate ? (
               <div className="sublegend">
-                {hardGate} objects. Propagating and drawing that many in the browser is real
-                work every frame -- switch this on only if you want it.
+                Runs to {hardGate} objects (see the total above once loaded). Propagating and
+                drawing that many in the browser is real work every frame -- switch this on
+                only if you want it.
               </div>
             ) : null}
           </label>

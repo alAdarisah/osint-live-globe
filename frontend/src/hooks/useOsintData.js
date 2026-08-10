@@ -56,6 +56,15 @@ const BOOT_SOURCES = [
   { key: "adsb", label: "Aircraft tracking (ADS-B)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
   { key: "satellites", label: "Satellite tracking (CelesTrak)" },
+  // Task 24: the three client-propagated groups on by default (see
+  // map/scene.js) -- same footing as "satellites" above, the server-
+  // propagated pair. The other four groups are off by default and fetched
+  // on demand instead (see createMapController.js's setLayerVisible), so
+  // they never belong on this list -- nothing should make the boot screen
+  // wait on a layer nobody has asked to see yet.
+  { key: "satNavigation", label: "Satellite tracking: navigation (CelesTrak, browser-propagated)" },
+  { key: "satWeather", label: "Satellite tracking: weather (CelesTrak, browser-propagated)" },
+  { key: "satImaging", label: "Satellite tracking: Earth imaging (CelesTrak, browser-propagated)" },
 ];
 
 // ACLED/FIRMS refresh server-side every 30/15 minutes respectively (see
@@ -146,6 +155,19 @@ const POLL_CONFIG = [
   // them back out.
   { key: "osmInfra", url: "/api/osm-infrastructure", intervalMs: 30 * 60000 },
   { key: "satellites", url: "/api/satellites", intervalMs: 10000 }, // position, not elements -- see backend/sources/satellites.py
+  // Task 24: element sets (not positions -- propagation happens client-side,
+  // see map/satPropagate.js) for the three groups on by default. The
+  // backend only refreshes these every six hours (elements barely change --
+  // see ELEMENTS_REFRESH_INTERVAL in backend/sources/satellites.py), so this
+  // interval is not about freshness in the way the 10s "satellites" row
+  // above is; it exists so a tab left open for a long session eventually
+  // notices a launch or a decay, the same reasoning airports'/osmInfra's own
+  // reference-data polls already use. Each lands in createMapController.js
+  // through applyData's "key in SAT_ELEMENT_CELESTRAK_GROUP" branch, which
+  // feeds the shared propagation tracker rather than a `raw[key]` array.
+  { key: "satNavigation", url: "/api/satellites/elements?groups=navigation", intervalMs: 30 * 60000 },
+  { key: "satWeather", url: "/api/satellites/elements?groups=weather", intervalMs: 30 * 60000 },
+  { key: "satImaging", url: "/api/satellites/elements?groups=imaging", intervalMs: 30 * 60000 },
   { key: "conflictStats", url: "/api/conflict-stats", intervalMs: 60 * 60000 }, // HDX file itself only changes weekly -- see backend/sources/hdx_conflict_stats.py
   // Server-side aggregate over a week of history (backend/escalation.py),
   // already cached for 120s there -- polling it faster would just re-serve

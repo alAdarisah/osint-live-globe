@@ -133,29 +133,41 @@ export function interpolateFixes(fixA, fixB, date) {
  * Tracks the last two true SGP4 fixes per satellite and answers "where is
  * this one right now" by interpolating between them (see interpolateFixes),
  * so a busy layer's render loop never has to run SGP4 more often than its
- * own cadence calls for (backend/sources/satellites.py's cadence_seconds --
- * this tracker doesn't read that value itself, the caller passes whatever
- * cadence applies to the objects it hands in).
+ * own cadence calls for (backend/sources/satellites.py's cadence_seconds).
  *
- * One tracker per layer, not one for the whole app: each layer's objects
- * come and go together (a toggle switching a whole layer on/off), and nothing
- * here needs to compare a Starlink satellite's fix against a GPS one's.
+ * One tracker shared across every layer, tagged per satellite with the
+ * `group` its own layer passes to setElements/tick, rather than one tracker
+ * per layer: CelesTrak's own groups never overlap (a NORAD id belongs to
+ * exactly one of them), so nothing is gained by seven separate Maps, and a
+ * caller that wants "just this layer's satellites" gets it by passing that
+ * layer's own key as `group` to tick()/size() -- entries tagged with a
+ * different group are left completely untouched.
+ *
+ * That tagging is not optional decoration: tick()'s whole reason to take a
+ * `group` argument is that calling it with none would re-run SGP4 for every
+ * satellite ever registered, on whichever layer's cadence happened to ask
+ * first -- which would mean switching on Starlink (its own sixty-second
+ * cadence) got its ~7,000 objects re-propagated every time a ten-second
+ * layer like satNavigation ticked. That defeats the entire reason
+ * cadence_seconds distinguishes small groups from large ones in the first
+ * place, so every caller in this codebase must pass its own layer key.
  */
 export function createPropagationTracker() {
-  const bySatnum = new Map(); // norad_id -> { satrec, epoch, prev: fix|null, last: fix }
+  const bySatnum = new Map(); // norad_id -> { satrec, epoch, group, prev: fix|null, last: fix }
 
   return {
     /**
-     * Registers or refreshes one satellite's element set. A satrec is only
-     * rebuilt when the epoch actually changed (a new element set landed) --
-     * rebuilding it on every call would be free, but the fix history it
-     * carries would not survive a rebuild that didn't need to happen every
-     * time a layer's steady poll handed the same elements back again.
+     * Registers or refreshes one satellite's element set under `group`. A
+     * satrec is only rebuilt when the epoch (or the group it's tagged with)
+     * actually changed -- rebuilding it on every call would be free, but the
+     * fix history it carries would not survive a rebuild that didn't need to
+     * happen every time a layer's steady poll hands the same elements back
+     * again.
      */
-    setElements(noradId, omm) {
+    setElements(noradId, omm, group) {
       const existing = bySatnum.get(noradId);
-      if (existing && existing.epoch === omm.EPOCH) return;
-      bySatnum.set(noradId, { satrec: satrecFromElements(omm), epoch: omm.EPOCH, prev: null, last: null });
+      if (existing && existing.epoch === omm.EPOCH && existing.group === group) return;
+      bySatnum.set(noradId, { satrec: satrecFromElements(omm), epoch: omm.EPOCH, group, prev: null, last: null });
     },
 
     /** Drops satellites no longer in `noradIds` -- a layer toggled off, or narrowed by a filter. */
@@ -165,14 +177,18 @@ export function createPropagationTracker() {
     },
 
     /**
-     * Runs one real SGP4 fix for every tracked satellite at `date`, shifting
-     * the previous "last" fix into "prev" -- this is the only place SGP4
-     * actually runs. Call it on the layer's own cadence (ten or sixty
-     * seconds; see backend/sources/satellites.py's cadence_seconds), not on
-     * every animation frame.
+     * Runs one real SGP4 fix for every satellite tagged with `group`, at
+     * `date`, shifting each one's previous "last" fix into "prev" -- this is
+     * the only place SGP4 actually runs. Call it on that group's own cadence
+     * (ten or sixty seconds; see backend/sources/satellites.py's
+     * cadence_seconds), not on every animation frame, and always with the
+     * calling layer's own key -- see this function's own doc above for what
+     * omitting it would defeat. Entries tagged with a different group are
+     * not visited at all, not merely skipped after being read.
      */
-    tick(date) {
+    tick(date, group) {
       for (const entry of bySatnum.values()) {
+        if (entry.group !== group) continue;
         const fix = propagateEci(entry.satrec, date);
         if (!fix) continue; // decayed/unpropagable -- keep whatever fix history it had, draw nothing new
         entry.prev = entry.last;
@@ -193,8 +209,12 @@ export function createPropagationTracker() {
       return interpolateFixes(entry.prev, entry.last, date);
     },
 
-    size() {
-      return bySatnum.size;
+    /** Total tracked satellites, or just those tagged with `group` if given. */
+    size(group) {
+      if (group === undefined) return bySatnum.size;
+      let n = 0;
+      for (const entry of bySatnum.values()) if (entry.group === group) n += 1;
+      return n;
     },
   };
 }

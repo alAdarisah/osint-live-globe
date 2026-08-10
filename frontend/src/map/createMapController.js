@@ -250,6 +250,24 @@ const SAT_ELEMENT_CELESTRAK_GROUP = {
   satScience: "science", satGeo: "geo", satStarlink: "starlink", satOneweb: "oneweb",
 };
 
+// satNavigation/satWeather/satImaging are on by default, so their element
+// sets are fetched by useOsintData.js's own POLL_CONFIG (see that file) --
+// the recipe's touch point 2, the same machinery every other default-on
+// source gets (fetch-coverage bookkeeping, the boot screen, a tab-refocus
+// catch-up). The other four are off by default, and nothing has been
+// fetched for one until a reader actually reaches for it -- that fetch
+// happens here in the controller instead, on the layer's own first
+// toggle-on, the same precedent waterLakes' fetch-on-first-toggle already
+// sets (see setLayerVisible's "waterLakes" branch below).
+const SAT_ELEMENT_ON_DEMAND_LAYERS = new Set(["satScience", "satGeo", "satStarlink", "satOneweb"]);
+
+// The three on-by-default groups are zoom-gated at THEATRE (see
+// map/scene.js) -- these are the only satX keys that ever need a
+// zoomNotes entry (the panel's "Zoom in to show X" hint). The four
+// off-by-default groups stay ungated, so their zoomNotes would always read
+// false; not worth reporting.
+const SAT_ELEMENT_ZOOM_NOTE_KEYS = new Set(["satNavigation", "satWeather", "satImaging"]);
+
 // The whole world, once: the full Web Mercator extent. The latitude limit is
 // Mercator's own -- the projection runs to infinity at the poles and 85.051129 is
 // where it closes on a square world, which is what makes the pixel world as tall as
@@ -2194,20 +2212,18 @@ export function createMapController(container, initial, callbacks) {
     // visibility. This block only owns what those two paths don't know
     // about: satElementVisible (read by the tick/redraw loop, see
     // tickAndRedrawSatElements), the on-demand fetch for the four
-    // default-off groups (mirrors waterLakes' fetch-on-first-toggle just
-    // below), and an immediate catch-up render so switching a layer on
-    // shows something before the next redraw tick rather than up to two
-    // seconds later.
+    // default-off groups (see SAT_ELEMENT_ON_DEMAND_LAYERS above), and an
+    // immediate catch-up render so switching a layer on shows something
+    // before the next redraw tick rather than up to two seconds later.
     if (key in SAT_ELEMENT_CELESTRAK_GROUP) {
       satElementVisible[key] = visible;
       if (visible) {
-        // Off by default (science/geo/starlink/oneweb -- see map/scene.js):
-        // nothing has been fetched yet the first time a reader reaches for
-        // one. navigation/weather/imaging are already fetched from boot
-        // (see the controller's own startup fetch), so this is a no-op for
-        // them -- fetchSatElements guards on satElements[key] already being
-        // non-null.
-        fetchSatElements(key);
+        // navigation/weather/imaging are fetched by useOsintData.js's own
+        // poller from boot regardless of this toggle (see POLL_CONFIG and
+        // this controller's applyData dispatch) -- calling fetchSatElements
+        // for them here as well would race that poller's own first fetch
+        // with a second, redundant one.
+        if (SAT_ELEMENT_ON_DEMAND_LAYERS.has(key)) fetchSatElements(key);
         renderSatElement(key); // catch up now rather than waiting for the next tick
       }
     }
@@ -2989,6 +3005,10 @@ export function createMapController(container, initial, callbacks) {
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
     gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
     deflock: false, laneDensity: false,
+    // Task 24's three on-by-default, THEATRE-gated groups -- see
+    // SAT_ELEMENT_ZOOM_NOTE_KEYS. The four off-by-default groups are
+    // ungated and never report a note.
+    satNavigation: false, satWeather: false, satImaging: false,
     // czib is deliberately absent: it has no gate, so it can never have a note.
     // Not a zoom gate but a band-dependent thinning, so it travels with the
     // rest: { [layerKey]: howManyKept } for every layer capByRank is currently
@@ -4210,19 +4230,27 @@ export function createMapController(container, initial, callbacks) {
 
   /** A real SGP4 pass (satElementTracker.tick) for one layer's currently-held
    *  element sets, gated by its own cadence unless `force`. Registers every
-   *  element set with the shared tracker first -- setElements is a no-op for
-   *  an object whose epoch has not changed, so this is cheap to call on
-   *  every redraw tick and only actually rebuilds a satrec when the elements
-   *  themselves refresh. */
+   *  element set with the shared tracker first, tagged with `layerKey` --
+   *  setElements is a no-op for an object whose epoch and group have not
+   *  changed, so this is cheap to call on every redraw tick and only
+   *  actually rebuilds a satrec when the elements themselves refresh.
+   *
+   *  `layerKey` is passed to tick() as its `group` -- not optional. Without
+   *  it tick() would re-propagate every satellite ever registered with the
+   *  shared tracker, on whichever layer's cadence happened to call it first,
+   *  which is exactly the bug that let a 10s-cadence layer's timer
+   *  re-SGP4-propagate a 60s-cadence layer's several thousand objects six
+   *  times more often than intended -- see satPropagate.js's own doc on
+   *  tick() for the full reasoning. */
   function tickSatElementLayer(layerKey, force = false) {
     const elements = satElements[layerKey];
     if (!elements || !elements.length) return;
-    for (const omm of elements) satElementTracker.setElements(omm.NORAD_CAT_ID, omm);
+    for (const omm of elements) satElementTracker.setElements(omm.NORAD_CAT_ID, omm, layerKey);
     const now = Date.now();
     const last = satElementLastTick[layerKey] || 0;
     if (!force && now - last < satElementCadenceMs(layerKey)) return;
     satElementLastTick[layerKey] = now;
-    satElementTracker.tick(new Date(now));
+    satElementTracker.tick(new Date(now), layerKey);
   }
 
   function satElementPositions(layerKey) {
@@ -4266,14 +4294,25 @@ export function createMapController(container, initial, callbacks) {
     satNavigation: satNavigationGroup, satWeather: satWeatherGroup, satScience: satScienceGroup,
   };
 
-  /** DOM-marker render for one of the three small groups. Ungated (see
-   *  map/scene.js's satNavigation/satWeather/satScience entries) so, like
-   *  renderSatellites above, the viewport filter is the only zoom question
-   *  here. */
+  /** DOM-marker render for one of the three small groups. `minZoomFor`
+   *  answers both cases the same way: satNavigation/satWeather are gated at
+   *  THEATRE (see map/scene.js), satScience is ungated (returns null, so
+   *  `belowMinZoom` is always false) -- one code path, no per-layer branch.
+   *  Below the gate this mirrors every other gated marker layer
+   *  (renderCities, renderInfra, ...): zoomNotes[layerKey] is set so the
+   *  panel can say *why* the count reads zero, and nothing is drawn. */
   function renderSatElementLayer(layerKey) {
     if (!satElementVisible[layerKey]) return;
+    const zoom = map.getZoom();
+    const belowMinZoom = zoom < (minZoomFor(layerKey) ?? -Infinity);
+    if (SAT_ELEMENT_ZOOM_NOTE_KEYS.has(layerKey)) {
+      zoomNotes[layerKey] = belowMinZoom;
+      scheduleReports({ notes: true });
+    }
     const inView = viewportFilter();
-    const visible = satElementPositions(layerKey).filter((s) => inView(s.lat, s.lon));
+    const visible = belowMinZoom
+      ? []
+      : satElementPositions(layerKey).filter((s) => inView(s.lat, s.lon));
     registerPlacement(
       layerKey,
       visible.map((s) => ({ id: s.norad_id, lat: s.lat, lon: s.lon, size: detailSize(satElementStyle(layerKey).size) }))
@@ -4289,14 +4328,23 @@ export function createMapController(container, initial, callbacks) {
     settlePlacement();
   }
 
-  /** WebGL-bucket render for one of the four bulk groups. No viewport filter
-   *  and no declutter offsets -- entityWebglLayer already reprojects and
-   *  culls off-screen sprites on its own (see webglLayer.js's _reset/
+  /** WebGL-bucket render for one of the four bulk groups. Same `minZoomFor`
+   *  treatment as renderSatElementLayer above: satImaging is gated at
+   *  THEATRE, satGeo/satStarlink/satOneweb are ungated (null, so the gate
+   *  never trips). No viewport filter and no declutter offsets when at or
+   *  above the gate -- entityWebglLayer already reprojects and culls
+   *  off-screen sprites on its own (see webglLayer.js's _reset/
    *  _repositionAll), the same unfiltered-feed approach renderAisLayer/
    *  renderAdsbLayer already take for their own, larger buckets. */
   function renderSatElementWebgl(layerKey) {
     if (!satElementVisible[layerKey]) return;
-    const visible = satElementPositions(layerKey);
+    const zoom = map.getZoom();
+    const belowMinZoom = zoom < (minZoomFor(layerKey) ?? -Infinity);
+    if (SAT_ELEMENT_ZOOM_NOTE_KEYS.has(layerKey)) {
+      zoomNotes[layerKey] = belowMinZoom;
+      scheduleReports({ notes: true });
+    }
+    const visible = belowMinZoom ? [] : satElementPositions(layerKey);
     const style = satElementStyle(layerKey);
     entityWebglLayer.updateEntities(layerKey, visible, {
       idField: (s) => s.norad_id,
@@ -6028,13 +6076,18 @@ export function createMapController(container, initial, callbacks) {
     renderSatellites();
     // Task 24's three DOM-marker groups bounds-filter to the viewport too
     // (see renderSatElementLayer), so they need the same pan/zoom catch-up
-    // renderSatellites gets just above. The four WebGL ones do not: they are
-    // unfiltered feeds on a canvas that reprojects itself (see
-    // renderSatElementWebgl's own note), and are instead kept moving by
-    // their own timer -- see tickAndRedrawSatElements.
+    // renderSatellites gets just above. Three of the four WebGL ones do not:
+    // they are unfiltered feeds on a canvas that reprojects itself (see
+    // renderSatElementWebgl's own note), kept moving by their own timer
+    // instead (tickAndRedrawSatElements). satImaging is the exception --
+    // it is THEATRE-gated (see map/scene.js), and without a call here
+    // crossing that gate would wait up to SAT_ELEMENT_REDRAW_MS (2s) for the
+    // next tick to notice, instead of responding to the zoom the way every
+    // other gated layer (floods, hazards, ...) does immediately.
     renderSatElementLayer("satNavigation");
     renderSatElementLayer("satWeather");
     renderSatElementLayer("satScience");
+    renderSatElementWebgl("satImaging");
     updateCountryWarFlare();
   }
 
@@ -6435,15 +6488,13 @@ export function createMapController(container, initial, callbacks) {
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
   refreshPrecipRadar();
   precipRefreshTimer = setInterval(refreshPrecipRadar, 10 * 60 * 1000); // matches RainViewer's own pass cadence
-  // Task 24: navigation/weather/imaging are on by default (see map/scene.js),
-  // so their element sets are fetched here at boot rather than waiting for a
-  // reader to switch anything on -- the same one-shot pattern railways/
-  // cables/water use, not a POLL_CONFIG row (see fetchSatElements). The other
-  // four (science/geo/starlink/oneweb) are off by default and fetch on their
-  // own first toggle instead -- see setLayerVisible.
-  fetchSatElements("satNavigation");
-  fetchSatElements("satWeather");
-  fetchSatElements("satImaging");
+  // Task 24: navigation/weather/imaging (on by default -- see map/scene.js)
+  // are fetched by useOsintData.js's own POLL_CONFIG, which lands here
+  // through applyData's "key in SAT_ELEMENT_CELESTRAK_GROUP" branch below,
+  // the same as every other default-on source -- not fetched by this
+  // controller directly. The other four (science/geo/starlink/oneweb) are
+  // off by default and fetch on their own first toggle instead -- see
+  // setLayerVisible and SAT_ELEMENT_ON_DEMAND_LAYERS above.
   satElementTickTimer = setInterval(tickAndRedrawSatElements, SAT_ELEMENT_REDRAW_MS);
   function onVisibilityChange() {
     if (!document.hidden) refreshWindArrows(); // catch up immediately instead of waiting out the rest of the 5min interval
@@ -6524,6 +6575,21 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "jamming") renderJamming();
       else if (key === "laneDensity") renderLaneDensity();
       else if (key === "satellites") renderSatellites();
+      // Task 24: navigation/weather/imaging land here from useOsintData.js's
+      // own POLL_CONFIG (see that file) -- raw[key] was just set above like
+      // every other source, but the element sets themselves are kept in
+      // satElements[key] (see fetchSatElements' own note on why), so this
+      // branch copies the payload across, runs an immediate SGP4 pass
+      // (force=true -- a reader should not wait out however much of the
+      // cadence window is left after a fresh poll), and redraws. The other
+      // four groups (science/geo/starlink/oneweb) never reach this branch --
+      // they are fetched on demand, straight into satElements, by
+      // fetchSatElements itself; see SAT_ELEMENT_ON_DEMAND_LAYERS.
+      else if (key in SAT_ELEMENT_CELESTRAK_GROUP) {
+        satElements[key] = Array.isArray(data) ? data : [];
+        tickSatElementLayer(key, true);
+        renderSatElement(key);
+      }
       // Neither of these is a point array with a layer of its own, so both
       // would otherwise fall through to renderMarkerLayer and blow up on a
       // missing group/marker map. conflictStats is a country->monthly-series

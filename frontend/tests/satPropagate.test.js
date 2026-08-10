@@ -240,6 +240,48 @@ test("setElements does not rebuild (and so does not reset fix history) when the 
   assert.notEqual(tracker.positionAt(25544, new Date(T0.getTime() + 30_000)), null);
 });
 
+test("a tick for one group's cadence never re-propagates another group's satellites", () => {
+  // The regression this guards: a single shared tracker across all seven
+  // layers (see createMapController.js) means a fast-cadence layer's tick
+  // must not sweep up a slow-cadence layer's satellites just because they
+  // live in the same Map. Without the `group` filter this used to call
+  // tick() over every registered satellite regardless of which layer's
+  // timer fired -- so switching on Starlink (60s cadence, ~7,000 objects)
+  // got it re-propagated on satNavigation's 10s cadence instead of its own,
+  // six times more often than backend/sources/satellites.py's
+  // cadence_seconds intends.
+  const tracker = createPropagationTracker();
+  const fastId = 25544; // e.g. satNavigation, 10s cadence
+  const slowId = 99999; // e.g. satStarlink, 60s cadence
+  tracker.setElements(fastId, ISS_OMM, "fast");
+  tracker.setElements(slowId, { ...ISS_OMM, NORAD_CAT_ID: slowId }, "slow");
+
+  // Only the fast group's timer has fired so far.
+  tracker.tick(T0, "fast");
+  assert.notEqual(tracker.positionAt(fastId, T0), null, "the fast group's satellite must have a fix");
+  assert.equal(tracker.positionAt(slowId, T0), null, "the slow group's satellite must not have been touched");
+
+  // A second fast-cadence tick, still before the slow group's own cadence
+  // has elapsed: the slow satellite must still be untouched.
+  const tenSecondsLater = new Date(T0.getTime() + 10_000);
+  tracker.tick(tenSecondsLater, "fast");
+  assert.equal(tracker.positionAt(slowId, tenSecondsLater), null);
+
+  // Only once the slow group's own timer fires does it get a fix.
+  tracker.tick(tenSecondsLater, "slow");
+  assert.notEqual(tracker.positionAt(slowId, tenSecondsLater), null);
+});
+
+test("size(group) counts only the satellites tagged with that group", () => {
+  const tracker = createPropagationTracker();
+  tracker.setElements(25544, ISS_OMM, "fast");
+  tracker.setElements(99999, { ...ISS_OMM, NORAD_CAT_ID: 99999 }, "slow");
+  tracker.setElements(11111, { ...ISS_OMM, NORAD_CAT_ID: 11111 }, "slow");
+  assert.equal(tracker.size("fast"), 1);
+  assert.equal(tracker.size("slow"), 2);
+  assert.equal(tracker.size(), 3);
+});
+
 test("prune drops satellites no longer in the requested set", () => {
   const tracker = createPropagationTracker();
   tracker.setElements(25544, ISS_OMM);
