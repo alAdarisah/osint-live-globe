@@ -28,7 +28,7 @@ from backend.refine import flight_legs, lane_density, port_call_thresholds
 # so an unaliased import here would be shadowed by it for every reference
 # below the route, the same reason admin1_boundaries/water_bodies's own
 # route handlers are named *_endpoint rather than reusing their module's name.
-from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, water_bodies
+from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, sat_passes, water_bodies
 from backend.sources import satellites as satellites_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1197,6 +1197,46 @@ async def satellite_elements(request: Request, groups: str | None = None):
     return _cached_source_response(
         request, "satellite_elements", None, _satellite_elements_filter(wanted),
         variant=f"groups:{','.join(sorted(wanted)) or '-'}",
+    )
+
+
+@app.get("/api/satellites/passes")
+async def satellite_passes(lat: float, lon: float, hours: float = sat_passes.MAX_PASS_HOURS, groups: str | None = None):
+    """Task 25's overpass prediction: the next passes of the requested
+    satellite groups over (lat, lon), for a country, water body or point the
+    reader currently has selected.
+
+    Not cached through _cached_source_response like the sources above --
+    this is a per-request computation over a caller-supplied lat/lon/hours,
+    not a narrowing of one shared payload, the same reason /api/track/{kind}/
+    {id} skips that machinery too. `groups` takes the same layer-key
+    vocabulary as /api/satellites/elements above (navigation, weather,
+    imaging, ...), not CelesTrak's own group names, and an empty or missing
+    value answers "no satellites in scope" rather than "every group", for
+    the identical reason that endpoint's own `groups` does.
+
+    `hours` is silently clamped to sat_passes.MAX_PASS_HOURS (24, the
+    brief's own window) rather than rejected -- a caller asking for more is
+    narrowed, not errored, matching filter_elements_by_layer's own "narrow,
+    don't error" contract for an unrecognised group name. See
+    backend/sources/sat_passes.py's module docstring for the other cap (how
+    many satellites a single request will actually run a real pass search
+    for) and the benchmark behind its number.
+
+    Every pass is derived, not observed: arithmetic (SGP4 plus a horizon
+    search) over an orbital element set someone else reported, and it
+    carries that element set's own `epoch` so the card can say how old the
+    orbit behind the prediction is -- the same honesty point Task 25's card
+    makes about the ground track and footprint.
+    """
+    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+        raise HTTPException(status_code=400, detail="lat/lon out of range")
+    wanted = {g.strip() for g in (groups or "").split(",") if g.strip()}
+    elements = satellites_source.filter_elements_by_layer(registry.get("satellite_elements").data, wanted)
+    result = sat_passes.compute_passes(elements, lat, lon, hours)
+    return JSONResponse(
+        {"lat": lat, "lon": lon, "groups": sorted(wanted), **result},
+        headers={"Cache-Control": "no-store"},
     )
 
 

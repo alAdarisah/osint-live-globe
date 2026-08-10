@@ -226,6 +226,11 @@ def test_positions_carries_the_previously_discarded_gp_fields():
     assert 300 < pos["perigee_km"] < 500
     assert 300 < pos["apogee_km"] < 500
     assert pos["apogee_km"] >= pos["perigee_km"]
+    # velocity_km_s (Task 25's card) is read off the same sat.at(now) call
+    # as the position, not re-derived from altitude via vis-viva -- so it is
+    # the real instantaneous SGP4 speed, not a circular-orbit approximation.
+    # ~7.5-7.8 km/s is the correct physical band for ISS's altitude.
+    assert 7.4 < pos["velocity_km_s"] < 7.9
 
 
 def test_decorate_element_tags_the_layer_and_carries_the_same_fields():

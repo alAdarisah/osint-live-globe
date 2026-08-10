@@ -160,9 +160,17 @@ def _positions(elements: list[dict]) -> list[dict]:
     for omm in elements:
         try:
             sat = EarthSatellite.from_omm(_ts, omm)
-            geo = sat.at(now).subpoint()
+            geocentric = sat.at(now)
+            geo = geocentric.subpoint()
         except Exception:  # noqa: BLE001 - a malformed element set just gets skipped
             continue
+        # Speed, not a velocity vector: Task 25's card wants one number, and
+        # the vector's three ECI components would mean nothing to a reader
+        # on their own. Read off the same `sat.at(now)` call already made
+        # for the position above rather than a second propagation -- SGP4
+        # already produced the velocity vector alongside the position, it
+        # was just never read before now.
+        vx, vy, vz = geocentric.velocity.km_per_s
         out.append(
             {
                 "norad_id": omm.get("NORAD_CAT_ID"),
@@ -173,6 +181,7 @@ def _positions(elements: list[dict]) -> list[dict]:
                 "lat": float(geo.latitude.degrees),
                 "lon": float(geo.longitude.degrees),
                 "alt_km": float(geo.elevation.km),
+                "velocity_km_s": float((vx**2 + vy**2 + vz**2) ** 0.5),
                 **_summary_fields(omm, sat),
             }
         )

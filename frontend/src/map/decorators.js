@@ -16,6 +16,7 @@ import {
   ageHoursFromDateAdded, newsAgeOpacity, newsAgeScale,
 } from "./severity";
 import { paletteColor, paletteGlyph, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
+import { footprintRadiusKm } from "./groundTrack";
 
 // --- level of detail -------------------------------------------------------
 //
@@ -3728,7 +3729,121 @@ export function isMilitarySatellite(d) {
   return d.group === "military";
 }
 
-export function decorateSatellite(d, { offset } = {}) {
+// --- epoch age and orbital detail shared by every satellite card (Task 25) ---
+//
+// A card, a ground track, a footprint and an overpass prediction are all
+// arithmetic over the same reported orbit, and all four are only as good as
+// that orbit is current -- see backend/sources/sat_passes.py's own module
+// docstring for the same point made about the pass search. This is the one
+// place that arithmetic lives on the frontend, so decorateSatellite
+// (server-propagated stations/military) and decorateSatElement (the seven
+// client-propagated layers) can never quietly disagree about how old "old"
+// is, or use a different footprint formula from each other.
+
+// A day old is still perfectly usable for a position; a week old is where
+// SGP4's own error growth stops being a rounding matter. Neither threshold
+// is exact -- accuracy really depends on the object's drag environment --
+// but both are the right order of magnitude and, unlike a false precision,
+// are said as what they are: a caution, not a guarantee.
+const EPOCH_AGE_AGING_HOURS = 24;
+const EPOCH_AGE_STALE_HOURS = 24 * 7;
+
+/**
+ * Hours between an element set's EPOCH and `now` (ms since epoch, default
+ * real now), or null if EPOCH is missing or unparsable -- never NaN, so a
+ * caller can test `!= null` instead of Number.isFinite everywhere this is
+ * read. CelesTrak's EPOCH string has no trailing "Z" (e.g.
+ * "2026-08-09T20:37:29.985312"), so one is added before Date.parse when
+ * the string does not already carry its own UTC offset -- without it, some
+ * runtimes read the bare string as local time instead of UTC.
+ */
+export function epochAgeHours(epochIso, now = Date.now()) {
+  if (!epochIso) return null;
+  const iso = /[Zz]|[+-]\d\d:?\d\d$/.test(epochIso) ? epochIso : `${epochIso}Z`;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return (now - t) / 3_600_000;
+}
+
+/**
+ * The epoch-age sentence a card shows -- always present when the epoch is
+ * known, since the brief is explicit that this is "never shown today" and
+ * matters. The two thresholds above turn into a caution appended to the
+ * plain age, not a second number.
+ */
+export function epochAgeLabel(hours) {
+  if (hours == null || !Number.isFinite(hours)) return "element set age unknown";
+  const shown = hours < 0 ? "0 min" // a clock skew or a just-refreshed set -- never a negative age
+    : hours < 1 ? `${Math.round(hours * 60)} min`
+    : hours < 48 ? `${hours.toFixed(1)} h`
+    : `${(hours / 24).toFixed(1)} days`;
+  if (hours >= EPOCH_AGE_STALE_HOURS) {
+    return `${shown} old -- stale; treat this position, ground track and any overpass prediction as approximate`;
+  }
+  if (hours >= EPOCH_AGE_AGING_HOURS) return `${shown} old -- aging, propagation error is growing`;
+  return `${shown} old`;
+}
+
+/**
+ * The Orbit section every satellite card shares, built from whichever
+ * fields the item actually carries.
+ *
+ * `item` is either a server-propagated position record (decorateSatellite's
+ * `d`, which already carries every one of these fields -- see backend/
+ * sources/satellites.py's _summary_fields and _positions' velocity_km_s) or
+ * a client-propagated one (decorateSatElement's `item`, enriched by
+ * createMapController.js's satElementPositions with the same static field
+ * names off the stored OMM element set).
+ *
+ * `extra` is what only a currently-*open* card computes fresh, because it
+ * is not worth paying for on every rendered marker:
+ *  - footprintKm: overrides the plain footprintRadiusKm(item.alt_km)
+ *    fallback -- both read the same formula, so this only matters when a
+ *    caller wants the card to state the exact number the drawn circle used.
+ *  - groundTrackAvailable: whether this satellite's layer has the orbital
+ *    elements needed to draw a track at all (see decorateSatellite/
+ *    decorateSatElement's own notes on which layers do and don't).
+ */
+function satelliteOrbitSections(item, extra = {}) {
+  const parts = [];
+  if (item.intl_designator) {
+    parts.push(
+      `<div class="meta">International designator: ${esc(item.intl_designator)}` +
+      `${item.launch_year ? ` &middot; launched ${esc(item.launch_year)}` : ""}</div>`
+    );
+  }
+  const orbital = [];
+  if (Number.isFinite(item.inclination_deg)) orbital.push(`inclination ${item.inclination_deg.toFixed(1)}&deg;`);
+  if (Number.isFinite(item.period_min)) orbital.push(`period ${item.period_min.toFixed(1)} min`);
+  if (Number.isFinite(item.apogee_km) && Number.isFinite(item.perigee_km)) {
+    orbital.push(`apogee/perigee ${Math.round(item.apogee_km)} / ${Math.round(item.perigee_km)} km`);
+  }
+  if (orbital.length) parts.push(`<div>${orbital.join(" &middot; ")} (derived)</div>`);
+
+  const speed = Number.isFinite(extra.velocityKmS) ? extra.velocityKmS : item.velocity_km_s;
+  if (Number.isFinite(speed)) parts.push(`<div>Velocity: ${speed.toFixed(2)} km/s (derived)</div>`);
+
+  if (item.epoch) {
+    parts.push(`<div class="meta">Element set epoch: ${esc(item.epoch)} UTC &middot; ${epochAgeLabel(epochAgeHours(item.epoch))}</div>`);
+  }
+
+  const footprintKm = Number.isFinite(extra.footprintKm) ? extra.footprintKm : footprintRadiusKm(item.alt_km);
+  if (footprintKm > 0) {
+    parts.push(
+      `<div class="meta">Visibility footprint: ~${Math.round(footprintKm)} km radius (derived -- standard ` +
+      `horizon geometry from altitude), drawn on the map while this card is open.</div>`
+    );
+  }
+  if (extra.groundTrackAvailable) {
+    parts.push(
+      '<div class="meta">Ground track (previous/next 90 min) drawn on the map while this card is open -- ' +
+      "derived by re-running the same propagation forwards and backwards from now, not a recorded path.</div>"
+    );
+  }
+  return parts.join("");
+}
+
+export function decorateSatellite(d, { offset, velocityKmS, footprintKm } = {}) {
   const style = satelliteStyle(d.group);
   const military = isMilitarySatellite(d);
   const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${Math.round(d.alt_km || 0)} km`;
@@ -3736,9 +3851,13 @@ export function decorateSatellite(d, { offset } = {}) {
     <h3>${esc(d.name || `NORAD ${d.norad_id}`)}</h3>
     <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(d.norad_id)}</div>
     <div>Altitude: ${Math.round(d.alt_km || 0)} km</div>
+    ${satelliteOrbitSections(d, { velocityKmS, footprintKm, groundTrackAvailable: false })}
     ${military ? '<p class="meta">Listed in CelesTrak\'s public "Miscellaneous Military" group (e.g. SAR-Lupe reconnaissance satellites) -- a catalogue classification, not a claim about what it is doing right now.</p>' : ""}
-    <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- a real orbit, not a live telemetry confirmation.</p>
-    <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
+    <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- derived, not a live telemetry confirmation.</p>
+    <p class="meta">No orbital elements are sent to your browser for this satellite (stations/military stay
+    propagated on the server -- see backend/sources/satellites.py); its ground track cannot be drawn client-side,
+    only its current position and visibility footprint.</p>
+    <div class="meta">Source: CelesTrak (NORAD GP data), publicly published, no formal licence stated &middot; derived</div>`;
   const cls = `satellite-marker${military ? " satellite-military-marker" : ""}`;
   return {
     icon: icon(style, style.color, style.size, 0, cls, layerOpacity("satellites"), "", offset),
@@ -3802,14 +3921,26 @@ export function satElementStyle(layerKey) {
 }
 
 /**
- * DOM-marker decorator for the three small client-propagated groups
- * (navigation/weather/science -- see SAT_ELEMENT_LAYERS' `dom` flag).
- * `item` is {norad_id, name, lat, lon, alt_km}, the propagation tracker's
- * output (map/satPropagate.js's positionAt), not the raw OMM element set --
- * there is no per-object distinction to draw here the way military/stations
- * has above, so this stays a flat function of which layer asked for it.
+ * DOM/WebGL-shared decorator for the seven client-propagated layers (see
+ * SAT_ELEMENT_LAYERS). `item` is the propagation tracker's output
+ * (map/satPropagate.js's positionAt: {norad_id, name, lat, lon, alt_km}),
+ * enriched by createMapController.js's satElementPositions with the static
+ * orbital fields off the matching stored OMM element set
+ * (intl_designator/launch_year/inclination_deg/period_min/apogee_km/
+ * perigee_km/epoch) -- the same field names decorateSatellite reads off its
+ * own server-propagated `d`, so satelliteOrbitSections above serves both
+ * without caring which one it was handed.
+ *
+ * `velocityKmS`/`footprintKm`/`groundTrackAvailable` are only ever supplied
+ * for the one card currently open -- see createMapController.js's
+ * satellite popupopen handler, which is also what actually draws the
+ * ground track and footprint this text describes. `groundTrackAvailable`
+ * defaults true: every one of these seven layers holds a real client-side
+ * element set (unlike stations/military above, which do not), so the
+ * ground track is available unless the specific caller says otherwise (an
+ * element set this particular NORAD id's fetch never returned, say).
  */
-export function decorateSatElement(item, layerKey, { offset } = {}) {
+export function decorateSatElement(item, layerKey, { offset, velocityKmS, footprintKm, groundTrackAvailable = true } = {}) {
   const style = satElementStyle(layerKey);
   const name = item.name || `NORAD ${item.norad_id}`;
   const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)} &middot; ${Math.round(item.alt_km || 0)} km`;
@@ -3817,13 +3948,95 @@ export function decorateSatElement(item, layerKey, { offset } = {}) {
     <h3>${esc(name)}</h3>
     <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(item.norad_id)}</div>
     <div>Altitude: ${Math.round(item.alt_km || 0)} km</div>
-    <p class="meta">Position propagated in your browser (SGP4, via satellite.js) from CelesTrak's public orbital elements -- a real orbit, not a live telemetry confirmation.</p>
-    <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
+    ${satelliteOrbitSections(item, { velocityKmS, footprintKm, groundTrackAvailable })}
+    <p class="meta">Position propagated in your browser (SGP4, via satellite.js) from CelesTrak's public orbital elements -- derived, not a live telemetry confirmation.</p>
+    <div class="meta">Source: CelesTrak (NORAD GP data), publicly published, no formal licence stated &middot; derived</div>`;
   return {
     icon: icon(style, style.color, style.size, 0, "satellite-marker", layerOpacity(layerKey), "", offset),
     tooltip,
     detail,
   };
+}
+
+/** Minutes from `now` until `iso` (negative if `iso` is already past), or
+ *  null if `iso` is missing/unparsable -- the satellite-passes card's own
+ *  small twin of epochAgeHours above, kept separate because it answers a
+ *  different question (how long *until*, not how long *since*) and mixing
+ *  the two by sign-flipping one into the other reads as a trick rather
+ *  than a plain calculation. */
+function minutesFromNow(iso, now = Date.now()) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? (t - now) / 60_000 : null;
+}
+
+function relativePassTiming(minutes) {
+  if (minutes == null) return "";
+  if (minutes <= 0) return "rising now";
+  if (minutes < 60) return `in ${Math.round(minutes)} min`;
+  return `in ${(minutes / 60).toFixed(1)} h`;
+}
+
+/**
+ * Task 25's overpass-prediction popup, for whichever country or water body
+ * createMapController.js's refreshSatellitePasses is currently showing
+ * this for (see that function's own note on why this is a separate,
+ * place-anchored popup rather than part of any one satellite's own card).
+ *
+ * `result` is {status: "loading"|"error"|"ready", data}, where `data` --
+ * only present when ready -- is exactly what GET /api/satellites/passes
+ * returns; see backend/sources/sat_passes.py's compute_passes for every
+ * field read here. `label` is a short place name for the header ("France",
+ * "the Baltic Sea"); undefined reads as "this location" rather than
+ * showing nothing.
+ *
+ * Every pass is derived, and says so twice: once in the per-pass caption
+ * (the age of *that* satellite's own element set -- each pass can be built
+ * from a different satellite with a different epoch, so one card-wide
+ * caveat would hide which passes are the trustworthy ones) and once in the
+ * closing paragraph, for the search as a whole.
+ */
+export function satellitePassesCardHtml(result, label) {
+  const place = label ? esc(label) : "this location";
+  const header = `<h3>Satellite overpasses</h3><div class="meta">Next passes of enabled imaging satellites over ${place}</div>`;
+  if (result.status === "loading") return `${header}<div class="meta">Checking...</div>`;
+  if (result.status === "error") return `${header}<p class="meta">Could not reach the pass-prediction service.</p>`;
+
+  const data = result.data || {};
+  const passes = data.passes || [];
+  const minElevation = Number.isFinite(data.min_elevation_deg) ? data.min_elevation_deg : 10;
+  const hours = Number.isFinite(data.hours) ? Math.round(data.hours) : 24;
+  const coverage = data.satellites_capped
+    ? `<p class="meta">Checked the closest ${fmtNumber(data.satellites_considered)} of ${fmtNumber(data.satellites_reachable)} ` +
+      `imaging satellites whose orbit can reach this latitude at all (of ${fmtNumber(data.satellites_total)} tracked) -- capped ` +
+      "to bound the work one request does; see backend/sources/sat_passes.py's own note on the cap.</p>"
+    : `<p class="meta">Checked all ${fmtNumber(data.satellites_reachable)} imaging satellites whose orbit can reach this ` +
+      `latitude (of ${fmtNumber(data.satellites_total)} tracked).</p>`;
+  const truncatedNote = data.passes_truncated
+    ? '<p class="meta">More passes were found than are listed here; only the soonest are shown.</p>' : "";
+
+  if (!passes.length) {
+    return (
+      `${header}<div>No passes above ${minElevation}&deg; elevation in the next ${hours} hours.</div>${coverage}` +
+      '<p class="meta">Derived: SGP4 propagation plus a horizon search over CelesTrak\'s public orbital elements, not an observation.</p>'
+    );
+  }
+  const rows = passes
+    .map((p) => {
+      const when = relativePassTiming(minutesFromNow(p.rise));
+      const elevation = Number.isFinite(p.max_elevation_deg) ? `up to ${p.max_elevation_deg.toFixed(0)}&deg;` : "elevation n/a";
+      const duration = Number.isFinite(p.duration_s) ? `${Math.round(p.duration_s)}s` : "";
+      return (
+        `<div>${esc(p.name || `NORAD ${p.norad_id}`)} &middot; ${when} &middot; ${elevation} &middot; ${duration}` +
+        `<div class="meta">element set ${epochAgeLabel(epochAgeHours(p.epoch))}</div></div>`
+      );
+    })
+    .join("");
+  return (
+    `${header}${rows}${coverage}${truncatedNote}` +
+    '<p class="meta">Derived: SGP4 propagation plus a horizon search over CelesTrak\'s public orbital elements, not an ' +
+    "observation. Each pass's own accuracy depends on how recent that satellite's element set is (shown per pass above).</p>"
+  );
 }
 
 // ---------- which kind of pin is this? ----------

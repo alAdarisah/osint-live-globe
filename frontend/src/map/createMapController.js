@@ -120,6 +120,7 @@ import {
   detailSize,
   applyCollapsedFallback,
   TOKEN_FOR,
+  satellitePassesCardHtml,
 } from "./decorators";
 import {
   setIconTheme, themedStyle, tokenZoom, tokenZoomMax, layerHasTokenZoom, layerHasTokenZoomMax, layerOpacity, stackZIndex, scaledSize, scaledWeight, layerScale,
@@ -158,7 +159,8 @@ import { createWaterLayer, syncWater, buildWaterIndex, findWaterAt } from "./wat
 import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { createEntityWebglLayer } from "./webglLayer";
-import { createPropagationTracker } from "./satPropagate";
+import { createPropagationTracker, satrecFromElements, propagateEci } from "./satPropagate";
+import { footprintRadiusKm, groundTrackSegments } from "./groundTrack";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
 import {
   nearestLon, unwrapPath, boundsContainsPoint,
@@ -616,6 +618,18 @@ export function createMapController(container, initial, callbacks) {
   const satScienceGroup = createSatelliteGroup();
   const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer, tankerTrailsLayer, militaryTrailsLayer } =
     createTrailLayers(map);
+  // Task 25: the ground track (one or more polylines, split at the
+  // antimeridian -- see map/groundTrack.js's splitAtAntimeridian) and
+  // visibility footprint (one L.circle) for whichever single satellite card
+  // is currently open. Always on the map (an empty layer group costs
+  // nothing) rather than added/removed per popup, so opening and closing a
+  // card repeatedly does not churn map.addLayer/removeLayer calls -- only
+  // its *contents* change, in drawSatelliteOverlay/clearSatelliteOverlay
+  // below. At most one satellite's worth of geometry is ever in it: Leaflet
+  // closes a previously-open popup when a new one opens (autoClose, the
+  // default), and every popupclose handler below clears this layer, so a
+  // second selection can never leave the first one's track behind.
+  const satelliteOverlayLayer = L.layerGroup().addTo(map);
   satelliteGroup.addTo(map);
   // navigation/weather are on by default (see map/scene.js); science is
   // MANUAL/off by default, so it is not added here -- setLayerVisible adds
@@ -646,6 +660,21 @@ export function createMapController(container, initial, callbacks) {
   // raw[key]=data assignment (see fetchSatElements below), the same reason
   // waterLakesFeatures/waterRiversFeatures are not in `raw` either.
   const satElements = {
+    satNavigation: null, satWeather: null, satImaging: null,
+    satScience: null, satGeo: null, satStarlink: null, satOneweb: null,
+  };
+  // Task 25: the same seven arrays as satElements above, indexed by NORAD id
+  // for O(1) lookup rather than a .find() scan -- built once per fetch (see
+  // fetchSatElements) and read every time a marker's popup opens, to merge
+  // the static orbital fields (intl_designator/inclination/period/apogee/
+  // perigee/epoch) satElementPositions' slim {norad_id,name,lat,lon,alt_km}
+  // does not carry, and to hand the raw OMM to satrecFromElements for a
+  // fresh ground-track/velocity propagation. A plain object of Maps, same
+  // shape as satElements, rather than folding this into that array: the
+  // array is what gets replaced wholesale on each (one-shot) fetch, and
+  // rebuilding a Map alongside it in the same place keeps the two from ever
+  // drifting out of step.
+  const satElementIndex = {
     satNavigation: null, satWeather: null, satImaging: null,
     satScience: null, satGeo: null, satStarlink: null, satOneweb: null,
   };
@@ -814,6 +843,21 @@ export function createMapController(container, initial, callbacks) {
   // itself is already open -- see selectAircraft's onPoints callback below,
   // which reuses loadRecordedTrack's existing /api/track/adsb fetch.
   let aircraftPopup = null;
+  // Task 25: the overpass-prediction popup for whichever country or water
+  // body is currently selected -- see refreshSatellitePasses below, called
+  // from setFocus (country) and selectWater (water). Independent of
+  // shipPopup/aircraftPopup/the satellite marker popups above: this is not
+  // a satellite's own card, it is a place's -- "which enabled imaging
+  // satellites pass over here in the next day". Leaflet's own autoClose
+  // means opening this closes any of the other popups above, and vice
+  // versa, matching this codebase's one-thing-selected-at-a-time norm.
+  let satellitePassesPopup = null;
+  // Guards the same out-of-order race loadVesselDetail/loadPortTraffic do:
+  // reselecting a different country/water body before an earlier
+  // /api/satellites/passes request resolves must not let that earlier
+  // response land after the later one and overwrite the popup with a
+  // different place's passes.
+  const satellitePassesGuard = createGenerationGuard();
   // Keyed by mmsi/port_id, so a fetch that lands out of order (an ordinary
   // flaky-connection case, not a hypothetical one) never overwrites a
   // popup with data older than what it already shows -- see
@@ -2113,6 +2157,72 @@ export function createMapController(container, initial, callbacks) {
     return b ? [b.minLat, b.minLon, b.maxLat, b.maxLon] : null;
   }
 
+  /**
+   * Task 25's overpass prediction, for whichever country or water body is
+   * currently selected -- GET /api/satellites/passes?lat=&lon=&hours=24&
+   * groups=imaging (see backend/sources/sat_passes.py for the two work
+   * caps this applies and why). A separate, place-anchored L.popup
+   * (satellitePassesPopup, declared above) rather than a section folded
+   * into the country/water sidebar card: those cards (PlaceInfoCard.jsx,
+   * popups.js) are React-rendered from `raw` state this controller
+   * publishes, outside this task's touched files, so this stays a
+   * self-contained Leaflet overlay the same way the ship/aircraft/port
+   * popups above already are.
+   *
+   * Scoped to the "imaging" layer specifically -- the brief's own words are
+   * "enabled imaging satellites" -- and only fetched when that layer is
+   * actually switched on (satElementVisible.satImaging): a reader who has
+   * turned imaging satellites off has nothing this feature would tell them
+   * that they have asked not to see.
+   *
+   * `key`/`label` identify the place ("country:FRA"/"France",
+   * "water:482"/a water body's title) so satellitePassesGuard can tell "the
+   * same place, refetching" from "a different place, superseding an
+   * in-flight request" -- the same out-of-order protection
+   * loadVesselDetail/loadPortTraffic give their own fetches above.
+   */
+  function closeSatellitePassesPopup() {
+    if (!satellitePassesPopup) return;
+    map.closePopup(satellitePassesPopup);
+    satellitePassesPopup = null;
+  }
+
+  function refreshSatellitePasses(lat, lon, key, label) {
+    if (!satElementVisible.satImaging || typeof lat !== "number" || typeof lon !== "number") {
+      closeSatellitePassesPopup();
+      return;
+    }
+    const token = satellitePassesGuard.start(key);
+    const loadingHtml = satellitePassesCardHtml({ status: "loading" }, label);
+    if (satellitePassesPopup) {
+      satellitePassesPopup.setLatLng([lat, lon]).setContent(loadingHtml);
+    } else {
+      satellitePassesPopup = L.popup(popupOptions(320)).setLatLng([lat, lon]).setContent(loadingHtml).openOn(map);
+    }
+    fetchJson(`/api/satellites/passes?lat=${lat}&lon=${lon}&hours=24&groups=imaging`)
+      .then((data) => {
+        if (!satellitePassesGuard.isCurrent(key, token) || !satellitePassesPopup) return;
+        satellitePassesPopup.setContent(satellitePassesCardHtml({ status: "ready", data }, label));
+      })
+      .catch(() => {
+        if (!satellitePassesGuard.isCurrent(key, token) || !satellitePassesPopup) return;
+        satellitePassesPopup.setContent(satellitePassesCardHtml({ status: "error" }, label));
+      });
+  }
+
+  /** The centroid of a [south, west, north, east] bounds array -- an
+   *  approximation of "over this place" a country or water body's own
+   *  extent is generously bigger than, but the brief asks for a point to
+   *  query passes for and a bounding box has no single better answer than
+   *  its own middle. Not corrected for a bbox that wraps the antimeridian
+   *  (west > east, see water.js/water bodies' own `antimeridian` flag) --
+   *  a rare handful of features, and a pass search centred a little off
+   *  for one of them is a much smaller error than the ones this whole
+   *  feature already states plainly (the epoch age on every pass shown). */
+  function boundsCentroid([south, west, north, east]) {
+    return [(south + north) / 2, (west + east) / 2];
+  }
+
   function setFocus(next) {
     const before = focus ? `${focus.kind}:${focus.key}` : "";
     const after = next ? `${next.kind}:${next.key}` : "";
@@ -2126,6 +2236,18 @@ export function createMapController(container, initial, callbacks) {
     applyScene();
     renderAll();
     callbacks.onFocusChange?.(next);
+    // Task 25: only a country focus drives the overpass popup here -- water
+    // selection does not go through setFocus at all (see selectWater's own
+    // call to this same refresh) and a "layer" focus (a single clicked pin)
+    // is not one of the three places the brief names.
+    if (next?.kind === "country") {
+      const bounds = boundsOfCountry(next.key);
+      const [lat, lon] = bounds ? boundsCentroid(bounds) : [null, null];
+      const entry = countryIndex.find((c) => c.key === next.key);
+      refreshSatellitePasses(lat, lon, `country:${next.key}`, entry?.name);
+    } else {
+      closeSatellitePassesPopup();
+    }
   }
 
   function setHoveredCountry(key) {
@@ -4088,6 +4210,54 @@ export function createMapController(container, initial, callbacks) {
     return satelliteStyle(sat.group).size;
   }
 
+  // ---------- Task 25: ground track / footprint overlay for the open card ----------
+  //
+  // Shared by stations/military (buildSatelliteMarker below, footprint
+  // only -- see decorateSatellite's own note on why there is no ground
+  // track for these two: their orbital elements are never sent to the
+  // browser, only their live position) and the three small client-
+  // propagated marker layers (buildSatElementMarker further down, footprint
+  // and ground track both). The four bulk WebGL layers (satImaging/satGeo/
+  // satStarlink/satOneweb) keep their pre-existing "no click-to-select
+  // model" (see their own entityWebglLayer.updateEntities call's isSelected/
+  // onSelect below) -- footprint and ground track are only ever drawn for a
+  // satellite that already has an actual Leaflet marker and popup to hang
+  // them on, and building a second, WebGL-specific selection path for
+  // several thousand Starlink/OneWeb objects is outside this task's brief.
+
+  function clearSatelliteOverlay() {
+    satelliteOverlayLayer.clearLayers();
+  }
+
+  /** The footprint circle: radius from footprintRadiusKm(altKm) -- see that
+   *  function's own comment for the standard horizon-geometry formula.
+   *  L.circle's radius is metres; footprintRadiusKm answers km. */
+  function drawSatelliteFootprint(lat, lon, altKm) {
+    const radiusKm = footprintRadiusKm(altKm);
+    if (radiusKm <= 0) return;
+    L.circle([lat, lon], {
+      radius: radiusKm * 1000,
+      color: "#6fe3ff",
+      weight: 1,
+      fillOpacity: 0.04,
+      opacity: 0.35,
+      interactive: false,
+    }).addTo(satelliteOverlayLayer);
+  }
+
+  /** The ground track: one L.polyline per antimeridian-split segment (see
+   *  map/groundTrack.js's groundTrackSegments/splitAtAntimeridian), drawn
+   *  on the map's one primary copy of the world -- a short, selection-only
+   *  line has no need for drawLatLng/worldCopies' per-visible-copy
+   *  repetition the way an always-drawn marker layer does. */
+  function drawSatelliteGroundTrack(satrec, centerDate) {
+    for (const segment of groundTrackSegments(satrec, centerDate, { beforeMin: 90, afterMin: 90, stepMin: 1 })) {
+      if (segment.length < 2) continue;
+      L.polyline(segment, { color: "#6fe3ff", weight: 2, opacity: 0.7, dashArray: "4 4", interactive: false })
+        .addTo(satelliteOverlayLayer);
+    }
+  }
+
   function buildSatelliteMarker(sat, copy = 0) {
     const d = decorateSatellite(sat, { offset: offsetFor("satellites", sat.norad_id) });
     const marker = L.marker(drawLatLng(sat, copy), { icon: d.icon });
@@ -4099,6 +4269,14 @@ export function createMapController(container, initial, callbacks) {
       className: "map-tooltip",
       direction: "top",
     });
+    // No orbital elements for stations/military on the client (see
+    // decorateSatellite's own note), so only the footprint -- pure
+    // arithmetic over the live alt_km this marker already has -- is drawn.
+    marker.on("popupopen", () => {
+      clearSatelliteOverlay();
+      drawSatelliteFootprint(marker._item.lat, marker._item.lon, marker._item.alt_km);
+    });
+    marker.on("popupclose", clearSatelliteOverlay);
     return marker;
   }
 
@@ -4219,11 +4397,18 @@ export function createMapController(container, initial, callbacks) {
     satElements[layerKey] = []; // in flight -- guards a fast double-toggle from double-fetching
     fetchJson(`/api/satellites/elements?groups=${SAT_ELEMENT_CELESTRAK_GROUP[layerKey]}`)
       .then((data) => {
-        satElements[layerKey] = Array.isArray(data) ? data : [];
+        const elements = Array.isArray(data) ? data : [];
+        satElements[layerKey] = elements;
+        // Task 25: indexed by NORAD id so a marker's popupopen handler (see
+        // buildSatElementMarker below) can find its own OMM record in O(1)
+        // instead of scanning the whole layer -- this can run to several
+        // thousand entries for starlink/oneweb.
+        satElementIndex[layerKey] = new Map(elements.map((omm) => [omm.NORAD_CAT_ID, omm]));
         tickSatElementLayer(layerKey, true); // first fix immediately, not up to two minutes late
       })
       .catch((err) => {
         satElements[layerKey] = null; // let the next attempt retry rather than pin an empty layer
+        satElementIndex[layerKey] = null;
         console.warn(`Failed to load satellite elements for ${layerKey}:`, err);
       });
   }
@@ -4265,9 +4450,67 @@ export function createMapController(container, initial, callbacks) {
       // so this has to say which one it means.
       const pos = satElementTracker.positionAt(omm.NORAD_CAT_ID, now, layerKey);
       if (!pos) continue; // no fix yet (still loading), or the element set doesn't propagate at all
-      out.push({ norad_id: omm.NORAD_CAT_ID, name: omm.OBJECT_NAME, lat: pos.lat, lon: pos.lon, alt_km: pos.alt_km });
+      out.push({
+        norad_id: omm.NORAD_CAT_ID, name: omm.OBJECT_NAME, lat: pos.lat, lon: pos.lon, alt_km: pos.alt_km,
+        // Task 25: the static orbital fields backend/sources/satellites.py's
+        // _decorate_element already computed once, server-side, at the
+        // six-hourly element refresh (see that module's own
+        // _summary_fields) -- a plain spread, not a second derivation, so
+        // the card can never disagree with the values the collector itself
+        // reported. Cheap to carry on every rendered item (they are static
+        // strings/numbers already sitting on `omm`, not a propagation),
+        // unlike velocity/ground-track/footprint below, which are only
+        // computed for the one card a reader has open.
+        // `omm.epoch` (lowercase) is _summary_fields' own copy of CelesTrak's
+        // EPOCH, not the raw uppercase OMM field of the same name under a
+        // different case -- both exist on the same record (see
+        // backend/sources/satellites.py's _decorate_element, which spreads
+        // the raw OMM and then _summary_fields over it), and this reads the
+        // one decorateSatElement/satelliteOrbitSections actually expects.
+        intl_designator: omm.intl_designator, launch_year: omm.launch_year,
+        inclination_deg: omm.inclination_deg, period_min: omm.period_min,
+        apogee_km: omm.apogee_km, perigee_km: omm.perigee_km, epoch: omm.epoch,
+      });
     }
     return out;
+  }
+
+  /**
+   * The fresh, on-demand propagation Task 25's card needs and the
+   * always-running redraw loop deliberately does not compute for every
+   * marker: a real SGP4 velocity (from the same satrec the shared tracker
+   * would otherwise interpolate) and the ground track over the
+   * surrounding +-90 minutes. Built once per popup open, not per redraw
+   * tick -- see buildSatElementMarker's own popupopen handler, the only
+   * caller.
+   *
+   * Uses a satrec built fresh from the stored OMM record rather than
+   * reaching into satElementTracker's own (module-private) entries: the
+   * tracker exists to answer "where to draw this, right now, cheaply,
+   * every two seconds" via interpolation between two fixes, and never
+   * kept the velocity either fix carried past positionAt's return value
+   * (see satPropagate.js's interpolateFixes/positionAt) -- there is
+   * nothing in it to reach into. One extra satrec build plus one real
+   * SGP4 propagation is trivial next to how rarely a reader opens a
+   * satellite's card, so this pays that cost fresh rather than growing
+   * the tracker a second, wider return shape only this call site wants.
+   */
+  function liveSatelliteDetail(noradId, layerKey) {
+    const omm = satElementIndex[layerKey]?.get(noradId);
+    const now = new Date();
+    if (!omm) return { velocityKmS: undefined, groundTrackAvailable: false, satrec: null, now };
+    try {
+      const satrec = satrecFromElements(omm);
+      const fix = propagateEci(satrec, now);
+      const v = fix?.velocity;
+      const velocityKmS = v ? Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) : undefined;
+      return { velocityKmS, groundTrackAvailable: true, satrec, now };
+    } catch {
+      // A malformed element set -- decorateSatElement's default (already
+      // rendered before this handler runs) still shows position/altitude;
+      // this only means no live velocity or ground track for this one.
+      return { velocityKmS: undefined, groundTrackAvailable: false, satrec: null, now };
+    }
   }
 
   function buildSatElementMarker(item, layerKey, copy = 0) {
@@ -4281,6 +4524,26 @@ export function createMapController(container, initial, callbacks) {
       className: "map-tooltip",
       direction: "top",
     });
+    // Task 25: ground track + footprint + real velocity, computed once on
+    // open (see liveSatelliteDetail above) rather than kept live while the
+    // card stays open -- over the few seconds to minutes a reader actually
+    // looks at one card, a LEO object's true position drifts by a few
+    // kilometres at most, well inside the footprint circle's own radius,
+    // so a snapshot read on open is a reasonable trade against recomputing
+    // a 181-point propagation on every 2s redraw tick for a card that is,
+    // most of the time, not open at all. Closing and reopening the same
+    // popup refreshes it.
+    marker.on("popupopen", () => {
+      clearSatelliteOverlay();
+      const { velocityKmS, groundTrackAvailable, satrec, now } = liveSatelliteDetail(marker._item.norad_id, layerKey);
+      drawSatelliteFootprint(marker._item.lat, marker._item.lon, marker._item.alt_km);
+      if (satrec) drawSatelliteGroundTrack(satrec, now);
+      const popup = marker.getPopup();
+      if (popup?.isOpen()) {
+        popup.setContent(decorateSatElement(marker._item, layerKey, { velocityKmS, groundTrackAvailable }).detail);
+      }
+    });
+    marker.on("popupclose", clearSatelliteOverlay);
     return marker;
   }
 
@@ -4354,7 +4617,12 @@ export function createMapController(container, initial, callbacks) {
       idField: (s) => s.norad_id,
       heading: () => NaN, // orbital motion has no meaningful "nose" to point a sprite at
       style: () => style,
-      isSelected: () => false, // no click-to-select model for satellites -- see decorateSatellite's own note
+      // Still no click-to-select model for these four bulk WebGL layers --
+      // see the "Task 25: ground track / footprint overlay" comment above
+      // buildSatelliteMarker for why that stayed out of this task's scope
+      // (several thousand Starlink/OneWeb objects is not a WebGL selection
+      // path worth building just for a card popup).
+      isSelected: () => false,
       onSelect: () => {},
       getTooltip: (s) => decorateSatElement(s, layerKey).tooltip,
       offsets: undefined,
@@ -5789,6 +6057,11 @@ export function createMapController(container, initial, callbacks) {
       selectedWaterId = null;
       focusedWaterLayer = null;
       reportWaterSelection();
+      // Task 25: this path bypasses selectWater entirely (a sub-toggle
+      // dropped the feature out from under an open card), so the overpass
+      // popup has to be closed here too, or it would keep showing passes
+      // for a water body whose own card just vanished.
+      closeSatellitePassesPopup();
     } else if (selectedWaterId != null) {
       // The card is still open on a feature that is still in the synced
       // document, but syncWater just tore down and rebuilt every Leaflet layer
@@ -5967,6 +6240,16 @@ export function createMapController(container, initial, callbacks) {
     focusedWaterLayer = waterLayerFor(id);
     updateWaterHighlights();
     reportWaterSelection();
+    // Task 25: water selection does not go through setFocus (see that
+    // function's own note), so the overpass popup is refreshed here
+    // instead, on the same "a water body was picked" event.
+    const entry = waterEntryFor(id);
+    if (entry?.bbox) {
+      const [lat, lon] = boundsCentroid([entry.bbox.minLat, entry.bbox.minLon, entry.bbox.maxLat, entry.bbox.maxLon]);
+      refreshSatellitePasses(lat, lon, `water:${id}`, entry.name);
+    } else {
+      closeSatellitePassesPopup();
+    }
   }
 
   function setHoveredWater(id) {
