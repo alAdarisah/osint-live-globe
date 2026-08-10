@@ -229,3 +229,116 @@ def test_an_unreadable_power_output_is_left_out_rather_than_guessed_at():
     """OSM writes this field freehand and most of the time it is unparseable."""
     for value in (None, "", "lots", "2x600 MW", "yes"):
         assert osm_infra._megawatts(value) is None
+
+
+# --- Task 27: mainline rail geometry ----------------------------------------
+
+
+def rail_way(way_id=1, geometry=None, tags=None):
+    return {
+        "type": "way",
+        "id": way_id,
+        "geometry": geometry if geometry is not None else [
+            {"lat": 50.45, "lon": 30.52}, {"lat": 50.5, "lon": 30.6},
+        ],
+        "tags": tags if tags is not None else {},
+    }
+
+
+def test_the_rail_line_query_asks_for_geometry_not_a_computed_centre():
+    """`out geom` is the whole point of a second query: a point sweep's `out
+    center` throws the vertices away, and a polyline needs every one of them."""
+    query = osm_infra.build_rail_line_query((29.0, 34.0, 34.5, 37.0))
+    assert "(29.0,34.0,34.5,37.0)" in query
+    assert "out geom tags" in query
+    assert "out center" not in query
+
+
+def test_the_rail_line_selector_is_the_running_lines_only():
+    """Sidings, yards, platforms and disused/proposed track carry the same
+    railway=* tag family and are exactly what made the *full* linework ~300 MB
+    per theatre (see railways.py's docstring) -- this selector excludes them."""
+    query = osm_infra.build_rail_line_query((0, 0, 1, 1))
+    assert 'way["railway"~"^(rail|light_rail|narrow_gauge)$"]' in query
+    assert "siding" not in query
+    assert "platform" not in query
+
+
+def test_a_way_with_fewer_than_two_vertices_is_not_a_line():
+    payload = {"elements": [rail_way(geometry=[{"lat": 1, "lon": 1}])]}
+    assert osm_infra.parse_rail_lines(payload, "sudan") == []
+
+
+def test_a_node_or_relation_in_the_response_is_ignored():
+    """The selector is way-only, but a defensive parse should not choke on
+    anything else Overpass might still hand back."""
+    payload = {"elements": [{"type": "node", "id": 1, "lat": 1, "lon": 1}]}
+    assert osm_infra.parse_rail_lines(payload, "sudan") == []
+
+
+def test_every_captured_tag_lands_on_the_record():
+    tags = {
+        "name": "Kyiv-Odesa Line", "operator": "Ukrzaliznytsia", "gauge": "1520",
+        "electrified": "contact_line", "usage": "main", "service": "main",
+        "railway": "rail",
+    }
+    (line,) = osm_infra.parse_rail_lines({"elements": [rail_way(tags=tags)]}, "ukraine")
+    assert line["name"] == "Kyiv-Odesa Line"
+    assert line["operator"] == "Ukrzaliznytsia"
+    assert line["gauge"] == "1520"
+    assert line["electrified"] == "contact_line"
+    assert line["usage"] == "main"
+    assert line["service"] == "main"
+    assert line["railway"] == "rail"
+
+
+def test_the_geometry_comes_out_as_leaflet_lat_lon_pairs():
+    (line,) = osm_infra.parse_rail_lines(
+        {"elements": [rail_way(geometry=[{"lat": 50.45, "lon": 30.52}, {"lat": 50.5, "lon": 30.6}])]},
+        "ukraine",
+    )
+    assert line["path"] == [[50.45, 30.52], [50.5, 30.6]]
+
+
+def test_every_line_is_tagged_source_osm_at_the_point_of_collection():
+    """railways.py merges this with Natural Earth and relies on that tag being
+    set here, not guessed back out of the shape of the data."""
+    (line,) = osm_infra.parse_rail_lines({"elements": [rail_way()]}, "ukraine")
+    assert line["source"] == "osm"
+
+
+def test_the_id_is_prefixed_so_it_cannot_collide_with_a_point_feature():
+    (line,) = osm_infra.parse_rail_lines({"elements": [rail_way(way_id=42)]}, "ukraine")
+    assert line["id"] == "osm:way/42"
+
+
+def test_the_region_the_sweep_found_the_way_in_travels_with_the_record():
+    (line,) = osm_infra.parse_rail_lines({"elements": [rail_way()]}, "sahel")
+    assert line["region_key"] == "sahel"
+
+
+def test_an_empty_rail_line_response_is_not_an_error():
+    assert osm_infra.parse_rail_lines({}, "sudan") == []
+    assert osm_infra.parse_rail_lines({"elements": []}, "sudan") == []
+
+
+def test_a_way_in_two_overlapping_theatres_is_only_listed_once():
+    shared = {"id": "osm:way/1", "path": [[1, 1], [2, 2]], "region_key": "south_china_sea"}
+    flat = osm_infra.flatten_rail_lines({
+        "south_china_sea": [shared, {"id": "osm:way/2", "path": [[3, 3], [4, 4]]}],
+        "taiwan_strait": [{**shared, "region_key": "taiwan_strait"}],
+    })
+    assert len(flat) == 2
+    assert next(l for l in flat if l["id"] == "osm:way/1")["region_key"] == "south_china_sea"
+
+
+def test_flattening_an_empty_rail_line_sweep_is_not_an_error():
+    assert osm_infra.flatten_rail_lines({}) == []
+    assert osm_infra.flatten_rail_lines({"sudan": []}) == []
+
+
+def test_the_rail_line_document_states_its_own_provenance():
+    doc = osm_infra.serialize_rail_lines([{"id": "osm:way/1", "source": "osm", "path": [[1, 1], [2, 2]]}])
+    assert doc["attribution"] == "OpenStreetMap contributors"
+    assert "railway=rail|light_rail|narrow_gauge" in doc["provenance"]
+    assert doc["lines"] == [{"id": "osm:way/1", "source": "osm", "path": [[1, 1], [2, 2]]}]

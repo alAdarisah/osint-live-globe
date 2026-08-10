@@ -64,6 +64,31 @@ MAX_PER_FEATURE = 300
 # can never make us ask a volunteer service for an unbounded result set.
 MAX_RAIL_PER_FEATURE = 25000
 
+# Task 27: mainline rail *geometry*, layered under railways.py's coarse Natural
+# Earth fallback so a reader who wants named lines, operators and gauges can
+# have them, without losing the global coverage OSM does not have.
+#
+# Queried separately from every selector above, on its own Overpass request,
+# because it needs `out geom` -- every vertex of every way -- rather than
+# `out center`, the one computed point per feature the rest of this sweep asks
+# for. The point classes' caps bound how many *features* come back; a line's
+# byte cost is dominated by how many *vertices* each one carries, which no
+# feature cap controls, so RAIL_LINE_TIMEOUT and MAX_RAIL_LINE_WAYS below are
+# a floor under the risk, not a promise of a small response.
+#
+# Restricted to railway=rail|light_rail|narrow_gauge -- the lines a train
+# actually runs on -- rather than every railway=* value. Sidings, yard leads,
+# platform edges and disused/abandoned/proposed/construction track all carry
+# the same tag family and are exactly what made railways.py's own docstring
+# reject OSM's *full* rail linework as ~300 MB per theatre-scale sweep (186.8
+# MB for Russia/Ukraine alone): this selector is the running-line subset of
+# that, and is expected to be a small fraction of it -- but it has not been
+# measured against a live Overpass instance, so treat a slow or a failed pass
+# on the largest theatres (Russia/Ukraine, the Sahel) as expected, not as a
+# bug, until an operator has watched a few real sweeps complete.
+RAIL_LINE_TIMEOUT = QUERY_TIMEOUT  # the same ceiling the point sweep already leans on
+MAX_RAIL_LINE_WAYS = 6000  # a cap on *ways*, not vertices -- see the note above
+
 # What is asked for, the per-record class it becomes, and its cap.
 #
 # Why each one carries a `["name"]` filter or does not:
@@ -255,6 +280,106 @@ async def _fetch_region(client: httpx.AsyncClient, key: str, bounds) -> list[dic
     return parse_overpass(resp.json(), key)
 
 
+def build_rail_line_query(bounds: tuple[float, float, float, float]) -> str:
+    """Overpass QL for one region box's mainline rail geometry.
+
+    One selector, one `out geom` -- unlike build_query above there is nothing
+    to union, because this asks for exactly one feature class. `out geom`
+    (rather than `out center`) is the point of this query: it returns every
+    vertex of every matched way, which is what a polyline needs and a point
+    sweep never does.
+    """
+    south, west, north, east = bounds
+    bbox = f"({south},{west},{north},{east})"
+    return (
+        f"[out:json][timeout:{RAIL_LINE_TIMEOUT}];\n"
+        f'way["railway"~"^(rail|light_rail|narrow_gauge)$"]{bbox};\n'
+        f"out geom tags {MAX_RAIL_LINE_WAYS};"
+    )
+
+
+def parse_rail_lines(payload: dict, region_key: str) -> list[dict]:
+    """An Overpass rail-line response -> attributed [lat, lon] line records.
+
+    `out geom` gives each way its own list of {lat, lon} vertices -- geometry,
+    not the `center` the point sweep above reads -- so this is its own parse
+    rather than a branch of parse_overpass. A way with fewer than two usable
+    vertices is not a line and is dropped, the same rule railways.py's own
+    theatre clip applies to Natural Earth's runs. Every record is tagged
+    source="osm" here, at the point of collection, so railways.py never has to
+    guess provenance back out of the shape of the data -- see its own
+    serialize(), which does the same for the Natural Earth half.
+    """
+    out: list[dict] = []
+    for element in (payload or {}).get("elements") or []:
+        if element.get("type") != "way":
+            continue
+        path = [
+            [pt["lat"], pt["lon"]]
+            for pt in (element.get("geometry") or [])
+            if isinstance(pt, dict)
+            and isinstance(pt.get("lat"), (int, float))
+            and isinstance(pt.get("lon"), (int, float))
+        ]
+        if len(path) < 2:
+            continue
+        way_id = element.get("id")
+        if way_id is None:
+            continue
+        tags = element.get("tags") or {}
+        out.append({
+            # Prefixed so an OSM way id can never collide with anything else
+            # riding this document -- same convention parse_overpass uses.
+            "id": f"osm:way/{way_id}",
+            "source": "osm",
+            "path": path,
+            "name": tags.get("name") or tags.get("name:en"),
+            "operator": tags.get("operator"),
+            "gauge": tags.get("gauge"),
+            "electrified": tags.get("electrified"),
+            "usage": tags.get("usage"),
+            "service": tags.get("service"),
+            "railway": tags.get("railway"),
+            "region_key": region_key,
+        })
+    return out
+
+
+async def _fetch_rail_lines(client: httpx.AsyncClient, key: str, bounds) -> list[dict]:
+    resp = await client.post(OVERPASS_URL, content=build_rail_line_query(bounds).encode("utf-8"))
+    if resp.status_code in (429, 504):
+        raise RuntimeError(f"Overpass busy ({resp.status_code}) for rail lines in {key}")
+    resp.raise_for_status()
+    return parse_rail_lines(resp.json(), key)
+
+
+def flatten_rail_lines(by_region: dict[str, list[dict]]) -> list[dict]:
+    """Every theatre's rail lines as one list, deduplicated by OSM way id.
+
+    Same reasoning as flatten() above: the theatre boxes in regions.py overlap,
+    so a way inside an overlap would otherwise be counted, and drawn, once per
+    box that swept it.
+    """
+    seen: dict[str, dict] = {}
+    for lines in by_region.values():
+        for line in lines:
+            seen.setdefault(line["id"], line)
+    return list(seen.values())
+
+
+def serialize_rail_lines(lines: list[dict]) -> dict:
+    """The stored document railways.py reads back and merges with Natural Earth.
+
+    Same shape discipline as railways.py's own serialize(): a provenance
+    string meant for the popup, not just a bag of lines.
+    """
+    return {
+        "attribution": "OpenStreetMap contributors",
+        "provenance": "OpenStreetMap Overpass, railway=rail|light_rail|narrow_gauge, swept daily across the conflict theatres",
+        "lines": lines,
+    }
+
+
 def flatten(by_region: dict[str, list[dict]]) -> list[dict]:
     """Every theatre's sites as one list, deduplicated by OSM id.
 
@@ -307,6 +432,32 @@ async def _warm(state) -> dict[str, list[dict]]:
     return by_region
 
 
+async def _warm_rail_lines() -> dict[str, list[dict]]:
+    """Seed the rail-line per-theatre map from storage, for the same reason
+    _warm above seeds the point one: without it, publishing after the first
+    region of a fresh sweep would shrink the merged railways.py document from
+    however many theatres the previous sweep covered down to one, for as long
+    as the rest of this (now heavier, see RAIL_LINE_TIMEOUT's note) sweep
+    takes to catch back up.
+
+    No registry state to fill here -- unlike the point sweep, nothing in this
+    process serves rail lines directly; railways.py reads the stored document
+    back in the backend process. So this only has to rebuild `by_region`.
+    """
+    stored = (await storage.reference("railways_osm")) or {}
+    lines = stored.get("lines") or []
+    if not lines:
+        return {}
+    by_region: dict[str, list[dict]] = {}
+    for line in lines:
+        by_region.setdefault(line.get("region_key") or "", []).append(line)
+    log.info(
+        "OSM rail lines: warmed %d stored ways across %d theatres while the sweep runs",
+        len(lines), len(by_region),
+    )
+    return by_region
+
+
 async def sweep_forever():
     """Overpass sweeps, for the life of the ingest process.
 
@@ -322,11 +473,17 @@ async def sweep_forever():
     # Per region, so one theatre failing keeps its previous copy instead of
     # blanking while the rest of the sweep continues.
     by_region: dict[str, list[dict]] = {}
+    # Task 27: the rail-line pass rides the same per-region loop below (see the
+    # comment there for why), so it gets the same warm-before-first-sweep
+    # treatment as the point pass, and for the identical reason.
+    rail_lines_by_region: dict[str, list[dict]] = {}
     if await storage.wait_for_warm_pool():
         by_region = await _warm(state)
+        rail_lines_by_region = await _warm_rail_lines()
     consecutive_failures = 0
     while True:
         swept = 0
+        rail_lines_swept = 0
         started = time.time()
         try:
             async with httpx.AsyncClient(
@@ -347,6 +504,28 @@ async def sweep_forever():
                     state.data = flatten(by_region)
                     state.last_success = time.time()
                     state.last_error = None
+
+                    # The rail-line pass for the same region, right after its
+                    # point pass and before the next region's pause -- one more
+                    # Overpass request per theatre rather than a second sweep
+                    # pacing itself independently against the same server. Its
+                    # own try/except: a rail-line timeout on a hard theatre
+                    # (see RAIL_LINE_TIMEOUT's note) must cost that region only
+                    # its lines, never its points, and must not stop the sweep
+                    # moving on to the next theatre.
+                    try:
+                        rail_lines_by_region[key] = await _fetch_rail_lines(client, key, bounds)
+                        rail_lines_swept += 1
+                    except Exception as exc:  # noqa: BLE001 - one theatre's lines are not the sweep
+                        log.warning("OSM rail lines fetch failed for %s: %s", key, exc)
+                        continue
+                    # Published per region like the points above. railways.py
+                    # (a different process) reads this document back on its own
+                    # clock and merges it with Natural Earth -- there is no
+                    # registry state to update here, only the stored copy.
+                    await storage.record_reference(
+                        "railways_osm", serialize_rail_lines(flatten_rail_lines(rail_lines_by_region))
+                    )
             if swept:
                 log.info(
                     "OSM infrastructure: %d sites across %d/%d theatres in %ds",
@@ -356,6 +535,22 @@ async def sweep_forever():
                 await storage.record_source_health("osm_infra", len(state.data), True)
             else:
                 raise RuntimeError("no theatre returned data")
+            # Rail lines are additive to the point sweep's own pass/fail verdict
+            # above, deliberately: a hard theatre timing out on the (heavier,
+            # unbounded-by-vertex-count) line query must not turn a healthy
+            # point sweep red. A systemic line failure is still visible -- just
+            # as a falling item_count on railways.py's own "railways" health
+            # row in the backend, once the merged document stops growing --
+            # rather than as a second health row here. See this function's own
+            # module-level note on RAIL_LINE_TIMEOUT for why that trade was made.
+            if rail_lines_swept:
+                log.info(
+                    "OSM rail lines: %d ways across %d/%d theatres in %ds",
+                    len(flatten_rail_lines(rail_lines_by_region)), rail_lines_swept,
+                    len(_regions_to_sweep()), round(time.time() - started),
+                )
+            else:
+                log.warning("OSM rail lines: no theatre returned any this pass")
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("OSM infrastructure sweep failed: %s", exc)

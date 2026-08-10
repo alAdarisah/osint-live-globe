@@ -1845,12 +1845,18 @@ export const OSM_INFRA_ORDER = [
   "railway_station", "railway_halt", "railway_yard", "railway_border",
 ];
 
-export function osmInfraStyle(kind) {
-  return themedStyle(OSM_INFRA_STYLE[kind] || OSM_INFRA_FALLBACK, "osmInfra");
+// `layerKey` picks which layer's admin opacity/theme dial applies (see
+// themedStyle) -- defaulted to "osmInfra" for every existing caller, and
+// overridden to "railwayPoints" by the two wrappers below it. Same style
+// table and the same glyphs either way: moving the four railway kinds onto
+// their own layer (Task 27) is about which checkbox and which dial governs
+// them, not about how they are drawn.
+export function osmInfraStyle(kind, layerKey = "osmInfra") {
+  return themedStyle(OSM_INFRA_STYLE[kind] || OSM_INFRA_FALLBACK, layerKey);
 }
 
-export function osmInfraIconSize(d) {
-  return osmInfraStyle(d?.kind).size;
+export function osmInfraIconSize(d, layerKey = "osmInfra") {
+  return osmInfraStyle(d?.kind, layerKey).size;
 }
 
 /**
@@ -1885,26 +1891,48 @@ function osmTwinBlock(twin, { what }) {
       }${osm.operator ? ` Operator, per OSM: ${esc(osm.operator)}.` : ""}</p>`;
 }
 
-export function decorateOsmInfra(d, { offset } = {}) {
-  const style = osmInfraStyle(d.kind);
+export function decorateOsmInfra(d, { offset, layerKey = "osmInfra" } = {}) {
+  const style = osmInfraStyle(d.kind, layerKey);
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)} &middot; OpenStreetMap`;
+  // The one line that reads differently depending on which layer this pin
+  // rides: under Infrastructure it is contrasted with the curated site list,
+  // under Railways with the Natural Earth linework it sits beside instead.
+  // Both are the same claim -- "crowd-sourced, not checked by hand" -- said
+  // against whichever neighbour a reader actually sees it next to.
+  const context = layerKey === "railwayPoints"
+    ? "The rail linework beside it is Natural Earth's coarser basemap context, a different, unattributed source."
+    : "The separate Critical Infrastructure layer is the curated one; this is the wider, noisier picture.";
   const detail = `
     <h3>${esc(d.name)}</h3>
     <div class="meta">${esc(style.label)}${d.operator ? ` &middot; ${esc(d.operator)}` : ""}</div>
     ${Number.isFinite(d.output_mw) ? `<div>Output: ${esc(Math.round(d.output_mw))} MW</div>` : ""}
     ${d.source_tag ? `<div>Generating from: ${esc(d.source_tag)}</div>` : ""}
     ${!d.named ? '<p class="meta">Unnamed in OpenStreetMap &mdash; the label above is its type, not its name.</p>' : ""}
-    <p class="meta">From <b>OpenStreetMap</b>, contributed by its mappers and not checked by hand. The
-      separate Critical Infrastructure layer is the curated one; this is the wider, noisier picture.
+    <p class="meta">From <b>OpenStreetMap</b>, contributed by its mappers and not checked by hand. ${context}
       Position is the feature's computed centre, so for a large site it is the middle of the area rather
       than any particular building.</p>
     <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass &middot;
       <a href="https://www.openstreetmap.org/${esc(d.osm_type)}/${esc(d.osm_id)}" target="_blank" rel="noopener noreferrer">view the raw feature</a></div>`;
   return {
-    icon: icon(style, style.color, style.size, 0, "osm-infra-marker", 0.75 * layerOpacity("osmInfra"), "", offset),
+    icon: icon(style, style.color, style.size, 0, "osm-infra-marker", 0.75 * layerOpacity(layerKey), "", offset),
     tooltip,
     detail,
   };
+}
+
+// ---------- railway points, riding the Railways layer (Task 27) ------------
+//
+// Thin wrappers over decorateOsmInfra/osmInfraIconSize above: same table, same
+// glyphs, same "crowd-sourced, not checked by hand" honesty -- only the layer
+// key (and so the admin opacity dial and the zoom-gate lookup it feeds) moves,
+// from osmInfra to railwayPoints. See LAYER_MANIFEST's own note in scene.js on
+// why these four kinds now ride the rail linework's toggle instead.
+export function decorateRailwayPoint(d, opts = {}) {
+  return decorateOsmInfra(d, { ...opts, layerKey: "railwayPoints" });
+}
+
+export function railwayPointIconSize(d) {
+  return osmInfraIconSize(d, "railwayPoints");
 }
 
 // ---------- EASA conflict-zone bulletins (backend/sources/czib.py) ----------
@@ -2387,6 +2415,127 @@ export const RAILWAY_STYLE = {
 
 export function railwayRouteColor() {
   return paletteColor("railway.line", RAILWAY_ROUTE_COLOR);
+}
+
+// ---------- OSM rail-line overlay (Task 27) ----------
+//
+// Layered over the Natural Earth linework above, sharing its layer key -- both
+// halves ride the one "railways" toggle and the one opacity dial -- but drawn
+// with their own weight and dash by class and their own colour by
+// electrification, the two per-feature claims the brief asked this overlay to
+// carry. Every OSM record also states name/operator/gauge/usage/service (see
+// backend/sources/osm_infra.py's parse_rail_lines), which the popup reads;
+// none of that changes how the line itself is drawn.
+export const RAILWAY_ELECTRIFIED_COLOR = "#e8b64f";
+export const RAILWAY_NONELECTRIFIED_COLOR = "#8fa876";
+export const RAILWAY_NARROW_GAUGE_COLOR = "#c17a4a";
+export const RAILWAY_OSM_STYLE = {
+  electrified: { color: RAILWAY_ELECTRIFIED_COLOR, label: "Electrified", token: "railway.electrified" },
+  nonElectrified: { color: RAILWAY_NONELECTRIFIED_COLOR, label: "Not electrified / unknown", token: "railway.nonElectrified" },
+  narrowGauge: { color: RAILWAY_NARROW_GAUGE_COLOR, label: "Narrow gauge", token: "railway.narrowGauge" },
+};
+export const RAILWAY_OSM_ORDER = ["electrified", "nonElectrified", "narrowGauge"];
+
+/**
+ * "main" | "branch" | "narrowGauge" -- what weight and dash differ by.
+ * Colour does not follow this split (see railwayLineColor below) except for
+ * narrow gauge, which is the one class distinct enough on the ground to earn
+ * its own colour as well as its own dash. `usage=branch` is OSM's own tag for
+ * a secondary line; `railway=light_rail` reads as a branch too, on the same
+ * "not the mainline" logic. Everything else -- railway=rail with usage=main
+ * or no usage tag at all -- is the mainline default.
+ */
+export function railwayOsmClass(line) {
+  if (line?.railway === "narrow_gauge") return "narrowGauge";
+  if (line?.usage === "branch" || line?.railway === "light_rail") return "branch";
+  return "main";
+}
+
+/**
+ * OSM's `electrified` tag is freehand-ish but converges on a few values:
+ * "yes"/"contact_line"/"rail" all mean current reaches the line; "no", and
+ * everything else (usually just an absent tag), does not. Absent is read as
+ * *not* electrified rather than as unknown -- the same "never assert a fact a
+ * source did not supply" rule everything else on this map follows. An
+ * unmarked line drawn as electrified would be this app's guess, not OSM's.
+ */
+export function railwayIsElectrified(line) {
+  const value = String(line?.electrified || "").toLowerCase();
+  return value === "yes" || value === "contact_line" || value === "rail";
+}
+
+const RAILWAY_OSM_CLASS_WEIGHT = { main: 2, branch: 1.3, narrowGauge: 1.3 };
+// null reads as "no dash" to Leaflet's own polyline options -- the mainline
+// class is drawn solid, the two others dashed, in different patterns so they
+// can be told apart without a legend.
+const RAILWAY_OSM_CLASS_DASH = { main: null, branch: "6 3", narrowGauge: "1 3" };
+
+/**
+ * The colour a merged railway line record draws in. `source` is read off the
+ * record rather than re-derived -- both halves of the merge stamp it at the
+ * point of collection (osm_infra.parse_rail_lines and railways.ne_line_records)
+ * so there is exactly one place that decision is made.
+ */
+export function railwayLineColor(line) {
+  if (line?.source !== "osm") return railwayRouteColor(); // Natural Earth: unchanged
+  if (railwayOsmClass(line) === "narrowGauge") {
+    return paletteColor("railway.narrowGauge", RAILWAY_NARROW_GAUGE_COLOR);
+  }
+  return railwayIsElectrified(line)
+    ? paletteColor("railway.electrified", RAILWAY_ELECTRIFIED_COLOR)
+    : paletteColor("railway.nonElectrified", RAILWAY_NONELECTRIFIED_COLOR);
+}
+
+/** Base weight in px, before the "railways" layer's own scale dial -- the
+ * caller applies scaledWeight(railwayLineBaseWeight(line), "railways"),
+ * matching how the Natural Earth line's weight was already scaled. */
+export function railwayLineBaseWeight(line) {
+  return line?.source === "osm" ? RAILWAY_OSM_CLASS_WEIGHT[railwayOsmClass(line)] : 1;
+}
+
+export function railwayLineDash(line) {
+  return line?.source === "osm" ? RAILWAY_OSM_CLASS_DASH[railwayOsmClass(line)] : "4 4";
+}
+
+// ---------- Digitraffic live trains (Task 27, backend/sources/digitraffic_rail.py) ----------
+//
+// Finland only -- Fintraffic's own coverage, not a gap in this map's. Every
+// popup says so, because a lone glyph over Finland with nothing said about
+// why would otherwise read as "this map only tracks trains in Finland" rather
+// than as "this is the one country with a live feed for this map to show".
+export const RAILWAY_LIVE_COLOR = "#ff5fa8";
+export const RAILWAY_LIVE_STYLE = {
+  svg: SVG.railway, color: RAILWAY_LIVE_COLOR, size: 13, label: "Live train (Digitraffic, Finland)",
+  token: "railway.live",
+};
+
+export function railLiveStyle() {
+  return themedStyle(RAILWAY_LIVE_STYLE, "railLive");
+}
+
+export function railLiveIconSize() {
+  return railLiveStyle().size;
+}
+
+export function decorateRailLive(d, { offset } = {}) {
+  const style = railLiveStyle();
+  const label = `Train ${esc(d.train_number)}`;
+  const tooltip = `<b>${label}</b><br/>Live position &middot; Digitraffic (Finland)`;
+  const detail = `
+    <h3>${label}</h3>
+    <div class="meta">Departure date: ${esc(d.departure_date)}</div>
+    ${Number.isFinite(d.speed) ? `<div>Speed: ${esc(Math.round(d.speed))} km/h</div>` : ""}
+    ${Number.isFinite(d.accuracy) ? `<div class="meta">GPS accuracy: &plusmn;${esc(Math.round(d.accuracy))} m</div>` : ""}
+    <p class="meta"><b>Finland only.</b> Fintraffic/Digitraffic publishes live positions for Finnish
+      rail traffic; no other country is covered by this layer, and that is a fact about their feed,
+      not a gap in this map's coverage elsewhere.</p>
+    <div class="meta">Source: ${esc(d.publisher || "Fintraffic / digitraffic.fi")},
+      ${esc(d.license || "license CC 4.0 BY")}</div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "rail-live-marker", style.opacity, "", offset),
+    tooltip,
+    detail,
+  };
 }
 
 // ---------- shipping lanes (backend/infrastructure.py's SHIPPING_LANES) ----------
@@ -4196,4 +4345,8 @@ export const TOKEN_FOR = {
   launches: (d) => (d?.upcoming ? "launch.upcoming" : "launch.flown"),
   cableLandings: (d) => (d?.planned ? "cable.planned" : "cable.landing"),
   osmInfra: (d) => OSM_INFRA_STYLE[d?.kind]?.token ?? null,
+  // Task 27: same lookup osmInfra uses just above -- the four railway kinds
+  // moved layers, not tables (see decorateRailwayPoint's own note).
+  railwayPoints: (d) => OSM_INFRA_STYLE[d?.kind]?.token ?? null,
+  railLive: () => "railway.live",
 };

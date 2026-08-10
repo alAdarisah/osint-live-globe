@@ -7,6 +7,7 @@ import {
   LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
   GFW_GAP_STYLE, GFW_DETECTION_STYLE, GFW_DETECTION_ORDER,
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
+  RAILWAY_OSM_STYLE, RAILWAY_LIVE_STYLE,
   WATER_STYLE, SHIPPING_LANE_STYLE, LANE_DENSITY_STYLE, SAT_ELEMENT_LAYERS,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
@@ -125,7 +126,7 @@ const GROUP_LAYERS = {
   // it is a place layer, and the aircraft that need it already get their
   // nearest field named inside their own popup.
   ground: [
-    "infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "shippingLanes",
+    "infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "railLive", "shippingLanes",
     "water", "cables", "firms", "jamming", "laneDensity",
   ],
   // Its own group rather than a ninth row under traffic: a regulator's ruling
@@ -159,7 +160,16 @@ const LAYER_LABEL = {
   cities: "Cities", dams: "Dams", ports: "Ports", osmInfra: "OSM infrastructure",
   gfwGaps: "AIS disabling", gfwDetections: "Vessel detections",
   aisCivilian: "Civilian ships", adsbCivilian: "Civilian aircraft",
+  // Task 27: railwayPoints carries the same LOCAL cap osmInfra's own points
+  // did before the move (see LAYER_MANIFEST), so it needs a name here too.
+  railwayPoints: "Railway points (OSM)",
 };
+
+// Task 27: railwayPoints has no checkbox of its own -- it mirrors "railways"'
+// visibility exactly (see setLayerVisible in createMapController.js) -- so
+// the cap note below has to ask about its *parent's* checkbox, not one that
+// will never exist. Every other capped layer answers for itself.
+const CAP_NOTE_VISIBILITY_KEY = { railwayPoints: "railways" };
 
 export default function LayersSection({
   counts, zoomNotes, layerVisibility, layerWish, onToggleLayer, infraFilterText, onInfraFilterChange,
@@ -186,7 +196,7 @@ export default function LayersSection({
   // operator wants to know *that* something is thinned and which, and the
   // per-layer count is already in the ticker next to it.
   const cappedElsewhere = Object.entries(zoomNotes.capped || {})
-    .filter(([key, n]) => key !== "events" && n && layerVisibility[key])
+    .filter(([key, n]) => key !== "events" && n && layerVisibility[CAP_NOTE_VISIBILITY_KEY[key] || key])
     .map(([key, n]) => `${LAYER_LABEL[key] || key} (${n})`);
 
   return (
@@ -879,11 +889,6 @@ export default function LayersSection({
             Border crossings
             <span className="count">{counts.osmBorder} ({counts.osmBorderTotal})</span>
           </div>
-          <div className="subticker-row">
-            <LayerIcon svg={OSM_INFRA_STYLE.railway_station.svg} color={OSM_INFRA_STYLE.railway_station.color} token={OSM_INFRA_STYLE.railway_station.token} />
-            Railways (stations, halts, yards, crossings)
-            <span className="count">{counts.osmRailway} ({counts.osmRailwayTotal})</span>
-          </div>
         </div>
         <div id="osmInfraZoomNote" className={`sublegend${zoomNotes.osmInfra ? " visible" : ""}`}>
           Zoom in to show OpenStreetMap infrastructure
@@ -909,6 +914,10 @@ export default function LayersSection({
             three quarters of the OSM military airfields here are one of those. Nothing is discarded
             &mdash; the surviving pin names the OSM record, its own name for the place and how far apart
             the two sources put it. Switch the other layer off and these pins come back.
+          </div>
+          <div className="sublegend">
+            <b>Railway stations, halts, yards and border crossings moved to the Railways layer below</b>,
+            next to the linework they sit on, rather than staying scattered in this one.
           </div>
         </LayerDetails>
 
@@ -1083,19 +1092,73 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={RAILWAY_STYLE.svg} color={RAILWAY_STYLE.color} token={RAILWAY_STYLE.token} />
-          {" "}Railways (Natural Earth)
+          {" "}Railways (Natural Earth + OpenStreetMap)
           <span className="count">{counts.railways} ({counts.railwaysTotal})</span>
+        </label>
+        {/* Task 27: the station/halt/yard/border points, moved here from OSM
+            infrastructure above -- a readout, not a toggle of its own, the
+            same "sub-ticker of its parent" treatment osmInfra's own rows get
+            (see EXTRA_TOKENS_UNDER in components/admin/sections/shared.jsx
+            for where its colours live in the admin panel). */}
+        <div className="subticker-list">
+          <div className="subticker-row">
+            <LayerIcon
+              svg={OSM_INFRA_STYLE.railway_station.svg}
+              color={OSM_INFRA_STYLE.railway_station.color}
+              token={OSM_INFRA_STYLE.railway_station.token}
+            />
+            Stations, halts, yards &amp; border crossings (OpenStreetMap)
+            <span className="count">{counts.railwayPoints} ({counts.railwayPointsTotal})</span>
+          </div>
+        </div>
+        {/* Its own row, not a sub-ticker: a reader may want the network
+            without the (live, Finland-only) trains riding along with it, or
+            the reverse -- see LAYER_MANIFEST's own note on why this is not
+            tied to the checkbox above it. */}
+        <label className="layer-row sub-row" data-layer="railLive">
+          <LayerCheck
+            layerKey="railLive"
+            on={layerVisibility.railLive}
+            wish={layerWish?.railLive}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={RAILWAY_LIVE_STYLE.svg} color={RAILWAY_LIVE_STYLE.color} token={RAILWAY_LIVE_STYLE.token} />
+          {" "}Live trains (Digitraffic, Finland only)
+          <span className="count">{counts.railLive} ({counts.railLiveTotal})</span>
         </label>
         <LayerDetails id="det-railways" open={isOpen("det-railways")} onToggle={setOpen}>
           <div className="sublegend">
-            <b>Coarse basemap linework, 2021.</b> Natural Earth 1:10m railroads &mdash; public domain,
-            unchanged since 2021, with no names, no operator and no gauge. It is drawn as a muted,
-            dashed hairline because it is context, not survey data.
+            <b>Two sources, and every line says which.</b> Natural Earth 1:10m railroads (public domain,
+            unchanged since 2021, no names, no operator, no gauge) is the muted dashed hairline drawn
+            worldwide. Layered over it, across this map&apos;s conflict theatres only, is OpenStreetMap&apos;s
+            attributed running-line network &mdash; name, operator, gauge and electrification where its
+            mappers recorded them, swept daily alongside the station points above.
           </div>
           <div className="sublegend">
-            <b>It will not sit exactly on the railway station points.</b> Those come from OpenStreetMap
-            (the Infrastructure layer above); this linework is a different, coarser source and the two
-            are not aligned. Clipped to this map&apos;s conflict theatres rather than drawn worldwide.
+            <LayerIcon svg={RAILWAY_STYLE.svg} color={RAILWAY_STYLE.color} token={RAILWAY_STYLE.token} />
+            Natural Earth (worldwide, unattributed)
+            <LayerIcon svg={SVG.railway} color={RAILWAY_OSM_STYLE.electrified.color} token={RAILWAY_OSM_STYLE.electrified.token} />
+            {RAILWAY_OSM_STYLE.electrified.label} (OpenStreetMap)
+            <LayerIcon svg={SVG.railway} color={RAILWAY_OSM_STYLE.nonElectrified.color} token={RAILWAY_OSM_STYLE.nonElectrified.token} />
+            {RAILWAY_OSM_STYLE.nonElectrified.label}
+            <LayerIcon svg={SVG.railway} color={RAILWAY_OSM_STYLE.narrowGauge.color} token={RAILWAY_OSM_STYLE.narrowGauge.token} />
+            {RAILWAY_OSM_STYLE.narrowGauge.label}
+          </div>
+          <div className="sublegend">
+            Main lines draw heaviest and solid; branch lines and narrow-gauge track are thinner and
+            dashed, in different patterns, so the three can be told apart without opening a popup.
+          </div>
+          <div className="sublegend">
+            <b>Neither line sits exactly on the station points above.</b> The linework and the points come
+            from the same daily OpenStreetMap sweep but different feature classes, and Natural Earth is a
+            different, coarser source again -- none of the three is surveyed to line up with another.
+          </div>
+          <div className="sublegend">
+            <LayerIcon svg={RAILWAY_LIVE_STYLE.svg} color={RAILWAY_LIVE_STYLE.color} token={RAILWAY_LIVE_STYLE.token} />
+            <b>Live trains cover Finland only.</b> Fintraffic/Digitraffic publishes live positions for
+            Finnish rail traffic and nothing else; that is a fact about their feed, not a gap in this
+            map&apos;s coverage of the network drawn above. Off by default and switched on separately from
+            the network itself.
           </div>
         </LayerDetails>
 

@@ -179,6 +179,28 @@ export const PALETTE_GROUPS = [
       // Coarse basemap rail *linework* (Natural Earth 1:10m, 2021). A muted grey,
       // and colour-only like cable.route below -- it is a polyline, not a pin.
       { id: "railway.line", label: "Railway line (Natural Earth, 2021)", value: "#6f7d92" },
+      // Task 27: the attributed OpenStreetMap overlay riding the same
+      // "railways" toggle as railway.line above. Colour-only, same reasoning
+      // -- a polyline, not a pin -- for all three: electrified/non-electrified
+      // is the one distinction the brief asked colour to carry (class --
+      // main/branch/narrow gauge -- is weight and dash instead, see
+      // decorators.js's railwayLineBaseWeight/railwayLineDash), and narrow
+      // gauge earns its own colour on top of its own dash because it is a
+      // physically different kind of track, not just a quieter branch line.
+      { id: "railway.electrified", label: "Railway line, electrified (OpenStreetMap)", value: "#e8b64f" },
+      {
+        id: "railway.nonElectrified",
+        label: "Railway line, not electrified / unknown (OpenStreetMap)",
+        value: "#8fa876",
+      },
+      { id: "railway.narrowGauge", label: "Railway line, narrow gauge (OpenStreetMap)", value: "#c17a4a" },
+      // Task 27: Digitraffic's live Finnish train positions. A pin, not a
+      // colour-only token -- see railway.electrified above for its line-only
+      // siblings -- and given a colour of its own (a vivid magenta, unclaimed
+      // elsewhere on this map) rather than reusing the muted OSM-point slate
+      // above: this is a live position, not reference geometry, and should
+      // not read as quiet crowd-sourced context the way a station pin does.
+      { id: "railway.live", label: "Live train (Digitraffic, Finland)", value: "#ff5fa8" },
       // The ten named corridors (Task 20b) -- colour-only, same reasoning as
       // railway.line just above: a polyline, not a pin. A muted cyan-teal,
       // deliberately unlike the severity/traffic reds and yellows so a
@@ -254,6 +276,11 @@ export const DEFAULT_COLORS = Object.freeze(
  */
 const COLOUR_ONLY_TOKENS = new Set([
   "event.corroborated", "sanctions.designated", "cable.route", "railway.line",
+  // Task 27: the OSM line overlay's three tokens are colour-only for the same
+  // reason railway.line is -- each colours a polyline, not a pin. railway.live
+  // is deliberately absent: it is a genuine marker (a live train position) and
+  // earns the size dial the other three have no shape to apply to.
+  "railway.electrified", "railway.nonElectrified", "railway.narrowGauge",
   "lanes.route", "lanes.density", "reach.contour",
   "choropleth.low", "choropleth.mid", "choropleth.high",
   "water.fill", "water.outline", "water.selected",
@@ -345,10 +372,15 @@ export const TOKEN_LAYER = Object.freeze({
   "osm.military_area": "osmInfra",
   "osm.power": "osmInfra",
   "osm.border": "osmInfra",
-  "osm.railway_station": "osmInfra",
-  "osm.railway_halt": "osmInfra",
-  "osm.railway_yard": "osmInfra",
-  "osm.railway_border": "osmInfra",
+  // Task 27: moved from "osmInfra" to "railwayPoints" -- these four kinds now
+  // ride the Railways layer's own toggle rather than OSM infrastructure's
+  // (see LAYER_MANIFEST's note in scene.js), so their own per-pin zoom gate
+  // must be checked against that layer's floor, not the one they left.
+  "osm.railway_station": "railwayPoints",
+  "osm.railway_halt": "railwayPoints",
+  "osm.railway_yard": "railwayPoints",
+  "osm.railway_border": "railwayPoints",
+  "railway.live": "railLive",
   "deflock.camera": "deflock",
   "czib.active": "czib",
   "czib.withdrawn": "czib",
@@ -401,6 +433,9 @@ export const PIN_STACK = [
   // they draw on the WebGL entity canvas instead (see STACK_ALIAS below).
   "satNavigation", "satWeather", "satScience", "launches",
   "cities", "infra", "osmInfra", "deflock", "airports", "ports", "dams",
+  // Task 27: railLive gets its own position -- a genuine independent toggle,
+  // unlike railwayPoints just below it, which has none (see STACK_ALIAS).
+  "railLive",
   "railways", "cables", "shippingLanes", "outagePoints", "outageRegionPoints",
 ];
 export const WASH_STACK = ["vehicles", "jamming", "firms", "laneDensity"];
@@ -434,6 +469,10 @@ export const STACK_ALIAS = Object.freeze({
   adsbMilitary: "vehicles", adsbCivilian: "vehicles", adsbFlagged: "vehicles",
   satImaging: "vehicles", satGeo: "vehicles", satStarlink: "vehicles", satOneweb: "vehicles",
   cableLandings: "cables",
+  // Task 27: the station/halt/yard/border points ride the rail linework's
+  // position, the same way cableLandings rides cables' -- one toggle, one
+  // place in the stack, for a subject that used to be split across two.
+  railwayPoints: "railways",
   firmsPoints: "firms",
 });
 

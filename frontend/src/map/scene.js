@@ -334,14 +334,49 @@ export const LAYER_MANIFEST = {
     disposition: CORROBORATING,
   },
   railways: {
-    // Coarse Natural Earth rail linework, theatre-clipped and drawn as whole
-    // polylines like cables -- so ungated once active. MANUAL and off by default:
-    // it is basemap context a reader opts into, not something the resolver should
-    // assert or a country focus should drag on. Fetched once at boot as a whole
-    // document (backend/sources/railways.py), same as cables, so FETCH_MANUAL
-    // keeps the poller out of it.
+    // Task 27 layered an attributed OpenStreetMap overlay on top of the
+    // Natural Earth fallback (backend/sources/railways.py's own merge), but
+    // the gate is unchanged: both halves are whole polylines, drawn ungated
+    // once active, MANUAL and off by default for the same reason as before --
+    // this is basemap context a reader opts into, not something the resolver
+    // should assert or a country focus should drag on. Fetched once at boot
+    // as a whole document, same as cables, so FETCH_MANUAL keeps the poller
+    // out of it.
     draw: null,
     fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  // Task 27: the station/halt/yard/border points osm_infra.py already swept,
+  // pulled out of the generic OSM infrastructure layer and given a home next
+  // to the rail linework they sit on -- one toggle for the whole rail
+  // network instead of two unrelated checkboxes for one subject. No
+  // disposition/checkbox of its own: it mirrors "railways"' visibility
+  // exactly the way cableLandings mirrors "cables" (see
+  // createMapController.js's setLayerVisible), it just needs its own draw
+  // gate and collapse here because it is a dense point layer where its
+  // parent is a small set of whole lines. Gate and cap are copied from
+  // osmInfra's own entry unchanged -- this task did not ask to redraw when
+  // OSM points are worth showing, only which toggle governs them.
+  railwayPoints: {
+    draw: { band: "LOCAL", z: 9 },
+    fetch: "LOCAL",
+    cap: { LOCAL: 800 },
+    collapse: { mode: "proximity", maxZoom: 11 },
+    disposition: MANUAL,
+  },
+  // Task 27: Digitraffic's live Finnish train positions
+  // (backend/sources/digitraffic_rail.py, GET /api/rail-live) -- a genuine
+  // sub-layer of the same rail group rather than a sub-ticker, because a
+  // reader may want the (static) network without the (moving, Finland-only)
+  // trains or the reverse. MANUAL and off by default, deliberately not tied
+  // to "railways"' own checkbox: turning on a coarse worldwide basemap must
+  // never be read as "and also Finland's live trains are now on", which is
+  // exactly the false impression of coverage this layer's own note in
+  // LayersSection.jsx exists to head off. Ungated once switched on -- ~111
+  // trains at most is legible at any zoom, the same argument aisNavy makes.
+  railLive: {
+    draw: null,
+    fetch: FETCH_ALWAYS,
     disposition: MANUAL,
   },
   shippingLanes: {
@@ -764,9 +799,11 @@ export const LAYER_MANIFEST = {
  *   cableLandings  has no toggle of its own; setLayerVisible("cables") mirrors
  *                  onto it, because a cable and the place it comes ashore are
  *                  one fact and being able to hide half of it helps nobody
+ *   railwayPoints  same arrangement, one layer over: setLayerVisible("railways")
+ *                  mirrors onto it -- see its own note in LAYER_MANIFEST above
  */
 export const SCENE_APPLY_KEYS = Object.keys(LAYER_MANIFEST).filter(
-  (key) => !LAYER_MANIFEST[key].virtual && key !== "cableLandings"
+  (key) => !LAYER_MANIFEST[key].virtual && key !== "cableLandings" && key !== "railwayPoints"
 );
 
 // Sub-toggles that have no independent existence: a trail is drawn wherever its

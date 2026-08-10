@@ -92,7 +92,15 @@ import {
   decorateCableLanding,
   cableLandingIconSize,
   cableRouteColor,
-  railwayRouteColor,
+  railwayLineColor,
+  railwayLineBaseWeight,
+  railwayLineDash,
+  railwayOsmClass,
+  railwayIsElectrified,
+  decorateRailwayPoint,
+  railwayPointIconSize,
+  decorateRailLive,
+  railLiveIconSize,
   shippingLaneColor,
   laneDensityColor,
   laneDensityIntensity,
@@ -295,6 +303,13 @@ const ID_FIELD = {
   launches: "id", osmInfra: "id",
   gfwGaps: "id", gfwDetections: "id", czib: "id", floods: "id", ports: "id", dams: "id",
   deflock: "id",
+  // Task 27: railwayPoints reuses osm_infra's own prefixed "osm:type/id" ids
+  // (it reads the same raw items, just split into their own array -- see
+  // applyData's own note on where that split happens). railLive's id is
+  // digitraffic_rail's synthetic "departureDate:trainNumber" composite (see
+  // backend/sources/digitraffic_rail.py's own note on why trainNumber alone
+  // is not a stable identity).
+  railwayPoints: "id", railLive: "id",
   // One pin per country, so the country code *is* the identity -- a country
   // whose score changes between polls has to update its existing marker rather
   // than be torn down and rebuilt under a new key.
@@ -313,6 +328,7 @@ const DECORATORS = {
   gfwGaps: decorateGfwGap, gfwDetections: decorateGfwDetection,
   czib: decorateCzib, floods: decorateFlood, ports: decoratePort, dams: decorateDam,
   deflock: decorateDeflock,
+  railwayPoints: decorateRailwayPoint, railLive: decorateRailLive,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
@@ -326,6 +342,7 @@ const ICON_SIZE_FOR_GLYPH = {
   gfwGaps: gfwGapIconSize, gfwDetections: gfwDetectionIconSize,
   czib: czibIconSize, floods: floodIconSize, ports: portIconSize, dams: damIconSize,
   deflock: deflockIconSize,
+  railwayPoints: railwayPointIconSize, railLive: railLiveIconSize,
 };
 // The same sizes with the current level of detail applied, which is what the
 // placement pass has to reserve: a dot needs a dot's worth of room, and routing
@@ -603,9 +620,15 @@ export function createMapController(container, initial, callbacks) {
   // the layer is off by default (see DEFAULT_LAYER_VISIBILITY in App.jsx).
   const cablesGroup = createCablesGroup();
   const cablesLayer = L.layerGroup([cablesGroup, groups.cableLandings]);
-  // Coarse Natural Earth railway linework. NOT added to the map here -- off by
-  // default (MANUAL disposition, see map/scene.js), toggled on from the panel.
+  // Coarse Natural Earth railway linework, now merged with an attributed OSM
+  // overlay (Task 27) -- still one document, one polyline group. NOT added to
+  // the map here -- off by default (MANUAL disposition, see map/scene.js),
+  // toggled on from the panel.
   const railwaysGroup = createRailwaysGroup();
+  // The station/halt/yard/border points ride the same toggle as the lines
+  // above, same "one fact, one checkbox" treatment cablesGroup+cableLandings
+  // just above already gets -- see LAYER_MANIFEST's own note on railwayPoints.
+  const railwaysLayer = L.layerGroup([railwaysGroup, groups.railwayPoints]);
   // Task 20b: the ten named corridors. Same treatment as railwaysGroup above
   // -- off by default (MANUAL, see map/scene.js), toggled on from the panel.
   const shippingLanesGroup = createShippingLanesGroup();
@@ -789,10 +812,15 @@ export function createMapController(container, initial, callbacks) {
     // Two published gazetteers: harbours (NGA) and barriers (Global Dam Watch).
     // Neither is a feed and nothing in either is current.
     ports: [], dams: [],
-    // DeFlock ALPR camera locations (deflock.py) and the coarse Natural Earth
-    // railway linework (railways.py). Neither is a feed; the first is a worldwide
-    // point layer gated deep by zoom, the second a whole-document set of lines.
+    // DeFlock ALPR camera locations (deflock.py) and the railway linework
+    // (railways.py, now Natural Earth + an OpenStreetMap overlay -- Task 27).
+    // Neither is a feed; the first is a worldwide point layer gated deep by
+    // zoom, the second a whole-document set of lines.
     deflock: [], railways: { lines: [] },
+    // Task 27: the station/halt/yard/border points, split out of osmInfra at
+    // render time (see applyData's own note) -- and Digitraffic's live
+    // Finnish train positions, a genuine feed with its own POLL_CONFIG row.
+    railwayPoints: [], railLive: [],
     // Task 20b's corridors (a plain array, like pipelines) and Task 20a's
     // AIS density grid (a whole document -- {note, cells} -- like railways
     // above, so the popup/legend can state the endpoint's own `note` rather
@@ -834,6 +862,7 @@ export function createMapController(container, initial, callbacks) {
     gfwGaps: new Map(), gfwDetections: new Map(),
     czib: new Map(), floods: new Map(), ports: new Map(), dams: new Map(),
     deflock: new Map(),
+    railwayPoints: new Map(), railLive: new Map(),
   };
   // Keyed by event id, same as markersByKey.events, so a circle and its pin
   // are added and dropped by the same diff against the same visible set.
@@ -1509,6 +1538,16 @@ export function createMapController(container, initial, callbacks) {
     const gate = minZoomFor(entry.by);
     if (gate != null && map.getZoom() < gate) return true;
     return false;
+  }
+
+  // Task 27: the one osm_infra sweep still returns all five kinds in one
+  // list -- moving the four railway kinds to their own layer (see
+  // LAYER_MANIFEST's note) is a rendering split, not a fetch split. applyData
+  // does the actual splitting (see its own note), into raw.osmInfra and
+  // raw.railwayPoints; this predicate is what it splits by, and is exported
+  // to that closure by being a plain function declaration in this scope.
+  function isRailwayPointItem(item) {
+    return typeof item.kind === "string" && item.kind.startsWith("railway_");
   }
 
   const LAYER_ITEM_FILTER = {
@@ -2348,7 +2387,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "cities") return citiesGroup;
     if (key === "infra") return infraLayer; // wraps infraGroup + pipelinesGroup together
     if (key === "cables") return cablesLayer; // wraps cablesGroup + the landing-point markers
-    if (key === "railways") return railwaysGroup;
+    if (key === "railways") return railwaysLayer; // wraps railwaysGroup (lines) + railwayPoints (stations)
     if (key === "shippingLanes") return shippingLanesGroup;
     if (key === "water") return waterLayer;
     if (key === "windArrows") return windFlowLayer;
@@ -2408,6 +2447,10 @@ export function createMapController(container, initial, callbacks) {
     // treated as permanently hidden and take up no room, so visible pins would
     // be free to sit on top of them.
     if (key === "cables") layerOnMap.cableLandings = visible;
+    // Same arrangement, one layer over: the station/halt/yard/border points
+    // live inside the combined "railways" layer and have no toggle of their
+    // own -- see railwaysLayer's construction and LAYER_MANIFEST's own note.
+    if (key === "railways") layerOnMap.railwayPoints = visible;
 
     // Task 24: the seven client-propagated satellite layers. Deliberately
     // does not `return` -- satNavigation/satWeather/satScience still need
@@ -3259,7 +3302,11 @@ export function createMapController(container, initial, callbacks) {
     aisSanctioned: 0, adsbSanctioned: 0,
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
-    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0, osmRailway: 0,
+    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
+    // Task 27: osmRailway's old lumped count is now this layer's own natural
+    // count/total (railwayPoints is a real render key, not a sub-ticker of
+    // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
+    railwayPoints: 0, railLive: 0,
     outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
@@ -3293,7 +3340,11 @@ export function createMapController(container, initial, callbacks) {
     aisSanctioned: 0, adsbSanctioned: 0,
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
-    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0, osmRailway: 0,
+    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
+    // Task 27: osmRailway's old lumped count is now this layer's own natural
+    // count/total (railwayPoints is a real render key, not a sub-ticker of
+    // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
+    railwayPoints: 0, railLive: 0,
     outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
@@ -3320,7 +3371,7 @@ export function createMapController(container, initial, callbacks) {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
     gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
-    deflock: false, laneDensity: false,
+    deflock: false, laneDensity: false, railwayPoints: false,
     // Task 24's three on-by-default, THEATRE-gated groups -- see
     // SAT_ELEMENT_ZOOM_NOTE_KEYS. The four off-by-default groups are
     // ungated and never report a note.
@@ -3360,14 +3411,18 @@ export function createMapController(container, initial, callbacks) {
       of: (item) => (item.kind === "sts_pair" ? "darkSts" : "darkGaps"),
     },
     osmInfra: {
-      keys: ["osmMilitary", "osmPower", "osmBorder", "osmRailway"],
+      keys: ["osmMilitary", "osmPower", "osmBorder"],
       of: (item) => {
         if (item.kind === "power_plant") return "osmPower";
         if (item.kind === "border_control") return "osmBorder";
-        // The four railway kinds the sweep now also returns (station, halt, yard,
-        // border) get their own tally rather than being folded into the military
-        // count they would otherwise fall through into.
-        if (typeof item.kind === "string" && item.kind.startsWith("railway_")) return "osmRailway";
+        // Task 27: the four railway kinds moved to their own layer
+        // (railwayPoints, with its own natural count) rather than a
+        // sub-ticker here -- LAYER_ITEM_FILTER.osmInfra already excludes
+        // them from this layer's *visible* set, and rolling them into
+        // nothing here (rather than into osmMilitary) keeps this layer's
+        // own *total* honest too: the totals loop below reads raw items
+        // unfiltered, and a railway station is not a military site.
+        if (typeof item.kind === "string" && item.kind.startsWith("railway_")) return null;
         return "osmMilitary"; // airfields and areas roll up together
       },
     },
@@ -6125,13 +6180,44 @@ export function createMapController(container, initial, callbacks) {
     scheduleReports({ counts: true });
   }
 
-  // Coarse railway linework, drawn once from the whole document exactly as
+  // Task 27: an OSM line's popup -- name, operator, gauge, electrification,
+  // usage and service where OSM has them, plus the same "swept daily, theatre
+  // only" honesty the Railways layer's own detail fold states. Kept apart
+  // from the Natural Earth popup below because the two are different claims
+  // about different data, not two renderings of one fact.
+  function osmRailwayPopupHtml(line) {
+    const label = line.name ? esc(line.name) : "Unnamed railway";
+    const cls = railwayOsmClass(line);
+    const classLabel = cls === "narrowGauge" ? "Narrow gauge" : cls === "branch" ? "Branch line" : "Main line";
+    const electrified = railwayIsElectrified(line);
+    return (
+      `<h3>${label}</h3>` +
+      `<div class="meta">${esc(classLabel)}${line.railway ? ` &middot; railway=${esc(line.railway)}` : ""}</div>` +
+      (line.operator ? `<div>Operator: ${esc(line.operator)}</div>` : "") +
+      (line.gauge ? `<div>Gauge: ${esc(line.gauge)} mm</div>` : "") +
+      `<div>${electrified ? "Electrified" : "Not electrified (or not stated)"}` +
+      `${line.electrified ? ` &middot; <span class="meta">electrified=${esc(line.electrified)}</span>` : ""}</div>` +
+      (line.usage ? `<div class="meta">Usage: ${esc(line.usage)}</div>` : "") +
+      (line.service ? `<div class="meta">Service: ${esc(line.service)}</div>` : "") +
+      `<p class="meta">From <b>OpenStreetMap</b>, swept daily across this map's conflict theatres only -- ` +
+      "outside them, the muted Natural Earth linework is the only coverage this layer has.</p>" +
+      `<div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass</div>`
+    );
+  }
+
+  // Railway linework, drawn once from the whole merged document exactly as
   // renderCables draws the cable routes: a polyline is already clipped by Leaflet
   // and a rail line only makes sense whole, so it is never bounds-filtered.
   //
-  // The honesty this layer carries is not optional -- every popup states that
-  // this is 1:10m Natural Earth basemap linework, static since 2021, unnamed, and
-  // that it will not sit exactly on the OSM station points from osm-infrastructure.
+  // Task 27 layered an attributed OpenStreetMap overlay onto the Natural Earth
+  // fallback (see railways.py's own merge), and the honesty this layer carries
+  // now has two halves instead of one: a Natural Earth line still states that
+  // it is 1:10m basemap linework, static since 2021, unnamed, and that it will
+  // not sit exactly on the station points; an OSM line states its own name,
+  // operator, gauge and electrification, and that it only exists across the
+  // conflict theatres. `line.source` (stamped at collection -- see
+  // railways.ne_line_records and osm_infra.parse_rail_lines) is what every
+  // per-line decision below reads to tell the two apart; nothing here guesses.
   //
   // Repeated across the visible world copies like the cables and pipelines above,
   // and re-drawn on the same trigger (see renderWorldCopyLayers).
@@ -6141,35 +6227,41 @@ export function createMapController(container, initial, callbacks) {
     worldCopyKeys.railways = offsets.join(",");
     const doc = raw.railways || {};
     const lines = Array.isArray(doc.lines) ? doc.lines : [];
-    const color = railwayRouteColor();
     // Read from the stored document rather than hard-coded, so the note tracks
     // whatever the backend actually served (see railways.py's `provenance`).
     const provenance = doc.provenance || "Natural Earth 1:10m, 2021, coarse basemap linework, unnamed";
-    const attribution = doc.attribution || "Natural Earth";
-    const popupHtml =
+    const nePopupHtml =
       "<h3>Railway (basemap linework)</h3>" +
       `<p class="meta"><b>Coarse basemap linework, 2021.</b> ${esc(provenance)}. It is context, not ` +
       "survey data, and will <b>not</b> line up exactly with the railway station points on the " +
       "OpenStreetMap infrastructure layer.</p>" +
-      `<div class="meta">Source: ${esc(attribution)}</div>`;
-    for (const path of lines) {
+      '<div class="meta">Source: Natural Earth</div>';
+    for (const line of lines) {
+      const path = line?.path;
       if (!Array.isArray(path) || path.length < 2) continue;
+      const isOsm = line.source === "osm";
+      const style = {
+        color: railwayLineColor(line),
+        // A hairline for Natural Earth and both dials on it like the cables
+        // layer: weight is what "size" means for a polyline, and the shipped
+        // judgement is that the coarse fallback sits well back behind
+        // everything real. The OSM overlay is heavier and mostly solid (see
+        // railwayLineBaseWeight/railwayLineDash) precisely because it is real
+        // survey data and is meant to read as more assertive than the basemap
+        // it sits over.
+        weight: scaledWeight(railwayLineBaseWeight(line), "railways"),
+        opacity: (isOsm ? 0.85 : 0.55) * layerOpacity("railways"),
+        dashArray: railwayLineDash(line),
+      };
+      const tooltipText = isOsm
+        ? `${line.name ? esc(line.name) : "Railway"} (OpenStreetMap)`
+        : "Railway (coarse basemap linework, 2021)";
+      const popupHtml = isOsm ? osmRailwayPopupHtml(line) : nePopupHtml;
       for (const offset of offsets) {
-        const line = L.polyline(shiftPathLon(path, offset), {
-          color,
-          // A hairline, and both dials on it like the cables layer: weight is what
-          // "size" means for a polyline, and the shipped judgement is that this
-          // sits well back behind everything real. dashed so it never reads as a
-          // surveyed route.
-          weight: scaledWeight(1, "railways"),
-          opacity: 0.55 * layerOpacity("railways"),
-          dashArray: "4 4",
-        });
-        line.bindTooltip("Railway (coarse basemap linework, 2021)", {
-          className: "map-tooltip", direction: "top", sticky: true,
-        });
-        line.bindPopup(popupHtml, popupOptions(280));
-        railwaysGroup.addLayer(line);
+        const poly = L.polyline(shiftPathLon(path, offset), style);
+        poly.bindTooltip(tooltipText, { className: "map-tooltip", direction: "top", sticky: true });
+        poly.bindPopup(popupHtml, popupOptions(280));
+        railwaysGroup.addLayer(poly);
       }
     }
     // Per line in the document, not per drawn line, for the same reason the cable
@@ -6596,6 +6688,15 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("outageRegionPoints");
     renderMarkerLayer("launches");
     renderMarkerLayer("osmInfra");
+    // Task 27: bounds-filtered like osmInfra above (it reads the same raw
+    // sweep, just split -- see applyData's own note), so it needs the same
+    // pan/zoom catch-up.
+    renderMarkerLayer("railwayPoints");
+    // Live and ungated, but still bounds-filtered like every other marker
+    // layer here -- without this it would render once and sit empty
+    // wherever the map panned to since the last poll, the same reasoning
+    // conflictHistory's own note gives above.
+    renderMarkerLayer("railLive");
     // Same reasoning as hazards above -- all six bounds-filter to the viewport
     // and none polls faster than every ten minutes, so without a pan/zoom
     // re-render each would sit empty everywhere the map moved to since its last
@@ -7076,7 +7177,23 @@ export function createMapController(container, initial, callbacks) {
         pendingCountries = data;
         return;
       }
-      raw[key] = data;
+      // Task 27: one fetch (backend/sources/osm_infra.py) still returns all
+      // five kinds together, but the four railway ones now belong to a
+      // different layer -- so the split happens here, once per landing,
+      // rather than at render time. Splitting `raw` itself rather than
+      // filtering inside renderMarkerLayer is what keeps every generic
+      // consumer honest with no further changes: each layer's own `total`
+      // (items.length in renderMarkerLayer, and skipHiddenLayer's
+      // totals-when-hidden path) now counts only what actually belongs to
+      // it, and rebuildOsmTwins/COUNTRY_CARD_FEEDS/the data editor all read
+      // raw.osmInfra expecting infrastructure, not stations.
+      if (key === "osmInfra") {
+        const items = Array.isArray(data) ? data : [];
+        raw.osmInfra = items.filter((item) => !isRailwayPointItem(item));
+        raw.railwayPoints = items.filter(isRailwayPointItem);
+      } else {
+        raw[key] = data;
+      }
       // Invalidates nearbyEventsFor's cache -- these are the only two
       // sources it reads, so nothing else needs to bust it.
       if (key === "events" || key === "gdelt") eventsDataVersion += 1;
@@ -7099,6 +7216,10 @@ export function createMapController(container, initial, callbacks) {
           if (layer !== key) renderMarkerLayer(layer);
         }
       }
+      // railwayPoints has just been rebuilt above; redraw it whenever a fresh
+      // OSM sweep lands, the same "whichever lands gets redrawn" rule the
+      // twin-rebuild block just above already follows.
+      if (key === "osmInfra") renderMarkerLayer("railwayPoints");
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();
       else if (key === "cities") {

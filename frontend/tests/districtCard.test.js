@@ -56,7 +56,10 @@ function makeDistrict(overrides = {}) {
 
 const emptyRaw = () => ({
   events: [], cities: [], adsb: [], ais: [], firms: [], jamming: [],
-  osmInfra: [], dams: [], airports: [], ports: [],
+  // Task 27: railwayPoints is its own array now, split out of osmInfra at
+  // render time in createMapController.js -- see buildAdminInfrastructure's
+  // own note in popups.js.
+  osmInfra: [], railwayPoints: [], dams: [], airports: [], ports: [],
   districtCounts: new Map(), districtMonthLoading: false, districtSeries: {},
 });
 
@@ -111,9 +114,10 @@ test("subdivisionCardSections -- polygon clipping against a hand-built state", a
       osmInfra: [
         { lat: 1, lon: 1, kind: "power_plant", output_mw: 50 },
         { lat: 90, lon: 90, kind: "power_plant", output_mw: 999 }, // outside
-        { lat: 2, lon: 2, kind: "railway_station" },
         { lat: 3, lon: 3, kind: "border_control" },
       ],
+      // Task 27: railway_* kinds live in their own array now.
+      railwayPoints: [{ lat: 2, lon: 2, kind: "railway_station" }],
       dams: [{ lat: 1, lon: 1, power_mw: 10 }],
       airports: [{ lat: 1, lon: 1, type: "small_airport" }],
       ports: [{ lat: 1, lon: 1 }],

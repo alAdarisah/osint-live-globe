@@ -381,6 +381,18 @@ export function createEntityClusterGroups(map) {
     // by zoom -- ~125k points worldwide, almost all US, only meaningfully
     // visible on the unfiltered World view, so a reader reaches it deliberately.
     deflock: L.layerGroup(),
+    // Task 27: the station/halt/yard/border points osm_infra.py already
+    // sweeps, pulled out of the osmInfra group above and given to the
+    // railways layer instead -- see LAYER_MANIFEST's own note on why. Not
+    // added to the map here: wrapped together with the rail linework into
+    // one combined "railways" layer in createMapController.js, same pattern
+    // infraGroup+pipelinesGroup and cablesGroup+cableLandings already use.
+    railwayPoints: L.layerGroup(),
+    // Task 27: Digitraffic's live Finnish train positions. Off by default
+    // (see LAYER_MANIFEST) and its own independent toggle, not wrapped into
+    // the combined railways layer above -- a reader may want the (static)
+    // network without the (live, Finland-only) trains riding along with it.
+    railLive: L.layerGroup(),
   };
   return { groups };
 }

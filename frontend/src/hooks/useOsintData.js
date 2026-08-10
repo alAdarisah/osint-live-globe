@@ -225,6 +225,13 @@ const POLL_CONFIG = [
   // humanitarian above.
   { key: "foodTrade", url: "/api/food-trade", intervalMs: 60 * 60000 },
   { key: "foodPriceIndex", url: "/api/food-price-index", intervalMs: 60 * 60000 },
+  // Task 27: Digitraffic's live Finnish train positions (~111 trains). The
+  // backend itself refreshes every 60s (config.DIGITRAFFIC_RAIL_POLL_INTERVAL)
+  // and answers If-None-Match, so polling somewhat faster than that costs
+  // round-trips rather than bytes -- the same trade adsb's own note above
+  // makes about its interval versus the server's refresh rate. Ungated
+  // (LAYER_MANIFEST's railLive has no draw gate), so this fetch is not either.
+  { key: "railLive", url: "/api/rail-live", intervalMs: 20000 },
 ];
 
 /**

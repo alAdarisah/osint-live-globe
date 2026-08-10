@@ -1120,7 +1120,10 @@ function buildTransport(bounds, raw) {
   const airports = itemsInBounds(raw.airports, bounds);
   const ports = itemsInBounds(raw.ports, bounds);
   const crossings = itemsInBounds(raw.osmInfra, bounds, (d) => d.kind === "border_control");
-  const rail = itemsInBounds(raw.osmInfra, bounds, (d) => typeof d.kind === "string" && d.kind.startsWith("railway_"));
+  // Task 27: railway_* kinds moved off raw.osmInfra onto their own layer's
+  // raw.railwayPoints (see createMapController.js's applyData note) -- same
+  // OpenStreetMap sweep, just its own array now, so no predicate is needed.
+  const rail = itemsInBounds(raw.railwayPoints, bounds);
   if (!airports.length && !ports.length && !crossings.length && !rail.length) return "";
 
   const airportBuckets = bucketAirportsByType(airports);
@@ -2213,7 +2216,9 @@ function buildAdminInfrastructure(entry, raw, bounds) {
   const dams = inside(raw.dams);
   const airports = inside(raw.airports);
   const ports = inside(raw.ports);
-  const rail = inside(raw.osmInfra, (d) => typeof d.kind === "string" && d.kind.startsWith("railway_"));
+  // Task 27: same move as buildTransport above -- raw.railwayPoints, not
+  // raw.osmInfra, is where the four railway kinds live now.
+  const rail = inside(raw.railwayPoints);
   const crossings = inside(raw.osmInfra, (d) => d.kind === "border_control");
   if (!plants.length && !dams.length && !airports.length && !ports.length && !rail.length && !crossings.length) {
     return "";

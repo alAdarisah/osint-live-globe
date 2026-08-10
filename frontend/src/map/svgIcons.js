@@ -756,6 +756,15 @@ export const GLYPH_CHOICES = Object.freeze({
   "osm.railway_yard": ["railway", "logisticsBase", "borderCrossing", "cityMedium"],
   "osm.railway_border": ["railway", "borderCrossing", "cityTown", "recordMark"],
   "railway.line": ["railway", "borderCrossing", "pipeline"],
+  // Task 27: the OSM overlay's three line tokens -- same "colour-only token,
+  // picker still offered" treatment as railway.line just above.
+  "railway.electrified": ["railway", "borderCrossing", "pipeline"],
+  "railway.nonElectrified": ["railway", "borderCrossing", "pipeline"],
+  "railway.narrowGauge": ["railway", "borderCrossing", "pipeline"],
+  // Task 27: a genuine marker (a live train position), so it gets the same
+  // settlement-glyph alternatives the station points above do rather than
+  // the line family's shapes.
+  "railway.live": ["railway", "borderCrossing", "cityTown", "cityMedium"],
   // Same "colour-only token, picker still offered" treatment as railway.line
   // just above -- neither corridors nor the density wash draws a marker, but
   // the legend swatch next to their checkbox can still be any shape from the

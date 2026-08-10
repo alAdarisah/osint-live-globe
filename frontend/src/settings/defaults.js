@@ -70,7 +70,12 @@ export const SETTINGS_LAYERS = [
   { key: "ports", label: "Ports (NGA WPI)" },
   { key: "dams", label: "Dams & reservoirs (GDW)" },
   { key: "deflock", label: "ALPR cameras (DeFlock)" },
-  { key: "railways", label: "Railways (Natural Earth)" },
+  { key: "railways", label: "Railways (Natural Earth + OpenStreetMap)" },
+  // Task 27: its own row -- railwayPoints has none (mirrors "railways", see
+  // EXTRA_TOKENS_UNDER in components/admin/sections/shared.jsx) because it
+  // has no independent toggle, but railLive does have one and needs its own
+  // zoom-gate/colour dials the same as any other layer.
+  { key: "railLive", label: "Live trains (Digitraffic, Finland)" },
   { key: "water", label: "Water bodies (Natural Earth)" },
   { key: "firms", label: "Fires / thermal anomalies (FIRMS)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },

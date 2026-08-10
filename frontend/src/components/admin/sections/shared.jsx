@@ -41,7 +41,12 @@ export const ADOPTED_BY = { "event.corroborated": "events", "cable.route": "cabl
 // Cable landings have no row of their own in SETTINGS_LAYERS -- one checkbox
 // covers the routes and the places they come ashore, because a cable and its
 // landing are one fact -- so its pin types are shown under Submarine cables.
-export const EXTRA_TOKENS_UNDER = { cables: "cableLandings" };
+// railwayPoints (Task 27) rides the same arrangement: the station/halt/yard/
+// border points have no checkbox of their own either, mirroring "railways"'
+// visibility exactly (see setLayerVisible in createMapController.js), so
+// their tokens surface under the Railways admin block rather than a
+// railwayPoints section nobody would ever see.
+export const EXTRA_TOKENS_UNDER = { cables: "cableLandings", railways: "railwayPoints" };
 
 export const TOKENS_BY_LAYER = (() => {
   const byLayer = {};
