@@ -49,6 +49,15 @@ directly, and no change to `docker-compose.yml` is required by this project.
   `deploy.sh`, so there remains exactly one definition of which images are stale.
 - **Styled on the Anthropic palette**, in colour and glyphs only — see *Visual
   theme*. A terminal's font belongs to whoever opened it.
+- **Source staleness is not recomputed here.** `backend/mirror.py` already
+  decides it per source from that job's `expected_every` and
+  `INGEST_STALE_MULTIPLIER`, and expresses the verdict as `last_error` in
+  `/api/health` — the same fact `osint_source_up` is built from. The command
+  center reads that verdict rather than inventing a threshold of its own, which
+  would disagree with the map and the alerts table the first time a slow source
+  like ACLED polled on schedule. A source therefore reads healthy when
+  `last_error` is null, degraded when it has an error but is still serving rows,
+  and down when it has an error and is serving none.
 
 ## Layout
 
@@ -88,7 +97,7 @@ terminal, and it keeps every subprocess and HTTP call out of the widget code.
 | --- | --- | --- |
 | `ops/cc/collectors/compose.py` | `docker compose ps --format json` → `ServiceState` per container: state, health, restart count | 2 s |
 | `ops/cc/collectors/stats.py` | `docker stats --no-stream --format json` → CPU and memory per container, merged into `ServiceState` | 5 s |
-| `ops/cc/collectors/host.py` | CPU, memory, disk, load average and the size of the `pgdata` volume via psutil → `HostState` | 5 s |
+| `ops/cc/collectors/host.py` | CPU, memory, disk and load average via psutil → `HostState` | 5 s |
 | `ops/cc/collectors/health.py` | `GET /api/health` → `SourceState` per source plus the `alerts` list | 10 s |
 | `ops/cc/collectors/prom.py` | A fixed set of PromQL instant queries plus `query_range` for the sparklines → `MetricState` | 15 s |
 | `ops/cc/collectors/logs.py` | `docker compose logs -f --tail 200` as an async subprocess, yielding parsed `LogLine`s | streaming |
@@ -125,6 +134,11 @@ dashboard whose contents are a config file is a worse Grafana:
 - `osint_alerts_active` — cross-check against the `/api/health` alerts block
 - `rate(osint_http_requests_total[5m])` — backend request rate, the sparkline
   that shows the backend is serving
+
+Database size comes from Prometheus rather than from the host collector on
+purpose: reading the `pgdata` volume off the filesystem means reading under
+`/var/lib/docker/volumes`, which needs root, and `cc` deliberately runs as an
+ordinary user in the `docker` group.
 
 Every metric name above already appears in `monitoring/grafana/dashboards/` or
 `monitoring/postgres-exporter/queries.yaml`, so the panes and the Grafana
