@@ -149,6 +149,7 @@ import {
   nearestLon, unwrapPath, boundsContainsPoint,
   worldCopyOffsets, worldCopyDraws, worldCopyKey, worldCopyPlacer, shiftPathLon,
 } from "../utils/geo";
+import { createGenerationGuard } from "../utils/fetchGeneration";
 import { fetchJson, vesselDetailUrl, portCallsUrl } from "../api";
 
 // A nearby ACLED/GDELT event within this radius flags an infrastructure
@@ -667,6 +668,16 @@ export function createMapController(container, initial, callbacks) {
   // finish before the popup itself opens (see selectShip), so the popup is
   // first drawn without the Cargo/Port calls sections and then updated.
   let shipPopup = null;
+  // Keyed by mmsi/port_id, so a fetch that lands out of order (an ordinary
+  // flaky-connection case, not a hypothetical one) never overwrites a
+  // popup with data older than what it already shows -- see
+  // utils/fetchGeneration.js for why stillSelected() alone can't cover
+  // this: reselecting the *same* hull, or reopening the *same* port's
+  // popup, before an earlier fetch for it resolves passes that check for
+  // both requests. loadVesselDetail and loadPortTraffic below are the two
+  // users.
+  const vesselDetailGuard = createGenerationGuard();
+  const portTrafficGuard = createGenerationGuard();
   // port_id -> {status: "loading"|"ready"|"error", data} for the port card's
   // "recent arrivals and departures" fetch -- not a request cache (see
   // loadPortTraffic, which refetches on every open), just the hand-off
@@ -2208,7 +2219,15 @@ export function createMapController(container, initial, callbacks) {
   // "error" state -- the brief requires the two new sections to say
   // "unavailable" rather than just not appear, since there is no earlier
   // render of them to fall back to.
+  //
+  // vesselDetailGuard (see above) guards against a second, narrower race
+  // than stillSelected() covers: reselecting the *same* hull before an
+  // earlier request for it has resolved. Both requests would pass
+  // stillSelected() (selectedMmsi never stopped naming this mmsi), so
+  // without the guard an out-of-order response could still overwrite the
+  // popup with data older than what is already showing.
   async function loadVesselDetail(mmsi, item, stillSelected) {
+    const token = vesselDetailGuard.start(mmsi);
     let entry;
     try {
       const data = await fetchJson(vesselDetailUrl(mmsi));
@@ -2216,7 +2235,7 @@ export function createMapController(container, initial, callbacks) {
     } catch {
       entry = { status: "error" };
     }
-    if (!stillSelected() || !shipPopup) return;
+    if (!vesselDetailGuard.isCurrent(mmsi, token) || !stillSelected() || !shipPopup) return;
     const d = decorateAis(item, { selectedMmsi, vesselDetail: entry });
     shipPopup.setContent(d.detail);
   }
@@ -2515,7 +2534,16 @@ export function createMapController(container, initial, callbacks) {
   // recurring here on the success path if this were allowed to go stale. A
   // port's popup opens far less often than a track fetch already firing on
   // every ship selection, so refetching every time costs little.
+  //
+  // portTrafficGuard (see above) is what refetching-on-every-open needs
+  // that the old cache-and-skip version got for free: close a port's popup
+  // and reopen it before the first fetch resolves and two requests for the
+  // same port_id are in flight together. Responses are not guaranteed to
+  // arrive in request order, so without the guard an earlier request
+  // landing after the later one would overwrite the fresher render with
+  // staler data.
   async function loadPortTraffic(portId, onUpdate) {
+    const token = portTrafficGuard.start(portId);
     portDetailCache.set(portId, { status: "loading" });
     let entry;
     try {
@@ -2524,6 +2552,7 @@ export function createMapController(container, initial, callbacks) {
     } catch {
       entry = { status: "error" };
     }
+    if (!portTrafficGuard.isCurrent(portId, token)) return;
     portDetailCache.set(portId, entry);
     onUpdate();
   }
