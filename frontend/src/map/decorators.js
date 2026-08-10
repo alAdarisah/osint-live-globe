@@ -3599,7 +3599,13 @@ function icaoHexDetail(d) {
 // The display-limited half of this used to live here too; it is now
 // displayLimitedNote below, in the brief's own wording, with the programme
 // named rather than folded into one generic sentence.
-const AIRCRAFT_FLAG_NOTE = {
+//
+// Exported so the emergency squawk alert strip (Task 33,
+// components/SquawkAlertStrip.jsx) prints this exact caveat rather than a
+// second sentence that says the same thing slightly differently -- 7500 is
+// far more often a mis-set transponder than a hijacking, and that has to read
+// identically everywhere the map says so.
+export const AIRCRAFT_FLAG_NOTE = {
   emergency:
     "Reserved emergency transponder codes: 7500 unlawful interference, 7600 radio failure, 7700 general " +
     "emergency. Squawks are occasionally set by mistake and cleared moments later &mdash; this is what the " +
@@ -3626,6 +3632,33 @@ const EMERGENCY_SQUAWK_LABEL = {
 export function decodeSquawk(squawk) {
   const code = squawk === null || squawk === undefined ? "" : String(squawk).trim();
   return code ? EMERGENCY_SQUAWK_LABEL[code] || null : null;
+}
+
+/** Which reserved-code meaning applies to this record's squawk right now --
+ *  backend/sources/adsb.py's own `emergency_squawk` when the merged record
+ *  carries one, or decodeSquawk(d.squawk) as a fallback for a feed that never
+ *  populated that field (see decorateAdsb below for why both are checked).
+ *  Exported so the alert strip (Task 33) asks the identical question rather
+ *  than re-deriving its own answer. */
+export function squawkEmergencyMeaning(d) {
+  return (d && (d.emergency_squawk || decodeSquawk(d.squawk))) || null;
+}
+
+/**
+ * The Emergency line's own text, e.g. "squawk 7700 &mdash; general emergency;
+ * transponder reports general emergency" -- shared between decorateAdsb's
+ * aircraft card and the emergency squawk alert strip (Task 33), so one
+ * emergency is never described in two sentences that happen to say slightly
+ * different things. Empty string when neither signal is present, so callers
+ * can use it directly as a falsy check.
+ */
+export function aircraftEmergencyLine(d) {
+  if (!d) return "";
+  const squawkEmergencyLabel = squawkEmergencyMeaning(d);
+  return [
+    squawkEmergencyLabel ? `squawk ${esc(d.squawk)} &mdash; ${esc(squawkEmergencyLabel)}` : null,
+    d.emergency ? `transponder reports ${esc(d.emergency)}` : null,
+  ].filter(Boolean).join("; ");
 }
 
 // ---------- display-limited wording (LADD / PIA) ----------
@@ -3840,12 +3873,12 @@ export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
   // are present, is the difference between "it says 7700" and "we inferred".
   // decodeSquawk runs regardless of whether the backend already computed
   // emergency_squawk, so a squawk read off a feed that never populates that
-  // field still gets named for what it is.
-  const squawkEmergencyLabel = d.emergency_squawk || decodeSquawk(d.squawk);
-  const emergencyLine = [
-    squawkEmergencyLabel ? `squawk ${esc(d.squawk)} &mdash; ${esc(squawkEmergencyLabel)}` : null,
-    d.emergency ? `transponder reports ${esc(d.emergency)}` : null,
-  ].filter(Boolean).join("; ");
+  // field still gets named for what it is. Both lines now come from the
+  // shared helpers above squawkEmergencyMeaning/aircraftEmergencyLine, which
+  // the alert strip (Task 33) calls too -- one sentence, not a second one
+  // that happens to say the same thing differently.
+  const squawkEmergencyLabel = squawkEmergencyMeaning(d);
+  const emergencyLine = aircraftEmergencyLine(d);
   const airfield = d.nearest_airfield;
   const displayLimitedText = displayLimitedNote(d);
 

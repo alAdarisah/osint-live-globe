@@ -98,6 +98,12 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // mostly-blank map needs to be told whether that means "no harm here" or
   // "nobody has measured here".
   const [choropleth, setChoropleth] = useState({ metricId: null, target: "country", covered: 0, total: 0 });
+  // The current emergency-squawking subset of raw.adsb (Task 33), mirrored
+  // out the same way the other on*Change callbacks are -- the controller
+  // reports a fresh array only when a new ADS-B poll actually lands (see
+  // applyData's own note), not on every pan/zoom repaint, so this does not
+  // thrash SquawkAlertStrip's own duration tracking.
+  const [emergencySquawks, setEmergencySquawks] = useState([]);
 
   // onRegionAutoReset changes identity across renders (it closes over
   // region state) -- keep the latest one in a ref so the controller (created
@@ -136,6 +142,7 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
         onChoroplethChange: setChoropleth,
         onLayerStateChange: setLayerState,
         onFocusChange: setFocus,
+        onEmergencySquawkChange: setEmergencySquawks,
         onBorderRingCommit: (commits) => onBorderRingCommitRef.current?.(commits),
       }
     );
@@ -167,6 +174,16 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   const flyTo = useCallback((lat, lon, minZoom) => {
     controllerRef.current?.flyTo(lat, lon, minZoom);
   }, []);
+
+  // Task 33: SquawkAlertStrip's "click to fly and select". Returns false when
+  // the airframe is no longer in the feed (a rare race: it dropped out
+  // between the strip's last render and the click), which is a no-op rather
+  // than flying nowhere -- the entry itself disappears on the strip's own
+  // next re-render once the controller reports the updated feed.
+  const selectAircraftByIcao = useCallback(
+    (icao24) => controllerRef.current?.selectAircraftByIcao(icao24) ?? false,
+    []
+  );
 
   // `visible === null` clears the reader's pin and hands the key back to the
   // scene resolver -- see setLayerWish in createMapController.js.
@@ -323,6 +340,7 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     layerState, setSceneBypass, invalidateSize, focus,
     applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter,
     setVesselFilter, setAircraftFilter, setAgeReference,
+    emergencySquawks, selectAircraftByIcao,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
     setIconTheme, setLayerZoomOverrides, setLayerZoomMaxOverrides, setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
     choropleth, setChoroplethMetric,

@@ -2299,6 +2299,103 @@ html, body {
   font-weight: 600;
 }
 
+/* ---------- emergency squawk alert strip (Task 33, SquawkAlertStrip.jsx) ---
+   Sits below #regionBar, at the same top:80px/left:0/right:0 band
+   #controlPanel already uses (see that rule's own comment on why the fixed
+   offset holds even though #regionBar itself can wrap to a second row).
+   Renders nothing at all -- no element, no reserved space -- while no
+   aircraft is squawking, so an ordinary session never sees this band. */
+#squawkAlertStrip {
+  position: fixed;
+  top: 80px;
+  left: 0;
+  right: 0;
+  z-index: 970; /* under #regionBar (1001)/#controlPanel, over the map and its own panes */
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 16px;
+  background: linear-gradient(rgba(20, 4, 4, 0.55), rgba(20, 4, 4, 0));
+}
+
+.squawk-alert-header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.squawk-alert-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: #ff3b30;
+}
+
+/* The caveat appears exactly once per strip, here in the header -- see
+   SquawkAlertStrip.jsx's own module note on why this is not repeated per row. */
+.squawk-alert-caveat {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--text-dim, #8f9bb3);
+}
+
+.squawk-alert-list {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 8px;
+  pointer-events: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.squawk-alert-list::-webkit-scrollbar { display: none; }
+
+.squawk-alert-item {
+  flex: none;
+  width: 240px;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 59, 48, 0.55);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.squawk-alert-item:hover { border-color: #ff3b30; background: rgba(255, 59, 48, 0.08); }
+
+.squawk-alert-item-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.squawk-alert-item-row.meta { justify-content: space-between; font-size: 10px; margin-top: 2px; }
+
+.squawk-alert-callsign {
+  font-weight: 700;
+  color: var(--text-bright);
+}
+
+.squawk-alert-meaning {
+  font-size: 10.5px;
+  color: #ff3b30;
+  margin-top: 2px;
+}
+
+.squawk-alert-dismiss {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #8f9bb3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.squawk-alert-dismiss:hover { color: var(--text-bright); }
+
 /* How long ago a ship or aircraft last reported its position (see
    lastPingDetail in map/decorators.js). Dim by default -- on a healthy feed it
    is a few seconds old and is context, not news. */
@@ -2717,6 +2814,11 @@ html, body {
     padding: 7px 12px;
     font-size: 11.5px;
   }
+
+  /* Same 88px band .leaflet-top's own mobile override sits at, just below the
+     single-row #regionBar above. */
+  #squawkAlertStrip { top: 88px; padding: 6px 10px; }
+  .squawk-alert-item { width: 210px; }
 
   .leaflet-top { top: 88px; }
 

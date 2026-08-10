@@ -24,6 +24,7 @@ import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
 import TitleBar from "./components/TitleBar";
 import RegionBar from "./components/RegionBar";
+import SquawkAlertStrip from "./components/SquawkAlertStrip";
 import IntelPanel from "./components/IntelPanel";
 import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
@@ -615,6 +616,16 @@ export default function App() {
         onSelect={onSelectRegion}
         regionActivity={regionActivity}
       />
+
+      {/* Task 33: a live strip of every aircraft currently squawking an
+          emergency code. Sits below RegionBar, above the map and every panel
+          below -- it renders nothing at all when no aircraft is squawking
+          (see SquawkAlertStrip's own note), so it never competes with
+          IntelPanel/AirfieldActivityPanel for space on an ordinary day.
+          Clicking an entry reuses the same selection path a marker click
+          already uses (mapApi.selectAircraftByIcao -> createMapController's
+          selectAircraft), so the popup/highlight/trail behave identically. */}
+      <SquawkAlertStrip aircraft={mapApi.emergencySquawks} onSelect={mapApi.selectAircraftByIcao} />
 
       {/* The reading panel, and it is the reader's rather than the operator's.
 

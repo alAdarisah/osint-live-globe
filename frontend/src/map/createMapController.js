@@ -81,6 +81,7 @@ import {
   pipelineRouteColor,
   decorateHazard,
   hazardIconSize,
+  aircraftFlag,
   aircraftFlagBucket,
   withAircraftFlag,
   isSanctioned,
@@ -7511,6 +7512,19 @@ export function createMapController(container, initial, callbacks) {
       } else {
         raw[key] = data;
       }
+      // Task 33: the alert strip needs the emergency-squawking subset the
+      // moment a fresh ADS-B poll lands, not merely whenever renderAdsbLayer
+      // next repaints -- that function also runs on every pan/zoom with the
+      // same data underneath it, and firing this on every one of those would
+      // re-render the strip (and restart App.jsx's duration tracking) for no
+      // reason. aircraftFlag, not aircraftFlagBucket: the strip is about the
+      // squawk itself, not which of the flagged buckets a sanctioned airframe
+      // also happens to fall into. Unfiltered by aircraftFilter/viewport on
+      // purpose -- a 7500 the reader has filtered out of the map, or panned
+      // away from, is exactly the one this strip exists to still surface.
+      if (key === "adsb") {
+        callbacks.onEmergencySquawkChange?.(raw.adsb.filter((item) => aircraftFlag(item) === "emergency"));
+      }
       // Invalidates nearbyEventsFor's cache -- these are the only two
       // sources it reads, so nothing else needs to bust it.
       if (key === "events" || key === "gdelt") eventsDataVersion += 1;
@@ -7636,6 +7650,24 @@ export function createMapController(container, initial, callbacks) {
 
     flyToRegion,
     flyTo,
+
+    // Task 33: the alert strip's own "click to fly and select" -- reuses the
+    // same selectAircraft the marker-click path already uses, rather than
+    // opening a second selection mechanism, so the popup/highlight/trail
+    // behave identically however the airframe was chosen. Only calls
+    // selectAircraft when it is not already the selection, since that
+    // function *toggles* -- clicking an alert for the airframe already open
+    // must not close its own popup. Returns false when the airframe has
+    // since left the feed (out of ADS-B range, a poll gap), so the caller can
+    // say so rather than silently flying nowhere. The zoom (8) matches
+    // App.jsx's own generic record-locate (openRecordDetail's onLocate).
+    selectAircraftByIcao(icao24) {
+      const item = raw.adsb.find((a) => a.icao24 === icao24);
+      if (!item) return false;
+      flyTo(item.lat, item.lon, 8);
+      if (selectedIcao !== icao24) selectAircraft(item);
+      return true;
+    },
 
     // The checkbox path. Writes a wish rather than touching the map directly,
     // so the resolver knows it has been overruled for this key and stops
