@@ -81,8 +81,12 @@ export default function BasemapSection({ settings, actions, isOpen, onToggle }) 
 }
 
 function TileDialBlock({ target, dial, onPreset, onChange }) {
+  // A plain div, not .admin-layer-block -- that class means a native
+  // <details> disclosure elsewhere in this panel (see LayerDialsSection.jsx
+  // and its own CSS comment), and there is nothing to collapse here: three
+  // blocks, not twenty-seven layers.
   return (
-    <div className="admin-layer-block">
+    <div className="admin-tile-block">
       <div className="admin-subhead">{target.label}</div>
       <div className="admin-note">{target.note}</div>
       <div className="admin-row admin-preset-row">

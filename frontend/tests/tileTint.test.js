@@ -5,15 +5,20 @@
 // map/tileTint.js is a leaf module (no imports of its own -- see its own
 // header note), so it can be imported directly here the way cursor.js and
 // iconTheme.js already are in cursor.test.js/splitTokens.test.js.
-// settings/defaults.js cannot be: it reaches map/iconTheme and map/scene
-// through extensionless specifiers only Vite resolves (see
-// editableSources.test.js's own note), so its merge/migration wiring is
-// checked out of the source text instead, the same technique that file and
-// splitTokens.test.js already use.
-
+//
+// settings/defaults.js reaches map/iconTheme.js, map/scene.js, map/cursor.js
+// and map/tileTint.js through extensionless specifiers only Vite resolves,
+// and cursor.js (via leafletGlobal.js) reads `window` at import time -- the
+// same obstacle zoomCeiling.test.js and webglHitTest.test.js already solve.
+// Taught to the loader here the same way, rather than worked around by
+// scraping the source text: a regex match on the file's own characters can
+// keep passing after the guard it is meant to prove is broken (move
+// `isPlainObject(stored.ui.tiles)` outside its enclosing
+// `isPlainObject(stored.ui)` check and every literal string below is still
+// present), where the real `mergeSettings` cannot.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { registerHooks } from "node:module";
 
 import {
   BLEND_MODES,
@@ -24,7 +29,25 @@ import {
   mergeTileDial,
 } from "../src/map/tileTint.js";
 
-const defaults = readFileSync(new URL("../src/settings/defaults.js", import.meta.url), "utf8");
+// Static imports are resolved before any top-level statement runs, so the
+// hook has to be installed and `window` stubbed before settings/defaults.js
+// is *loaded* -- which is exactly what a dynamic `await import()` below
+// gets, and a static import of it would not.
+registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier.startsWith(".") && !specifier.endsWith(".js")) {
+      return next(`${specifier}.js`, context);
+    }
+    return next(specifier, context);
+  },
+});
+
+globalThis.window = {
+  L: { Layer: { extend: () => ({}) }, DomUtil: {} },
+  matchMedia: () => ({ matches: false }),
+};
+
+const { defaultSettings, mergeSettings, SETTINGS_VERSION } = await import("../src/settings/defaults.js");
 
 test("buildTileFilter", async (t) => {
   await t.test("the shipped default is the untouched string, not a no-op filter", () => {
@@ -170,34 +193,67 @@ test("mergeTileDial", async (t) => {
 
 test("defaults.js wires the migration in, not just the shape", async (t) => {
   await t.test("the settings version was bumped for this key", () => {
-    assert.match(defaults, /export const SETTINGS_VERSION = 2;/);
+    assert.equal(SETTINGS_VERSION, 2);
   });
 
   await t.test("defaultSettings() ships every dial inert", () => {
-    assert.match(defaults, /tiles: \{/);
-    assert.match(defaults, /basemap: \{ \.\.\.DEFAULT_TILE_DIAL \}/);
-    assert.match(defaults, /imagery: \{ \.\.\.DEFAULT_TILE_DIAL \}/);
-    assert.match(defaults, /weather: \{ \.\.\.DEFAULT_TILE_DIAL \}/);
+    const tiles = defaultSettings().ui.tiles;
+    assert.equal(tiles.applyAtRest, false);
+    assert.deepEqual(tiles.basemap, DEFAULT_TILE_DIAL);
+    assert.deepEqual(tiles.imagery, DEFAULT_TILE_DIAL);
+    assert.deepEqual(tiles.weather, DEFAULT_TILE_DIAL);
   });
 
-  await t.test("mergeSettings only touches ui.tiles when the stored config actually has one", () => {
-    // This is the guard that makes an old config (no `ui.tiles` key at all)
-    // load cleanly: isPlainObject fails, the branch is skipped entirely, and
-    // base.ui.tiles is left exactly as defaultSettings() built it above.
-    assert.match(defaults, /if \(isPlainObject\(stored\.ui\.tiles\)\) \{/);
+  // The case this whole key exists for: a config saved before Task 30, which
+  // has no `ui.tiles` at all -- not even an empty object. `mergeSettings`
+  // must not throw reading into it, and must leave every target on the
+  // shipped default rather than on `undefined`.
+  await t.test("a config with no ui key at all loads cleanly onto the shipped tile defaults", () => {
+    const merged = mergeSettings({});
+    assert.deepEqual(merged.ui.tiles.basemap, DEFAULT_TILE_DIAL);
+    assert.deepEqual(merged.ui.tiles.imagery, DEFAULT_TILE_DIAL);
+    assert.deepEqual(merged.ui.tiles.weather, DEFAULT_TILE_DIAL);
+    assert.equal(merged.ui.tiles.applyAtRest, false);
   });
 
-  await t.test("mergeSettings validates all three targets through mergeTileDial", () => {
-    for (const target of ["basemap", "imagery", "weather"]) {
-      assert.match(
-        defaults,
-        new RegExp(`base\\.ui\\.tiles\\.${target} = mergeTileDial\\(stored\\.ui\\.tiles\\.${target}\\)`),
-        `${target} is not validated through mergeTileDial`
-      );
-    }
+  // The narrower case: a real pre-Task-30 config, complete with a `ui`
+  // object full of other real settings, just none of them named `tiles`.
+  await t.test("an old ui block with every other field but no tiles key also loads cleanly", () => {
+    const stored = defaultSettings();
+    stored.ui.accent = "#ff9500";
+    delete stored.ui.tiles;
+    const merged = mergeSettings(stored);
+    assert.equal(merged.ui.accent, "#ff9500", "the rest of ui still merges normally");
+    assert.deepEqual(merged.ui.tiles.basemap, DEFAULT_TILE_DIAL);
   });
 
-  await t.test("imports the dial helpers from map/tileTint rather than redefining them", () => {
-    assert.match(defaults, /import \{ DEFAULT_TILE_DIAL, mergeTileDial \} from "\.\.\/map\/tileTint";/);
+  await t.test("a stored dial reaches mergeTileDial's own clamping through the real merge, not a copy of it", () => {
+    const stored = defaultSettings();
+    stored.ui.tiles.imagery = { ...DEFAULT_TILE_DIAL, blendMode: "not-a-real-mode", blur: 999 };
+    const merged = mergeSettings(stored);
+    assert.equal(merged.ui.tiles.imagery.blendMode, "multiply");
+    assert.equal(merged.ui.tiles.imagery.blur, 3);
+    // The targets mergeSettings did not touch stay on the default, proving
+    // the three targets are validated independently rather than as one blob.
+    assert.deepEqual(merged.ui.tiles.basemap, DEFAULT_TILE_DIAL);
+    assert.deepEqual(merged.ui.tiles.weather, DEFAULT_TILE_DIAL);
+  });
+
+  await t.test("a real dial and applyAtRest survive a round trip untouched", () => {
+    const stored = defaultSettings();
+    stored.ui.tiles.applyAtRest = true;
+    stored.ui.tiles.weather = {
+      tintColor: "#00ffaa",
+      tintStrength: 0.6,
+      blendMode: "screen",
+      saturate: 1.4,
+      brightness: 1.1,
+      contrast: 1.2,
+      invert: false,
+      blur: 2,
+    };
+    const merged = mergeSettings(stored);
+    assert.equal(merged.ui.tiles.applyAtRest, true);
+    assert.deepEqual(merged.ui.tiles.weather, stored.ui.tiles.weather);
   });
 });

@@ -3340,6 +3340,17 @@ html, body {
 .admin-layer-body { padding: 2px 2px 8px 12px; }
 .admin-shared-colours { padding: 6px 2px 8px; }
 
+/* Task 30: one target's whole tile-tint dial (basemap/imagery/weather),
+   separated the same visual way .admin-layer-block separates one layer's row
+   -- but a plain div, not a <details>. There is nothing here to collapse
+   (three blocks, not twenty-seven), so unlike .admin-layer-block this is
+   never a disclosure widget and carries no summary/caret/[open] state. */
+.admin-tile-block {
+  padding: 6px 2px 10px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
+}
+.admin-tile-block:last-of-type { border-bottom: none; }
+
 .admin-row {
   display: flex;
   align-items: center;
