@@ -3334,8 +3334,17 @@ function flightLegRow(leg) {
 
 /** The Route fold. Opens with the honesty caveat the brief requires verbatim:
  * ADS-B carries no flight plan, so every origin/destination below it is read
- * off where this airframe was actually seen, never a filed route. */
-function routeSection(flightDetail) {
+ * off where this airframe was actually seen, never a filed route.
+ *
+ * `updated` is the aircraft's own live "last position report" age -- the
+ * same field lastPingDetail already renders elsewhere on this card -- so the
+ * "Currently airborne" callout below can be qualified against it (Task 23
+ * review, Important 2): the header above already promises this section is
+ * never more certain than each leg's own confidence, and a present-tense
+ * "currently" for an airframe that stopped reporting the same STALE_PING_SECONDS
+ * ago the rest of the card already flags is exactly the overclaim that
+ * promise rules out. */
+function routeSection(flightDetail, updated) {
   const head = '<div class="csection-h">Route</div>' +
     '<p class="meta">ADS-B broadcasts no flight plan. Origin and destination below are inferred from ' +
     "where this airframe was seen leaving or returning to the ground (or crossing 1,500 ft near a known " +
@@ -3352,11 +3361,20 @@ function routeSection(flightDetail) {
   if (!legs.length) {
     return `${head}<p class="meta">No flight legs recorded for this airframe yet.</p>`;
   }
-  const currentNote = current
-    ? `<p class="meta"><b>Currently airborne:</b> departed ${esc(utcClockFromUnix(current.departed_at))}` +
+  let currentNote = "";
+  if (current) {
+    const age = pingAgeSeconds(updated);
+    const stale = age !== null && age > STALE_PING_SECONDS;
+    const label = stale ? "Last known open leg" : "Currently airborne";
+    currentNote = `<p class="meta"><b>${label}:</b> departed ${esc(utcClockFromUnix(current.departed_at))}` +
       `${current.origin_code ? ` from ${esc(current.origin_code)}` : " from an unknown origin"} &mdash; ` +
-      `${esc(LEG_CONFIDENCE_LABEL[current.confidence] || current.confidence || "n/a")}</p>`
-    : "";
+      `${esc(LEG_CONFIDENCE_LABEL[current.confidence] || current.confidence || "n/a")}` +
+      (stale
+        ? ` <span class="stale-ping">&mdash; last position report was ${esc(timeAgoFromUnix(updated))}; ` +
+          "this airframe may already have landed or gone out of range</span>"
+        : "") +
+      "</p>";
+  }
   return `
     ${head}
     ${currentNote}
@@ -3482,7 +3500,7 @@ export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
       identity fields (registration, operator, type) <i>reported</i> by airplanes.live's reference data, where it
       has an entry; ICAO allocation country <i>derived</i> from the Mode-S address block; vertical trend
       <i>derived</i> from this aircraft's own recorded track${airfield ? "; airfields: OurAirports" : ""}</div>
-    ${d.icao24 === selectedIcao ? routeSection(flightDetail) : ""}`;
+    ${d.icao24 === selectedIcao ? routeSection(flightDetail, d.updated) : ""}`;
   let cls = "aircraft-marker";
   if (type === "military") cls += " military-marker";
   if (flag) cls += ` aircraft-flagged aircraft-${flag === "emergency" ? "emergency" : "hidden"}`;

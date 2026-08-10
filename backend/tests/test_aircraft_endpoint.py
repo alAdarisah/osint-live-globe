@@ -38,12 +38,17 @@ LEG = {
     "icao24": ICAO, "departed_at": 1_700_000_000.0, "arrived_at": 1_700_010_000.0,
     "origin_code": "KJFK", "dest_code": "EGLL", "callsign": "TST123",
     "max_alt_ft": 35000, "distance_km": 5500.2, "confidence": "observed_both",
+    "last_seen_at": 1_700_010_000.0,
 }
 
 OPEN_LEG = {
     "icao24": ICAO, "departed_at": 1_700_500_000.0, "arrived_at": None,
     "origin_code": "EGLL", "dest_code": None, "callsign": "TST123",
     "max_alt_ft": 12000, "distance_km": 400.0, "confidence": "observed_one",
+    # backend/refine/flight_legs.py's Task 23 review fix (Important 1) --
+    # this is the field that lets a reader tell "still airborne" from "we
+    # stopped hearing from this eleven weeks ago" for an open leg.
+    "last_seen_at": 1_700_500_300.0,
 }
 
 
@@ -111,6 +116,9 @@ def test_full_shape_carries_identity_legs_current_leg_and_cargo_hint(stubbed):
     assert len(body["legs"]) == 1
     assert body["legs"][0]["confidence"] == "observed_both"
     assert body["current_leg"]["origin_code"] == "EGLL"
+    # last_seen_at (Task 23 review, Important 1) passes through untouched --
+    # nothing in this handler recomputes it, it is exactly what storage held.
+    assert body["current_leg"]["last_seen_at"] == OPEN_LEG["last_seen_at"]
 
     # Freighter-typed identity + an in-progress leg's origin -> a hint fires,
     # and it says nothing stronger than "suggests freight".

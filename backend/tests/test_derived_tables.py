@@ -386,21 +386,29 @@ class _FlightLegConn:
         return max(a, b)
 
     async def executemany(self, query, tuples):
-        for icao24, departed_at, arrived_at, origin_code, dest_code, callsign, max_alt_ft, distance_km, confidence in tuples:
+        for (
+            icao24, departed_at, arrived_at, origin_code, dest_code, callsign,
+            max_alt_ft, distance_km, confidence, last_seen_at,
+        ) in tuples:
             key = (icao24, departed_at)
             existing = self.store.get(key)
             if existing is None:
                 merged_max_alt = max_alt_ft
                 merged_origin, merged_dest, merged_callsign = origin_code, dest_code, callsign
+                merged_last_seen = last_seen_at
             else:
                 merged_max_alt = self._greatest(max_alt_ft, existing["max_alt_ft"])
                 merged_origin = origin_code if origin_code is not None else existing["origin_code"]
                 merged_dest = dest_code if dest_code is not None else existing["dest_code"]
                 merged_callsign = callsign if callsign is not None else existing["callsign"]
+                # GREATEST, same as max_alt_ft -- see the schema comment on
+                # last_seen_at: it must never appear to go backwards.
+                merged_last_seen = self._greatest(last_seen_at, existing["last_seen_at"])
             self.store[key] = {
                 "icao24": icao24, "departed_at": departed_at, "arrived_at": arrived_at,
                 "origin_code": merged_origin, "dest_code": merged_dest, "callsign": merged_callsign,
                 "max_alt_ft": merged_max_alt, "distance_km": distance_km, "confidence": confidence,
+                "last_seen_at": merged_last_seen,
             }
 
     async def fetch(self, query, *args):

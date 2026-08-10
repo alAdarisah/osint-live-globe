@@ -5,8 +5,18 @@ ADS-B broadcasts no flight plan. What these tests hold the line on is exactly
 what counts as "observed" (a real on_ground or altitude transition) versus
 "inferred" (an airframe first seen already in the air, with nothing earlier
 to compare against), the arithmetic (distance, max altitude) that has to keep
-accumulating across an open leg rather than freeze at its first row, and the
-cursor discipline a job reading entity_history exactly once has to hold to.
+accumulating across an open leg rather than freeze at its first row, the
+cursor discipline a job reading entity_history exactly once has to hold to,
+and -- Task 23 review, Critical -- that a coverage gap is never mistaken for
+continuous tracking (see the "resumption after a gap" section below).
+
+Rows meant to represent a genuinely continuously-tracked flight are spaced
+well under COVERAGE_GAP_SECONDS (30 minutes) apart, the same way real
+entity_history rows for an airborne aircraft would be -- this matters now in
+a way it did not before the review fix: a gap wider than that bound is no
+longer treated as "the previous reading", so a fixture using an unrealistic
+multi-hour gap to mean "later in the same flight" would silently exercise the
+abandonment path instead of the path it claims to test.
 """
 
 import asyncio
@@ -55,14 +65,14 @@ def test_landing_closes_the_leg_and_resolves_both_ends():
     rows = [
         pos(1, 0.0, on_ground=True, airfield_km=1.0),
         pos(2, 60.0, on_ground=False, airfield_km=1.0),
-        pos(3, 3600.0, on_ground=False, airfield_km=20.0, altitude=8000),  # en route, far from a field
-        pos(4, 7200.0, on_ground=True, airfield_km=0.5, altitude=None),   # wheels down
+        pos(3, 960.0, on_ground=False, airfield_km=20.0, altitude=8000),  # en route, far from a field
+        pos(4, 1860.0, on_ground=True, airfield_km=0.5, altitude=None),   # wheels down
     ]
     upserts, state = fl.apply_positions(rows, {})
     assert len(upserts) == 1  # opened and closed within one batch -- one row, not two
     leg = upserts[0]
     assert leg["departed_at"] == 60.0
-    assert leg["arrived_at"] == 7200.0
+    assert leg["arrived_at"] == 1860.0
     assert leg["origin_code"] == "TEST"
     assert leg["dest_code"] == "TEST"
     assert leg["confidence"] == "observed_both"
@@ -72,19 +82,111 @@ def test_landing_closes_the_leg_and_resolves_both_ends():
 def test_a_leg_spanning_two_batches_still_closes():
     """The two-pass path port_calls' own tests drive directly: a leg opened in
     one apply_positions call must still close in a later call fed the first
-    call's own returned state."""
+    call's own returned state. The batch boundary is a row-count limit
+    (BATCH_LIMIT), not a time limit -- unlike the dedicated gap tests below,
+    nothing here should be far enough apart in wall-clock time to trip
+    COVERAGE_GAP_SECONDS."""
     first = [pos(1, 0.0, on_ground=True, airfield_km=1.0), pos(2, 60.0, on_ground=False, airfield_km=1.0)]
     upserts_1, state_1 = fl.apply_positions(first, {})
     assert len(upserts_1) == 1
     assert state_1[ICAO]["leg"]["arrived_at"] is None
 
-    second = [pos(3, 7200.0, on_ground=True, airfield_km=0.5)]
+    second = [pos(3, 900.0, on_ground=True, airfield_km=0.5)]
     upserts_2, state_2 = fl.apply_positions(second, state_1)
     assert len(upserts_2) == 1
     assert upserts_2[0]["departed_at"] == 60.0
-    assert upserts_2[0]["arrived_at"] == 7200.0
+    assert upserts_2[0]["arrived_at"] == 900.0
     assert upserts_2[0]["confidence"] == "observed_both"
     assert ICAO not in state_2 or state_2[ICAO].get("leg") is None
+
+
+# --- resumption after a coverage gap (Task 23 review, Critical) -------------
+
+
+def test_a_gap_past_the_coverage_bound_abandons_the_open_leg_rather_than_closing_it():
+    """The critical case from the review: an airframe that departs, goes dark
+    for a long time, and resurfaces on the ground somewhere else must not
+    have that whole blackout counted as continuous coverage. The resumption
+    is not an observed arrival -- nothing about it should be written at all,
+    let alone as observed_both."""
+    first = [pos(1, 0.0, on_ground=True, airfield_km=1.0), pos(2, 60.0, on_ground=False, airfield_km=1.0)]
+    upserts_1, state_1 = fl.apply_positions(first, {})
+    assert upserts_1[0]["confidence"] == "observed_one"
+
+    thirty_days_later = 60.0 + 30 * 24 * 3600
+    second = [pos(3, thirty_days_later, lat=40.0, lon=-70.0, on_ground=True, airfield_km=0.5)]
+    upserts_2, state_2 = fl.apply_positions(second, state_1)
+
+    # Nothing closes the old leg -- it is simply abandoned. Its last durably
+    # written state (from pass one: open, observed_one, no arrival) stands.
+    assert upserts_2 == []
+    assert state_2[ICAO].get("leg") is None
+
+
+def test_a_gap_past_the_coverage_bound_does_not_let_a_resumed_leg_inherit_the_old_ones_distance():
+    """A resumption row that is itself airborne *can* open a brand new leg --
+    that is fine and expected (see the "inferred" case) -- but it must start
+    from zero, not from wherever the abandoned leg's own track left off, and
+    it must not silently inherit the old leg's departure_observed=True."""
+    first = [
+        pos(1, 0.0, on_ground=True, airfield_km=1.0),
+        pos(2, 60.0, on_ground=False, airfield_km=1.0),
+        pos(3, 960.0, lat=10.5, lon=20.5, on_ground=False, altitude=5000.0, airfield_km=25.0),
+    ]
+    _upserts_1, state_1 = fl.apply_positions(first, {})
+    assert state_1[ICAO]["leg"]["distance_km"] > 0  # some track accumulated before the gap
+
+    thirty_days_later = 960.0 + 30 * 24 * 3600
+    second = [pos(4, thirty_days_later, lat=40.0, lon=-70.0, on_ground=False, altitude=30000.0)]
+    upserts_2, state_2 = fl.apply_positions(second, state_1)
+
+    # One upsert -- the fresh leg's own opening progress write, the same as
+    # any newly opened leg gets (see test_takeoff_opens_a_leg_...) -- not the
+    # abandoned one, which writes nothing here at all.
+    assert len(upserts_2) == 1
+    fresh = upserts_2[0]
+    assert fresh["departed_at"] == thirty_days_later
+    assert fresh["distance_km"] == 0.0  # not the thirty-day hop from the old leg's last position
+    assert fresh["confidence"] == "inferred"  # genuinely not observed departing
+    assert state_2[ICAO]["leg"]["departure_observed"] is False
+
+
+def test_a_gap_just_inside_the_coverage_bound_is_still_treated_as_continuous():
+    """The bound is a real cutoff, not a hair-trigger -- a gap just under
+    COVERAGE_GAP_SECONDS must behave exactly as before this review fix."""
+    rows = [
+        pos(1, 0.0, on_ground=True, airfield_km=1.0),
+        pos(2, 60.0, on_ground=False, airfield_km=1.0),
+        pos(3, 60.0 + fl.COVERAGE_GAP_SECONDS - 1, on_ground=True, airfield_km=0.5),
+    ]
+    upserts, state = fl.apply_positions(rows, {})
+    assert len(upserts) == 1
+    assert upserts[0]["confidence"] == "observed_both"
+
+
+# --- last_seen_at (Task 23 review, Important 1) ------------------------------
+
+
+def test_last_seen_at_tracks_the_most_recent_row_that_touched_the_leg():
+    rows = [
+        pos(1, 0.0, on_ground=True, airfield_km=1.0),
+        pos(2, 60.0, on_ground=False, airfield_km=1.0),   # opens -- last_seen_at starts here
+        pos(3, 600.0, on_ground=False, altitude=5000.0, airfield_km=25.0),  # still open -- advances
+    ]
+    upserts, state = fl.apply_positions(rows, {})
+    assert len(upserts) == 1  # still open -- this pass's own progress write
+    assert upserts[0]["last_seen_at"] == 600.0
+    assert state[ICAO]["leg"]["last_seen_at"] == 600.0
+
+
+def test_last_seen_at_is_the_closing_rows_own_timestamp():
+    rows = [
+        pos(1, 0.0, on_ground=True, airfield_km=1.0),
+        pos(2, 60.0, on_ground=False, airfield_km=1.0),
+        pos(3, 900.0, on_ground=True, airfield_km=0.5),  # closes
+    ]
+    upserts, state = fl.apply_positions(rows, {})
+    assert upserts[0]["last_seen_at"] == 900.0
 
 
 # --- the altitude-threshold path ---------------------------------------------
@@ -111,14 +213,14 @@ def test_descending_through_1500ft_near_a_field_closes_it():
         pos(1, 0.0, on_ground=True, altitude=None, airfield_km=2.0),
         pos(2, 60.0, on_ground=True, altitude=1000.0, airfield_km=2.0),
         pos(3, 120.0, on_ground=True, altitude=2000.0, airfield_km=2.0),    # opens
-        pos(4, 3600.0, on_ground=True, altitude=2500.0, airfield_km=30.0),  # cruising past 1500, far from any field
-        pos(5, 7200.0, on_ground=True, altitude=800.0, airfield_km=3.0),    # crosses back down, near a field
+        pos(4, 1020.0, on_ground=True, altitude=2500.0, airfield_km=30.0),  # cruising past 1500, far from any field
+        pos(5, 1920.0, on_ground=True, altitude=800.0, airfield_km=3.0),    # crosses back down, near a field
     ]
     upserts, state = fl.apply_positions(rows, {})
     assert len(upserts) == 1
     leg = upserts[0]
     assert leg["departed_at"] == 120.0
-    assert leg["arrived_at"] == 7200.0
+    assert leg["arrived_at"] == 1920.0
     assert leg["confidence"] == "observed_both"
 
 
@@ -133,6 +235,40 @@ def test_the_altitude_threshold_is_gated_by_distance_to_a_field():
     upserts, state = fl.apply_positions(rows, {})
     assert upserts == []
     assert state.get(ICAO, {}).get("leg") is None
+
+
+# --- altitude hysteresis (Task 23 review, Minor) -----------------------------
+
+
+def test_altitude_oscillating_within_the_hysteresis_band_does_not_open_a_leg():
+    """A reading wobbling either side of the plain 1,500 ft line -- but never
+    clearing ALTITUDE_HYSTERESIS_FT past it -- must not toggle departure on
+    every crossing. Every other altitude test in this file crosses
+    monotonically once; this one does not cross cleanly at all."""
+    rows = [
+        pos(1, 0.0, on_ground=True, altitude=None, airfield_km=2.0),
+        pos(2, 60.0, on_ground=True, altitude=1000.0, airfield_km=2.0),   # establishes "below"
+        pos(3, 120.0, on_ground=True, altitude=1600.0, airfield_km=2.0),  # inside the band -- still "below"
+        pos(4, 180.0, on_ground=True, altitude=1400.0, airfield_km=2.0),  # back down, unsurprising
+        pos(5, 240.0, on_ground=True, altitude=1620.0, airfield_km=2.0),  # inside the band again -- still "below"
+    ]
+    upserts, state = fl.apply_positions(rows, {})
+    assert upserts == []
+    assert state[ICAO].get("leg") is None
+
+
+def test_altitude_clearing_the_far_side_of_the_hysteresis_band_still_opens():
+    """The hysteresis band has a far side -- a reading that actually clears
+    it still opens a leg, same as before this review fix."""
+    rows = [
+        pos(1, 0.0, on_ground=True, altitude=None, airfield_km=2.0),
+        pos(2, 60.0, on_ground=True, altitude=1000.0, airfield_km=2.0),   # "below"
+        pos(3, 120.0, on_ground=True, altitude=1600.0, airfield_km=2.0),  # inside the band -- no toggle
+        pos(4, 180.0, on_ground=True, altitude=1700.0, airfield_km=2.0),  # clears the far side -- genuine departure
+    ]
+    upserts, state = fl.apply_positions(rows, {})
+    assert len(upserts) == 1
+    assert upserts[0]["departed_at"] == 180.0
 
 
 # --- single-ended legs and the confidence values -----------------------------
@@ -168,12 +304,12 @@ def test_an_inferred_legs_landing_is_observed_one_never_observed_both():
     _upserts_1, state_1 = fl.apply_positions(first, {})
     assert state_1[ICAO]["leg"]["departure_observed"] is False
 
-    second = [pos(2, 5000.0, on_ground=True, airfield_km=1.0)]
+    second = [pos(2, 1900.0, on_ground=True, airfield_km=1.0)]
     upserts_2, state_2 = fl.apply_positions(second, state_1)
     assert len(upserts_2) == 1
     leg = upserts_2[0]
     assert leg["departed_at"] == 1000.0
-    assert leg["arrived_at"] == 5000.0
+    assert leg["arrived_at"] == 1900.0
     assert leg["dest_code"] == "TEST"
     assert leg["confidence"] == "observed_one"
     assert ICAO not in state_2 or state_2[ICAO].get("leg") is None
@@ -261,7 +397,7 @@ def test_the_cursor_advances_and_a_second_pass_does_not_reprocess(monkeypatch):
     rows = [
         pos(1, 0.0, on_ground=True, airfield_km=1.0),
         pos(2, 60.0, on_ground=False, airfield_km=1.0),
-        pos(3, 7200.0, on_ground=True, airfield_km=0.5),
+        pos(3, 900.0, on_ground=True, airfield_km=0.5),
     ]
     fake = _FakeStorage(rows)
     monkeypatch.setattr(fl, "storage", fake)

@@ -401,14 +401,44 @@ test("a completed leg's table row carries origin, destination and confidence", (
 });
 
 test("an open leg is called out as currently airborne, distinct from the table of completed legs", () => {
+  // updated has to be recent, not AIRCRAFT's fixed fixture value, or the
+  // Task 23 review's Important 2 fix (below) reads this aircraft as stale
+  // and downgrades the callout -- exactly what the next two tests check.
+  const freshUpdated = Date.now() / 1000 - 60;
   const { detail } = decorateAdsb(
-    { ...AIRCRAFT, icao24: "airborne1" },
+    { ...AIRCRAFT, icao24: "airborne1", updated: freshUpdated },
     { selectedIcao: "airborne1", flightDetail: { status: "ready", data: { legs: [OPEN_LEG], current_leg: OPEN_LEG } } }
   );
   assert.match(detail, /Currently airborne/);
   assert.match(detail, /from EGLL/);
   assert.match(detail, /One end observed/);
   assert.match(detail, /still open/); // the open leg's own table row, no arrival time
+});
+
+// --- Route section staleness qualifier (Task 23 review, Important 2) -------
+
+test("a stale last position report downgrades the callout from Currently airborne, and says why", () => {
+  // Old enough to clear decorators.js's own STALE_PING_SECONDS (15 min) --
+  // the same threshold the card's "Last position report" line already uses.
+  const staleUpdated = Date.now() / 1000 - 3600;
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "gonestale", updated: staleUpdated },
+    { selectedIcao: "gonestale", flightDetail: { status: "ready", data: { legs: [OPEN_LEG], current_leg: OPEN_LEG } } }
+  );
+  assert.doesNotMatch(detail, /<b>Currently airborne<\/b>/);
+  assert.match(detail, /Last known open leg/);
+  assert.match(detail, /last position report was/);
+  assert.match(detail, /may already have landed or gone out of range/);
+});
+
+test("a missing updated field (never reported an age) does not crash and does not falsely claim freshness", () => {
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "noupdated", updated: undefined },
+    { selectedIcao: "noupdated", flightDetail: { status: "ready", data: { legs: [OPEN_LEG], current_leg: OPEN_LEG } } }
+  );
+  // pingAgeSeconds(undefined) is null -- neither stale nor fresh is provable,
+  // so this reads as the ordinary (non-stale) label rather than throwing.
+  assert.match(detail, /Currently airborne/);
 });
 
 test("a leg with no resolved origin says Unknown rather than rendering blank", () => {

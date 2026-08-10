@@ -353,6 +353,17 @@ CREATE TABLE IF NOT EXISTS flight_legs (
 );
 -- Serves flight_legs_for(): one aircraft's recent legs, newest first.
 CREATE INDEX IF NOT EXISTS idx_flight_legs_icao ON flight_legs (icao24, departed_at DESC);
+-- Added after the table above: the ts of the most recent entity_history row
+-- that actually contributed to this leg, open or closed. Task 23 review
+-- (Important 1) -- an open leg with no arrival looked identical whether the
+-- airframe was ten minutes into a long flight or had gone dark eleven weeks
+-- ago; this is the field a reader (and GET /api/aircraft/{icao24}) can
+-- compare against "now" to tell the two apart. Nullable so a pre-migration
+-- row (there should be none in practice -- this table is new in this same
+-- task -- but ADD COLUMN IF NOT EXISTS is the established, non-destructive
+-- pattern this file already uses for conflict_events) reads as "unknown"
+-- rather than a fabricated value.
+ALTER TABLE flight_legs ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 """
 
 
@@ -1379,8 +1390,8 @@ async def open_port_call(mmsi: str) -> dict | None:
 
 
 _UPSERT_FLIGHT_LEG = """
-INSERT INTO flight_legs (icao24, departed_at, arrived_at, origin_code, dest_code, callsign, max_alt_ft, distance_km, confidence)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+INSERT INTO flight_legs (icao24, departed_at, arrived_at, origin_code, dest_code, callsign, max_alt_ft, distance_km, confidence, last_seen_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 ON CONFLICT (icao24, departed_at) DO UPDATE SET
   arrived_at = EXCLUDED.arrived_at,
   -- origin_code/dest_code/callsign are resolved progressively as a leg's
@@ -1403,7 +1414,12 @@ ON CONFLICT (icao24, departed_at) DO UPDATE SET
   -- one already recorded.
   max_alt_ft = GREATEST(EXCLUDED.max_alt_ft, flight_legs.max_alt_ft),
   distance_km = EXCLUDED.distance_km,
-  confidence = EXCLUDED.confidence
+  confidence = EXCLUDED.confidence,
+  -- Same GREATEST-ignores-NULL treatment as max_alt_ft, and for the same
+  -- reason it must never go backwards: this is "how recently did we last
+  -- actually hear from this leg", and a write cannot un-hear something a
+  -- previous write already recorded.
+  last_seen_at = GREATEST(EXCLUDED.last_seen_at, flight_legs.last_seen_at)
 """
 
 
@@ -1420,6 +1436,7 @@ def _flight_leg_row(item: dict) -> tuple | None:
         item.get("origin_code"), item.get("dest_code"), item.get("callsign"),
         int(item["max_alt_ft"]) if item.get("max_alt_ft") is not None else None,
         item.get("distance_km"), str(confidence),
+        _to_timestamp(item.get("last_seen_at")),
     )
 
 
@@ -1464,11 +1481,15 @@ def _flight_leg_dict(r) -> dict:
         "arrived_at": r["arrived_at"].timestamp() if r["arrived_at"] else None,
         "origin_code": r["origin_code"], "dest_code": r["dest_code"], "callsign": r["callsign"],
         "max_alt_ft": r["max_alt_ft"], "distance_km": r["distance_km"], "confidence": r["confidence"],
+        # None for a leg recorded before this column existed (see the ALTER
+        # TABLE above) -- a card reads that the same way it reads any other
+        # unknown staleness, not as "just now".
+        "last_seen_at": r["last_seen_at"].timestamp() if r["last_seen_at"] else None,
     }
 
 
 _FLIGHT_LEG_COLUMNS = (
-    "icao24, departed_at, arrived_at, origin_code, dest_code, callsign, max_alt_ft, distance_km, confidence"
+    "icao24, departed_at, arrived_at, origin_code, dest_code, callsign, max_alt_ft, distance_km, confidence, last_seen_at"
 )
 
 

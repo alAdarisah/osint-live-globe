@@ -55,6 +55,39 @@ that has been airborne for hours. Both accumulate in the per-airframe state
 persisted across passes, and each write to storage carries the running
 total, matching record_flight_legs' own note that distance_km is overwritten
 wholesale on every write, never summed by Postgres.
+
+**A coverage gap is not evidence of anything.** `last` (this airframe's most
+recent processed row) is compared against every new row to detect a
+transition, but a stale `last` is not "the state immediately before this
+one" -- it is just the last thing this job happened to see, arbitrarily long
+ago. Task 23 review, Critical: without a bound, an airframe that departs,
+goes dark for weeks (out of range, transponder off, deregistered), and later
+resurfaces on the ground somewhere else had that entire blackout compared as
+an ordinary two-poll gap -- the resumption read as a genuine, continuously
+observed arrival (`observed_both`), and the single straight-line hop across
+the whole gap was folded into `distance_km` as though it were recorded
+track. COVERAGE_GAP_SECONDS bounds this: a row more than that long after
+`last` resets the comparison to "unknown" (the same state a genuinely
+first-ever sighting starts from -- see `continuous` in `_advance`), and any
+leg still open across the gap is abandoned rather than closed, so its last
+honestly-written state (already durably stored from before the gap) stands
+as the record rather than being overwritten with a fabricated arrival.
+
+**last_seen_at is the field that makes an abandoned leg legible.** Task 23
+review, Important 1: `observed_one` alone does not distinguish "departed ten
+minutes ago, still climbing" from "we stopped hearing from this airframe
+eleven weeks ago" -- both are an open leg with one end watched. last_seen_at
+is the ts of the most recent row that actually touched the leg (open or
+still accumulating), so a reader -- and GET /api/aircraft/{icao24} -- can
+compare it against now and say which one this is, rather than the record
+looking equally fresh either way.
+
+**The altitude threshold has hysteresis.** Task 23 review, Minor: a reading
+oscillating in barometric noise (or a circuit aircraft genuinely levelling)
+around the plain 1,500 ft line would otherwise flip departure/arrival on
+every crossing, spawning a near-zero-duration leg per wobble.
+ALTITUDE_HYSTERESIS_FT means a state, once established, only flips on a
+reading that clears the *far* side of the band -- see `_altitude_state`.
 """
 
 import asyncio
@@ -83,6 +116,13 @@ BATCH_LIMIT = 200_000
 # threshold. 1,500 ft is the brief's own number: comfortably inside a normal
 # traffic-pattern altitude, well clear of cruise.
 ALTITUDE_TRANSITION_FT = 1500
+# Hysteresis half-band around ALTITUDE_TRANSITION_FT -- see _altitude_state
+# and the module docstring's "The altitude threshold has hysteresis" section
+# (Task 23 review, Minor). 150 ft is the same order of magnitude as
+# decorators.js's VERTICAL_TREND_THRESHOLD_M (~200 ft): comfortably above
+# barometric quantisation and fix-to-fix jitter at a level altitude, without
+# being so wide that a genuine, tight circuit never clears it.
+ALTITUDE_HYSTERESIS_FT = 150
 # Tighter than adsb.py's own 40 km NEAREST_RADIUS_KM on purpose: a threshold
 # crossing 35 km from the nearest field is not evidence of a departure or
 # arrival there -- only that the aircraft happened to pass beneath 1,500 ft
@@ -97,6 +137,19 @@ ALTITUDE_AIRFIELD_RADIUS_KM = 10.0
 # reappears already airborne just opens an `inferred` leg from that later
 # row, the same as any airframe this job has never seen before.
 STATE_PRUNE_SECONDS = 6 * 3600
+
+# How much wall-clock time may separate two consecutive entity_history rows
+# before this job stops trusting the earlier one as "this airframe's own
+# immediately preceding state" -- see the module docstring's "A coverage gap
+# is not evidence of anything" section (Task 23 review, Critical).
+# entity_history only gains a row when the entity actually moved (see
+# backend/storage.py), and an airborne aircraft is essentially always
+# moving, so under genuinely continuous coverage consecutive rows track the
+# poll cadence closely. Set to twice the slowest cadence this source runs at
+# (config.ADSB_POLL_INTERVAL_ANON, unauthenticated OpenSky, 900s) -- headroom
+# for one missed poll, without being anywhere close to wide enough to mistake
+# a real, multi-day blackout for a normal gap.
+COVERAGE_GAP_SECONDS = 2 * config.ADSB_POLL_INTERVAL_ANON
 
 
 def _altitude(payload: dict) -> float | None:
@@ -122,6 +175,28 @@ def _airfield_code(field: dict | None) -> str | None:
     return field.get("code") if field else None
 
 
+def _altitude_state(altitude: float | None, prior_state: str | None) -> str | None:
+    """Which side of ALTITUDE_TRANSITION_FT this reading sits on, with
+    hysteresis: once a state is established, only a reading that clears the
+    *far* side of the ALTITUDE_HYSTERESIS_FT band flips it back (see the
+    module docstring's "The altitude threshold has hysteresis" section), so
+    an altitude oscillating in barometric noise near the plain threshold
+    stops toggling departure/arrival on every crossing. A reading of None
+    leaves whatever state was already established alone rather than
+    resetting it -- a single unreadable altitude is not evidence the
+    airframe moved to the other side. `prior_state=None` (no state
+    established yet -- a fresh airframe, or a comparison reset by a coverage
+    gap) classifies directly against the plain midpoint, since there is
+    nothing yet to apply hysteresis relative to."""
+    if altitude is None:
+        return prior_state
+    if prior_state == "above":
+        return "below" if altitude < ALTITUDE_TRANSITION_FT - ALTITUDE_HYSTERESIS_FT else "above"
+    if prior_state == "below":
+        return "above" if altitude > ALTITUDE_TRANSITION_FT + ALTITUDE_HYSTERESIS_FT else "below"
+    return "above" if altitude >= ALTITUDE_TRANSITION_FT else "below"
+
+
 def _open_leg(ts: float, lat: float, lon: float, payload: dict, departure_observed: bool) -> dict:
     return {
         "departed_at": ts,
@@ -135,16 +210,23 @@ def _open_leg(ts: float, lat: float, lon: float, payload: dict, departure_observ
         "arrived_at": None,
         "dest_code": None,
         "arrival_observed": False,
+        # The ts of the row that opened it, updated on every row that
+        # touches this leg thereafter (see _accumulate) -- see the module
+        # docstring's "last_seen_at is the field..." section.
+        "last_seen_at": ts,
     }
 
 
-def _accumulate(leg: dict, lat: float, lon: float, payload: dict) -> None:
+def _accumulate(leg: dict, ts: float, lat: float, lon: float, payload: dict) -> None:
     """Folds one more recorded position into an open leg's running totals.
     Called for every row seen while a leg is open, including the row that
     closes it, so distance_km and max_alt_ft reflect the whole recorded
-    track rather than only its first and last fixes."""
+    track rather than only its first and last fixes. `ts` is only ever this
+    row's own timestamp -- see the caller in _advance, which never reaches
+    here across a coverage gap (the leg is abandoned first)."""
     leg["distance_km"] = leg.get("distance_km", 0.0) + haversine_km(leg["last_lat"], leg["last_lon"], lat, lon)
     leg["last_lat"], leg["last_lon"] = lat, lon
+    leg["last_seen_at"] = ts
     altitude = _altitude(payload)
     if altitude is not None:
         leg["max_alt_ft"] = max(leg.get("max_alt_ft") or altitude, altitude)
@@ -179,6 +261,7 @@ def _leg_row(icao24: str, leg: dict) -> dict:
         "max_alt_ft": int(round(leg["max_alt_ft"])) if leg.get("max_alt_ft") is not None else None,
         "distance_km": round(leg.get("distance_km", 0.0), 1),
         "confidence": _confidence(leg),
+        "last_seen_at": leg.get("last_seen_at"),
     }
 
 
@@ -200,8 +283,26 @@ def _advance(icao24: str, rows: list[dict], entry: dict) -> tuple[dict | None, l
         on_ground = payload.get("on_ground")
         altitude = _altitude(payload)
 
-        prior_on_ground = last.get("on_ground") if last else None
-        prior_altitude = last.get("altitude") if last else None
+        # `continuous` is the coverage-gap bound (Task 23 review, Critical --
+        # see COVERAGE_GAP_SECONDS and the module docstring): False for a
+        # genuinely first-ever row (`last` absent) exactly as before, but now
+        # also False when `last` exists but is too old to trust as this
+        # airframe's own immediately preceding state. Either way, the prior
+        # reading is treated as unknown rather than compared against.
+        continuous = last is not None and (ts - last.get("ts", ts)) <= COVERAGE_GAP_SECONDS
+        prior_on_ground = last.get("on_ground") if continuous else None
+        prior_altitude_state = last.get("altitude_state") if continuous else None
+        altitude_state = _altitude_state(altitude, prior_altitude_state)
+
+        if leg is not None and not continuous:
+            # Coverage broke while this leg was open. Abandon it rather than
+            # let this row's on_ground/altitude masquerade as an arrival this
+            # job never actually watched -- whatever was last durably written
+            # for it (open, unresolved, with the last_seen_at that write
+            # carried) already stands as the honest record of how far this
+            # job actually saw it. This row may still open a brand new leg
+            # below, entirely independent of the abandoned one.
+            leg = None
 
         departure = arrival = False
         if isinstance(prior_on_ground, bool) and isinstance(on_ground, bool):
@@ -209,27 +310,28 @@ def _advance(icao24: str, rows: list[dict], entry: dict) -> tuple[dict | None, l
                 departure = True
             elif not prior_on_ground and on_ground:
                 arrival = True
-        if not departure and not arrival and prior_altitude is not None and altitude is not None:
+        if not departure and not arrival and prior_altitude_state is not None:
             if _airfield_within(payload, ALTITUDE_AIRFIELD_RADIUS_KM) is not None:
-                if prior_altitude < ALTITUDE_TRANSITION_FT <= altitude:
+                if prior_altitude_state == "below" and altitude_state == "above":
                     departure = True
-                elif prior_altitude >= ALTITUDE_TRANSITION_FT > altitude:
+                elif prior_altitude_state == "above" and altitude_state == "below":
                     arrival = True
 
         if leg is None:
             if departure:
                 leg = _open_leg(ts, lat, lon, payload, departure_observed=True)
                 leg_dirty = True
-            elif last is None and on_ground is False:
-                # The first row this job has ever read for this airframe, and
-                # it is already airborne -- see the module docstring's
-                # "inferred" case. Nothing was observed departing; departed_at
-                # is bounded by how far back this job's own cursor happens to
-                # reach, not by a takeoff this job actually saw.
+            elif not continuous and on_ground is False:
+                # Either a genuinely first-ever row, or a row resuming after
+                # a gap too long to trust -- either way there is no prior
+                # reading to compare against, so nothing was observed
+                # departing. See the module docstring's "inferred" case.
+                # departed_at is bounded by how far back this job can
+                # actually see, not by a takeoff this job witnessed.
                 leg = _open_leg(ts, lat, lon, payload, departure_observed=False)
                 leg_dirty = True
         else:
-            _accumulate(leg, lat, lon, payload)
+            _accumulate(leg, ts, lat, lon, payload)
             leg_dirty = True
             if arrival:
                 leg["arrived_at"] = ts
@@ -245,7 +347,7 @@ def _advance(icao24: str, rows: list[dict], entry: dict) -> tuple[dict | None, l
                 leg = None
                 leg_dirty = False
 
-        last = {"on_ground": on_ground, "altitude": altitude, "ts": ts}
+        last = {"on_ground": on_ground, "altitude_state": altitude_state, "ts": ts}
 
     if leg is not None and leg_dirty:
         upserts.append(_leg_row(icao24, leg))
