@@ -48,7 +48,7 @@ EMPTY_WATER = dv.WaterMask()
 def test_reach_radius_is_vmax_times_elapsed_time():
     stats = {"p_kn": 20.0, "stdev_kn": 1.0, "sample_count": 50}
     out = dv.build_reachability(base_record(gap_hours=10.0), stats, EMPTY_WATER, None, NOW)
-    assert out["speed_basis"] == "measured"
+    assert out["speed_basis"] == "own_history"
     assert out["reach_radius_km"] == round(20.0 * dv.KN_TO_KMH * 10.0, 1)
 
 
@@ -79,7 +79,7 @@ def test_no_speed_history_at_all_also_falls_back():
 def test_enough_samples_uses_the_hulls_own_measured_speed():
     stats = {"p_kn": 30.0, "stdev_kn": 2.0, "sample_count": dv.REACH_MIN_SPEED_SAMPLES}
     out = dv.build_reachability(base_record(), stats, EMPTY_WATER, None, NOW)
-    assert out["speed_basis"] == "measured"
+    assert out["speed_basis"] == "own_history"
     assert out["reach_radius_km"] == round(30.0 * dv.KN_TO_KMH * 8.0, 1)
 
 
@@ -347,7 +347,7 @@ def test_add_reachability_zips_each_records_own_speed_stats_by_position():
         {"p_kn": 10.0, "stdev_kn": 1.0, "sample_count": 50},  # slow hull
     ]
     out = dv.add_reachability(records, stats_list, EMPTY_WATER, {}, NOW)
-    assert out[0]["mmsi"] == "111" and out[0]["speed_basis"] == "measured"
+    assert out[0]["mmsi"] == "111" and out[0]["speed_basis"] == "own_history"
     assert out[0]["reach_radius_km"] > out[1]["reach_radius_km"]
     # Originals untouched.
     assert "reach_radius_km" not in records[0]

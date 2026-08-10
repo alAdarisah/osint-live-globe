@@ -792,14 +792,24 @@ def _vmax_and_basis(ship_type, speed_stats: dict | None) -> tuple[float, str, fl
     """(v_max_kn, speed_basis, stdev_kn) for one hull. stdev_kn is 0.0, not
     None, when the class-default fallback fires -- the along-track term
     downstream floors against the cross-track one for exactly this case (see
-    build_reachability), rather than needing a None check of its own."""
+    build_reachability), rather than needing a None check of its own.
+
+    speed_basis is "own_history" or "class_default" -- deliberately neither
+    word from this project's four-word provenance vocabulary
+    (measured/reported/derived/inferred, see the global constraints). Both
+    branches are already arithmetic over AIS's own measured speed reports (a
+    percentile in one case, a fixed lookup table in the other), so the
+    record's own `inferred: True` is what states the provenance; this field
+    answers a narrower question -- whose numbers, this hull's or the class's
+    -- not a second, competing provenance claim.
+    """
     if (
         speed_stats
         and speed_stats.get("sample_count", 0) >= REACH_MIN_SPEED_SAMPLES
         and speed_stats.get("p_kn") is not None
     ):
         stdev = speed_stats.get("stdev_kn")
-        return float(speed_stats["p_kn"]), "measured", float(stdev) if stdev is not None else 0.0
+        return float(speed_stats["p_kn"]), "own_history", float(stdev) if stdev is not None else 0.0
     return _class_default_speed_kn(ship_type), "class_default", 0.0
 
 

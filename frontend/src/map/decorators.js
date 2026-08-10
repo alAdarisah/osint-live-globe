@@ -2631,7 +2631,7 @@ function gfwPriorCredit(prior) {
 // buried inside them.
 function reachabilityDetail(d) {
   if (!Number.isFinite(Number(d.reach_radius_km))) return "";
-  const basis = d.speed_basis === "measured"
+  const basis = d.speed_basis === "own_history"
     ? "this hull's own recent speed history"
     : "a generic ceiling for its vessel class (its own speed history was too thin to trust)";
   const scored = Number.isFinite(Number(d.prediction_error_km))
