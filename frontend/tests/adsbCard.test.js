@@ -224,7 +224,10 @@ test("a non-military classification is marked as a best-effort guess too, not st
 test("callsign, altitude, speed, heading and squawk all appear in Flight now", () => {
   const { detail } = decorateAdsb({ ...AIRCRAFT, squawk: "1200" }, {});
   assert.match(detail, /RCH285/);
-  assert.match(detail, /3200 m/);
+  // Task 32 item 4: formatAltitudeM/formatSpeedKmh now render these --
+  // fmtNumber-style thousands separator on the altitude, same as every other
+  // large number on this map.
+  assert.match(detail, /3,200 m/);
   assert.match(detail, /864 km\/h/); // velocity is m/s on the wire: 240 * 3.6
   assert.match(detail, /91&deg;/);
   assert.match(detail, /1200/);
@@ -396,8 +399,13 @@ test("a completed leg's table row carries origin, destination and confidence", (
   assert.match(detail, /KJFK/);
   assert.match(detail, /EGLL/);
   assert.match(detail, /Both ends observed/);
-  assert.match(detail, /35,000 ft/);
-  assert.match(detail, /5500 km/);
+  // Task 32 item 4: max_alt_ft/distance_km now go through formatAltitudeM/
+  // formatDistanceKm (metric by default -- see utils/format.js's
+  // preferredUnitsSystem), so a native-feet field now shows metres unless a
+  // reader has picked imperial/nautical, and a distance carries the
+  // formatter's own one-decimal precision.
+  assert.match(detail, /10,668 m/);
+  assert.match(detail, /5500\.2 km/);
 });
 
 test("an open leg is called out as currently airborne, distinct from the table of completed legs", () => {

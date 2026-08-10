@@ -6,7 +6,10 @@
 
 import { L } from "./leafletGlobal";
 import { SVG, OFFICIALS_KIND_ICON, buildDivIcon } from "./svgIcons";
-import { esc, fmtNumber, formatAisEta, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix } from "../utils/format";
+import {
+  esc, fmtNumber, formatAisEta, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix,
+  formatDistanceKm, formatSpeedKmh, formatAltitudeM, nmToKm, feetToMeters,
+} from "../utils/format";
 import { flagForMmsi } from "../utils/mmsi";
 import {
   severityBand, severityColor, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
@@ -793,7 +796,7 @@ const HAZARD_SEVERITY_BASIS = {
 function decorateEarthquake(d) {
   const magnitude = Number.isFinite(d.magnitude) ? `M${d.magnitude.toFixed(1)}` : "Magnitude unknown";
   const when = timeAgoFromUnix(d.time);
-  const depth = Number.isFinite(d.depth_km) ? `${Math.round(d.depth_km)} km deep` : "depth unknown";
+  const depth = Number.isFinite(d.depth_km) ? `${formatDistanceKm(d.depth_km)} deep` : "depth unknown";
   const tooltip = `<b>${esc(magnitude)}</b> earthquake &middot; ${esc(depth)}<br/>` +
     `${esc(d.place || "")}${when ? ` &middot; ${esc(when)}` : ""}`;
   const detail = `
@@ -1591,7 +1594,7 @@ const CARGO_CLASS_LABEL = {
 const LADEN_LABEL = { laden: "Laden", ballast: "Ballast", unknown: "Unknown" };
 
 function fmtDraughtM(value) {
-  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)} m` : "n/a";
+  return typeof value === "number" && Number.isFinite(value) ? formatAltitudeM(value) : "n/a";
 }
 
 // port_calls_for/port_calls_at never carry a distance -- only the tier that
@@ -1600,9 +1603,9 @@ function fmtDraughtM(value) {
 // travels on the response instead (app.py's PORT_CALL_CONFIDENCE_KM), so this
 // reads it from there rather than hardcoding the same three numbers again.
 const CONFIDENCE_NOTE = {
-  exact: (km) => `within ${km} km of the charted point`,
-  proximity: (km) => `within ${km} km &mdash; an outer anchorage or approach, not necessarily alongside`,
-  inferred: (km) => `attributed to the nearest known port, up to ${km} km away`,
+  exact: (km) => `within ${formatDistanceKm(km)} of the charted point`,
+  proximity: (km) => `within ${formatDistanceKm(km)} &mdash; an outer anchorage or approach, not necessarily alongside`,
+  inferred: (km) => `attributed to the nearest known port, up to ${formatDistanceKm(km)} away`,
 };
 
 function confidenceCell(confidence, radii) {
@@ -1735,7 +1738,7 @@ export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
     // Names the class, never a generic "flagged": a designation, a detention and
     // an allegation are three different claims (see watchlistDetail).
     `${watchlisted ? `<br/><span class="watchlist-flag">Watchlist: ${esc(WATCHLIST_CLASS_LABEL[watchlisted.evidence] || "listed")}</span>` : ""}` +
-    `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn` +
+    `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${d.speed != null ? esc(formatSpeedKn(d.speed)) : "?"}` +
     lastPingTooltip(d.updated);
 
   // Everything below is stored, and until this task nothing read it back:
@@ -1766,8 +1769,8 @@ export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
           (${esc(flag.mid)}); reassigned if the hull reflags, and not necessarily what it flies today.</span>`
       : '<span class="meta">Flag state: not derivable from this MMSI</span>'}</div>
     ${(d.length_m || d.beam_m)
-      ? `<div>Dimensions: ${d.length_m ? `${esc(d.length_m)} m` : "length n/a"} &times; ${
-          d.beam_m ? `${esc(d.beam_m)} m` : "beam n/a"
+      ? `<div>Dimensions: ${d.length_m ? esc(formatAltitudeM(d.length_m)) : "length n/a"} &times; ${
+          d.beam_m ? esc(formatAltitudeM(d.beam_m)) : "beam n/a"
         } <span class="meta">(LOA &times; beam) &mdash; derived from the static message's antenna-offset
           fields, not a measurement of the hull</span></div>`
       : ""}
@@ -1788,11 +1791,11 @@ export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
           : '<div class="meta">ETA broadcast but encoded as "not available"</div>')
       : '<div class="meta">ETA: not stated</div>'}
     ${Number.isFinite(Number(d.draught)) && Number(d.draught) > 0
-      ? `<div>Reported draught: ${esc(d.draught)} m <span class="meta">&mdash; crew-set in AIS static
+      ? `<div>Reported draught: ${esc(formatAltitudeM(Number(d.draught)))} <span class="meta">&mdash; crew-set in AIS static
         data, not a measurement</span></div>`
       : ""}
     <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
-    <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg; &middot;
+    <div>Speed: ${d.speed != null ? esc(formatSpeedKn(d.speed)) : "n/a"} &middot; Course: ${esc(d.course ?? "n/a")}&deg; &middot;
       Heading: ${headingKnown ? `${esc(d.heading)}&deg;` : "n/a"}</div>
     ${lastPingDetail(d.updated)}
 
@@ -2684,8 +2687,8 @@ export function decorateRailLive(d, { offset } = {}) {
   const detail = `
     <h3>${label}</h3>
     <div class="meta">Departure date: ${esc(d.departure_date)}</div>
-    ${Number.isFinite(d.speed) ? `<div>Speed: ${esc(Math.round(d.speed))} km/h</div>` : ""}
-    ${Number.isFinite(d.accuracy) ? `<div class="meta">GPS accuracy: &plusmn;${esc(Math.round(d.accuracy))} m</div>` : ""}
+    ${Number.isFinite(d.speed) ? `<div>Speed: ${esc(formatSpeedKmh(d.speed))}</div>` : ""}
+    ${Number.isFinite(d.accuracy) ? `<div class="meta">GPS accuracy: &plusmn;${esc(formatAltitudeM(d.accuracy))}</div>` : ""}
     <p class="meta"><b>Finland only.</b> Fintraffic/Digitraffic publishes live positions for Finnish
       rail traffic; no other country is covered by this layer, and that is a fact about their feed,
       not a gap in this map's coverage elsewhere.</p>
@@ -3046,7 +3049,7 @@ function reachabilityDetail(d) {
     ? "this hull's own recent speed history"
     : "a generic ceiling for its vessel class (its own speed history was too thin to trust)";
   const scored = Number.isFinite(Number(d.prediction_error_km))
-    ? `<div>The model's own dead-reckoned guess landed <b>${esc(fmtNumber(Number(d.prediction_error_km)))} km</b>
+    ? `<div>The model's own dead-reckoned guess landed <b>${esc(formatDistanceKm(Number(d.prediction_error_km)))}</b>
         from where the vessel actually reappeared.</div>`
     : "";
   const dest = d.destination_prior_used
@@ -3055,7 +3058,7 @@ function reachabilityDetail(d) {
     : "";
   return `
     <div class="inferred-block">
-      <div>Could have reached up to <b>${esc(fmtNumber(Number(d.reach_radius_km)))} km</b> away in a straight
+      <div>Could have reached up to <b>${esc(formatDistanceKm(Number(d.reach_radius_km)))}</b> away in a straight
         line at its own top speed, using ${basis}.</div>
       <div class="meta">The shaded region on the map is narrower than that outer figure -- it is built from
         the course and speed this hull was actually holding when it went quiet, not the full circle its top
@@ -3068,10 +3071,23 @@ function reachabilityDetail(d) {
     </div>`;
 }
 
+// AIS's own speed-over-ground field, and dark_vessels.py/gfw_gaps.py's
+// derived `implied_speed_kn`, are both already reported in knots -- so this
+// converts *into* the reader's chosen system rather than out of one, going
+// through the same km/h formatter every other speed on this map does
+// (nmToKm's own linear conversion applies identically to a rate as to a
+// distance). One function rather than one per call site: a vessel's
+// broadcast speed and an inferred implied speed are different claims, but
+// they are the same unit and the same conversion.
+function formatSpeedKn(kn) {
+  const n = Number(kn);
+  return Number.isFinite(n) ? formatSpeedKmh(nmToKm(n)) : "n/a";
+}
+
 function decorateAisGap(d) {
   const vessel = d.name || `MMSI ${d.mmsi}`;
   const tooltip = `<b>${esc(vessel)}</b> &middot; went dark<br/>` +
-    `${esc(d.gap_hours)} h silent &middot; reappeared ${esc(d.resumed_km_away)} km away`;
+    `${esc(d.gap_hours)} h silent &middot; reappeared ${esc(formatDistanceKm(Number(d.resumed_km_away)))} away`;
   // An implied speed a merchant hull cannot make is the one number here that
   // rules out the innocent explanation, so it is called out rather than listed.
   const impossible = Number(d.implied_speed_kn) > 25;
@@ -3081,7 +3097,8 @@ function decorateAisGap(d) {
     ${sanctionDetail(d)}
     <div class="inferred-block">
       <div><b>${esc(d.gap_hours)} hours</b> with no position reported.</div>
-      <div>Reappeared ${esc(d.resumed_km_away)} km away, implying ${esc(d.implied_speed_kn)} knots${
+      <div>Reappeared ${esc(formatDistanceKm(Number(d.resumed_km_away)))} away, implying
+        ${esc(formatSpeedKn(d.implied_speed_kn))}${
         impossible ? " &mdash; faster than a merchant vessel makes" : ""
       }.</div>
       <div class="meta">Last heard ${esc(timeAgoFromUnix(d.went_dark_at))}, back ${esc(timeAgoFromUnix(d.resumed_at))}.</div>
@@ -3100,12 +3117,12 @@ function decorateStsPair(d) {
   const vessels = d.vessels || [];
   const names = vessels.map((v) => v.name || `MMSI ${v.mmsi}`);
   const tooltip = `<b>Possible ship-to-ship transfer</b><br/>${esc(names.join(" + "))}<br/>` +
-    `${esc(d.separation_m)} m apart for ${esc(d.together_hours)} h`;
+    `${esc(formatAltitudeM(Number(d.separation_m)))} apart for ${esc(d.together_hours)} h`;
   const detail = `
     <h3>Possible ship-to-ship transfer</h3>
     ${sanctionDetail(d)}
     <div class="inferred-block">
-      <div>${esc(d.separation_m)} m apart, both under way at almost zero speed, for <b>${esc(d.together_hours)} hours</b>.</div>
+      <div>${esc(formatAltitudeM(Number(d.separation_m)))} apart, both under way at almost zero speed, for <b>${esc(d.together_hours)} hours</b>.</div>
       <ul class="coverage-list">
         ${vessels.map((v) => `<li>${esc(v.name || "Unknown vessel")} &middot; MMSI ${esc(v.mmsi)}${
           v.imo ? ` &middot; IMO ${esc(v.imo)}` : ""
@@ -3197,17 +3214,17 @@ export function decorateGfwGap(d, { offset } = {}) {
         d.resumed_at ? `, back ${esc(timeAgoFromUnix(d.resumed_at))}` : ""
       }.</div>
       ${Number.isFinite(Number(d.distance_km))
-        ? `<div>Reappeared ${esc(fmtNumber(Number(d.distance_km)))} km away, implying
-            ${esc(d.implied_speed_kn)} knots.</div>`
+        ? `<div>Reappeared ${esc(formatDistanceKm(Number(d.distance_km)))} away, implying
+            ${esc(formatSpeedKn(d.implied_speed_kn))}.</div>`
         : ""}
       ${Number.isFinite(Number(d.positions_per_day_sat))
         ? `<div class="meta">GFW normally hears this hull about
             ${esc(Math.round(Number(d.positions_per_day_sat)))} times a day by satellite.</div>`
         : ""}
       ${Number.isFinite(Number(d.distance_from_shore_km))
-        ? `<div class="meta">${esc(Math.round(Number(d.distance_from_shore_km)))} km from shore${
+        ? `<div class="meta">${esc(formatDistanceKm(Number(d.distance_from_shore_km)))} from shore${
             Number.isFinite(Number(d.distance_from_port_km))
-              ? `, ${esc(Math.round(Number(d.distance_from_port_km)))} km from the nearest port`
+              ? `, ${esc(formatDistanceKm(Number(d.distance_from_port_km)))} from the nearest port`
               : ""
           } when it stopped.</div>`
         : ""}
@@ -3721,12 +3738,17 @@ const LEG_CONFIDENCE_LABEL = {
   inferred: "Neither end observed (inferred)",
 };
 
+// leg.max_alt_ft (backend/refine/flight_legs.py) is natively feet -- ADS-B's
+// own reporting unit -- so this goes metres-and-back through formatAltitudeM
+// rather than printing the source figure directly, the same "reader's
+// preference, not the source's own unit" rule every other measurement on
+// this map now follows.
 function fmtAltFt(value) {
-  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value).toLocaleString()} ft` : "n/a";
+  return typeof value === "number" && Number.isFinite(value) ? formatAltitudeM(feetToMeters(value)) : "n/a";
 }
 
 function fmtDistanceKm(value) {
-  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(0)} km` : "n/a";
+  return typeof value === "number" && Number.isFinite(value) ? formatDistanceKm(value) : "n/a";
 }
 
 function flightLegRow(leg) {
@@ -3838,7 +3860,7 @@ export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
 
   const tooltip = `<b>${esc(d.callsign || d.icao24)}</b>${aircraftLine ? ` &middot; ${esc(aircraftLine)}` : ` &middot; ${esc(label)}`}` +
     `${emergencyLine ? `<br/><span class="aircraft-emergency">${emergencyLine}</span>` : ""}` +
-    `<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h` +
+    `<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(formatAltitudeM(d.altitude || 0))} &middot; ${esc(formatSpeedKmh((d.velocity || 0) * 3.6))}` +
     lastPingTooltip(d.updated);
 
   const detail = `
@@ -3871,7 +3893,7 @@ export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
 
     <div class="csection-h">Flight now</div>
     <div>Callsign: ${d.callsign ? esc(d.callsign) : '<span class="meta">not broadcast</span>'}</div>
-    <div>Altitude: ${esc(Math.round(d.altitude || 0))} m</div>
+    <div>Altitude: ${esc(formatAltitudeM(d.altitude || 0))}</div>
     ${!d.on_ground && isSelected
       ? `<div>Vertical trend: ${
           Array.isArray(track)
@@ -3881,7 +3903,7 @@ export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
             : '<span class="meta">recorded track loading&hellip;</span>'
         }</div>`
       : ""}
-    <div>Ground speed: ${esc(Math.round((d.velocity || 0) * 3.6))} km/h &middot; Heading: ${
+    <div>Ground speed: ${esc(formatSpeedKmh((d.velocity || 0) * 3.6))} &middot; Heading: ${
       Number.isFinite(d.heading) ? `${esc(Math.round(d.heading))}&deg;` : "n/a"
     }</div>
     <div>On ground: ${d.on_ground ? "yes" : "no"}</div>
@@ -3901,7 +3923,7 @@ export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
 
     <div class="csection-h">Provenance</div>
     ${airfield
-      ? `<div>Nearest airfield: ${esc(airfield.name)}${airfield.code ? ` (${esc(airfield.code)})` : ""} &middot; ${esc(airfield.km)} km` +
+      ? `<div>Nearest airfield: ${esc(airfield.name)}${airfield.code ? ` (${esc(airfield.code)})` : ""} &middot; ${esc(formatDistanceKm(airfield.km))}` +
         `${airfield.military_name ? " &middot; military by name" : ""}</div>` +
         '<p class="meta">Nearest airfield is our own proximity lookup against the OurAirports index &mdash; ' +
         "<b>not a filed origin or destination</b>. ADS-B carries no flight plan, so this is proximity only; " +
@@ -4247,7 +4269,7 @@ function satelliteOrbitSections(item, extra = {}) {
   if (Number.isFinite(item.inclination_deg)) orbital.push(`inclination ${item.inclination_deg.toFixed(1)}&deg;`);
   if (Number.isFinite(item.period_min)) orbital.push(`period ${item.period_min.toFixed(1)} min`);
   if (Number.isFinite(item.apogee_km) && Number.isFinite(item.perigee_km)) {
-    orbital.push(`apogee/perigee ${Math.round(item.apogee_km)} / ${Math.round(item.perigee_km)} km`);
+    orbital.push(`apogee/perigee ${formatDistanceKm(item.apogee_km)} / ${formatDistanceKm(item.perigee_km)}`);
   }
   if (orbital.length) parts.push(`<div>${orbital.join(" &middot; ")} (derived)</div>`);
 
@@ -4261,7 +4283,7 @@ function satelliteOrbitSections(item, extra = {}) {
   const footprintKm = Number.isFinite(extra.footprintKm) ? extra.footprintKm : footprintRadiusKm(item.alt_km);
   if (footprintKm > 0) {
     parts.push(
-      `<div class="meta">Visibility footprint: ~${Math.round(footprintKm)} km radius (derived -- standard ` +
+      `<div class="meta">Visibility footprint: ~${formatDistanceKm(footprintKm)} radius (derived -- standard ` +
       `horizon geometry from altitude), drawn on the map while this card is open.</div>`
     );
   }
@@ -4277,11 +4299,11 @@ function satelliteOrbitSections(item, extra = {}) {
 export function decorateSatellite(d, { offset, velocityKmS, footprintKm } = {}) {
   const style = satelliteStyle(d.group);
   const military = isMilitarySatellite(d);
-  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${Math.round(d.alt_km || 0)} km`;
+  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${esc(formatDistanceKm(d.alt_km || 0))}`;
   const detail = `
     <h3>${esc(d.name || `NORAD ${d.norad_id}`)}</h3>
     <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(d.norad_id)}</div>
-    <div>Altitude: ${Math.round(d.alt_km || 0)} km</div>
+    <div>Altitude: ${esc(formatDistanceKm(d.alt_km || 0))}</div>
     ${satelliteOrbitSections(d, { velocityKmS, footprintKm, groundTrackAvailable: false })}
     ${military ? '<p class="meta">Listed in CelesTrak\'s public "Miscellaneous Military" group (e.g. SAR-Lupe reconnaissance satellites) -- a catalogue classification, not a claim about what it is doing right now.</p>' : ""}
     <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- derived, not a live telemetry confirmation.</p>
@@ -4374,11 +4396,11 @@ export function satElementStyle(layerKey) {
 export function decorateSatElement(item, layerKey, { offset, velocityKmS, footprintKm, groundTrackAvailable = true } = {}) {
   const style = satElementStyle(layerKey);
   const name = item.name || `NORAD ${item.norad_id}`;
-  const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)} &middot; ${Math.round(item.alt_km || 0)} km`;
+  const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)} &middot; ${esc(formatDistanceKm(item.alt_km || 0))}`;
   const detail = `
     <h3>${esc(name)}</h3>
     <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(item.norad_id)}</div>
-    <div>Altitude: ${Math.round(item.alt_km || 0)} km</div>
+    <div>Altitude: ${esc(formatDistanceKm(item.alt_km || 0))}</div>
     ${satelliteOrbitSections(item, { velocityKmS, footprintKm, groundTrackAvailable })}
     <p class="meta">Position propagated in your browser (SGP4, via satellite.js) from CelesTrak's public orbital elements -- derived, not a live telemetry confirmation.</p>
     <div class="meta">Source: CelesTrak (NORAD GP data), publicly published, no formal licence stated &middot; derived</div>`;

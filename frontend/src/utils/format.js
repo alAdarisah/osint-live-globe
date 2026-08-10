@@ -151,9 +151,35 @@ export function feetToMeters(ft) { return ft * M_PER_FT; }
 
 export const UNIT_SYSTEMS = ["metric", "imperial", "nautical"];
 
+// The reader's own preference, mirrored here the same way map/iconTheme.js
+// mirrors icon settings (`setIconTheme`/`palette` there; `setUnitsPreference`/
+// `preferredUnitsSystem` here) -- a module-level value a render-time decorator
+// reads directly, set once by App.jsx whenever settings.units changes, rather
+// than threaded as a parameter through map/decorators.js's rendering
+// functions and every one of their call sites in createMapController.js.
+// Every formatter below still takes an explicit `system`/`timezone` argument
+// too (that is what makes each one independently testable at a known value,
+// per this task's own brief) -- it is only the *default* that changes here.
+let preferredSystem = "metric";
+let preferredTz = "utc";
+
+/** Applies a stored `settings.units` object -- called from App.jsx's own
+ *  effect, the same shape setIconTheme's own caller uses. Malformed input
+ *  (missing, or values mergeSettings would already have rejected) leaves
+ *  whatever was already in force rather than resetting to the shipped
+ *  default, so a stale or partial call can never blank out a reader's choice
+ *  mid-session. */
+export function setUnitsPreference(units) {
+  if (units && UNIT_SYSTEMS.includes(units.system)) preferredSystem = units.system;
+  if (units && typeof units.timezone === "string" && units.timezone) preferredTz = units.timezone;
+}
+
+export function preferredUnitsSystem() { return preferredSystem; }
+export function preferredTimezone() { return preferredTz; }
+
 /** A distance already in kilometres (haversineKm's own unit), in the
  *  reader's chosen system. */
-export function formatDistanceKm(km, system = "metric") {
+export function formatDistanceKm(km, system = preferredSystem) {
   if (!Number.isFinite(km)) return "n/a";
   if (system === "imperial") return `${kmToMiles(km).toFixed(1)} mi`;
   if (system === "nautical") return `${kmToNm(km).toFixed(1)} nm`;
@@ -164,7 +190,7 @@ export function formatDistanceKm(km, system = "metric") {
  *  as knots, which is also what a mariner would call "nautical miles per
  *  hour" if asked, so this is the same conversion as formatDistanceKm's,
  *  just per hour rather than absolute. */
-export function formatSpeedKmh(kmh, system = "metric") {
+export function formatSpeedKmh(kmh, system = preferredSystem) {
   if (!Number.isFinite(kmh)) return "n/a";
   if (system === "imperial") return `${kmToMiles(kmh).toFixed(0)} mph`;
   if (system === "nautical") return `${kmToNm(kmh).toFixed(0)} kn`;
@@ -175,7 +201,7 @@ export function formatSpeedKmh(kmh, system = "metric") {
  *  and maritime readers both expect feet, so "imperial" and "nautical" share
  *  the one non-metric answer here (unlike distance/speed, where nautical
  *  miles and statute miles are different figures). */
-export function formatAltitudeM(m, system = "metric") {
+export function formatAltitudeM(m, system = preferredSystem) {
   if (!Number.isFinite(m)) return "n/a";
   if (system === "imperial" || system === "nautical") return `${Math.round(metersToFeet(m)).toLocaleString()} ft`;
   return `${Math.round(m).toLocaleString()} m`;
@@ -198,7 +224,7 @@ export function formatAltitudeM(m, system = "metric") {
  * offset string is the one part of the output that has to visibly change to
  * prove the zone (not just the clock) was applied.
  */
-export function formatClockAt(seconds, timezone = "utc") {
+export function formatClockAt(seconds, timezone = preferredTz) {
   if (!Number.isFinite(seconds)) return "";
   const dt = new Date(seconds * 1000);
   if (Number.isNaN(dt.getTime())) return "";

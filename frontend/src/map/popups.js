@@ -660,10 +660,29 @@ function buildConnectivity(props, raw) {
   // so a country whose own aggregate score sat under IODA's reporting floor
   // (raw.outages carries only countries above it) lost this whole section,
   // sub-national tally included, even when some of its regions genuinely had
-  // scored. Computed here, before the early return, off props' own ISO2 --
-  // the same "-99" resolution outageFor does for the country record -- so a
-  // quiet country score can no longer hide a region that was not quiet.
-  const iso2 = props.iso_a2 && props.iso_a2 !== "-99" ? props.iso_a2 : (outage ? outage.country_code : null);
+  // scored. Computed here, before the early return, off props' own ISO2, so
+  // a quiet country score can no longer hide a region that was not quiet.
+  //
+  // Task 32 review, round 2 (Important 1): the first version of this fix
+  // fell back to `outage ? outage.country_code : null` for a "-99" shape with
+  // no outage record -- which is every "-99" shape in exactly the case this
+  // fix exists for, since outageFor's own name-matched fallback (used to find
+  // `outage` in the first place) only ever succeeds when raw.outages *has*
+  // an entry to match a name against. A France/Norway/Kosovo under the
+  // reporting floor has no such entry, `outage` is null, and the fallback
+  // resolved to null right along with it -- the precise conflation this task
+  // exists to close, unclosed for exactly the three countries `outageFor`'s
+  // own docstring three paragraphs above calls out by name. ISO2_BY_ISO3 is
+  // the fix `energyRecordFor` above already uses for this identical "-99,
+  // no name to fall back on" problem, and `buildAdminConnectivity` two
+  // functions below already reaches it (via iso2ForIso3) for the same
+  // reason -- reused here a third time rather than reinvented, in the one
+  // function of the three that had not yet been given it.
+  const iso2 = outage
+    ? outage.country_code
+    : (props.iso_a2 && props.iso_a2 !== "-99"
+      ? props.iso_a2
+      : ISO2_BY_ISO3[(props.iso_a3 || "").toUpperCase()] || null);
   const regionSummary = regionMatchSummary(iso2, raw);
   if (!outage) {
     if (!regionSummary) return "";
@@ -832,7 +851,21 @@ function buildGridStress(props, raw) {
 
   const unit = (physical && physical.unit) || "GW";
   const netNow = physical && physical.net != null ? physical.net : null;
-  const regionSummary = outage ? regionMatchSummary(outage.country_code, raw) : null;
+  // Task 32 review (Important 2): this used to compute regionSummary only
+  // when `outage` was already truthy, keyed off outage.country_code -- the
+  // identical floor-hides-regions defect buildConnectivity's own known
+  // instance 1 had, just one fold over. A country with real cross-border
+  // flow (so this section renders regardless) but an IODA aggregate under
+  // the reporting floor has no `outage` record, and the sub-national tally
+  // silently dropped out from under a section that was still on screen.
+  // Same fix, same reasoning, same ISO2_BY_ISO3 fallback for the "-99"
+  // shapes (France/Norway/Kosovo) buildConnectivity's own fix above needed.
+  const iso2 = outage
+    ? outage.country_code
+    : (props.iso_a2 && props.iso_a2 !== "-99"
+      ? props.iso_a2
+      : ISO2_BY_ISO3[(props.iso_a3 || "").toUpperCase()] || null);
+  const regionSummary = regionMatchSummary(iso2, raw);
 
   // A 24h window off the publisher's own reported cadence rather than a
   // hard-coded "96 points" -- physical exchange is usually 15-minute steps,

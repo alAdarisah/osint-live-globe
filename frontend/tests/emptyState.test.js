@@ -236,6 +236,112 @@ test("buildConnectivity (country card) -- known instance 1: a quiet country scor
     assert.match(connectivity.html, /IODA composite score: 5,000,000/);
     assert.doesNotMatch(connectivity.html, /No national-level/);
   });
+
+  // Task 32 review (Important 1): the first version of this fix fell back to
+  // `outage ? outage.country_code : null`, which is null for every "-99"
+  // shape (Natural Earth's own quirk for France/Norway/Kosovo -- see
+  // outageFor's own docstring) the moment that country's aggregate score is
+  // under the floor, since `outage` itself never resolves without a raw.
+  // outages entry to name-match against. ISO2_BY_ISO3 (already in this file,
+  // already used by energyRecordFor and buildAdminConnectivity) is the fix.
+  await t.test("a '-99' country (France/Norway/Kosovo's Natural Earth quirk) under the reporting floor still gets its region tally", () => {
+    const franceProps = { name: "France", iso_a2: "-99", iso_a3: "FRA", population: 1 };
+    const withRegionsNo99 = raw({
+      outages: {}, // France's own aggregate score is under the floor -- absent
+      outagesRegions: {
+        FR: {
+          "FR-A": { matched: "exact", region_code: "FR-A", score: 5e9, signals: {}, country_code: "FR" },
+        },
+      },
+    });
+    const { sections } = countryCardSections(franceProps, withRegionsNo99, bounds);
+    const connectivity = sections.find((s) => s.id === "connectivity");
+    assert.ok(connectivity, "ISO2_BY_ISO3's FRA -> FR resolves even with no outage record to read country_code off");
+    assert.match(connectivity.html, /No national-level internet disruption detected/);
+    assert.match(connectivity.html, /1 region\(s\) here/);
+  });
+
+  await t.test("a '-99' country with neither a national score nor any region-level reporting still drops cleanly", () => {
+    const franceProps = { name: "France", iso_a2: "-99", iso_a3: "FRA", population: 1 };
+    const { sections } = countryCardSections(franceProps, raw({ outages: {}, outagesRegions: {} }), bounds);
+    assert.equal(sections.find((s) => s.id === "connectivity"), undefined);
+  });
+});
+
+// ---------- Important 2: buildGridStress had the identical defect ---------
+
+test("buildGridStress (country card, 'gridStress') -- Important 2: the same floor-hides-regions defect, one fold over", async (t) => {
+  const baseProps = { name: "Testland", iso_a2: "TL", iso_a3: "TST", population: 1 };
+  const PHYSICAL = {
+    country_code: "TL",
+    physical: { net: 0.4, unit: "GW", interval_minutes: 15, net_series: [{ t: "a", net: 0.1 }, { t: "b", net: 0.4 }] },
+  };
+  function raw(overrides) {
+    return {
+      events: [], gdelt: [], officials: [], conflictStats: {}, escalation: [],
+      adsb: [], ais: [], jamming: [], firms: [], infra: [], conflictDistricts: [],
+      humanitarian: {}, outages: {}, energyFlows: {}, foodTrade: {},
+      fetchCoverage: { outages: fetchedUnscoped() },
+      ...overrides,
+    };
+  }
+
+  await t.test("physical flow exists (so the section renders) but the national IODA score is under the floor: the tally used to vanish silently", () => {
+    // Before the fix: `const regionSummary = outage ? regionMatchSummary(outage.country_code, raw) : null;`
+    // -- with no `outage` record, regionSummary was never computed even
+    // though the section itself was already on screen for the physical
+    // exchange figure, and a reader had no way to learn IODA had scored
+    // this country's regions at all.
+    const withRegions = raw({
+      energyFlows: { TL: PHYSICAL },
+      outages: {}, // under the floor -- absent
+      outagesRegions: {
+        TL: {
+          "TL-01": { matched: "exact", region_code: "TL-01", score: 5e9, signals: {}, country_code: "TL" },
+          999: { matched: "unmatched", region_code: null, score: 2e9, signals: {}, country_code: "TL" },
+        },
+      },
+    });
+    const { sections } = countryCardSections(baseProps, withRegions, bounds);
+    const gridStress = sections.find((s) => s.id === "gridStress");
+    assert.ok(gridStress, "the physical net-exchange figure alone already earns this section");
+    assert.match(gridStress.html, /\+0\.40 GW/, "the exchange figure is unaffected by the fix");
+    assert.match(gridStress.html, /1 of 2 IODA-scored/, "the sub-national tally no longer silently drops");
+  });
+
+  await t.test("a '-99' country (France/Norway/Kosovo) with physical flow and a scored-but-under-floor national score: same fix applies here too", () => {
+    const franceProps = { name: "France", iso_a2: "-99", iso_a3: "FRA", population: 1 };
+    const withRegions = raw({
+      energyFlows: { FR: { ...PHYSICAL, country_code: "FR" } },
+      outages: {},
+      outagesRegions: {
+        FR: { "FR-A": { matched: "exact", region_code: "FR-A", score: 5e9, signals: {}, country_code: "FR" } },
+      },
+    });
+    const { sections } = countryCardSections(franceProps, withRegions, bounds);
+    const gridStress = sections.find((s) => s.id === "gridStress");
+    assert.ok(gridStress);
+    assert.match(gridStress.html, /1 of 1 IODA-scored/);
+  });
+
+  await t.test("neither physical flow nor outage nor region data: the section still drops, unchanged from before this fix", () => {
+    const { sections } = countryCardSections(baseProps, raw({ outages: {}, outagesRegions: {} }), bounds);
+    assert.equal(sections.find((s) => s.id === "gridStress"), undefined);
+  });
+
+  await t.test("a real outage score (not under the floor) still renders its own tally exactly as before", () => {
+    const withOutage = raw({
+      energyFlows: { TL: PHYSICAL },
+      outages: { TL: { country_code: "TL", score: 42, window_start: 0, window_end: 3600, signals: {} } },
+      outagesRegions: {
+        TL: { "TL-01": { matched: "exact", region_code: "TL-01", score: 5e9, signals: {}, country_code: "TL" } },
+      },
+    });
+    const { sections } = countryCardSections(baseProps, withOutage, bounds);
+    const gridStress = sections.find((s) => s.id === "gridStress");
+    assert.match(gridStress.html, /IODA outage score/);
+    assert.match(gridStress.html, /1 of 1 IODA-scored/);
+  });
 });
 
 // ---------- admin (state/district) cards: cities, live, infrastructure -----

@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import {
   kmToMiles, milesToKm, kmToNm, nmToKm, metersToFeet, feetToMeters,
   formatDistanceKm, formatSpeedKmh, formatAltitudeM, formatClockAt, UNIT_SYSTEMS,
+  setUnitsPreference, preferredUnitsSystem, preferredTimezone,
 } from "../src/utils/format.js";
 
 test("kmToMiles / milesToKm -- round trip at a known value", async (t) => {
@@ -180,4 +181,52 @@ test("formatClockAt -- the timezone formatter, including across a DST boundary",
     const result = formatClockAt(AUG_9_1400_UTC, "browser");
     assert.match(result, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} (UTC|GMT[+-]\d+(:\d{2})?)$/);
   });
+});
+
+// ---------- setUnitsPreference: the module-level store map/decorators.js's
+// call sites read through, so the preference is applied without a settings
+// object threaded through every one of them (mirrors map/iconTheme.js's own
+// setIconTheme/palette pattern) -----------------------------------------
+//
+// Run last and cleaned up in a `finally`, since these tests are the only
+// ones in this file that mutate the shared module state every other test
+// above relies on defaulting to metric/utc.
+test("setUnitsPreference / preferredUnitsSystem / preferredTimezone -- the store every decorator call site reads", async (t) => {
+  try {
+    await t.test("starts at the shipped default", () => {
+      assert.equal(preferredUnitsSystem(), "metric");
+      assert.equal(preferredTimezone(), "utc");
+    });
+
+    await t.test("a valid system/timezone pair is applied", () => {
+      setUnitsPreference({ system: "nautical", timezone: "browser" });
+      assert.equal(preferredUnitsSystem(), "nautical");
+      assert.equal(preferredTimezone(), "browser");
+    });
+
+    await t.test("formatters with no explicit system/timezone now read the applied preference", () => {
+      // This is the fix for the review finding that item 4 was scaffolding
+      // with no call sites: map/decorators.js calls these exact three-
+      // argument-omitted forms, and this proves omitting the argument reaches
+      // the preference just set above, not a hard-coded "metric".
+      assert.equal(formatDistanceKm(1.852), "1.0 nm");
+      assert.equal(formatSpeedKmh(1.852), "1 kn");
+    });
+
+    await t.test("an invalid system is rejected, leaving the previous one in force", () => {
+      setUnitsPreference({ system: "furlongs", timezone: "utc" });
+      assert.equal(preferredUnitsSystem(), "nautical", "the bad value did not overwrite the good one");
+      assert.equal(preferredTimezone(), "utc", "the valid timezone in the same call still applied");
+    });
+
+    await t.test("a missing/malformed argument leaves whatever was already set, rather than resetting", () => {
+      setUnitsPreference(undefined);
+      assert.equal(preferredUnitsSystem(), "nautical");
+      setUnitsPreference({});
+      assert.equal(preferredUnitsSystem(), "nautical");
+      assert.equal(preferredTimezone(), "utc");
+    });
+  } finally {
+    setUnitsPreference({ system: "metric", timezone: "utc" });
+  }
 });

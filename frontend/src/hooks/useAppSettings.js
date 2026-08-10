@@ -32,6 +32,7 @@ import { setCursorOptions } from "../map/cursor";
 import { buildTileFilter, TILE_TINT_PRESETS } from "../map/tileTint";
 import { setTileTintAtRest } from "../map/tileTintMotion";
 import { setInferenceMode } from "../map/inferenceVisibility";
+import { setUnitsPreference } from "../utils/format";
 import { setPerformanceOptions } from "../map/createMapController";
 import { MARINE_CLASSES } from "../map/water";
 
@@ -307,6 +308,15 @@ export function useAppSettings() {
   useEffect(() => {
     setInferenceMode(settings.inference.mode);
   }, [settings.inference.mode]);
+
+  // Task 32 item 4, pushed into utils/format.js's own module-level store the
+  // same way just above -- decorators.js's speed/altitude/distance/clock
+  // renderers are plain functions called mid-popup-build too, and read the
+  // preference directly (formatDistanceKm/formatSpeedKmh/formatAltitudeM/
+  // formatClockAt's own default parameter) rather than needing it passed in.
+  useEffect(() => {
+    setUnitsPreference(settings.units);
+  }, [settings.units]);
 
   // Task 31's Performance section, pushed into createMapController.js's own
   // module-level `let` bindings -- see that file's own note by

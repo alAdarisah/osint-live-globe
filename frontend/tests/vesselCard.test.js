@@ -119,7 +119,7 @@ test("the port-calls table carries the row's confidence and the distance it stan
   assert.match(detail, /exact/);
   // The confidence tier alone never claims berth contact -- the radius
   // behind it (from confidence_radius_km) has to be visible too.
-  assert.match(detail, /within 3 km/);
+  assert.match(detail, /within 3.0 km/); // Task 32 item 4: formatDistanceKm carries a one-decimal metric precision
 });
 
 test("an open call is called out on its own line, not just as a row with no departure", () => {
@@ -160,5 +160,5 @@ test("a ready port-traffic answer lists the vessel and its confidence radius", (
   };
   const { detail } = decoratePort(PORT_ITEM, { portDetail });
   assert.match(detail, /MV Test Hull/);
-  assert.match(detail, /within 3 km/);
+  assert.match(detail, /within 3.0 km/); // Task 32 item 4: formatDistanceKm carries a one-decimal metric precision
 });
