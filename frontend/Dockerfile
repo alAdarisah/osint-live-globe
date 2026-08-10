@@ -16,4 +16,10 @@ RUN npm run build
 FROM nginx:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
+# Included by both server blocks in nginx.conf. Outside conf.d/ on purpose:
+# everything in that directory is loaded as a top-level config, and a file of
+# bare proxy directives is not valid there.
+COPY api-proxy.conf /etc/nginx/api-proxy.conf
+# 80 is the private entry point (SSH tunnel), 8081 the public read-only one that
+# the Cloudflare tunnel points at. See nginx.conf.
+EXPOSE 80 8081

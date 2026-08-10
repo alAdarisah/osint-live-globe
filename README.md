@@ -209,6 +209,27 @@ inside WSL rather than Docker Desktop. It starts the daemon in the distro,
 brings the stack up, holds a WSL session open so `localhost` keeps forwarding,
 and opens the map. Pass compose flags straight through: `run-stack.bat --build`.
 
+### Running it on a server instead
+
+Since 2026-08-10 the collectors live on a Hetzner host rather than a PC, because
+a PC that sleeps stops collecting and live positions cannot be backfilled. Four
+scripts cover the whole workflow from a Windows machine:
+
+| Script | Does |
+|---|---|
+| `deploy.bat` | Packs this working tree, uploads it, rebuilds whatever image is behind its source, then verifies both listeners and the read-only boundary. `--ingest` to also rebuild the metered collector, `--force` to rebuild regardless |
+| `admin.bat` | Opens an SSH tunnel and the map **with** Admin Mode, on `localhost:8090`. `--close` tears it down |
+| `link.bat` | Prints the current public read-only link and checks it answers |
+| `pull-backups.bat` | Copies the server's nightly database dumps down to this PC |
+
+`deploy.sh` is the server half of `deploy.bat` — the staleness check and rebuild,
+in bash rather than batch. It replaces the old `update-link.bat`, which assumed
+the source tree and Docker were on the same machine.
+
+The split matters for one thing in particular: `deploy.bat` syncs the working
+tree rather than doing `git pull` on the server. A deploy that shipped only
+committed changes would silently omit whatever you were actually testing.
+
 A one-off SQLite → Postgres import exists for upgrading from an older layout:
 
 ```bash
@@ -829,6 +850,7 @@ Everything lives in `.env` at the project root. All values are optional.
 |---|---|
 | `FIRMS_MAP_KEY` | NASA FIRMS VIIRS |
 | `AISSTREAM_API_KEY` | Live AIS |
+| `MARINESIA_API_KEY` | Vessel positions, second supplier — free "Trial" key at [marinesia.com](https://marinesia.com), 5 req/min |
 | `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` | Authenticated OpenSky (60 s instead of 15 min) |
 | `ACLED_EMAIL` / `ACLED_PASSWORD` | myACLED login for the point-level feed |
 | `OWM_API_KEY` | OpenWeatherMap cloud/wind tiles |
@@ -867,6 +889,34 @@ live AIS stream would continuously evict a city index refetched once a day.
 | `NEWS_URL_DATE_GATE` | off | Stricter recency gate on news URLs |
 | `OFFICIALS_SNAP_REGION` | off | Snap region-level diplomacy geocodes |
 | `PORT` | 8000 | Set by PaaS hosts; its presence switches the bind to `0.0.0.0` and skips auto-opening a browser |
+
+### Two suppliers for ships
+
+The vessel layer had one source until aisstream stopped delivering for days in
+August 2026 — socket accepted, subscription accepted, zero frames — with no
+fallback behind it. `backend/sources/marinesia.py` is the second supplier.
+
+It is deliberately **not** merged into the `ais` layer. Marinesia advertise
+~100k AIS messages a day worldwide; the eight watched chokepoints alone were
+producing ~140k movement rows a day through aisstream. Merging feeds of such
+different density would make "the ships layer" mean something different
+depending on which supplier was up — including to `dark_vessels.py`, which reads
+the AIS movement log to decide whether a hull went quiet. So it publishes its own
+kind, and every record carries `source` and `attribution`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MARINESIA_API_KEY` | unset | Free "Trial" key. Unset leaves the layer empty and says so |
+| `MARINESIA_BBOXES` | `WATCHED_WATERS` | One request per box, so the box list *is* the request count |
+| `MARINESIA_POLL_INTERVAL` | 300 | A sweep is ~100s of paced requests; the 5/min budget binds, not data freshness |
+| `MARINESIA_STALE_AFTER` | 3600 | Wider than AIS's 1800 — polled every 5 min, so hulls skip sweeps |
+
+One advantage over aisstream: identity and position arrive together — name, IMO,
+flag, type and hull dimensions on the same record as the fix. aisstream splits
+those into `ShipStaticData` messages that arrive minutes apart and sometimes
+never, which is the entire reason `ais.py` maintains a static cache. An IMO on
+every record also makes the OFAC cross-reference a hull match rather than an
+MMSI guess.
 
 ### Egress proxies
 
