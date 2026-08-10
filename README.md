@@ -204,29 +204,38 @@ Stop with `docker compose down`. Use `docker compose down -v` **only** if you
 mean to throw the collected history away — that is the one command that deletes
 the volume.
 
-**`run-stack.bat`** is the same thing for a Windows host whose Docker lives
+**`Run on This PC (legacy).bat`** is the same thing for a Windows host whose Docker lives
 inside WSL rather than Docker Desktop. It starts the daemon in the distro,
 brings the stack up, holds a WSL session open so `localhost` keeps forwarding,
-and opens the map. Pass compose flags straight through: `run-stack.bat --build`.
+and opens the map. Pass compose flags straight through: `"Run on This PC (legacy).bat" --build`.
 
 ### Running it on a server instead
 
 Since 2026-08-10 the collectors live on a Hetzner host rather than a PC, because
-a PC that sleeps stops collecting and live positions cannot be backfilled. Four
-scripts cover the whole workflow from a Windows machine:
+a PC that sleeps stops collecting and live positions cannot be backfilled. Five
+scripts cover the whole workflow from a Windows machine. They are named for what
+they do rather than for what they are, because the folder is the only
+documentation anyone reads at the moment they need it:
 
 | Script | Does |
 |---|---|
-| `deploy.bat` | Packs this working tree, uploads it, rebuilds whatever image is behind its source, then verifies both listeners and the read-only boundary. `--ingest` to also rebuild the metered collector, `--force` to rebuild regardless |
-| `admin.bat` | Opens an SSH tunnel and the map **with** Admin Mode, on `localhost:8090`. `--close` tears it down |
-| `link.bat` | Prints the current public read-only link and checks it answers |
-| `pull-backups.bat` | Copies the server's nightly database dumps down to this PC |
+| `Open Map - Admin.bat` | The map **with** Admin Mode, over an SSH tunnel, on `localhost:8090`. `--close` tears the tunnel down |
+| `Open Map - Public View.bat` | The map as a stranger sees it — the real Cloudflare link, over the internet, no admin controls. Run it before sharing |
+| `Show Public Link.bat` | Prints the current public link and checks it answers, without opening a browser |
+| `Deploy Code to Server.bat` | Packs this working tree, uploads it, rebuilds whatever image is behind its source, then verifies both listeners and the read-only boundary. `--ingest` to also rebuild the metered collector, `--force` to rebuild regardless |
+| `Download Backups.bat` | Copies the server's nightly database dumps down to this PC |
 
-`deploy.sh` is the server half of `deploy.bat` — the staleness check and rebuild,
+The two `Open Map` scripts are the pair worth understanding, because they are the
+security boundary made visible: the admin one reaches the server's private
+listener through SSH, the public one goes over the internet to a listener that
+does not render Admin Mode and answers 403 to any attempt to write the
+configuration. Same app, same container, two doors.
+
+`deploy.sh` is the server half of `Deploy Code to Server.bat` — the staleness check and rebuild,
 in bash rather than batch. It replaces the old `update-link.bat`, which assumed
 the source tree and Docker were on the same machine.
 
-The split matters for one thing in particular: `deploy.bat` syncs the working
+The split matters for one thing in particular: `Deploy Code to Server.bat` syncs the working
 tree rather than doing `git pull` on the server. A deploy that shipped only
 committed changes would silently omit whatever you were actually testing.
 

@@ -11,11 +11,11 @@ REM
 REM So the gate on Admin Mode is possession of the server's SSH key, which is
 REM also the gate on the server itself. Nothing new to remember.
 REM
-REM   admin.bat          -> tunnel up (if needed) and open the map
-REM   admin.bat --close  -> tear the tunnel down
+REM   "Open Map - Admin.bat"          -> tunnel up (if needed) and open the map
+REM   "Open Map - Admin.bat" --close  -> tear the tunnel down
 REM
 REM Local ports are deliberately NOT 8080/3000. If the old local stack is ever
-REM started again (run-stack.bat), it binds those, and the collision would either
+REM started again ("Run on This PC (legacy).bat"), it binds those, and the collision would either
 REM fail confusingly or -- worse -- silently show you the local copy while you
 REM believe you are editing the server's.
 setlocal EnableDelayedExpansion
@@ -38,7 +38,7 @@ if not errorlevel 1 (
 )
 
 echo Opening SSH tunnel to %SERVER% ...
-REM Its own titled, minimised window, exactly like run-stack.bat's WSL keepalive:
+REM Its own titled, minimised window, exactly like "Run on This PC (legacy).bat"'s WSL keepalive:
 REM the tunnel has to outlive this script, and a visible window is how you close
 REM it later without hunting for a PID. -N because no remote command is wanted.
 start "%WINDOW%" /min ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L %LOCAL_APP%:localhost:8080 -L %LOCAL_GRAFANA%:localhost:3000 %SERVER%
@@ -86,10 +86,10 @@ echo.
 echo   Map with Admin Mode:  http://localhost:%LOCAL_APP%
 echo   Grafana:              http://localhost:%LOCAL_GRAFANA%
 echo.
-echo   Public read-only link: run link.bat
+echo   Public read-only link: run "Show Public Link.bat"
 echo.
 echo The tunnel lives in the minimised "%WINDOW%" window. Closing that window --
-echo or running "admin.bat --close" -- ends it. This window can be closed now.
+echo or running "Open Map - Admin.bat" --close -- ends it. This window can be closed now.
 start "" http://localhost:%LOCAL_APP%
 exit /b 0
 

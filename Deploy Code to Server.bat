@@ -6,9 +6,9 @@ REM same machine. They no longer are: you edit here, the stack runs on the
 REM server, so a deploy is now two steps -- sync, then rebuild -- and the second
 REM half lives in deploy.sh where it can be written in bash instead of batch.
 REM
-REM   deploy.bat            sync, then rebuild backend/frontend/refine/cache-worker if stale
-REM   deploy.bat --ingest   also rebuild ingest -- it re-polls every metered source on start
-REM   deploy.bat --force    rebuild regardless of staleness
+REM   "Deploy Code to Server.bat"            sync, then rebuild backend/frontend/refine/cache-worker if stale
+REM   "Deploy Code to Server.bat" --ingest   also rebuild ingest -- it re-polls every metered source on start
+REM   "Deploy Code to Server.bat" --force    rebuild regardless of staleness
 REM
 REM What is synced: the files that go into images, and docker-compose.yml. Not
 REM data/ -- that is runtime state on both machines and the server's copy is the
@@ -64,7 +64,7 @@ echo.
 echo Public link:
 ssh %SERVER% "osint-link"
 echo.
-echo Admin view: run admin.bat   (http://localhost:8090)
+echo Admin view: run "Open Map - Admin.bat"   (http://localhost:8090)
 echo.
 echo Anyone holding the public link has the old bundle cached; tell them Ctrl+Shift+R.
 endlocal

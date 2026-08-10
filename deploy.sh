@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild whatever is running behind its source, on the server. Called by
-# deploy.bat after it has synced the working tree here; also runnable directly
+# "Deploy Code to Server.bat" after it has synced the working tree here; also runnable directly
 # over SSH if you have already copied files up some other way.
 #
 #   deploy.sh              rebuild backend, frontend, refine, cache-worker if stale
