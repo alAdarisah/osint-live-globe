@@ -2299,6 +2299,23 @@ html, body {
   font-weight: 600;
 }
 
+/* Visually hidden but still reachable by assistive tech -- the standard
+   clip-based pattern (not display:none/visibility:hidden, both of which
+   remove a node from the accessibility tree along with the screen). Used by
+   the squawk alert strip's always-mounted live-region announcer; add more
+   users here rather than inventing a second one. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ---------- emergency squawk alert strip (Task 33, SquawkAlertStrip.jsx) ---
    Sits below #regionBar, at the same top:80px/left:0/right:0 band
    #controlPanel already uses (see that rule's own comment on why the fixed
@@ -2317,7 +2334,18 @@ html, body {
   gap: 4px;
   padding: 6px 16px;
   background: linear-gradient(rgba(20, 4, 4, 0.55), rgba(20, 4, 4, 0));
+  transition: left 0.22s ease; /* matches #map.panel-open's own transition */
 }
+
+/* #controlPanel (Admin Mode's drawer) is 320px wide, opaque, and z-index
+   1000 -- above this strip's own 970 -- and open by default on desktop
+   (App.jsx's panelOpenPref). Without this, the strip's header, caveat and
+   leftmost cards render underneath the drawer for exactly the reader most
+   likely to have it open. Same fixed 320px shift #map.panel-open already
+   uses, for the same reason: it holds regardless of what the drawer's own
+   content happens to be doing. No mobile override needed beyond the one
+   below -- see #map.panel-open's own mobile rule, which this mirrors. */
+#squawkAlertStrip.panel-open { left: 320px; }
 
 .squawk-alert-header {
   display: flex;
@@ -2779,6 +2807,7 @@ html, body {
    sitting in a narrow top-right column, and tap targets grow a bit. */
 @media (max-width: 700px) {
   #map.panel-open { left: 0; }
+  #squawkAlertStrip.panel-open { left: 0; } /* same reasoning as #map.panel-open above */
 
   #controlPanel {
     top: 88px;

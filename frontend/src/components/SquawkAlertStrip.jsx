@@ -13,6 +13,14 @@
 // squawk-meaning text is aircraftEmergencyLine(d), the identical string the
 // card itself prints, not a second sentence composed to say the same thing.
 //
+// Review note (worth carrying forward, not just fixing): reusing "unlawful
+// interference (hijack)" verbatim was the right call for wording, but this
+// task moves that parenthetical from a popup someone chose to open onto a
+// strip that is visible to everyone, unasked, the moment it applies. The
+// exposure of that phrase went up even though its wording did not change --
+// see the header caveat and squawkAnnouncement below, both of which exist
+// specifically to keep the qualifier attached to it everywhere it appears.
+//
 // Data flows one way: createMapController.js's applyData reports the current
 // emergency-squawking subset of raw.adsb the moment a fresh poll lands (see
 // its own onEmergencySquawkChange note), useLeafletMap.js mirrors that into
@@ -30,10 +38,11 @@
 // sibling module squawkAlertsLogic.js, for the same reason every other
 // panel's own logic does: this file is JSX and frontend/tests/*.test.js
 // (node --test, no build step) cannot import JSX at all.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { aircraftEmergencyLine, AIRCRAFT_FLAG_NOTE } from "../map/decorators.js";
 import {
-  trackEmergencySquawks, dismissAlert, visibleAlerts, formatSquawkDuration,
+  trackEmergencySquawks, dismissAlert, pruneDismissed, visibleAlerts, formatSquawkDuration,
+  alertLabel, squawkAnnouncement,
 } from "./squawkAlertsLogic.js";
 
 // Independent of any network poll cadence -- this only needs to be frequent
@@ -41,13 +50,9 @@ import {
 // to when fresh data happens to arrive.
 const DURATION_TICK_MS = 30000;
 
-function squawkAlertLabel(entry) {
-  const d = entry.aircraft;
-  return d.callsign || d.registration || d.icao24;
-}
-
 function AlertRow({ entry, nowMs, onSelect, onDismiss }) {
   const d = entry.aircraft;
+  const label = alertLabel(entry);
   const hasPosition = Number.isFinite(d.lat) && Number.isFinite(d.lon);
   const seconds = Math.max(0, (nowMs - entry.firstSeenMs) / 1000);
   return (
@@ -64,16 +69,24 @@ function AlertRow({ entry, nowMs, onSelect, onDismiss }) {
       }}
     >
       <div className="squawk-alert-item-row">
-        <span className="squawk-alert-callsign">{squawkAlertLabel(entry)}</span>
-        {d.registration && d.registration !== squawkAlertLabel(entry) && (
+        <span className="squawk-alert-callsign">{label}</span>
+        {d.registration && d.registration !== label && (
           <span className="meta">{d.registration}</span>
         )}
         {d.type_desc && <span className="meta">{d.type_desc}</span>}
         <button
           type="button"
           className="squawk-alert-dismiss"
-          title="Dismiss until this airframe's squawk changes"
-          aria-label={`Dismiss the emergency alert for ${squawkAlertLabel(entry)}`}
+          // Matches the actual dismissal key (icao24 + signature, which folds
+          // in both the squawk digits and the transponder's own `emergency`
+          // field -- see squawkAlertsLogic.js's squawkSignature), not only
+          // "squawk" on its own.
+          title="Dismiss until this airframe's squawk or emergency status changes"
+          // The qualifier belongs in the accessible name itself, not only in
+          // a sibling header a screen reader may never visit while tabbing
+          // through controls -- see the review note this file's own module
+          // comment carries forward.
+          aria-label={`Dismiss the emergency squawk alert for ${label} — squawks are occasionally set by mistake, not a confirmed incident`}
           onClick={(e) => {
             e.stopPropagation();
             onDismiss(entry.icao24, entry.signature);
@@ -103,16 +116,42 @@ function AlertRow({ entry, nowMs, onSelect, onDismiss }) {
   );
 }
 
-export default function SquawkAlertStrip({ aircraft, onSelect }) {
+export default function SquawkAlertStrip({ aircraft, onSelect, panelOpen }) {
   const [tracked, setTracked] = useState({});
   const [dismissed, setDismissed] = useState({});
   const [nowMs, setNowMs] = useState(() => Date.now());
+  // The visually-hidden live region's own text -- see squawkAnnouncement's
+  // own module note in squawkAlertsLogic.js for why this exists separately
+  // from the visible strip's markup.
+  const [announcement, setAnnouncement] = useState("");
 
-  // Folds each fresh snapshot into the running record -- see
-  // trackEmergencySquawks's own note on why this is keyed by icao24 and what
-  // resets a "since when" clock versus what carries it forward.
+  // trackEmergencySquawks needs the *previous* tracked snapshot to know
+  // which entries are genuinely fresh -- kept in a ref rather than read from
+  // the `tracked` state var so this effect does not need `tracked` in its
+  // own dependency array (which would re-run it, and recompute a fresh
+  // object, on every render this effect itself causes).
+  const trackedRef = useRef({});
+
   useEffect(() => {
-    setTracked((prev) => trackEmergencySquawks(prev, aircraft, Date.now()));
+    const now = Date.now();
+    const next = trackEmergencySquawks(trackedRef.current, aircraft, now);
+    const prev = trackedRef.current;
+    trackedRef.current = next;
+    setTracked(next);
+    // Critical fix: a dismissal must not outlive the tracking episode it was
+    // recorded against, or an airframe that clears its squawk and later
+    // squawks the identical code again stays silently suppressed -- see
+    // pruneDismissed's own note in squawkAlertsLogic.js.
+    setDismissed((d) => pruneDismissed(d, next));
+
+    // Announce only entries whose firstSeenMs is *this* pass -- i.e. genuinely
+    // fresh (a new icao24, or a changed signature, or a return after having
+    // left `tracked` entirely) -- never merely because this effect re-ran or
+    // the duration tick below forced a re-render. Otherwise a screen-reader
+    // user would hear the same sentence repeated every poll for as long as
+    // an aircraft kept squawking.
+    const fresh = Object.values(next).filter((entry) => entry.firstSeenMs === now && (!prev[entry.icao24] || prev[entry.icao24].signature !== entry.signature));
+    if (fresh.length) setAnnouncement(fresh.map(squawkAnnouncement).join(" "));
   }, [aircraft]);
 
   // Keeps the printed durations moving even between polls -- see
@@ -128,43 +167,67 @@ export default function SquawkAlertStrip({ aircraft, onSelect }) {
 
   const alerts = visibleAlerts(tracked, dismissed);
 
-  // No footprint at all when nothing is squawking -- matching every other
-  // panel on this map (e.g. AirfieldActivityPanel's own `if (!rows.length)
-  // return null`), and doubly right here: a strip that is always present,
-  // empty or not, would train a reader to stop looking at it.
-  if (!alerts.length) return null;
-
   return (
-    // aria-live="polite" rather than role="alert" (which implies "assertive"
-    // and interrupts whatever a screen-reader user is doing): the whole point
-    // of the caveat this strip carries is that a fresh entry is more often a
-    // mis-set transponder than an emergency, so it should announce the same
-    // way any other panel update does, not the way a genuine interruption
-    // would.
-    <div id="squawkAlertStrip" role="region" aria-live="polite" aria-label="Emergency squawk alerts">
-      <div className="squawk-alert-header">
-        <span className="squawk-alert-title">
-          Emergency squawk{alerts.length === 1 ? "" : "s"} &middot; {alerts.length}
-        </span>
-        {/* The caveat appears once, here, rather than once per row below --
-            see the module note above. Pre-escaped HTML from decorators.js,
-            same as aircraftEmergencyLine. */}
-        <p
-          className="squawk-alert-caveat meta"
-          dangerouslySetInnerHTML={{ __html: AIRCRAFT_FLAG_NOTE.emergency }}
-        />
-      </div>
-      <div className="squawk-alert-list">
-        {alerts.map((entry) => (
-          <AlertRow
-            key={entry.icao24}
-            entry={entry}
-            nowMs={nowMs}
-            onSelect={onSelect}
-            onDismiss={handleDismiss}
-          />
-        ))}
-      </div>
-    </div>
+    <>
+      {/* Always mounted, even with nothing to say -- a live region that only
+          appears in the DOM once it already has content is a common
+          accessibility trap: several screen readers announce *changes* to an
+          existing node, not a freshly-inserted node that arrives
+          pre-populated. Kept entirely separate from the visible strip below
+          (which carries no aria-live of its own -- see that div's own note)
+          because relying on the visible markup's own mutations was exactly
+          the bug this was written to fix: several screen readers announce
+          only the node that changed, which for a plain per-row squawk-meaning
+          string means the caveat, sitting in a sibling header, is never
+          heard. squawkAnnouncement (squawkAlertsLogic.js) builds one
+          self-contained sentence per fresh alert instead, caveat included. */}
+      <div aria-live="polite" role="status" className="sr-only">{announcement}</div>
+
+      {/* No visible footprint at all when nothing is squawking -- matching
+          every other panel on this map (e.g. AirfieldActivityPanel's own
+          `if (!rows.length) return null`), and doubly right here: a strip
+          that is always present, empty or not, would train a reader to stop
+          looking at it. */}
+      {alerts.length > 0 && (
+        // Offsets clear of #controlPanel (Admin Mode's own drawer, open by
+        // default on desktop, 320px wide, z-index 1000 -- above this strip's
+        // own 970) the same way #map itself does: see #map.panel-open in
+        // style.css, whose comment explains why the fixed 320px shift holds
+        // regardless of the drawer's own content. Without this the strip's
+        // header, caveat and leftmost cards render underneath the drawer for
+        // exactly the reader -- an operator in Admin Mode -- most likely to
+        // have it open.
+        <div
+          id="squawkAlertStrip"
+          className={panelOpen ? "panel-open" : ""}
+          role="region"
+          aria-label="Emergency squawk alerts"
+        >
+          <div className="squawk-alert-header">
+            <span className="squawk-alert-title">
+              Emergency squawk{alerts.length === 1 ? "" : "s"} &middot; {alerts.length}
+            </span>
+            {/* The caveat appears once, here, rather than once per row below
+                -- see the module note above. Pre-escaped HTML from
+                decorators.js, same as aircraftEmergencyLine. */}
+            <p
+              className="squawk-alert-caveat meta"
+              dangerouslySetInnerHTML={{ __html: AIRCRAFT_FLAG_NOTE.emergency }}
+            />
+          </div>
+          <div className="squawk-alert-list">
+            {alerts.map((entry) => (
+              <AlertRow
+                key={entry.icao24}
+                entry={entry}
+                nowMs={nowMs}
+                onSelect={onSelect}
+                onDismiss={handleDismiss}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </>
   );
 }

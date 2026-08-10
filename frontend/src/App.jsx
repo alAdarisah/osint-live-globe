@@ -625,7 +625,11 @@ export default function App() {
           Clicking an entry reuses the same selection path a marker click
           already uses (mapApi.selectAircraftByIcao -> createMapController's
           selectAircraft), so the popup/highlight/trail behave identically. */}
-      <SquawkAlertStrip aircraft={mapApi.emergencySquawks} onSelect={mapApi.selectAircraftByIcao} />
+      <SquawkAlertStrip
+        aircraft={mapApi.emergencySquawks}
+        onSelect={mapApi.selectAircraftByIcao}
+        panelOpen={panelOpen}
+      />
 
       {/* The reading panel, and it is the reader's rather than the operator's.
 
