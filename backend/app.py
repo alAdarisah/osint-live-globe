@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import re
 import time
@@ -20,7 +21,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.refine import port_call_thresholds
+from backend.refine import lane_density, port_call_thresholds
 from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, water_bodies
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1040,6 +1041,50 @@ async def vessel_port_calls(port_id: str):
         ],
         "confidence_radius_km": PORT_CALL_CONFIDENCE_KM,
     }
+
+
+def _lane_course_deg(mean_sin: float, mean_cos: float) -> float | None:
+    """atan2 over the stored unit-vector sum -- see the schema comment on
+    lane_cells in backend/storage.py for why the table keeps mean_sin/mean_cos
+    rather than a mean bearing column. Both exactly zero means this cell has
+    no net directional evidence at all (every position in it either never
+    reported a usable course or the courses it did report cancelled out), so
+    None is returned rather than an arbitrary 0deg claiming due north."""
+    if mean_sin == 0.0 and mean_cos == 0.0:
+        return None
+    return math.degrees(math.atan2(mean_sin, mean_cos)) % 360.0
+
+
+@app.get("/api/lanes")
+async def lanes_endpoint(bbox: str | None = None, min_transits: int = 1):
+    """The AIS traffic grid: where this map's own AIS coverage has actually
+    seen ships. Never a claim about where shipping lanes run in general --
+    see backend/refine/lane_density.py's module docstring, and `note` below,
+    which repeats that module's own NOTE constant verbatim so the wording
+    served here can't quietly drift from the one explaining the job that
+    built it.
+
+    Reads storage.lane_cells only -- never entity_history, the 11 GB raw
+    movement log the grid is derived from on a schedule (see global
+    constraints: that table is never read on a request path). No ETag/version
+    machinery: lane_cells changes at most once an hour
+    (config.LANE_DENSITY_INTERVAL) and bbox/min_transits both vary per client,
+    so there is nothing here for _cached_source_response's per-source version
+    counter to usefully key off -- the same reasoning /api/replay's per-request
+    `at` already gets.
+    """
+    bounds = regions.parse_bbox(bbox)
+    cells = await storage.lane_cells(bounds, min_transits=max(1, min_transits))
+    return JSONResponse(
+        {
+            "note": lane_density.NOTE,
+            "cells": [
+                {**cell, "course_deg": _lane_course_deg(cell["mean_sin"], cell["mean_cos"])}
+                for cell in cells
+            ],
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/hazards")

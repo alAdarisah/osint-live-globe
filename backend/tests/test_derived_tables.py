@@ -1,7 +1,10 @@
-"""lane_cells, vessel_port_calls, flight_legs -- the three tables behind not
-yet built refine jobs (lane density, port-call detection, flight-leg
-detection). No consumer exists yet; this is what holds the storage helpers to
-the behaviour their eventual callers will depend on.
+"""lane_cells, vessel_port_calls, flight_legs -- the three tables behind the
+refine tier's AIS/ADS-B derivations (lane density, port-call detection,
+flight-leg detection). lane_cells now has its consumer
+(backend/refine/lane_density.py, covered by test_lane_density.py); the other
+two are still ahead of theirs. This is what holds the storage helpers to the
+behaviour their callers depend on, independent of whether that caller exists
+yet.
 
 There is no live Postgres in this test run (see backend/tests/conftest.py --
 every existing storage test fakes the connection rather than hitting a real

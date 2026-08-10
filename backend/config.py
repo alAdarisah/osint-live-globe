@@ -381,6 +381,14 @@ FLIGHT_LEG_RETENTION_DAYS = int(os.getenv("FLIGHT_LEG_RETENTION_DAYS", "90"))
 # than the same ships being re-queried four times an hour for no new evidence.
 VESSEL_PROFILE_INTERVAL = int(os.getenv("VESSEL_PROFILE_INTERVAL", "1800"))
 
+# How often backend/refine/lane_density.py both reads the next slice of AIS
+# history into the traffic grid and ages the whole grid down (see that
+# module's DECAY_FACTOR, derived from this same number). An hour: frequent
+# enough that a busy strait fills in within a session, coarse enough that the
+# decay math above stays a small correction each tick rather than something
+# that has to claw back a huge swing every pass.
+LANE_DENSITY_INTERVAL = int(os.getenv("LANE_DENSITY_INTERVAL", "3600"))
+
 # The laden/ballast thresholds themselves -- named constants rather than
 # numbers inline in backend/refine/vessel_profile.py because Task 33's admin
 # panel exposes them in an "Inference" section, where a reader can see exactly

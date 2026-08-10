@@ -43,6 +43,10 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # either -- one reference_snapshots document keyed by MMSI, attached
         # to the ais layer's own coordinates rather than carrying its own.
         "backend.refine.vessel_profile",
+        # AIS traffic grid. Publishes no layer either -- it writes lane_cells
+        # rows, a grid rather than a point per ship, and GET /api/lanes reads
+        # that table directly.
+        "backend.refine.lane_density",
     }
 
 

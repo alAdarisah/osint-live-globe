@@ -238,11 +238,11 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (resolved_at, last_seen DESC);
 
--- Grid-cell accumulator for the AIS lane-density refine job. Schema only in
--- this task -- nothing writes here yet. entity_history holds the raw
--- movement log (11 GB and rising with a global AIS subscription), and no
--- request path may scan it (see backend/tests -- global project constraint);
--- this compact table is what a future /api/lanes actually reads.
+-- Grid-cell accumulator for the AIS lane-density refine job
+-- (backend/refine/lane_density.py). entity_history holds the raw movement
+-- log (11 GB and rising with a global AIS subscription), and no request path
+-- may scan it (see backend/tests -- global project constraint); this compact
+-- table is what GET /api/lanes actually reads.
 --
 -- cell_key is the caller's own grid quantization (lat/lon rounded to `res`
 -- degrees, encoded as text) -- computed by the refine job, not derived here,
@@ -982,11 +982,13 @@ async def active_alerts() -> list[dict]:
 
 # --- lane_cells, vessel_port_calls, flight_legs ----------------------------
 #
-# The compact tables behind three not-yet-built refine jobs (lane density,
-# port-call detection, flight-leg detection). Nothing calls these helpers yet
-# -- see the schema comments above for why each table exists and is shaped
-# the way it is. They land now so those jobs build on a settled schema rather
-# than each inventing its own.
+# The compact tables behind the refine tier's derived-from-AIS/ADS-B products
+# (lane density, port-call detection, flight-leg detection). lane_cells' own
+# helpers are now driven by backend/refine/lane_density.py; the other two
+# tables are still ahead of their jobs -- see the schema comments above for
+# why each table exists and is shaped the way it is. They land together so
+# every one of those jobs builds on a settled schema rather than each
+# inventing its own.
 
 
 def _sum_by_class(a: dict, b: dict) -> dict:
@@ -1086,7 +1088,7 @@ ON CONFLICT (cell_key) DO UPDATE SET
 """
 
 
-async def upsert_lane_cells(rows: list[dict]) -> None:
+async def upsert_lane_cells(rows: list[dict]) -> bool:
     """Adds one refine sweep's grid cells to the running lane-density totals.
 
     Read-merge-write rather than arithmetic in the UPSERT's SET clause (the
@@ -1101,9 +1103,19 @@ async def upsert_lane_cells(rows: list[dict]) -> None:
     Batched at _BATCH for the same reason record_snapshot is: a full-planet
     sweep can be many thousand cells, and this keeps both the existing-row
     lookup and the write's parameter arrays bounded.
+
+    Returns whether the batch is now durably written, the same bool
+    record_port_calls returns and for the same reason: backend/refine/
+    lane_density.py reads entity_history exactly once through an
+    ever-advancing id cursor, so "logged and moved on" on a failed write
+    would mean "logged and lost" for that slice of the movement log, not
+    merely stale until the next poll. That caller holds its cursor back on
+    False and retries the same batch next pass.
     """
-    if _pool is None or not rows:
-        return
+    if not rows:
+        return True
+    if _pool is None:
+        return False
     now = datetime.now(timezone.utc)
     try:
         # Normalizing/merging happens inside the same try as the write:
@@ -1114,7 +1126,7 @@ async def upsert_lane_cells(rows: list[dict]) -> None:
         # guarantee, whatever produces the exception.
         incoming = _prepare_lane_cell_rows(rows)
         if not incoming:
-            return
+            return True
         async with _pool.acquire() as conn:
             async with conn.transaction():
                 keys = list(incoming)
@@ -1143,8 +1155,10 @@ async def upsert_lane_cells(rows: list[dict]) -> None:
                         [f["mean_cos"] for f in final],
                         now,
                     )
+        return True
     except Exception:  # noqa: BLE001 - storage must never take a refine job down
         log.exception("Failed to upsert %d lane cells", len(rows))
+        return False
 
 
 async def lane_cells(bbox: tuple | None, min_transits: int = 1) -> list[dict]:

@@ -124,6 +124,19 @@ _JOBS = (
         health_name="vessel_profiles",
         health_every=config.VESSEL_PROFILE_INTERVAL,
     ),
+    # Writes lane_cells rows -- a grid, not a point per ship -- so there is
+    # nothing here for the backend to mirror either; GET /api/lanes
+    # (backend/app.py) reads storage.lane_cells directly, the same shape as
+    # the vessel_port_calls reads above.
+    Job(
+        module="backend.refine.lane_density",
+        entrypoint="derive_forever",
+        publishes=(),
+        # lane_density.HEALTH_NAME, copied for the same reason
+        # port_calls.HEALTH_NAME is copied above.
+        health_name="lane_density",
+        health_every=config.LANE_DENSITY_INTERVAL,
+    ),
 )
 
 
