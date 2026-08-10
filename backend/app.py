@@ -19,6 +19,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
+from backend.refine import port_call_thresholds
 from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, water_bodies
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -899,17 +900,22 @@ async def track(kind: str, entity_id: str, points: int = 800):
 
 
 # What a port_calls row's `confidence` tier actually means, in the distance
-# AIS gave no berth for. Mirrors backend/refine/port_calls.py's own
-# PORT_EXACT_RADIUS_KM / PORT_PROXIMITY_RADIUS_KM / PORT_SEARCH_RADIUS_KM --
-# duplicated rather than imported, because that module pulls in the ingest
-# side's ProximityIndex and dark_vessels machinery this request-serving
-# process has no other reason to load, for three numbers that do not change
-# on their own. vessel_port_calls itself stores only the tier, never the
-# distance that produced it (see _classify in port_calls.py), so this is the
-# one place that distance can still reach a card: sent with every response
-# rather than hardcoded a third time in the frontend, so a reader sees the
-# actual radius behind "exact"/"proximity"/"inferred" instead of just the word.
-PORT_CALL_CONFIDENCE_KM = {"exact": 3.0, "proximity": 15.0, "inferred": 50.0}
+# AIS gave no berth for. Read from backend/refine/port_call_thresholds.py --
+# a leaf module with no other imports, split out of refine/port_calls.py
+# specifically so this process could read these three numbers without also
+# pulling in that module's ingest-side ProximityIndex/dark_vessels
+# dependencies -- rather than duplicated as a second copy of the same
+# floats, which a change to one and not the other would silently desync.
+# vessel_port_calls itself stores only the tier, never the distance that
+# produced it (see _classify in port_calls.py), so this is the one place
+# that distance can still reach a card: sent with every response rather than
+# hardcoded a third time in the frontend, so a reader sees the actual radius
+# behind "exact"/"proximity"/"inferred" instead of just the word.
+PORT_CALL_CONFIDENCE_KM = {
+    "exact": port_call_thresholds.PORT_EXACT_RADIUS_KM,
+    "proximity": port_call_thresholds.PORT_PROXIMITY_RADIUS_KM,
+    "inferred": port_call_thresholds.PORT_SEARCH_RADIUS_KM,
+}
 
 
 def _curated_port_by_id() -> dict[str, dict]:
@@ -975,6 +981,15 @@ async def vessel_detail(mmsi: str):
     the two refine jobs above; a request path must never open it directly
     (see global-constraints.md), and nothing below does.
     """
+    # storage.reference decodes the whole vessel_profiles document (one entry
+    # per hull this map has ever profiled, capped at vessel_profile.HULL_CAP)
+    # just to pick this one mmsi out of it -- the same whole-document read
+    # entity_latest_one was added in this diff specifically to avoid for
+    # entity_latest and ports. Left as-is because vessel_profiles has no
+    # per-hull row to key a lookup against (see storage.record_reference: it
+    # is one reference_snapshots document, not a table); a keyed table would
+    # be real schema work, not a one-line fix, so this is a known scaling
+    # edge rather than an oversight -- flagged in the task report.
     identity, profiles, port_calls, open_call = await asyncio.gather(
         storage.entity_latest_one("ais", mmsi),
         storage.reference("vessel_profiles"),

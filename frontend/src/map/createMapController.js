@@ -668,11 +668,12 @@ export function createMapController(container, initial, callbacks) {
   // first drawn without the Cargo/Port calls sections and then updated.
   let shipPopup = null;
   // port_id -> {status: "loading"|"ready"|"error", data} for the port card's
-  // "recent arrivals and departures" fetch. Unlike the ship card, this is a
-  // real cache -- read back by decorateOptionsFor below on every open, not
-  // just written -- because popups for the "ports" layer are lazy (see
-  // buildMarker) and rebuilt from scratch each time one opens, so without
-  // this a reopened port would forget an answer it already has and re-fetch.
+  // "recent arrivals and departures" fetch -- not a request cache (see
+  // loadPortTraffic, which refetches on every open), just the hand-off
+  // between it and decorateOptionsFor below: popups for the "ports" layer
+  // are lazy (see buildMarker) and rebuilt from scratch on every open, so
+  // this is where the in-flight/last-landed answer for whichever port is
+  // currently open lives for that rebuild to read.
   const portDetailCache = new Map();
   let countryNameByIso2 = {};
   // The conflict zone currently flown to, or null for World -- read only by the
@@ -2503,19 +2504,18 @@ export function createMapController(container, initial, callbacks) {
     };
   }
 
-  // Fetches /api/vessel/port/{port_id} (Task 17) the first time a port's
-  // popup opens, and calls `onUpdate` once it lands so the caller can
-  // re-render whatever is currently showing. Unlike loadVesselDetail's
-  // ship-side sibling, a port's traffic is not cleared and re-fetched on
-  // every open -- a port card is reference data first (see decorators.js's
-  // AIS_COVERAGE_CAVEAT) and its recent-traffic fold is one more read of the
-  // same aisstream.io history on every visit, not a value that goes stale
-  // inside one session -- but a failed fetch is retried on the next open rather
-  // than cached as permanently unavailable, since a dropped request is
-  // exactly the kind of transient failure a reopen ought to just fix.
+  // Fetches /api/vessel/port/{port_id} (Task 17) every time a port's popup
+  // opens, and calls `onUpdate` once it lands so the caller can re-render
+  // whatever is currently showing. Matches loadVesselDetail's ship-side
+  // sibling on purpose, not "cache for the session" as an earlier version of
+  // this did: vessel_port_calls rows accrue continuously (a vessel can call
+  // between one open and the next), so a cached "ready" answer served on
+  // reopen would silently omit a new arrival -- the same silent-omission
+  // failure the brief already rules out for the fetch-*failure* case,
+  // recurring here on the success path if this were allowed to go stale. A
+  // port's popup opens far less often than a track fetch already firing on
+  // every ship selection, so refetching every time costs little.
   async function loadPortTraffic(portId, onUpdate) {
-    const existing = portDetailCache.get(portId);
-    if (existing && existing.status !== "error") return;
     portDetailCache.set(portId, { status: "loading" });
     let entry;
     try {

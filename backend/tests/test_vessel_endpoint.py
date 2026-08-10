@@ -114,12 +114,21 @@ def _forbid_entity_history(monkeypatch):
     """entity_history is ~11 GB and a request path must never open it (see
     global-constraints.md). Wiring these to fail loudly turns a regression
     that added such a call into a test failure instead of a silent table
-    scan on every card open."""
+    scan on every card open.
+
+    All five of storage.py's entity_history readers are covered here, not
+    just the three this handler happens to be nowhere near today
+    (entity_history_since, entity_track, history_at) -- position_gaps and
+    airfield_activity read the same table and are exactly the shape a future
+    "gaps in AIS coverage" fold on this same card would reach for. Listing
+    all five is what keeps this test proving the rule instead of just
+    describing today's implementation.
+    """
 
     async def _forbidden(*args, **kwargs):
         raise AssertionError("a per-request handler must not read entity_history")
 
-    for name in ("entity_history_since", "entity_track", "history_at"):
+    for name in ("entity_history_since", "entity_track", "history_at", "position_gaps", "airfield_activity"):
         monkeypatch.setattr(app_mod.storage, name, _forbidden)
 
 

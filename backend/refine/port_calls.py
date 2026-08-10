@@ -41,6 +41,9 @@ import copy
 import logging
 
 from backend import config, storage
+from backend.refine.port_call_thresholds import (
+    PORT_EXACT_RADIUS_KM, PORT_PROXIMITY_RADIUS_KM, PORT_SEARCH_RADIUS_KM,
+)
 from backend.sources import dark_vessels
 from backend.sources.proximity import ProximityIndex, haversine_km
 
@@ -70,36 +73,14 @@ DWELL_MIN_SECONDS = 3600
 DEPART_MIN_SPEED_KN = 1.0
 DEPART_MIN_SECONDS = 1800
 
-# Inside this of a charted port point, the attribution is as good as AIS gets:
-# not "confirmed alongside" (see the module docstring), but not a guess either.
-PORT_EXACT_RADIUS_KM = 3.0
-# Out to here still counts as "in port" -- an outer anchorage, an approach
-# channel, a lightering area against the port's own works -- but the charted
-# point is no longer where the dwell actually is, so the card has to say
-# "near", not "at".
-PORT_PROXIMITY_RADIUS_KM = 15.0
-# Past the proximity radius, a dwell is still attributed to whichever port is
-# nearest -- confidence "inferred" -- but only out to here.
-#
-# The brief that specified this module places no ceiling on "inferred": it
-# treats recording the distance and leaving the card to state it as guard
-# enough on its own. This module adds one anyway (a ruling, not an oversight
-# -- flagged in the task report): unbounded attribution would record a vessel
-# anchored mid-ocean as *calling* at a port hundreds of km away, which is a
-# stronger and less honest claim than "we could not attribute this" would be.
-#
-# That makes the cap a real trade-off, not a formality, because the index
-# behind `ports` is not exhaustive: dark_vessels.port_index carries 393 ports
-# across the map's watched theatres (40 curated plus the NGA World Port
-# Index, clipped -- see that function's own docstring), not every port on
-# earth. A dwell can land outside this radius because the port it is actually
-# near simply is not in either list -- not because nothing is there. That
-# failure mode is made visible rather than silent: every rejection is counted
-# (see `rejected` in _advance/apply_positions) and carried into this job's own
-# source_health row and log line by run_once/derive_forever, so "nothing
-# happened near a port" and "we saw a dwell we could not attribute" stay
-# distinguishable from outside this module.
-PORT_SEARCH_RADIUS_KM = 50.0
+# PORT_EXACT_RADIUS_KM / PORT_PROXIMITY_RADIUS_KM / PORT_SEARCH_RADIUS_KM used
+# to live here; they moved to backend/refine/port_call_thresholds.py (a leaf
+# module with no other imports) so backend/app.py could read the same three
+# numbers -- to tell a card what a stored `confidence` tier means in
+# kilometres -- without importing this module's dark_vessels/ProximityIndex
+# dependencies into the request-serving process. See that module's docstring
+# for the full reasoning behind each threshold, including why "inferred" gets
+# a ceiling at all.
 
 # How long a per-vessel state entry with no active dwell/departure run is kept
 # before a pass drops it. It exists only to answer "what was this hull doing
