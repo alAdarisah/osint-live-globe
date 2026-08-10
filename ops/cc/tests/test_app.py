@@ -4,10 +4,17 @@ The row builders are pure on purpose: rendering is the part a snapshot test
 covers badly and a unit test covers exactly.
 """
 
+import asyncio
+
+import pytest
+
+from ops.cc import __main__ as cli
+from ops.cc.app import supervise
 from ops.cc.collectors.compose import ServiceState
 from ops.cc.collectors.health import SourceState
 from ops.cc.collectors.host import HostSnapshot
 from ops.cc.collectors.prom import MetricSnapshot
+from ops.cc.run import CollectorError
 from ops.cc.theme import GLYPH
 from ops.cc.widgets.host import format_bytes, host_lines
 from ops.cc.widgets.services import service_row
@@ -96,3 +103,102 @@ def test_unmeasured_prometheus_values_render_as_dashes():
     joined = " ".join(lines)
     assert "34%" in joined, "the host half keeps working when Prometheus does not"
     assert "—" in joined
+
+
+def test_supervise_applies_each_successful_collection():
+    seen = []
+    calls = {"n": 0}
+
+    async def collect():
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise asyncio.CancelledError
+        return f"value-{calls['n']}"
+
+    async def sleep(_seconds):
+        return None
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(supervise(collect, seen.append, 1.0, sleep=sleep))
+    assert seen == ["value-1", "value-2"]
+
+
+def test_supervise_keeps_running_after_a_collector_error():
+    """One failing docker call must not end the pane's updates for the session."""
+    outcomes = []
+    calls = {"n": 0}
+
+    async def collect():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise CollectorError("permission denied")
+        if calls["n"] > 2:
+            raise asyncio.CancelledError
+        return "recovered"
+
+    async def sleep(_seconds):
+        return None
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(supervise(collect, outcomes.append, 1.0, sleep=sleep,
+                              on_error=lambda msg: outcomes.append(("error", msg))))
+    assert outcomes[0] == ("error", "permission denied")
+    assert outcomes[1] == "recovered"
+
+
+def test_the_app_mounts_with_its_theme_variables_resolved():
+    """The regression this pins: App.CSS is parsed on the way into the first
+    frame, so a theme registered in on_mount arrives too late and every start
+    dies with "reference to undefined variable '$cc-border'". Nothing else in
+    the suite touches the stylesheet, and the app never got as far as a pane.
+    """
+    from pathlib import Path
+
+    from ops.cc.app import CommandCenter
+    from ops.cc.widgets.host import HostPane
+    from ops.cc.widgets.logs import LogPane
+    from ops.cc.widgets.services import ServicesPane
+    from ops.cc.widgets.sources import SourcesPane
+
+    async def boot():
+        # read_only, so mounting this cannot start or stop anything on the
+        # machine running the tests.
+        app = CommandCenter(Path("."), read_only=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for pane in (ServicesPane, SourcesPane, HostPane, LogPane):
+                assert app.query_one(pane) is not None
+            assert app.theme == "claude-dark"
+
+    asyncio.run(boot())
+
+
+def test_read_only_is_off_by_default():
+    assert cli.parse_args([]).read_only is False
+
+
+def test_read_only_flag():
+    assert cli.parse_args(["--read-only"]).read_only is True
+
+
+def test_the_default_compose_dir_is_the_deployment_path():
+    # as_posix, because these tests are also run on the Windows machine the
+    # code is written on, where str(Path("/opt/osint")) has backslashes -- and
+    # that would be a test of the platform rather than of the default.
+    assert cli.parse_args([]).compose_dir.as_posix() == "/opt/osint"
+
+
+def test_the_compose_dir_is_overridable_for_a_checkout():
+    args = cli.parse_args(["--compose-dir", "/home/me/osint"])
+    assert args.compose_dir.as_posix() == "/home/me/osint"
+
+
+def test_the_theme_choices_are_the_two_that_exist():
+    assert cli.parse_args([]).theme == "claude-dark"
+    assert cli.parse_args(["--light"]).theme == "claude-light"
+
+
+def test_the_api_and_prometheus_urls_are_the_published_ports():
+    args = cli.parse_args([])
+    assert args.api_url == "http://localhost:8080"
+    assert args.prom_url == "http://localhost:9090"
