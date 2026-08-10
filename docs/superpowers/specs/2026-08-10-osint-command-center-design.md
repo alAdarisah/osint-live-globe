@@ -47,18 +47,21 @@ directly, and no change to `docker-compose.yml` is required by this project.
   both one-button launch and a read-only dashboard; the flag reconciles them.
 - **`cc` never reimplements deploy logic.** Rebuilds shell out to the existing
   `deploy.sh`, so there remains exactly one definition of which images are stale.
+- **Styled on the Anthropic palette**, in colour and glyphs only — see *Visual
+  theme*. A terminal's font belongs to whoever opened it.
 
 ## Layout
 
 ```
+ ✳ osint command center                        osint @ arch-box
 ┌ SERVICES ─────────────────┬ SOURCES ──────────────────────┐
-│ postgres    up  healthy   │ acled       4,201    12m ago  │
-│ backend     up  healthy   │ firms       9,133     2m ago  │
-│ ingest      up   ×3 rst   │ ais            —     47m STALE│
-│ refine      up            │ ⚠ 2 alerts: redis evicting    │
+│ ● postgres     healthy    │ ● acled     4,201     12m ago │
+│ ● backend      healthy    │ ● firms     9,133      2m ago │
+│ ▲ ingest       ×3 rst     │ ▲ ais           —     47m STALE│
+│ ● refine       up         │ ▲ 2 alerts: redis evicting    │
 ├ HOST ─────────────────────┴───────────────────────────────┤
 │ cpu ▁▂▅▃▇ 34%   mem 61%   disk 44%   pgdata 8.1G          │
-│ db conn 12   xact age 4s   slow 0   scrape 3/3 up         │
+│ conn 12/100   oldest xact 4s   scrape 3/3 up              │
 ├ LOGS  [all ▾]  filter: ───────────────────────────────────┤
 │ 12:03:11 backend  INFO  served /api/ships 214 rows        │
 │ 12:03:12 ingest   WARN  aisstream backoff 30s             │
@@ -91,6 +94,7 @@ terminal, and it keeps every subprocess and HTTP call out of the widget code.
 | `ops/cc/collectors/logs.py` | `docker compose logs -f --tail 200` as an async subprocess, yielding parsed `LogLine`s | streaming |
 | `ops/cc/actions.py` | The mutating commands: up, stop, restart, `deploy.sh`, `deploy.sh --ingest`. Streams stdout to the log pane. | on demand |
 | `ops/cc/state.py` | The single `State` object every collector writes into and every widget reads | — |
+| `ops/cc/theme.py` | The two Textual themes and the semantic colour tokens every widget refers to | — |
 | `ops/cc/app.py` | The Textual `App`: layout, key bindings, task supervision | — |
 | `ops/cc/widgets/` | One file per pane: `services.py`, `sources.py`, `host.py`, `logs.py` | — |
 
@@ -125,6 +129,49 @@ dashboard whose contents are a config file is a worse Grafana:
 Every metric name above already appears in `monitoring/grafana/dashboards/` or
 `monitoring/postgres-exporter/queries.yaml`, so the panes and the Grafana
 dashboards cannot drift apart in what they claim to measure.
+
+## Visual theme
+
+The dashboard is styled on Anthropic's brand palette. A terminal owns its own
+font, so typography is not something this tool can set — the theme is carried
+entirely by colour, glyphs and spacing.
+
+Colours are registered as a Textual theme in `theme.py`, and widgets refer only
+to semantic tokens (`ok`, `warn`, `down`, `idle`, `value`, `muted`). No widget
+names a hex value, so retheming is a one-file change.
+
+| Token | Colour | Where it appears |
+| --- | --- | --- |
+| background | `#141413` | The screen |
+| surface | `#1f1e1d` | Pane bodies, one step off the background so borders read without a stroke |
+| foreground | `#faf9f5` | Primary text |
+| muted | `#b0aea5` | Labels, units, timestamps, inactive key hints |
+| border | `#e8e6dc` at 20% | Pane rules; full strength on the focused pane |
+| accent / warn | `#d97757` | Focused pane title, selection bar, `WARN` lines, stale sources, the `✳` mark |
+| value | `#6a9bcc` | Numbers and sparklines in the host pane |
+| ok | `#788c5d` | Healthy containers, producing sources, exit code 0 |
+
+`#1f1e1d` and the 20 % border are the only values not taken directly from the
+brand palette; both are derived from the dark base because a four-pane layout
+needs two surface levels and one rule weight that the palette does not name.
+
+There is no red. The palette does not have one, and inventing a hue for the most
+important state on the screen would be the wrong way to solve it: **failure is
+shown by inverting the accent** — dark text on an orange block — so a stopped
+container or a dead scrape reads as a solid bar rather than one more coloured
+word among coloured words. Severity is carried by form, and the palette stays
+closed.
+
+The header is `✳ osint command center` with the mark in accent orange and the
+compose project and hostname in muted grey on the right. `--light` swaps the
+base pair (`#faf9f5` background, `#141413` text), keeps all three accents, and
+darkens the muted grey to `#6b6a63` for contrast on the light ground; it exists
+because a light terminal profile otherwise renders the whole dashboard as a dark
+rectangle pasted into a light window.
+
+Health states use both colour and shape, so the screen still parses on a
+monochrome terminal or for a red-green colour-blind reader: `●` healthy, `◐`
+starting, `▲` degraded or stale, inverted `■` down.
 
 ## Controls
 
@@ -196,6 +243,11 @@ Widget rendering is covered by Textual's snapshot testing for the four panes at
 one representative state each. This is deliberately shallow: the value is in the
 collectors, and pinning exact terminal output would make every layout tweak a
 test failure.
+
+`theme.py` gets one real test rather than a snapshot: every semantic token
+resolves in both the dark and the light theme, and the two themes define the
+same token set. A token that exists in one theme only is the failure that shows
+up as an invisible pane on somebody else's terminal.
 
 ## Installation on the Arch box
 
