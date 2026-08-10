@@ -603,6 +603,73 @@ export const LAYER_MANIFEST = {
     disposition: AUTO,
   },
 
+  // Task 24: client-propagated satellite layers. Stored CelesTrak element
+  // sets, never fetched through the generic poller (see useOsintData.js's
+  // POLL_CONFIG) -- `fetch: FETCH_MANUAL` here just means "not on that
+  // table", not "never fetched": createMapController.js fetches
+  // /api/satellites/elements itself, the same way it already fetches
+  // lakes/rivers on demand (see setLayerVisible). All seven are `draw: null`
+  // (ungated), matching `satellites` above -- a handful to a few thousand
+  // objects is legible at any zoom once a reader has the layer on, and what
+  // changes between them is object count and cadence (see
+  // backend/sources/satellites.py's cadence_seconds), not whether zooming in
+  // is what earns them the right to appear.
+  satNavigation: {
+    // GPS/Galileo/GLONASS/Beidou, ~150 objects. On by default, same footing
+    // as `satellites` -- a navigation constellation is small enough to just
+    // show.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: AUTO,
+  },
+  satWeather: {
+    // ~75 objects (weather + goes -- see satellites.py's note on why "noaa"
+    // is not a real CelesTrak group). On by default.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: AUTO,
+  },
+  satImaging: {
+    // resource/sarsat/spire/planet, several hundred objects. On by default
+    // per the task brief, which is exactly why this one draws on the WebGL
+    // entity path rather than as DOM markers (see createMapController.js) --
+    // "on by default" and "hundreds of markers" cannot coexist on the DOM
+    // path without becoming the clutter this map's declutter philosophy
+    // exists to prevent.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: AUTO,
+  },
+  satScience: {
+    // Off by default (task brief): a curated-interest set (Hubble, Terra,
+    // ...) a reader opts into rather than one the resolver asserts.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  satGeo: {
+    // Off by default (task brief). ~500+ geostationary objects -- WebGL.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  satStarlink: {
+    // Off by default and hard-gated in the control panel (task brief):
+    // several thousand objects. WebGL is not optional here -- it is the only
+    // reason this toggle can exist at all. `active` (11,000 objects) is
+    // deliberately not offered anywhere in this map, including here.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  satOneweb: {
+    // Off by default and hard-gated (task brief), same reasoning as
+    // satStarlink -- a few hundred to a thousand-odd objects, WebGL.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+
   // ---- weather ------------------------------------------------------------
   // Weather answers a different question from the rest of this map, so none of
   // it is ever switched on by the resolver. windArrows additionally gates the

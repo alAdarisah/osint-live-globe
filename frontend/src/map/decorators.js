@@ -3747,6 +3747,85 @@ export function decorateSatellite(d, { offset } = {}) {
   };
 }
 
+// ---------- client-propagated satellite layers (Task 24) ----------
+//
+// stations/military above are this map's own server-side SGP4 (see
+// backend/sources/satellites.py's GROUPS, unchanged by this task);
+// everything below is propagated in the browser instead (see
+// map/satPropagate.js) from stored CelesTrak element sets fetched through
+// /api/satellites/elements. One toggle per group of CelesTrak groups -- see
+// satellites.py's ELEMENT_LAYER_GROUPS, the same seven keys as here, just
+// spelled satX so the family reads as one in this file and in the control
+// panel.
+//
+// One shared glyph (SVG.satellite) rather than seven new silhouettes: none
+// of these needs a shape of its own the way military's downward sensor cone
+// does -- what tells them apart is which toggle drew them, which is a
+// colour and a label, not a shape. `dom: false` marks the four groups drawn
+// on the WebGL entity path (webglLayer.js) instead of as Leaflet DOM
+// markers -- see createMapController.js's own note on that split and why.
+export const SAT_ELEMENT_LAYERS = {
+  satNavigation: {
+    svg: SVG.satellite, label: "Navigation satellite", color: "#8ad1ff", size: 18, name: "sat-navigation",
+    token: "satellite.navigation", dom: true,
+  },
+  satWeather: {
+    svg: SVG.satellite, label: "Weather satellite", color: "#ffd166", size: 18, name: "sat-weather",
+    token: "satellite.weather", dom: true,
+  },
+  satImaging: {
+    svg: SVG.satellite, label: "Earth-imaging satellite", color: "#9ee6a8", size: 12, name: "sat-imaging",
+    token: "satellite.imaging", dom: false,
+  },
+  satScience: {
+    svg: SVG.satellite, label: "Science satellite", color: "#c9b6ff", size: 18, name: "sat-science",
+    token: "satellite.science", dom: true,
+  },
+  satGeo: {
+    svg: SVG.satellite, label: "Geostationary satellite", color: "#ff9f6f", size: 12, name: "sat-geo",
+    token: "satellite.geo", dom: false,
+  },
+  satStarlink: {
+    svg: SVG.satellite, label: "Starlink satellite", color: "#7ee0c9", size: 8, name: "sat-starlink",
+    token: "satellite.starlink", dom: false,
+  },
+  satOneweb: {
+    svg: SVG.satellite, label: "OneWeb satellite", color: "#6fe3ff", size: 8, name: "sat-oneweb",
+    token: "satellite.oneweb", dom: false,
+  },
+};
+
+/** One of the seven client-propagated layers' style, themed -- also what
+ *  webglLayer's texture cache and createMapController's placement pass read. */
+export function satElementStyle(layerKey) {
+  return themedStyle(SAT_ELEMENT_LAYERS[layerKey], layerKey);
+}
+
+/**
+ * DOM-marker decorator for the three small client-propagated groups
+ * (navigation/weather/science -- see SAT_ELEMENT_LAYERS' `dom` flag).
+ * `item` is {norad_id, name, lat, lon, alt_km}, the propagation tracker's
+ * output (map/satPropagate.js's positionAt), not the raw OMM element set --
+ * there is no per-object distinction to draw here the way military/stations
+ * has above, so this stays a flat function of which layer asked for it.
+ */
+export function decorateSatElement(item, layerKey, { offset } = {}) {
+  const style = satElementStyle(layerKey);
+  const name = item.name || `NORAD ${item.norad_id}`;
+  const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)} &middot; ${Math.round(item.alt_km || 0)} km`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(item.norad_id)}</div>
+    <div>Altitude: ${Math.round(item.alt_km || 0)} km</div>
+    <p class="meta">Position propagated in your browser (SGP4, via satellite.js) from CelesTrak's public orbital elements -- a real orbit, not a live telemetry confirmation.</p>
+    <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "satellite-marker", layerOpacity(layerKey), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
 // ---------- which kind of pin is this? ----------
 
 /**
@@ -3786,6 +3865,16 @@ export const TOKEN_FOR = {
   cities: (d) => cityDrawTier(d).token,
   infra: (d) => infraBaseStyle(d)?.token ?? null,
   satellites: (d) => (isMilitarySatellite(d) ? "satellite.military" : "satellite.stations"),
+  // The seven client-propagated layers (Task 24) each draw one token, always
+  // -- unlike stations/military above there is no per-object distinction
+  // inside one of these layers for a token to pick between.
+  satNavigation: () => "satellite.navigation",
+  satWeather: () => "satellite.weather",
+  satImaging: () => "satellite.imaging",
+  satScience: () => "satellite.science",
+  satGeo: () => "satellite.geo",
+  satStarlink: () => "satellite.starlink",
+  satOneweb: () => "satellite.oneweb",
   aisNavy: () => "ship.navy",
   aisTanker: () => "ship.tanker",
   aisCivilian: () => "ship.other",

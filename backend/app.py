@@ -22,7 +22,14 @@ from backend import (
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
 from backend.refine import flight_legs, lane_density, port_call_thresholds
+# Aliased: this module already has a route handler literally named
+# `satellites` (see /api/satellites below, unchanged from before this task),
+# and that function def rebinds the bare module-level name `satellites` --
+# so an unaliased import here would be shadowed by it for every reference
+# below the route, the same reason admin1_boundaries/water_bodies's own
+# route handlers are named *_endpoint rather than reusing their module's name.
 from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, water_bodies
+from backend.sources import satellites as satellites_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe")
@@ -1153,6 +1160,44 @@ async def satellites(region: str | None = None):
     state = registry.get("satellites")
     payload = regions.filter_points(state.data, regions.bounds_for(region))
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+def _satellite_elements_filter(layer_keys: set[str]):
+    # A closure rather than a top-level function so _cached_source_response's
+    # filter_fn(items, bounds) signature doesn't have to grow a third
+    # argument just for this one caller -- same shape _ships_callsign_filter
+    # above already uses. `bounds` is accepted and ignored: element sets
+    # carry no lat/lon (see backend/sources/satellites.py's module docstring
+    # on why positions are never stored), so there is nothing here for
+    # regions.filter_points to do.
+    def _filter(items: list[dict], bounds) -> list[dict]:
+        return satellites_source.filter_elements_by_layer(items, layer_keys)
+    return _filter
+
+
+@app.get("/api/satellites/elements")
+async def satellite_elements(request: Request, groups: str | None = None):
+    """Stored OMM element sets for the client-propagated satellite layers
+    (backend/sources/satellites.py's ELEMENT_LAYER_GROUPS) -- SGP4 runs in
+    the browser via satellite.js (frontend/src/map/satPropagate.js), not
+    here. See /api/satellites above for the two small groups this server
+    still propagates itself, every ten seconds, exactly as before this
+    endpoint existed.
+
+    `groups` is a comma-separated list of *layer* keys (navigation, weather,
+    imaging, science, geo, starlink, oneweb) -- the control panel's toggles,
+    not CelesTrak's own group names, since one toggle can span more than one
+    CelesTrak group and a reader turning on "navigation" should get
+    gps-ops+galileo+glo-ops+beidou in one request, not four. Missing or
+    empty answers empty, not "every group": a reader who has not asked for
+    anything should not pull every stored element set (starlink and oneweb
+    alone run to several thousand) just by omitting the parameter.
+    """
+    wanted = {g.strip() for g in (groups or "").split(",") if g.strip()}
+    return _cached_source_response(
+        request, "satellite_elements", None, _satellite_elements_filter(wanted),
+        variant=f"groups:{','.join(sorted(wanted)) or '-'}",
+    )
 
 
 def _matches_callsign_query(value, query: str) -> bool:

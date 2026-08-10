@@ -8,6 +8,8 @@ import { createMapController } from "./createMapController";
 
 const COUNT_KEYS = [
   "events", "firms", "gdelt", "officials", "countries", "cities", "infra", "jamming", "satellites",
+  // Task 24: the seven client-propagated satellite layers.
+  "satNavigation", "satWeather", "satImaging", "satScience", "satGeo", "satStarlink", "satOneweb",
   "aisCivilian", "aisNavy", "aisTanker", "adsbCivilian", "adsbMilitary",
   "infraMilitary", "infraRefinery", "infraLng", "infraPort", "infraDesalination",
   "infraNuclear", "infraFab", "infraPipelineNode", "pipelineRoutes",

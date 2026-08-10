@@ -57,6 +57,9 @@ import {
   decorateInfra,
   decorateSatellite,
   isMilitarySatellite,
+  decorateSatElement,
+  satElementStyle,
+  SAT_ELEMENT_LAYERS,
   classifyAircraft,
   classifyShip,
   SHIP_STYLE,
@@ -155,6 +158,7 @@ import { createWaterLayer, syncWater, buildWaterIndex, findWaterAt } from "./wat
 import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { createEntityWebglLayer } from "./webglLayer";
+import { createPropagationTracker } from "./satPropagate";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
 import {
   nearestLon, unwrapPath, boundsContainsPoint,
@@ -214,6 +218,37 @@ const SATELLITE_TRAIL_MAX_POINTS = 36;
 // Tankers poll on the same cadence as the rest of AIS -- same "several
 // polls back" length as ship trails, not satellites' longer arc.
 const TANKER_TRAIL_MAX_POINTS = 60;
+
+// Task 24: client-propagated satellite layers -- see map/satPropagate.js and
+// backend/sources/satellites.py's ELEMENT_LAYER_GROUPS/cadence_seconds. This
+// is the frontend's own copy of that backend cadence classification: there
+// is no shared module between a Python process and a browser bundle, the
+// same reason backend/app.py's _matches_callsign_query keeps its own copy of
+// the client's matchQuery in step by hand rather than importing it.
+//
+// The cadence gates only tick() (a real SGP4 pass, see satPropagate.js) --
+// SAT_ELEMENT_REDRAW_MS below is how often the *drawn* position is
+// recomputed by interpolating between the last two fixes, which is cheap
+// enough to do far more often than SGP4 itself.
+const SAT_ELEMENT_SMALL_CADENCE_MS = 10_000;
+const SAT_ELEMENT_LARGE_CADENCE_MS = 60_000;
+const SAT_ELEMENT_LARGE_LAYERS = new Set(["satImaging", "satGeo", "satStarlink", "satOneweb"]);
+function satElementCadenceMs(layerKey) {
+  return SAT_ELEMENT_LARGE_LAYERS.has(layerKey) ? SAT_ELEMENT_LARGE_CADENCE_MS : SAT_ELEMENT_SMALL_CADENCE_MS;
+}
+// Redrawn (interpolated + repositioned/re-styled) this often, regardless of
+// cadence -- frequent enough to read as smooth motion, coarse enough that
+// even the several-thousand-object Starlink/OneWeb layers cost only a
+// handful of milliseconds per tick rather than a per-frame cost.
+const SAT_ELEMENT_REDRAW_MS = 2000;
+
+// Which CelesTrak groups (see backend/sources/satellites.py's
+// ELEMENT_LAYER_GROUPS) sit behind each control-panel toggle -- the same
+// string /api/satellites/elements?groups= expects.
+const SAT_ELEMENT_CELESTRAK_GROUP = {
+  satNavigation: "navigation", satWeather: "weather", satImaging: "imaging",
+  satScience: "science", satGeo: "geo", satStarlink: "starlink", satOneweb: "oneweb",
+};
 
 // The whole world, once: the full Web Mercator extent. The latitude limit is
 // Mercator's own -- the projection runs to infinity at the poles and 85.051129 is
@@ -551,9 +586,25 @@ export function createMapController(container, initial, callbacks) {
   let imageryKey = null;   // null == off; otherwise a key of GIBS_LAYERS
   let imageryDate = null;  // "YYYY-MM-DD", UTC
   const satelliteGroup = createSatelliteGroup();
+  // Task 24: the three client-propagated groups small enough to draw as DOM
+  // markers (navigation/weather/science -- see decorators.js's
+  // SAT_ELEMENT_LAYERS and createMapController's own DOM-vs-WebGL note
+  // below). createSatelliteGroup is generic enough to reuse as-is: it
+  // returns a bare L.layerGroup(), which is exactly what these need too.
+  // satImaging/satGeo/satStarlink/satOneweb have no Leaflet layer of their
+  // own -- they draw on entityWebglLayer's shared canvas instead.
+  const satNavigationGroup = createSatelliteGroup();
+  const satWeatherGroup = createSatelliteGroup();
+  const satScienceGroup = createSatelliteGroup();
   const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer, tankerTrailsLayer, militaryTrailsLayer } =
     createTrailLayers(map);
   satelliteGroup.addTo(map);
+  // navigation/weather are on by default (see map/scene.js); science is
+  // MANUAL/off by default, so it is not added here -- setLayerVisible adds
+  // it the first time a reader switches it on, same as railwaysGroup/
+  // waterLayer below.
+  satNavigationGroup.addTo(map);
+  satWeatherGroup.addTo(map);
   const windFlowLayer = createWindFlowLayer(map);
   // GPU-batched sprite rendering for AIS/ADS-B markers (see webglLayer.js) --
   // replaces the L.marker+L.divIcon path buildMarker/updateMarker below still
@@ -563,6 +614,38 @@ export function createMapController(container, initial, callbacks) {
   // more than it saves -- setLayerVisible below calls entityWebglLayer's own
   // per-bucket setVisible instead of map.addLayer/removeLayer for these keys.
   const entityWebglLayer = createEntityWebglLayer(map);
+
+  // Task 24: one shared SGP4 propagation tracker across all seven client-
+  // propagated groups. CelesTrak's own groups never overlap (see
+  // backend/sources/satellites.py's ELEMENT_LAYER_GROUPS), so a NORAD id is
+  // never claimed by two of these layers at once, and one Map keyed on it
+  // (see map/satPropagate.js's createPropagationTracker) is simpler than
+  // seven separate ones with no risk of an id landing in the wrong one.
+  const satElementTracker = createPropagationTracker();
+  // Raw OMM element sets per layer, from /api/satellites/elements -- null
+  // means "never fetched", [] means "fetched, empty". Held here rather than
+  // in `raw` because these never arrive through applyData's generic
+  // raw[key]=data assignment (see fetchSatElements below), the same reason
+  // waterLakesFeatures/waterRiversFeatures are not in `raw` either.
+  const satElements = {
+    satNavigation: null, satWeather: null, satImaging: null,
+    satScience: null, satGeo: null, satStarlink: null, satOneweb: null,
+  };
+  // Mirrors each layer's actual add/remove (or WebGL bucket) state, same
+  // reason satellitesVisible does for the server-propagated pair below --
+  // lets the tick/redraw loop skip work for a layer nobody can see rather
+  // than just hiding the result. navigation/weather/imaging default on,
+  // science/geo/starlink/oneweb off -- see map/scene.js's own entries; the
+  // first real applyScene pass (moments after construction) confirms these.
+  const satElementVisible = {
+    satNavigation: true, satWeather: true, satImaging: true,
+    satScience: false, satGeo: false, satStarlink: false, satOneweb: false,
+  };
+  // ms epoch of each layer's last real SGP4 pass (satElementTracker.tick) --
+  // compared against satElementCadenceMs so a busy layer is not re-SGP4'd
+  // more often than its cadence allows, while positionAt's cheap
+  // interpolation still redraws on the faster SAT_ELEMENT_REDRAW_MS below.
+  const satElementLastTick = {};
 
   // ---------- state that used to be top-level `let`s in app.js ----------
   // All internal to the controller: nothing outside the map needs to know
@@ -669,6 +752,11 @@ export function createMapController(container, initial, callbacks) {
   // (see webglLayer.js's updateEntities), not as L.marker instances.
   const markersByKey = {
     events: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
+    // Task 24: the three DOM-marker client-propagated groups. The four
+    // WebGL ones (satImaging/satGeo/satStarlink/satOneweb) have no marker
+    // Map of their own -- entityWebglLayer keeps their entries internally,
+    // same as the AIS/ADS-B buckets.
+    satNavigation: new Map(), satWeather: new Map(), satScience: new Map(),
     conflictHistory: new Map(), officials: new Map(), hazards: new Map(), airports: new Map(), darkVessels: new Map(),
     cableLandings: new Map(), launches: new Map(), osmInfra: new Map(),
     outagePoints: new Map(),
@@ -745,6 +833,9 @@ export function createMapController(container, initial, callbacks) {
   let windRefreshTimer = null;
   let moveEndWindTimer = null;
   let precipRefreshTimer = null;
+  // Task 24: the tick/redraw loop for the seven client-propagated satellite
+  // layers -- see tickAndRedrawSatElements and SAT_ELEMENT_REDRAW_MS.
+  let satElementTickTimer = null;
   // Debounced re-check of the rivers sub-toggle's loaded extent -- see
   // maybeRefetchRivers below, wired to moveend next to moveEndWindTimer above.
   let moveEndRiversTimer = null;
@@ -2043,14 +2134,19 @@ export function createMapController(container, initial, callbacks) {
     if (key === "jamming") return jammingLayerWithPing;
     if (key === "laneDensity") return laneDensityLayer;
     if (key === "satellites") return satelliteGroup;
+    if (key === "satNavigation") return satNavigationGroup;
+    if (key === "satWeather") return satWeatherGroup;
+    if (key === "satScience") return satScienceGroup;
     return groups[key];
   }
 
-  // The five AIS/ADS-B bucket keys route through entityWebglLayer's own
-  // per-bucket visibility instead of a Leaflet layerForKey lookup -- see the
-  // comment where entityWebglLayer is created above.
+  // The five AIS/ADS-B bucket keys, plus Task 24's four bulk satellite
+  // layers, route through entityWebglLayer's own per-bucket visibility
+  // instead of a Leaflet layerForKey lookup -- see the comment where
+  // entityWebglLayer is created above.
   const WEBGL_BUCKET_KEYS = new Set([
     "adsbCivilian", "adsbMilitary", "adsbFlagged", "aisCivilian", "aisNavy", "aisTanker",
+    "satImaging", "satGeo", "satStarlink", "satOneweb",
   ]);
 
   // Each entry: the trail flag it drives, the trail layer to add/remove, the
@@ -2089,6 +2185,32 @@ export function createMapController(container, initial, callbacks) {
     // treated as permanently hidden and take up no room, so visible pins would
     // be free to sit on top of them.
     if (key === "cables") layerOnMap.cableLandings = visible;
+
+    // Task 24: the seven client-propagated satellite layers. Deliberately
+    // does not `return` -- satNavigation/satWeather/satScience still need
+    // the generic layerForKey add/remove below (they are ordinary Leaflet
+    // layerGroups), and satImaging/satGeo/satStarlink/satOneweb still need
+    // the WEBGL_BUCKET_KEYS branch below to flip their bucket's own
+    // visibility. This block only owns what those two paths don't know
+    // about: satElementVisible (read by the tick/redraw loop, see
+    // tickAndRedrawSatElements), the on-demand fetch for the four
+    // default-off groups (mirrors waterLakes' fetch-on-first-toggle just
+    // below), and an immediate catch-up render so switching a layer on
+    // shows something before the next redraw tick rather than up to two
+    // seconds later.
+    if (key in SAT_ELEMENT_CELESTRAK_GROUP) {
+      satElementVisible[key] = visible;
+      if (visible) {
+        // Off by default (science/geo/starlink/oneweb -- see map/scene.js):
+        // nothing has been fetched yet the first time a reader reaches for
+        // one. navigation/weather/imaging are already fetched from boot
+        // (see the controller's own startup fetch), so this is a no-op for
+        // them -- fetchSatElements guards on satElements[key] already being
+        // non-null.
+        fetchSatElements(key);
+        renderSatElement(key); // catch up now rather than waiting for the next tick
+      }
+    }
 
     if (key === "gdelt") {
       newsVisible = visible;
@@ -2794,7 +2916,10 @@ export function createMapController(container, initial, callbacks) {
 
   const counts = {
     events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
-    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    satellites: 0,
+    // Task 24: the seven client-propagated satellite layers.
+    satNavigation: 0, satWeather: 0, satImaging: 0, satScience: 0, satGeo: 0, satStarlink: 0, satOneweb: 0,
+    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
     hazards: 0, hazardsQuake: 0, hazardsVolcano: 0,
@@ -2826,7 +2951,9 @@ export function createMapController(container, initial, callbacks) {
   // UI as the "(total)" figure next to the live on-screen tick.
   const totals = {
     events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
-    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    satellites: 0,
+    satNavigation: 0, satWeather: 0, satImaging: 0, satScience: 0, satGeo: 0, satStarlink: 0, satOneweb: 0,
+    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
     hazards: 0, hazardsQuake: 0, hazardsVolcano: 0,
@@ -3074,7 +3201,13 @@ export function createMapController(container, initial, callbacks) {
     // Just under conflict events: a dark-vessel pin marks a place something was
     // last seen, which is a real position, but it is an inference about it.
     darkVessels: 95,
-    events: 100, infra: 80, satellites: 70, aisNavy: 65, adsbMilitary: 65,
+    events: 100, infra: 80, satellites: 70,
+    // Task 24's three DOM-marker groups sit just under the server-propagated
+    // pair above -- same class of object, same reasoning, one step lower so
+    // stations/military (this map's own SGP4) never lose their pixel to an
+    // element-set-only object if the two ever land on the same spot.
+    satNavigation: 69, satWeather: 69, satScience: 69,
+    aisNavy: 65, adsbMilitary: 65,
     // Above news: several officials pins sit on a capital's coordinate by
     // construction (a press release has no location of its own), so they are
     // the ones that most need to keep their true point rather than being
@@ -3188,6 +3321,9 @@ export function createMapController(container, initial, callbacks) {
   function redrawLayerGroup(group) {
     if (group === "infra") renderInfra();
     else if (group === "satellites") renderSatellites();
+    else if (group === "satNavigation" || group === "satWeather" || group === "satScience") {
+      renderSatElementLayer(group);
+    }
     else if (group === "cities") renderCities();
     else if (group === "ais") renderAisLayer();
     else if (group === "adsb") renderAdsbLayer();
@@ -4025,6 +4161,172 @@ export function createMapController(container, initial, callbacks) {
         new Set(satelliteTrails.keys()),
         { refLon: map.getCenter().lng, copies: worldCopies(), layerKey: "satellites", maxOpacity: 0.22, dashArray: "2 5" }
       );
+    }
+  }
+
+  // ---------- Task 24: client-propagated satellite layers ----------
+  //
+  // stations/military above are this map's own server-side SGP4, unchanged.
+  // Everything here is propagated in the browser instead, from stored
+  // CelesTrak element sets (see map/satPropagate.js and
+  // backend/sources/satellites.py's ELEMENT_LAYER_GROUPS/cadence_seconds).
+  //
+  // DOM vs WebGL: satNavigation/satWeather/satScience (a few dozen to ~150
+  // objects apiece) draw as ordinary Leaflet markers, the same mechanism
+  // stations/military already use -- individually poppable, individually
+  // tooltippable, and cheap at that count. satImaging/satGeo/satStarlink/
+  // satOneweb (several hundred to several thousand objects, and imaging is
+  // on by default) draw on entityWebglLayer's shared GPU-batched canvas
+  // instead, the same one AIS/ADS-B already use -- that is the one renderer
+  // on this map already proven to carry thousands of moving points without
+  // per-marker DOM cost, and hundreds-to-thousands of markers was never a
+  // reasonable DOM-path number to begin with (see webglLayer.js's own
+  // opening comment on why it exists at all). Declutter offsets and per-pin
+  // zoom gating are deliberately not wired up for either path here -- Task
+  // 24's brief is the propagation and the toggles, not a second pass over
+  // the placement system for seven more layers; a future task can add it
+  // the way it was added for stations/military if it turns out to matter at
+  // these object counts.
+
+  /** GET /api/satellites/elements?groups=<celestrak group>, storing the raw
+   *  OMM element sets for one layer. Never re-fetched automatically after
+   *  the first success -- elements barely change (six hours server-side; see
+   *  ELEMENTS_REFRESH_INTERVAL in backend/sources/satellites.py) -- so, like
+   *  railways/cables/water elsewhere in this file, this is a one-shot fetch
+   *  rather than a poller. */
+  function fetchSatElements(layerKey) {
+    if (satElements[layerKey] != null) return; // already fetched (or in flight)
+    satElements[layerKey] = []; // in flight -- guards a fast double-toggle from double-fetching
+    fetchJson(`/api/satellites/elements?groups=${SAT_ELEMENT_CELESTRAK_GROUP[layerKey]}`)
+      .then((data) => {
+        satElements[layerKey] = Array.isArray(data) ? data : [];
+        tickSatElementLayer(layerKey, true); // first fix immediately, not up to two minutes late
+      })
+      .catch((err) => {
+        satElements[layerKey] = null; // let the next attempt retry rather than pin an empty layer
+        console.warn(`Failed to load satellite elements for ${layerKey}:`, err);
+      });
+  }
+
+  /** A real SGP4 pass (satElementTracker.tick) for one layer's currently-held
+   *  element sets, gated by its own cadence unless `force`. Registers every
+   *  element set with the shared tracker first -- setElements is a no-op for
+   *  an object whose epoch has not changed, so this is cheap to call on
+   *  every redraw tick and only actually rebuilds a satrec when the elements
+   *  themselves refresh. */
+  function tickSatElementLayer(layerKey, force = false) {
+    const elements = satElements[layerKey];
+    if (!elements || !elements.length) return;
+    for (const omm of elements) satElementTracker.setElements(omm.NORAD_CAT_ID, omm);
+    const now = Date.now();
+    const last = satElementLastTick[layerKey] || 0;
+    if (!force && now - last < satElementCadenceMs(layerKey)) return;
+    satElementLastTick[layerKey] = now;
+    satElementTracker.tick(new Date(now));
+  }
+
+  function satElementPositions(layerKey) {
+    const elements = satElements[layerKey];
+    if (!elements || !elements.length) return [];
+    const now = new Date();
+    const out = [];
+    for (const omm of elements) {
+      const pos = satElementTracker.positionAt(omm.NORAD_CAT_ID, now);
+      if (!pos) continue; // no fix yet (still loading), or the element set doesn't propagate at all
+      out.push({ norad_id: omm.NORAD_CAT_ID, name: omm.OBJECT_NAME, lat: pos.lat, lon: pos.lon, alt_km: pos.alt_km });
+    }
+    return out;
+  }
+
+  function buildSatElementMarker(item, layerKey, copy = 0) {
+    const d = decorateSatElement(item, layerKey, { offset: offsetFor(layerKey, item.norad_id) });
+    const marker = L.marker(drawLatLng(item, copy), { icon: d.icon });
+    marker._item = item;
+    marker._iconHtml = d.icon.options.html;
+    applyStacking(marker, detailSize(satElementStyle(layerKey).size), layerKey);
+    marker.bindPopup(() => decorateSatElement(marker._item, layerKey).detail, popupOptions(320));
+    marker.bindTooltip(() => decorateSatElement(marker._item, layerKey).tooltip, {
+      className: "map-tooltip",
+      direction: "top",
+    });
+    return marker;
+  }
+
+  function updateSatElementMarker(marker, item, layerKey, copy = 0) {
+    marker._item = item;
+    marker.setLatLng(drawLatLng(item, copy));
+    const d = decorateSatElement(item, layerKey, { offset: offsetFor(layerKey, item.norad_id) });
+    if (marker._iconHtml !== d.icon.options.html) {
+      marker.setIcon(d.icon);
+      marker._iconHtml = d.icon.options.html;
+    }
+  }
+
+  const SAT_ELEMENT_DOM_GROUP = {
+    satNavigation: satNavigationGroup, satWeather: satWeatherGroup, satScience: satScienceGroup,
+  };
+
+  /** DOM-marker render for one of the three small groups. Ungated (see
+   *  map/scene.js's satNavigation/satWeather/satScience entries) so, like
+   *  renderSatellites above, the viewport filter is the only zoom question
+   *  here. */
+  function renderSatElementLayer(layerKey) {
+    if (!satElementVisible[layerKey]) return;
+    const inView = viewportFilter();
+    const visible = satElementPositions(layerKey).filter((s) => inView(s.lat, s.lon));
+    registerPlacement(
+      layerKey,
+      visible.map((s) => ({ id: s.norad_id, lat: s.lat, lon: s.lon, size: detailSize(satElementStyle(layerKey).size) }))
+    );
+    syncAcrossWorldCopies(
+      markersByKey[layerKey], SAT_ELEMENT_DOM_GROUP[layerKey], visible, (s) => s.norad_id,
+      (item, copy) => buildSatElementMarker(item, layerKey, copy),
+      (marker, item, copy) => updateSatElementMarker(marker, item, layerKey, copy)
+    );
+    counts[layerKey] = visible.length;
+    totals[layerKey] = (satElements[layerKey] || []).length;
+    scheduleReports({ counts: true });
+    settlePlacement();
+  }
+
+  /** WebGL-bucket render for one of the four bulk groups. No viewport filter
+   *  and no declutter offsets -- entityWebglLayer already reprojects and
+   *  culls off-screen sprites on its own (see webglLayer.js's _reset/
+   *  _repositionAll), the same unfiltered-feed approach renderAisLayer/
+   *  renderAdsbLayer already take for their own, larger buckets. */
+  function renderSatElementWebgl(layerKey) {
+    if (!satElementVisible[layerKey]) return;
+    const visible = satElementPositions(layerKey);
+    const style = satElementStyle(layerKey);
+    entityWebglLayer.updateEntities(layerKey, visible, {
+      idField: (s) => s.norad_id,
+      heading: () => NaN, // orbital motion has no meaningful "nose" to point a sprite at
+      style: () => style,
+      isSelected: () => false, // no click-to-select model for satellites -- see decorateSatellite's own note
+      onSelect: () => {},
+      getTooltip: (s) => decorateSatElement(s, layerKey).tooltip,
+      offsets: undefined,
+    });
+    counts[layerKey] = visible.length;
+    totals[layerKey] = (satElements[layerKey] || []).length;
+    scheduleReports({ counts: true });
+  }
+
+  function renderSatElement(layerKey) {
+    if (SAT_ELEMENT_LAYERS[layerKey].dom) renderSatElementLayer(layerKey);
+    else renderSatElementWebgl(layerKey);
+  }
+
+  /** The redraw tick: ticks whichever layers are visible and due for a real
+   *  SGP4 pass (see satElementCadenceMs), then redraws every visible layer's
+   *  interpolated positions regardless -- called on its own timer
+   *  (SAT_ELEMENT_REDRAW_MS) rather than from renderAllLayers, since these
+   *  seven have to keep moving even while the camera sits still. */
+  function tickAndRedrawSatElements() {
+    for (const layerKey of Object.keys(SAT_ELEMENT_CELESTRAK_GROUP)) {
+      if (!satElementVisible[layerKey]) continue;
+      tickSatElementLayer(layerKey);
+      renderSatElement(layerKey);
     }
   }
 
@@ -5724,6 +6026,15 @@ export function createMapController(container, initial, callbacks) {
     // last poll.
     renderLaneDensity();
     renderSatellites();
+    // Task 24's three DOM-marker groups bounds-filter to the viewport too
+    // (see renderSatElementLayer), so they need the same pan/zoom catch-up
+    // renderSatellites gets just above. The four WebGL ones do not: they are
+    // unfiltered feeds on a canvas that reprojects itself (see
+    // renderSatElementWebgl's own note), and are instead kept moving by
+    // their own timer -- see tickAndRedrawSatElements.
+    renderSatElementLayer("satNavigation");
+    renderSatElementLayer("satWeather");
+    renderSatElementLayer("satScience");
     updateCountryWarFlare();
   }
 
@@ -6124,6 +6435,16 @@ export function createMapController(container, initial, callbacks) {
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
   refreshPrecipRadar();
   precipRefreshTimer = setInterval(refreshPrecipRadar, 10 * 60 * 1000); // matches RainViewer's own pass cadence
+  // Task 24: navigation/weather/imaging are on by default (see map/scene.js),
+  // so their element sets are fetched here at boot rather than waiting for a
+  // reader to switch anything on -- the same one-shot pattern railways/
+  // cables/water use, not a POLL_CONFIG row (see fetchSatElements). The other
+  // four (science/geo/starlink/oneweb) are off by default and fetch on their
+  // own first toggle instead -- see setLayerVisible.
+  fetchSatElements("satNavigation");
+  fetchSatElements("satWeather");
+  fetchSatElements("satImaging");
+  satElementTickTimer = setInterval(tickAndRedrawSatElements, SAT_ELEMENT_REDRAW_MS);
   function onVisibilityChange() {
     if (!document.hidden) refreshWindArrows(); // catch up immediately instead of waiting out the rest of the 5min interval
   }
@@ -6587,6 +6908,7 @@ export function createMapController(container, initial, callbacks) {
     destroy() {
       clearInterval(windRefreshTimer);
       clearInterval(precipRefreshTimer);
+      clearInterval(satElementTickTimer);
       clearTimeout(moveEndWindTimer);
       clearTimeout(moveEndRiversTimer);
       clearTimeout(regionFlightTimer);

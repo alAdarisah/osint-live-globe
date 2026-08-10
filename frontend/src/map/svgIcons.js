@@ -778,6 +778,18 @@ export const GLYPH_CHOICES = Object.freeze({
   // ---- space, news, diplomacy, places ----
   "satellite.stations": ["satellite", "satelliteMilitary", "globe", "launchPad"],
   "satellite.military": ["satelliteMilitary", "satellite", "radarBase", "globe"],
+  // Task 24: the seven client-propagated groups all ship with the plain
+  // `satellite` glyph (see SAT_ELEMENT_LAYERS in map/decorators.js) and offer
+  // the same picker list as satellite.stations -- nothing about which group a
+  // pin belongs to is a shape distinction, so there is no reason for one
+  // group's picker to differ from another's.
+  "satellite.navigation": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.weather": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.imaging": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.science": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.geo": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.starlink": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.oneweb": ["satellite", "satelliteMilitary", "globe", "launchPad"],
   // An upcoming launch is a thing that has not happened; a flown one is a
   // record of one that has. The last entry on each says so.
   "launch.upcoming": ["launchPad", "missileBase", "satellite", "alertRing"],

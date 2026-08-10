@@ -42,6 +42,15 @@ export const SETTINGS_LAYERS = [
   { key: "cities", label: "Cities" },
   { key: "infra", label: "Critical infrastructure" },
   { key: "satellites", label: "Satellites" },
+  // Task 24: client-propagated satellite layers -- see map/scene.js's own
+  // entries for which are on by default and why.
+  { key: "satNavigation", label: "Satellites: navigation (GPS/Galileo/GLONASS/Beidou)" },
+  { key: "satWeather", label: "Satellites: weather" },
+  { key: "satImaging", label: "Satellites: Earth imaging" },
+  { key: "satScience", label: "Satellites: science" },
+  { key: "satGeo", label: "Satellites: geostationary" },
+  { key: "satStarlink", label: "Satellites: Starlink" },
+  { key: "satOneweb", label: "Satellites: OneWeb" },
   { key: "aisNavy", label: "Navy & MSC ships" },
   { key: "aisTanker", label: "Oil tankers" },
   { key: "aisCivilian", label: "Civilian ships" },

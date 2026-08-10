@@ -17,7 +17,12 @@ import { IconField } from "../fields";
 // (see STACK_ALIAS in map/iconTheme.js), and both say so.
 export const STACK_LABEL = {
   ...Object.fromEntries(SETTINGS_LAYERS.map((l) => [l.key, l.label])),
-  vehicles: "Ships & aircraft (one canvas)",
+  // Task 24 added satImaging/satGeo/satStarlink/satOneweb to this same shared
+  // WebGL canvas (see STACK_ALIAS in map/iconTheme.js) -- ships, aircraft and
+  // now four of the seven client-propagated satellite layers all draw on it,
+  // so they share this one row in the stack order rather than getting four
+  // more.
+  vehicles: "Ships, aircraft & bulk satellites (one canvas)",
   cables: "Submarine cables & landings",
   outagePoints: "Internet disruption (IODA)",
   firms: "Fires / thermal anomalies (FIRMS)",

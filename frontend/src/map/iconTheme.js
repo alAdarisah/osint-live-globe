@@ -112,6 +112,17 @@ export const PALETTE_GROUPS = [
       { id: "infra.pipeline", label: "Pipeline node & routes", value: "#ffb347" },
       { id: "satellite.stations", label: "Space station", value: "#6fe3ff" },
       { id: "satellite.military", label: "Military satellite", value: "#ff4d4d" },
+      // Task 24: client-propagated groups (see map/decorators.js's
+      // SAT_ELEMENT_LAYERS and backend/sources/satellites.py's
+      // ELEMENT_LAYER_GROUPS). Colour is the only distinction between them --
+      // all seven share the one satellite glyph above.
+      { id: "satellite.navigation", label: "Navigation satellite", value: "#8ad1ff" },
+      { id: "satellite.weather", label: "Weather satellite", value: "#ffd166" },
+      { id: "satellite.imaging", label: "Earth-imaging satellite", value: "#9ee6a8" },
+      { id: "satellite.science", label: "Science satellite", value: "#c9b6ff" },
+      { id: "satellite.geo", label: "Geostationary satellite", value: "#ff9f6f" },
+      { id: "satellite.starlink", label: "Starlink satellite", value: "#7ee0c9" },
+      { id: "satellite.oneweb", label: "OneWeb satellite", value: "#6fe3ff" },
       // One row per runway layout, not one row for "civil". The three tiers
       // draw three different glyphs (see AIRFIELD_STYLE in decorators.js), and
       // under a single token the shape picker could only flatten them onto one
@@ -314,6 +325,13 @@ export const TOKEN_LAYER = Object.freeze({
   "infra.pipeline": "infra",
   "satellite.stations": "satellites",
   "satellite.military": "satellites",
+  "satellite.navigation": "satNavigation",
+  "satellite.weather": "satWeather",
+  "satellite.imaging": "satImaging",
+  "satellite.science": "satScience",
+  "satellite.geo": "satGeo",
+  "satellite.starlink": "satStarlink",
+  "satellite.oneweb": "satOneweb",
   "airfield.large": "airports",
   "airfield.medium": "airports",
   "airfield.small": "airports",
@@ -375,7 +393,12 @@ export const TOKEN_LAYER = Object.freeze({
 // inferred or in motion, then the places all of it happened to.
 export const PIN_STACK = [
   "events", "conflictHistory", "czib", "hazards", "floods", "gdelt", "officials",
-  "darkVessels", "gfwGaps", "gfwDetections", "satellites", "launches",
+  "darkVessels", "gfwGaps", "gfwDetections", "satellites",
+  // The three DOM-marker client-propagated groups (Task 24), right beside
+  // the server-propagated satellites above -- one family, split only by how
+  // each is computed. satImaging/satGeo/satStarlink/satOneweb are not here:
+  // they draw on the WebGL entity canvas instead (see STACK_ALIAS below).
+  "satNavigation", "satWeather", "satScience", "launches",
   "cities", "infra", "osmInfra", "deflock", "airports", "ports", "dams",
   "railways", "cables", "shippingLanes", "outagePoints",
 ];
@@ -396,10 +419,19 @@ export const WASH_STACK = ["vehicles", "jamming", "firms", "laneDensity"];
  * each its own would undo the reason it exists. Cable landings are drawn as part
  * of the cables layer for the same reason its checkbox covers both: a cable and
  * the place it comes ashore are one fact.
+ *
+ * satImaging/satGeo/satStarlink/satOneweb (Task 24) join the same canvas for
+ * the same reason the six above do -- several hundred to several thousand
+ * objects apiece is exactly the count the WebGL path exists for, and a DOM
+ * marker per object was never on the table for these four (see
+ * createMapController.js's DOM-vs-WebGL note). The three small groups drawn
+ * as DOM markers instead (satNavigation/satWeather/satScience) sit in
+ * PIN_STACK directly, beside `satellites`, rather than here.
  */
 export const STACK_ALIAS = Object.freeze({
   aisNavy: "vehicles", aisTanker: "vehicles", aisCivilian: "vehicles",
   adsbMilitary: "vehicles", adsbCivilian: "vehicles", adsbFlagged: "vehicles",
+  satImaging: "vehicles", satGeo: "vehicles", satStarlink: "vehicles", satOneweb: "vehicles",
   cableLandings: "cables",
   firmsPoints: "firms",
 });

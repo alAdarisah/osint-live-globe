@@ -7,7 +7,7 @@ import {
   LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
   GFW_GAP_STYLE, GFW_DETECTION_STYLE, GFW_DETECTION_ORDER,
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
-  WATER_STYLE, SHIPPING_LANE_STYLE, LANE_DENSITY_STYLE,
+  WATER_STYLE, SHIPPING_LANE_STYLE, LANE_DENSITY_STYLE, SAT_ELEMENT_LAYERS,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
@@ -79,6 +79,23 @@ const INFRA_ROWS = [
 
 const MILITARY_SUBTYPE_ORDER = ["air", "naval", "army", "missile", "joint", "logistics", "radar"];
 
+// Task 24: the seven client-propagated satellite toggles, in the order the
+// panel lists them. `hardGate`, where present, is the object-count warning
+// shown under the row -- only starlink and oneweb carry one, per the task
+// brief. Object counts here are the roughly-known scale of each CelesTrak
+// group at the time this was written (see backend/sources/satellites.py's
+// comments on each group), not a live count the panel could otherwise show
+// before the layer has ever been switched on.
+const SAT_ELEMENT_ROWS = [
+  { key: "satNavigation", label: "Navigation (GPS, Galileo, GLONASS, Beidou)" },
+  { key: "satWeather", label: "Weather" },
+  { key: "satImaging", label: "Earth imaging" },
+  { key: "satScience", label: "Science" },
+  { key: "satGeo", label: "Geostationary" },
+  { key: "satStarlink", label: "Starlink", hardGate: "~7,000" },
+  { key: "satOneweb", label: "OneWeb", hardGate: "~650" },
+];
+
 // How many of a group's layers are currently on, shown on the group's own
 // heading so a collapsed group still reports whether it is doing anything.
 function activeCount(layerVisibility, keys) {
@@ -108,7 +125,10 @@ const GROUP_LAYERS = {
   // traffic already carries nine layers.
   airspace: ["czib"],
   hazards: ["hazards", "floods"],
-  space: ["satellites", "launches"],
+  space: [
+    "satellites", "satNavigation", "satWeather", "satImaging", "satScience",
+    "satGeo", "satStarlink", "satOneweb", "launches",
+  ],
 };
 
 // Per-kind rows under the hazards toggle. Same "the swatch is the real glyph"
@@ -1441,6 +1461,33 @@ export default function LayersSection({
             </span>
           </div>
         </LayerDetails>
+
+        {/* Task 24: client-propagated groups -- stored CelesTrak element sets,
+            SGP4'd in the browser (map/satPropagate.js) rather than here, one
+            row per control-panel toggle (backend/sources/satellites.py's
+            ELEMENT_LAYER_GROUPS). navigation/weather/imaging are on by
+            default; science/geo/starlink/oneweb are off, and the last two
+            carry a hard-gate warning about their object count -- see the
+            task brief and SAT_ELEMENT_LAYERS in map/decorators.js. */}
+        {SAT_ELEMENT_ROWS.map(({ key, label, hardGate }) => (
+          <label className="layer-row sub-row" data-layer={key} key={key}>
+            <LayerCheck
+              layerKey={key}
+              on={layerVisibility[key]}
+              wish={layerWish?.[key]}
+              onToggle={onToggleLayer}
+            />
+            <LayerIcon svg={SAT_ELEMENT_LAYERS[key].svg} color={SAT_ELEMENT_LAYERS[key].color} token={SAT_ELEMENT_LAYERS[key].token} />
+            {" "}{label}
+            <span className="count">{counts[key]} ({counts[`${key}Total`]})</span>
+            {hardGate ? (
+              <div className="sublegend">
+                {hardGate} objects. Propagating and drawing that many in the browser is real
+                work every frame -- switch this on only if you want it.
+              </div>
+            ) : null}
+          </label>
+        ))}
 
         <label className="layer-row" data-layer="launches">
           <LayerCheck
