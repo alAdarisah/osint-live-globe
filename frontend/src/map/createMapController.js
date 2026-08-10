@@ -161,7 +161,7 @@ import {
   worldCopyOffsets, worldCopyDraws, worldCopyKey, worldCopyPlacer, shiftPathLon,
 } from "../utils/geo";
 import { createGenerationGuard } from "../utils/fetchGeneration";
-import { fetchJson, vesselDetailUrl, portCallsUrl } from "../api";
+import { fetchJson, vesselDetailUrl, portCallsUrl, aircraftDetailUrl } from "../api";
 
 // A nearby ACLED/GDELT event within this radius flags an infrastructure
 // site as a "hot zone" and triggers its flare animation -- same radius
@@ -722,6 +722,12 @@ export function createMapController(container, initial, callbacks) {
   // icao24 before an earlier /api/track/adsb request for it resolves must not
   // let that earlier response overwrite the popup with an older track.
   const aircraftTrackGuard = createGenerationGuard();
+  // Same race again, for /api/aircraft/{icao24} (Task 23's Route section).
+  // This is a *third* independent fetch racing to update the same aircraft
+  // popup (alongside the live poll and the recorded-track fetch above), so
+  // selectAircraft keeps its own last-known answer for each and rebuilds the
+  // popup from both together -- see selectAircraft's `refresh` closure.
+  const aircraftDetailGuard = createGenerationGuard();
   // port_id -> {status: "loading"|"ready"|"error", data} for the port card's
   // "recent arrivals and departures" fetch -- not a request cache (see
   // loadPortTraffic, which refetches on every open), just the hand-off
@@ -2317,17 +2323,42 @@ export function createMapController(container, initial, callbacks) {
     shipPopup.setContent(d.detail);
   }
 
-  // Refreshes the open aircraft popup once /api/track/adsb/{icao} answers,
-  // the same follow-up loadVesselDetail does for the ship card (Task 17).
-  // decorateAdsb's vertical trend (Task 22) is derived from this recorded
-  // track rather than anything watched client-side -- the endpoint already
-  // gets fetched here for the trail, so this spends no second request, only
-  // the popup refresh that request's answer didn't used to get.
+  // Fetches /api/aircraft/{icao24} (Task 23) and hands the settled entry to
+  // `onDetail` -- the same shape loadRecordedTrack hands its points to
+  // onPoints, rather than writing the popup itself the way loadVesselDetail
+  // does. It has to be a hand-off, not a direct write: selectAircraft below
+  // already has a second fetch (the recorded track) racing to update the
+  // very same popup, and each has to merge its own answer with whatever the
+  // other last produced rather than one overwriting the other's section.
   //
-  // aircraftTrackGuard guards the same race vesselDetailGuard does: reselecting
-  // the *same* icao24 before an earlier request for it resolves must not let
-  // that earlier response land after the later one and overwrite the popup
-  // with an older track.
+  // Same "error" state on failure as loadVesselDetail, for the same reason:
+  // the Route section has no earlier render to fall back to, so a failure
+  // has to say "unavailable" rather than silently stay blank.
+  async function loadAircraftDetail(icao24, stillSelected, onDetail) {
+    let entry;
+    try {
+      const data = await fetchJson(aircraftDetailUrl(icao24));
+      entry = { status: "ready", data };
+    } catch {
+      entry = { status: "error" };
+    }
+    if (!stillSelected()) return;
+    onDetail(entry);
+  }
+
+  // Refreshes the open aircraft popup once /api/track/adsb/{icao} and/or
+  // /api/aircraft/{icao24} answer, the same follow-up loadVesselDetail does
+  // for the ship card (Task 17) -- except here there are two independent
+  // fetches racing to update the same popup (the recorded track, for
+  // decorateAdsb's vertical trend, and the flight-leg detail for its Route
+  // section), so `latestTrack`/`latestFlightDetail` and the shared `refresh`
+  // closure exist to merge whichever has landed so far into one re-render,
+  // rather than the second fetch's callback clobbering the first's.
+  //
+  // aircraftTrackGuard/aircraftDetailGuard guard the same race
+  // vesselDetailGuard does: reselecting the *same* icao24 before an earlier
+  // request for it resolves must not let that earlier response land after
+  // the later one and overwrite the popup with older data.
   function selectAircraft(item) {
     selectedIcao = selectedIcao === item.icao24 ? null : item.icao24;
     if (selectedIcao) {
@@ -2336,19 +2367,34 @@ export function createMapController(container, initial, callbacks) {
       // looked like flight history didn't work.
       updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
       const chosen = selectedIcao;
+      // undefined until each fetch's own callback below sets it -- decorateAdsb
+      // reads "still undefined" as "still fetching" for both.
+      let latestTrack;
+      let latestFlightDetail;
+      const refresh = () => {
+        if (selectedIcao !== chosen || !aircraftPopup) return;
+        const d = decorateAdsb(item, { selectedIcao, track: latestTrack, flightDetail: latestFlightDetail });
+        aircraftPopup.setContent(d.detail);
+      };
       const trackToken = aircraftTrackGuard.start(chosen);
       loadRecordedTrack(
         "adsb", chosen, aircraftTrails, AIRCRAFT_TRAIL_MAX_POINTS,
         () => selectedIcao === chosen, renderAdsbLayer,
         (points) => {
-          if (!aircraftTrackGuard.isCurrent(chosen, trackToken) || selectedIcao !== chosen || !aircraftPopup) return;
-          const d = decorateAdsb(item, { selectedIcao, track: points });
-          aircraftPopup.setContent(d.detail);
+          if (!aircraftTrackGuard.isCurrent(chosen, trackToken)) return;
+          latestTrack = points;
+          refresh();
         }
       );
-      // track is omitted (undefined) on this first, synchronous render --
-      // decorateAdsb reads that as "still fetching" and says so, the same way
-      // vesselDetail starts undefined in selectShip below.
+      const detailToken = aircraftDetailGuard.start(chosen);
+      loadAircraftDetail(chosen, () => selectedIcao === chosen, (entry) => {
+        if (!aircraftDetailGuard.isCurrent(chosen, detailToken)) return;
+        latestFlightDetail = entry;
+        refresh();
+      });
+      // track/flightDetail are omitted (undefined) on this first, synchronous
+      // render -- decorateAdsb reads that as "still fetching" and says so, the
+      // same way vesselDetail starts undefined in selectShip below.
       const d = decorateAdsb(item, { selectedIcao });
       aircraftPopup = L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
     } else {

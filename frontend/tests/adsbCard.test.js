@@ -337,3 +337,111 @@ test("nearest_airfield is stated as proximity, never as a filed destination", ()
   assert.match(detail, /not a filed origin or destination/);
   assert.match(detail, /ADS-B carries no flight plan/);
 });
+
+// --- decorateAdsb: Route section (Task 23: GET /api/aircraft/{icao24}) ------
+
+const LEG = {
+  departed_at: 1_700_000_000, arrived_at: 1_700_010_000,
+  origin_code: "KJFK", dest_code: "EGLL", confidence: "observed_both",
+  max_alt_ft: 35000, distance_km: 5500.2,
+};
+
+const OPEN_LEG = {
+  departed_at: 1_700_500_000, arrived_at: null,
+  origin_code: "EGLL", dest_code: null, confidence: "observed_one",
+  max_alt_ft: 12000, distance_km: 400,
+};
+
+test("an unselected aircraft carries no Route section at all -- the fetch is per-selection", () => {
+  const { detail } = decorateAdsb(AIRCRAFT, { selectedIcao: "some-other-aircraft" });
+  assert.doesNotMatch(detail, /Route/);
+});
+
+test("a freshly selected aircraft's Route section says it is loading, before the fetch resolves", () => {
+  const { detail } = decorateAdsb({ ...AIRCRAFT, icao24: "freshcontact" }, { selectedIcao: "freshcontact" }); // flightDetail omitted
+  assert.match(detail, /csection-h">Route/);
+  assert.match(detail, /Loading/);
+});
+
+test("a failed aircraft-detail fetch says the flight-leg history is unavailable, not silently blank", () => {
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "failedfetch" },
+    { selectedIcao: "failedfetch", flightDetail: { status: "error" } }
+  );
+  assert.match(detail, /Flight-leg history unavailable/);
+});
+
+test("the Route section opens with the no-flight-plan honesty line, verbatim", () => {
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "honest1" },
+    { selectedIcao: "honest1", flightDetail: { status: "ready", data: { legs: [LEG], current_leg: null } } }
+  );
+  assert.match(detail, /ADS-B broadcasts no flight plan/);
+  assert.match(detail, /never a filed route/);
+});
+
+test("an airframe with no recorded legs yet says so rather than showing an empty table", () => {
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "nolegs" },
+    { selectedIcao: "nolegs", flightDetail: { status: "ready", data: { legs: [], current_leg: null } } }
+  );
+  assert.match(detail, /No flight legs recorded for this airframe yet/);
+});
+
+test("a completed leg's table row carries origin, destination and confidence", () => {
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "onelegged" },
+    { selectedIcao: "onelegged", flightDetail: { status: "ready", data: { legs: [LEG], current_leg: null } } }
+  );
+  assert.match(detail, /KJFK/);
+  assert.match(detail, /EGLL/);
+  assert.match(detail, /Both ends observed/);
+  assert.match(detail, /35,000 ft/);
+  assert.match(detail, /5500 km/);
+});
+
+test("an open leg is called out as currently airborne, distinct from the table of completed legs", () => {
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "airborne1" },
+    { selectedIcao: "airborne1", flightDetail: { status: "ready", data: { legs: [OPEN_LEG], current_leg: OPEN_LEG } } }
+  );
+  assert.match(detail, /Currently airborne/);
+  assert.match(detail, /from EGLL/);
+  assert.match(detail, /One end observed/);
+  assert.match(detail, /still open/); // the open leg's own table row, no arrival time
+});
+
+test("a leg with no resolved origin says Unknown rather than rendering blank", () => {
+  const legWithNoOrigin = { ...LEG, origin_code: null };
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "noorigin" },
+    { selectedIcao: "noorigin", flightDetail: { status: "ready", data: { legs: [legWithNoOrigin], current_leg: null } } }
+  );
+  assert.match(detail, /<td>Unknown<\/td>/);
+});
+
+test("the cargo hint appears verbatim when the backend supplies one, and never asserts a commodity", () => {
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "freighter1" },
+    {
+      selectedIcao: "freighter1",
+      flightDetail: {
+        status: "ready",
+        data: {
+          legs: [LEG], current_leg: null,
+          cargo_hint: "Boeing 767-300F, operated by Cargo Air, tracked KJFK to EGLL -- aircraft class suggests freight. No cargo or commodity is asserted.",
+        },
+      },
+    }
+  );
+  assert.match(detail, /aircraft class suggests freight/);
+  assert.match(detail, /No cargo or commodity is asserted/);
+});
+
+test("no cargo hint from the backend means no cargo sentence on the card", () => {
+  const { detail } = decorateAdsb(
+    { ...AIRCRAFT, icao24: "nocargo" },
+    { selectedIcao: "nocargo", flightDetail: { status: "ready", data: { legs: [LEG], current_leg: null, cargo_hint: null } } }
+  );
+  assert.doesNotMatch(detail, /suggests freight/);
+});

@@ -1423,25 +1423,38 @@ def _flight_leg_row(item: dict) -> tuple | None:
     )
 
 
-async def record_flight_legs(rows: list[dict]) -> None:
+async def record_flight_legs(rows: list[dict]) -> bool:
     """Upserts a batch of detected flight legs.
 
     Keyed on (icao24, departed_at): a later write for the same key -- the
     same leg tracked further, with an arrival now resolved -- updates the row
     in place rather than creating a second one.
+
+    Returns whether the batch is now durably written, following
+    record_port_calls' own contract exactly (True when there was nothing to
+    write or the write succeeded, False otherwise, never raising). The same
+    justification applies here as there: backend/refine/flight_legs.py reads
+    entity_history exactly once through an ever-advancing id cursor over a
+    table with its own retention, so "logged and moved on" would mean "logged
+    and lost", not "stale until the next poll re-supplies it". That caller
+    holds its cursor back on False and retries the same batch next pass.
     """
-    if _pool is None or not rows:
-        return
+    if not rows:
+        return True
     tuples = [t for t in (_flight_leg_row(r) for r in rows) if t is not None]
     if not tuples:
-        return
+        return True
+    if _pool is None:
+        return False
     try:
         async with _pool.acquire() as conn:
             async with conn.transaction():
                 for start in range(0, len(tuples), _BATCH):
                     await conn.executemany(_UPSERT_FLIGHT_LEG, tuples[start:start + _BATCH])
+        return True
     except Exception:  # noqa: BLE001 - storage must never take a refine job down
         log.exception("Failed to record %d flight legs", len(tuples))
+        return False
 
 
 def _flight_leg_dict(r) -> dict:

@@ -3293,7 +3293,83 @@ export function verticalTrend(track) {
 
 const VERTICAL_TREND_LABEL = { climbing: "Climbing", descending: "Descending", level: "Level" };
 
-export function decorateAdsb(d, { selectedIcao, track } = {}) {
+// ---------- flight legs (Task 23: GET /api/aircraft/{icao24}) --------------
+//
+// Same fetch-after-the-popup-opens shape as vessel detail above (Task 17):
+// createMapController.js's loadAircraftDetail fetches this once selectAircraft
+// has already drawn the popup from the live ADS-B record, so every state that
+// fetch can be in has to render honestly here too -- absent/"loading" while
+// in flight, "error" on failure (the brief requires "unavailable", never a
+// silent gap), "ready" once it lands. `flightDetail` is only ever passed for
+// the selected airframe -- see decorateAdsb below -- so no other aircraft's
+// popup (built lazily, on its own open) pays for this.
+
+const LEG_CONFIDENCE_LABEL = {
+  observed_both: "Both ends observed",
+  observed_one: "One end observed",
+  inferred: "Neither end observed (inferred)",
+};
+
+function fmtAltFt(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value).toLocaleString()} ft` : "n/a";
+}
+
+function fmtDistanceKm(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(0)} km` : "n/a";
+}
+
+function flightLegRow(leg) {
+  const origin = leg.origin_code || "Unknown";
+  const dest = leg.dest_code || (leg.arrived_at ? "Unknown" : "In progress");
+  return `<tr>
+    <td>${esc(utcClockFromUnix(leg.departed_at))}</td>
+    <td>${esc(origin)}</td>
+    <td>${esc(dest)}</td>
+    <td>${leg.arrived_at ? esc(utcClockFromUnix(leg.arrived_at)) : '<span class="meta">still open</span>'}</td>
+    <td>${fmtAltFt(leg.max_alt_ft)}</td>
+    <td>${fmtDistanceKm(leg.distance_km)}</td>
+    <td>${esc(LEG_CONFIDENCE_LABEL[leg.confidence] || leg.confidence || "n/a")}</td>
+  </tr>`;
+}
+
+/** The Route fold. Opens with the honesty caveat the brief requires verbatim:
+ * ADS-B carries no flight plan, so every origin/destination below it is read
+ * off where this airframe was actually seen, never a filed route. */
+function routeSection(flightDetail) {
+  const head = '<div class="csection-h">Route</div>' +
+    '<p class="meta">ADS-B broadcasts no flight plan. Origin and destination below are inferred from ' +
+    "where this airframe was seen leaving or returning to the ground (or crossing 1,500 ft near a known " +
+    "airfield) &mdash; never a filed route, and never more certain than each leg's own confidence says.</p>";
+  if (!flightDetail || flightDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (flightDetail.status === "error") {
+    return `${head}<p class="meta"><b>Flight-leg history unavailable</b> &mdash; the aircraft-detail request failed.</p>`;
+  }
+  const data = flightDetail.data || {};
+  const legs = data.legs || [];
+  const current = data.current_leg;
+  if (!legs.length) {
+    return `${head}<p class="meta">No flight legs recorded for this airframe yet.</p>`;
+  }
+  const currentNote = current
+    ? `<p class="meta"><b>Currently airborne:</b> departed ${esc(utcClockFromUnix(current.departed_at))}` +
+      `${current.origin_code ? ` from ${esc(current.origin_code)}` : " from an unknown origin"} &mdash; ` +
+      `${esc(LEG_CONFIDENCE_LABEL[current.confidence] || current.confidence || "n/a")}</p>`
+    : "";
+  return `
+    ${head}
+    ${currentNote}
+    <table class="food-estimates flight-legs-table">
+      <tr><th>Departed</th><th>Origin</th><th>Dest</th><th>Arrived</th><th>Max alt</th><th>Distance</th><th>Confidence</th></tr>
+      ${legs.slice(0, 10).map(flightLegRow).join("")}
+    </table>
+    ${data.cargo_hint ? `<p class="meta">${esc(data.cargo_hint)}</p>` : ""}
+    <div class="meta">Source: this app's own flight-leg job, over OpenSky Network + airplanes.live ADS-B
+      position history &mdash; <i>inferred</i>, never a filed flight plan</div>`;
+}
+
+export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
   const type = classifyAircraft(d);
   const base = (type === "military" && d.military_role && MILITARY_ROLE_STYLE[d.military_role]) || AIRCRAFT_STYLE[type];
   const style = withAircraftFlag(themedStyle(base, AIRCRAFT_LAYER_KEY[type]), d);
@@ -3405,7 +3481,8 @@ export function decorateAdsb(d, { selectedIcao, track } = {}) {
     )} (ADS-B) &mdash; position, altitude, speed and heading <i>measured</i> by the aircraft's own transponder;
       identity fields (registration, operator, type) <i>reported</i> by airplanes.live's reference data, where it
       has an entry; ICAO allocation country <i>derived</i> from the Mode-S address block; vertical trend
-      <i>derived</i> from this aircraft's own recorded track${airfield ? "; airfields: OurAirports" : ""}</div>`;
+      <i>derived</i> from this aircraft's own recorded track${airfield ? "; airfields: OurAirports" : ""}</div>
+    ${d.icao24 === selectedIcao ? routeSection(flightDetail) : ""}`;
   let cls = "aircraft-marker";
   if (type === "military") cls += " military-marker";
   if (flag) cls += ` aircraft-flagged aircraft-${flag === "emergency" ? "emergency" : "hidden"}`;

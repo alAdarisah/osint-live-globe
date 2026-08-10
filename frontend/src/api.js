@@ -107,3 +107,14 @@ export function vesselDetailUrl(mmsi) {
 export function portCallsUrl(portId) {
   return `/api/vessel/port/${encodeURIComponent(portId)}`;
 }
+
+/**
+ * The aircraft-card endpoint (Task 23's /api/aircraft/{icao24}): one
+ * airframe's identity, its last 20 detected flight legs and whatever leg is
+ * currently open. The aviation twin of vesselDetailUrl above, same shape and
+ * same reason -- a per-entity route, keyed by a single icao24 a reader just
+ * clicked, nothing for a second caller to share an ETag with.
+ */
+export function aircraftDetailUrl(icao24) {
+  return `/api/aircraft/${encodeURIComponent(icao24)}`;
+}

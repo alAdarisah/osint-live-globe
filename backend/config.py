@@ -371,6 +371,13 @@ PORT_CALL_INTERVAL = int(os.getenv("PORT_CALL_INTERVAL", "900"))
 # table's own row count becomes the thing worth pruning.
 FLIGHT_LEG_RETENTION_DAYS = int(os.getenv("FLIGHT_LEG_RETENTION_DAYS", "90"))
 
+# How often backend/refine/flight_legs.py reads the next slice of ADS-B
+# history. Same cadence, same reasoning, as PORT_CALL_INTERVAL: nothing about
+# an on_ground/altitude transition is more correctly detected by revisiting it
+# faster than the map's own aircraft positions refresh, and this is the pace a
+# job that has fallen behind catches up at.
+FLIGHT_LEG_INTERVAL = int(os.getenv("FLIGHT_LEG_INTERVAL", "900"))
+
 # How often backend/refine/vessel_profile.py reads the next slice of AIS
 # history. Slower than PORT_CALL_INTERVAL on purpose: a hull's laden/ballast
 # verdict is read off its own draught extremes over HISTORY_RETENTION_SECONDS

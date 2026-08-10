@@ -3720,6 +3720,12 @@ html, body {
 .port-calls-table th,
 .port-calls-table td { text-align: left; white-space: normal; }
 
+/* Task 23's flight-legs table (aircraft card's Route section) is the same
+   shape again -- dates, airport codes, a confidence word -- so it gets the
+   same override rather than food-estimates' right/nowrap defaults. */
+.flight-legs-table th,
+.flight-legs-table td { text-align: left; white-space: normal; }
+
 /* --- text size -------------------------------------------------------
    Admin Mode's text scale, applied to the HUD's own type.
    Every size in this stylesheet is an absolute px (the panels are dense,

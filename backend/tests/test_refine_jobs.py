@@ -47,6 +47,10 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # rows, a grid rather than a point per ship, and GET /api/lanes reads
         # that table directly.
         "backend.refine.lane_density",
+        # Departure/arrival legs derived from the ADS-B movement log, the
+        # aviation twin of port_calls. Publishes no layer either -- it writes
+        # flight_legs rows, read per airframe by GET /api/aircraft/{icao24}.
+        "backend.refine.flight_legs",
     }
 
 

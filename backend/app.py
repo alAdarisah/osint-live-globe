@@ -21,7 +21,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.refine import lane_density, port_call_thresholds
+from backend.refine import flight_legs, lane_density, port_call_thresholds
 from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, water_bodies
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1343,6 +1343,50 @@ async def aircraft(request: Request, region: str | None = None, civilian: str | 
     return _cached_source_response(
         request, "adsb", region, _aircraft_priority_filter, variant="nocivil"
     )
+
+
+@app.get("/api/aircraft/{icao24}")
+async def aircraft_detail(icao24: str):
+    """One airframe's identity and its recent flight legs (Task 23).
+
+    Per-entity route, following /api/vessel/{mmsi}'s shape (Task 17) rather
+    than _cached_source_response: no region filter, no ETag machinery, keyed
+    by a single icao24 a reader just clicked, nothing for a second caller to
+    share.
+
+    Reads flight_legs (backend/refine/flight_legs.py, via flight_legs_for /
+    open_flight_leg) and entity_latest -- never entity_history. That table is
+    read incrementally, on a schedule, by the refine job above; a request
+    path must never open it directly (see global-constraints.md), and
+    nothing below does.
+    """
+    identity, legs, current_leg = await asyncio.gather(
+        storage.entity_latest_one("adsb", icao24),
+        storage.flight_legs_for(icao24, limit=20),
+        storage.open_flight_leg(icao24),
+    )
+    if identity is None and not legs and current_leg is None:
+        raise HTTPException(status_code=404, detail=f"no record for aircraft '{icao24}'")
+
+    # Route context for the cargo hint below: the leg still in progress, if
+    # there is one, otherwise the most recently completed leg -- `legs` is
+    # already newest-departure-first (see flight_legs_for), so index 0 is it.
+    route = current_leg or (legs[0] if legs else {})
+    identity_fields = identity or {}
+    cargo_hint = flight_legs.aircraft_cargo_hint(
+        identity_fields.get("type_code"),
+        identity_fields.get("type_desc"),
+        identity_fields.get("operator"),
+        route.get("origin_code"),
+        route.get("dest_code"),
+    )
+
+    return {
+        "identity": identity,
+        "legs": legs,
+        "current_leg": current_leg,
+        "cargo_hint": cargo_hint,
+    }
 
 
 @app.get("/api/countries")

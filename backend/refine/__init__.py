@@ -15,6 +15,8 @@ Several jobs, most self-paced rather than scheduled:
   port_calls      finds vessel dwells near a port in the AIS movement log
   vessel_profile  reads cargo class and laden/ballast state off the same
                    AIS movement log port_calls reads, per hull
+  flight_legs     derives departure/arrival legs from the ADS-B movement log,
+                   the aviation twin of port_calls
 
 Unlike backend/ingest, there is no scheduler here. Each of these already owns a
 loop that carries real logic -- fusion waits for its inputs and rehydrates a
@@ -136,6 +138,20 @@ _JOBS = (
         # port_calls.HEALTH_NAME is copied above.
         health_name="lane_density",
         health_every=config.LANE_DENSITY_INTERVAL,
+    ),
+    # Writes flight_legs rows -- the aviation twin of port_calls, keyed by
+    # icao24 rather than mmsi. Publishes nothing either: the coordinates a
+    # leg's origin/destination carry already exist on the airports layer, and
+    # GET /api/aircraft/{icao24} (backend/app.py) reads flight_legs_for /
+    # open_flight_leg directly, the same shape vessel_port_calls' reads take.
+    Job(
+        module="backend.refine.flight_legs",
+        entrypoint="derive_forever",
+        publishes=(),
+        # flight_legs.HEALTH_NAME, copied for the same reason
+        # port_calls.HEALTH_NAME is copied above.
+        health_name="flight_legs",
+        health_every=config.FLIGHT_LEG_INTERVAL,
     ),
 )
 
