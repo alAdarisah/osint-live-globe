@@ -116,6 +116,29 @@ def parse_outages(payload: dict, window_start: float, window_end: float) -> dict
     return out
 
 
+def _add_lookup_entry(table: dict[str, str], key: str, code: str, kind: str) -> None:
+    """One name/normalised-name -> code mapping, first writer wins.
+
+    Where two subdivisions share a name after normalising (rare, but Natural
+    Earth's own duplicate-code cases -- see admin1_boundaries.py's
+    `_assign_keys` -- can produce it), the first one encountered wins rather
+    than the last, which is at least deterministic against the order the
+    source publishes them in. This is the only path in the whole matcher that
+    can attribute a region to the *wrong* boundary rather than to none at all
+    (the matcher itself is normalised-exact, never similarity-based, which is
+    what keeps every other outcome conservative) -- so a collision is logged
+    rather than resolved silently.
+    """
+    existing = table.get(key)
+    if existing is not None and existing != code:
+        log.debug(
+            "region_lookup_for_country: %s key %r already resolves to %s -- keeping it over %s",
+            kind, key, existing, code,
+        )
+        return
+    table[key] = code
+
+
 def region_lookup_for_country(features: list[dict]) -> dict:
     """One country's admin-1 features (as admin1_boundaries.py stores them) ->
     {"exact": {name: code}, "fuzzy": {normalized_name: code}}.
@@ -123,11 +146,6 @@ def region_lookup_for_country(features: list[dict]) -> dict:
     Only features carrying both a name and a code are usable -- Natural Earth
     ships a handful of subdivisions with no ISO 3166-2 code at all (see that
     module's own docstring), and those can never be joined by name here either.
-    `setdefault` rather than plain assignment: where two subdivisions share a
-    name after normalising (rare, but Natural Earth's own duplicate-code cases
-    -- see admin1_boundaries.py's `_assign_keys` -- can produce it), the first
-    one encountered wins rather than the last, which is at least deterministic
-    against the order the source publishes them in.
     """
     exact: dict[str, str] = {}
     fuzzy: dict[str, str] = {}
@@ -137,8 +155,8 @@ def region_lookup_for_country(features: list[dict]) -> dict:
         name = props.get("name")
         if not code or not name:
             continue
-        exact.setdefault(name, code)
-        fuzzy.setdefault(normalize(name), code)
+        _add_lookup_entry(exact, name, code, "exact")
+        _add_lookup_entry(fuzzy, normalize(name), code, "fuzzy")
     return {"exact": exact, "fuzzy": fuzzy}
 
 
@@ -189,14 +207,24 @@ async def build_region_lookup(country_codes: set[str]) -> dict[str, dict]:
     lookup for it and every one of its regions comes back unmatched, which is
     the honest answer for a country this map cannot place subdivisions in at
     all.
+
+    The Postgres reads run concurrently rather than one-at-a-time. A busy day
+    can put 40-50 countries in `country_codes`, and at a 15-minute cadence
+    fifty sequential round-trips were fine in wall-clock terms but held the
+    connection needlessly long for no reason -- storage.reference() already
+    swallows its own failures (see its docstring) and returns None rather
+    than raising, so gather needs no return_exceptions to stay safe against
+    one bad read taking the others down with it.
     """
     iso3_by_iso2 = _iso2_to_iso3_map()
+    wanted = [(iso2, iso3) for iso2 in country_codes if (iso3 := iso3_by_iso2.get(iso2))]
+    if not wanted:
+        return {}
+    collections = await asyncio.gather(
+        *(storage.reference(f"{admin1_boundaries.SNAPSHOT_PREFIX}:{iso3}") for _iso2, iso3 in wanted)
+    )
     lookup: dict[str, dict] = {}
-    for iso2 in country_codes:
-        iso3 = iso3_by_iso2.get(iso2)
-        if not iso3:
-            continue
-        collection = await storage.reference(f"{admin1_boundaries.SNAPSHOT_PREFIX}:{iso3}")
+    for (iso2, _iso3), collection in zip(wanted, collections):
         features = (collection or {}).get("features") or []
         if features:
             lookup[iso2] = region_lookup_for_country(features)

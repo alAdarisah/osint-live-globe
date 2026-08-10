@@ -202,6 +202,42 @@ test("countryCardSections -- connectivity: the outage window in hours-and-UTC-cl
   assert.match(connectivity.html, /last 24 hours, to 14:00 UTC/);
 });
 
+// Task 26 review fix: the country-level Connectivity fold used to say nothing
+// at all about the region pass, which left "IODA scored nothing sub-national
+// here" and "IODA scored regions here we could not place" looking identical
+// from the country card too.
+test("countryCardSections -- connectivity: names the sub-national match tally when regions exist", async (t) => {
+  const baseOutage = {
+    TL: {
+      country_code: "TL", country: "Testland", score: 5_000_000,
+      signals: {}, event_count: 1, window_start: 0, window_end: 86400,
+    },
+  };
+
+  await t.test("some regions matched, some not: both counts appear, unmatched called out", () => {
+    const raw = emptyRaw({
+      outages: baseOutage,
+      outagesRegions: {
+        TL: {
+          "TL-01": { matched: "exact", region_code: "TL-01", score: 5e9, signals: {}, country_code: "TL" },
+          999: { matched: "unmatched", region_code: null, score: 2e9, signals: {}, country_code: "TL" },
+        },
+      },
+    });
+    const { sections } = countryCardSections(baseProps, raw, null);
+    const connectivity = sections.find((s) => s.id === "connectivity");
+    assert.ok(connectivity.html.includes("1 matched"));
+    assert.ok(connectivity.html.includes("1 could not be matched"));
+  });
+
+  await t.test("no region-level data for this country: the fold says nothing extra, not a false claim", () => {
+    const raw = emptyRaw({ outages: baseOutage, outagesRegions: {} });
+    const { sections } = countryCardSections(baseProps, raw, null);
+    const connectivity = sections.find((s) => s.id === "connectivity");
+    assert.doesNotMatch(connectivity.html, /Sub-national/);
+  });
+});
+
 test("countryCardSections -- power: coverage line and a provenance-labelled net-flow sparkline per half", async (t) => {
   const raw = emptyRaw({
     energyFlows: {

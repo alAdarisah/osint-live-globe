@@ -564,9 +564,11 @@ function iso2ForIso3(iso3, raw) {
  * `region_code` to join on by construction (see outages.py's own docstring on
  * why it is kept in the payload anyway) -- there is no admin-1 shape for it to
  * be the record of, so a card built from a shape can never reach it. That is
- * the correct outcome, not a gap: the unmatched record is still visible to
- * anyone reading the raw `/api/outages/regions` feed, which is the audience it
- * exists for.
+ * correct for *this* function: it answers for one shape, and an unmatched
+ * record is not the record of any shape. It is not the whole answer for a
+ * reader, though -- see regionMatchSummary below, which is what tells a state
+ * or district card the difference between "IODA never scored anywhere near
+ * here" and "IODA scored something here that could not be placed on a map".
  */
 export function regionOutageFor(props, raw) {
   if (!props?.country_code || !props?.code) return null;
@@ -575,6 +577,35 @@ export function regionOutageFor(props, raw) {
   const byCountry = (raw.outagesRegions || {})[iso2];
   if (!byCountry) return null;
   return Object.values(byCountry).find((r) => r.matched !== "unmatched" && r.region_code === props.code) || null;
+}
+
+/**
+ * How many of one country's IODA-scored regions could be matched to an
+ * admin-1 boundary, and how many could not -- null when this country has no
+ * region-level reporting in the current feed at all.
+ *
+ * This exists because regionOutageFor's per-shape answer, on its own, makes
+ * "IODA never scored anywhere near this state" and "IODA scored something
+ * here but this map could not tell which state it was" look identical: both
+ * read as an empty Connectivity fold. At this build's own measured match
+ * rate roughly a quarter of a country's regions can land in the second
+ * bucket, so silence there is not a rare edge case -- it is the same
+ * fetched-but-unplaceable-vs-never-fetched conflation this project has had
+ * to close in several other layers, and the fix is the same shape every
+ * time: say what was found, even when it could not be drawn.
+ *
+ * Takes the ISO2 directly rather than a shape's props, because its two
+ * callers reach it from different places: the country card already has ISO2
+ * (outageFor's own record carries it), while the admin-1/admin-2 cards go
+ * through iso2ForIso3 first.
+ */
+export function regionMatchSummary(iso2, raw) {
+  const byCountry = iso2 ? (raw.outagesRegions || {})[iso2] : null;
+  if (!byCountry) return null;
+  const records = Object.values(byCountry);
+  if (!records.length) return null;
+  const unmatched = records.filter((r) => r.matched === "unmatched").length;
+  return { matched: records.length - unmatched, unmatched, total: records.length };
 }
 
 // ISO3, the same key humanitarian uses -- so this one joins on props.iso_a3
@@ -617,6 +648,11 @@ function buildConnectivity(props, raw) {
   if (!outage) return "";
   const signals = Object.keys(outage.signals || {});
   const windowText = formatOutageWindow(outage.window_start, outage.window_end);
+  // regionMatchSummary reads outage.country_code rather than props.iso_a2 --
+  // outageFor already resolved the "-99" cases (France, Norway, Kosovo) to get
+  // this record at all, and its own answer is the more direct route to the
+  // same ISO2 than re-deriving it from props a second time.
+  const regionSummary = regionMatchSummary(outage.country_code, raw);
   return `
     <div class="outage-block">
       <div class="outage-head">Internet disruption detected</div>
@@ -628,7 +664,12 @@ function buildConnectivity(props, raw) {
     <p class="meta">Over the ${esc(windowText || "reporting window")}, reported by IODA (Georgia Tech), which watches
       BGP withdrawals, active probing and darknet traffic. The score is a composite that is only meaningful
       <b>in comparison</b> &mdash; against this country's own normal and against others in the same window.
-      It is not a percentage of the country offline, and it cannot distinguish a shutdown from a cable fault.</p>`;
+      It is not a percentage of the country offline, and it cannot distinguish a shutdown from a cable fault.</p>
+    ${regionSummary ? `<div class="meta">Sub-national: IODA also scored ${regionSummary.total} region(s) within
+        this country over the same window &mdash; ${regionSummary.matched} matched to a state or province boundary
+        here (see its own card)${regionSummary.unmatched
+          ? `, and ${regionSummary.unmatched} could not be matched to one and are not drawn`
+          : ""}.</div>` : ""}`;
 }
 
 // --- cross-border electricity (backend/sources/energy_flows.py) ---------
@@ -2284,16 +2325,37 @@ function buildAdminConnectivity(props, raw) {
 
 /**
  * The honesty fold both cards share: which six countries have admin-2
- * boundaries at all, the Natural Earth 1:10m subdivision caveat verbatim, and
- * the "a missing row is not a reported zero" caveat verbatim -- see
- * SUBDIVISION_SCALE_CAVEAT and DISTRICT_NO_RECORD_CAVEAT for why each is kept
- * as its own constant rather than retyped here. Never empty, like
- * buildCoverage on the country card: this is the place a reader checks *why*
- * a fold above came back thin, so it has to survive being asked about a
- * country with no district layer at all.
+ * boundaries at all, the Natural Earth 1:10m subdivision caveat verbatim, the
+ * "a missing row is not a reported zero" caveat verbatim, and how many of this
+ * country's IODA-scored regions could and could not be placed on a boundary
+ * here -- see SUBDIVISION_SCALE_CAVEAT, DISTRICT_NO_RECORD_CAVEAT and
+ * regionMatchSummary respectively for why each is kept as its own thing
+ * rather than retyped here. Never empty, like buildCoverage on the country
+ * card: this is the place a reader checks *why* a fold above came back thin,
+ * so it has to survive being asked about a country with no district layer,
+ * and no IODA region reporting, at all.
+ *
+ * The region line is the fix for a conflation this project has repeated
+ * across several other layers: without it, a province IODA scored but could
+ * not place and a province IODA never looked at both render as an empty
+ * Connectivity fold above, and a reader has no way to tell "nothing here"
+ * from "something here we couldn't draw". At this build's own measured match
+ * rate that is not a rare case -- roughly a quarter of a country's regions
+ * can land in the second bucket.
  */
-function buildAdminCoverage() {
+function buildAdminCoverage(props, raw) {
   const list = ADMIN2_COUNTRIES.map((c) => esc(c.name)).join(", ");
+  const regionSummary = regionMatchSummary(iso2ForIso3(props?.country_code, raw), raw);
+  const regionLine = regionSummary
+    ? `<div class="meta">Internet outages (IODA): ${regionSummary.matched} of ${regionSummary.total}
+        region(s) IODA scored in this country over the current window matched to an admin-1 boundary here${
+          regionSummary.unmatched
+            ? ` &mdash; <b>${regionSummary.unmatched} could not be placed</b> and do not appear on any state
+                or district card, though IODA did report them`
+            : ""
+        }.</div>`
+    : `<div class="meta">Internet outages (IODA): no region-level reporting for this country in the current
+        window.</div>`;
   return `
     <div class="meta">${SUBDIVISION_SCALE_CAVEAT}</div>
     <div class="meta">District-level (admin-2) boundaries and their monthly conflict archive exist for
@@ -2301,6 +2363,7 @@ function buildAdminCoverage() {
       drill into, which is not a claim that nothing has happened there.</div>
     <div class="meta district-nodata">A district can go unmentioned in the archive for any given month.
       ${DISTRICT_NO_RECORD_CAVEAT}</div>
+    ${regionLine}
     <div class="meta">Boundaries: Natural Earth admin-1 (public domain, CC0) and OCHA COD-AB admin-2
       (public domain), both <i>reported</i> geometry.</div>`;
 }
@@ -2328,7 +2391,7 @@ export function subdivisionCardSections(props, raw, bounds) {
     { id: "live", title: "Live picture", html: buildAdminLive(props, raw, bounds) },
     { id: "infrastructure", title: "Infrastructure", html: buildAdminInfrastructure(props, raw, bounds) },
     { id: "connectivity", title: "Connectivity", html: buildAdminConnectivity(props, raw) },
-    { id: "coverage", title: "Data coverage", html: buildAdminCoverage() },
+    { id: "coverage", title: "Data coverage", html: buildAdminCoverage(props, raw) },
   ];
   return { title: props.name || "State", sections: sections.filter((s) => s.html && s.html.trim()) };
 }
@@ -2368,7 +2431,7 @@ export function districtCardSections(props, raw, bounds, month) {
     { id: "live", title: "Live picture", html: buildAdminLive(props, raw, bounds) },
     { id: "infrastructure", title: "Infrastructure", html: buildAdminInfrastructure(props, raw, bounds) },
     { id: "connectivity", title: "Connectivity", html: buildAdminConnectivity(props, raw) },
-    { id: "coverage", title: "Data coverage", html: buildAdminCoverage() },
+    { id: "coverage", title: "Data coverage", html: buildAdminCoverage(props, raw) },
   ];
   return { title: props.name || props.pcode || "District", sections: sections.filter((s) => s.html && s.html.trim()) };
 }

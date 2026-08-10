@@ -196,6 +196,69 @@ test("subdivisionCardSections -- profile and coverage", async (t) => {
   });
 });
 
+// A country feature carrying both ISO codes, the way backend/sources/countries.py's
+// own features do -- the join adminOutageRecord/regionMatchSummary need to get
+// from a state/district's bare ISO3 country_code to the ISO2 outagesRegions is
+// keyed by.
+const usCountryFeature = () => ({
+  type: "Feature",
+  properties: { iso_a2: "US", iso_a3: "USA", name: "United States of America" },
+});
+
+test("subdivisionCardSections/districtCardSections -- coverage names the region match tally", async (t) => {
+  const state = makeState();
+  const district = makeDistrict();
+
+  await t.test("no region-level reporting for this country at all: says so plainly", () => {
+    const raw = { ...emptyRaw(), countries: { features: [usCountryFeature()] }, outagesRegions: {} };
+    const { sections } = subdivisionCardSections(state, raw, null);
+    const coverage = sections.find((s) => s.id === "coverage");
+    assert.ok(coverage.html.includes("no region-level reporting for this country"));
+  });
+
+  await t.test("some matched, some not: both counts are named, and the unmatched ones are called out", () => {
+    const raw = {
+      ...emptyRaw(),
+      countries: { features: [usCountryFeature()] },
+      outagesRegions: {
+        US: {
+          "US-TS": { matched: "exact", region_code: "US-TS", score: 5e9, signals: {}, country_code: "US" },
+          12345: { matched: "unmatched", region_code: null, score: 2e9, signals: {}, country_code: "US" },
+        },
+      },
+    };
+    const { sections: stateSections } = subdivisionCardSections(state, raw, null);
+    const stateCoverage = stateSections.find((s) => s.id === "coverage");
+    assert.ok(stateCoverage.html.includes("1 of 2"), "one of two regions matched");
+    assert.ok(
+      stateCoverage.html.includes("1 could not be placed"),
+      "the unmatched one is called out, not silently folded into the total"
+    );
+
+    // The district card reads the same summary, keyed off its own ISO3 --
+    // IODA has no district-level reading, but the country-wide tally is still
+    // the honest answer to "why is this district's own Connectivity fold thin".
+    const { sections: districtSections } = districtCardSections(district, raw, null, null);
+    const districtCoverage = districtSections.find((s) => s.id === "coverage");
+    assert.ok(districtCoverage.html.includes("1 of 2"));
+    assert.ok(districtCoverage.html.includes("1 could not be placed"));
+  });
+
+  await t.test("every region matched: no 'could not be placed' clause is printed", () => {
+    const raw = {
+      ...emptyRaw(),
+      countries: { features: [usCountryFeature()] },
+      outagesRegions: {
+        US: { "US-TS": { matched: "exact", region_code: "US-TS", score: 5e9, signals: {}, country_code: "US" } },
+      },
+    };
+    const { sections } = subdivisionCardSections(state, raw, null);
+    const coverage = sections.find((s) => s.id === "coverage");
+    assert.ok(coverage.html.includes("1 of 1"));
+    assert.doesNotMatch(coverage.html, /could not be placed/);
+  });
+});
+
 test("districtCardSections -- the month selector's effect on the four DISTRICT_METRICS", async (t) => {
   const district = makeDistrict();
 

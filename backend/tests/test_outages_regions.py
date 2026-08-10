@@ -7,6 +7,8 @@ captures -- IODA's `scores`/`entity` shape is what these functions read, and
 nothing else in the payload matters to them.
 """
 
+import logging
+
 import pytest
 
 from backend.sources import outages
@@ -56,6 +58,37 @@ class TestRegionLookup:
         # respelling of the same place is not present verbatim.
         assert "Telenesti" not in lookup["exact"]
         assert lookup["fuzzy"][outages.normalize("Telenesti")] == "MD-TE"
+
+    def test_an_exact_name_collision_keeps_the_first_code_and_logs_it(self, caplog):
+        # Natural Earth's own duplicate-code case (see admin1_boundaries.py's
+        # _assign_keys): two features, same published name, different codes --
+        # the one real path in this matcher that could attribute a region to
+        # the wrong boundary rather than to none at all.
+        features = [
+            admin1_feature("PE-LIM", "Lima"),  # the province
+            admin1_feature("PE-CIT", "Lima"),  # Lima the city, cut out of it
+        ]
+        with caplog.at_level(logging.DEBUG, logger="osint-globe.outages"):
+            lookup = outages.region_lookup_for_country(features)
+        assert lookup["exact"]["Lima"] == "PE-LIM"
+        assert any("Lima" in record.message and "PE-CIT" in record.message for record in caplog.records)
+
+    def test_a_fuzzy_name_collision_keeps_the_first_code_and_logs_it(self, caplog):
+        # Two differently-spelled names that fold to the same normalised key.
+        features = [
+            admin1_feature("MD-CS", "Căușeni"),
+            admin1_feature("MD-XX", "Causeni"),
+        ]
+        with caplog.at_level(logging.DEBUG, logger="osint-globe.outages"):
+            lookup = outages.region_lookup_for_country(features)
+        assert lookup["fuzzy"][outages.normalize("Causeni")] == "MD-CS"
+        assert any("MD-XX" in record.message for record in caplog.records)
+
+    def test_no_collision_means_no_log_line(self, caplog):
+        features = [admin1_feature("DZ-23", "Annaba"), admin1_feature("DZ-07", "Sirdaryo")]
+        with caplog.at_level(logging.DEBUG, logger="osint-globe.outages"):
+            outages.region_lookup_for_country(features)
+        assert caplog.records == []
 
     def test_features_missing_a_code_or_name_are_skipped(self):
         features = [
