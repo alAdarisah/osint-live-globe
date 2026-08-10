@@ -12,7 +12,7 @@ always rendered, same as everything else here -- the frontend has no region
 filter on this endpoint.
 """
 
-from backend.sources.proximity import ProximityIndex
+from backend.sources.proximity import haversine_km
 
 INFRA_SITES: list[dict] = [
     # ---- Persian Gulf / Strait of Hormuz ----
@@ -1887,11 +1887,44 @@ AIR_DEFENSE_OSM_KINDS = frozenset({"radar_station", "military_bunker", "military
 # traced for the same footprint, which for a sprawling base (an airfield's
 # runways plus its whole cantonment area, say) can land a couple of
 # kilometres from the curated point without being a different installation.
-# 5km is wide enough to bridge that gap and narrow enough that two genuinely
-# separate nearby facilities (an air base and a naval base sharing one port
-# city -- Djibouti's cluster is the closest case checked) are never folded
-# into the same site.
+# 5km is wide enough to bridge that gap.
+#
+# Task 29 review (Important 1): it is NOT, on its own, narrow enough to tell
+# two genuinely separate nearby facilities apart. Camp Lemonnier (US) and
+# JSDF Base Djibouti (Japan) are 1.56km apart -- both inside this radius of a
+# point near either one, not outside it as an earlier version of this
+# comment claimed, citing that exact pair, before anyone had actually
+# computed the distance. With curated points that close together, an OSM
+# centroid's documented drift is easily enough to make the *wrong* one the
+# nearest -- and a false `matched_curated_id` is the worst kind of error this
+# layer can make: it tells a reader OpenStreetMap corroborates one country's
+# base when the feature was mapped for a different country's.
+#
+# The radius alone cannot fix that -- shrinking it only moves the same
+# problem to a smaller cluster of close-together bases somewhere else, and a
+# global map of foreign military installations has more crowded corners than
+# Djibouti's. So the radius stays generous, and _closest_curated_match below
+# refuses to guess instead: an OSM site is matched only when exactly one
+# curated site is within this radius of it. Two or more, and the drift that
+# is normal at this radius is not precise enough to say which one the
+# feature belongs to, so no match is claimed at all.
 BASE_MATCH_RADIUS_KM = 5.0
+
+
+def _closest_curated_match(site: dict, curated: list[dict]) -> dict | None:
+    """The one curated site an OSM record should be matched to, or None when
+    zero or more-than-one curated site falls within BASE_MATCH_RADIUS_KM --
+    see that constant's own note on why "more than one" refuses rather than
+    picks the nearest. `curated` is the small (~100-entry) MILITARY_BASES
+    list, so a plain per-call scan is simpler than building a spatial index
+    for it and no source of the bug a coarse grid cell could introduce at a
+    cluster boundary.
+    """
+    within = [
+        c for c in curated
+        if haversine_km(site["lat"], site["lon"], c["lat"], c["lon"]) <= BASE_MATCH_RADIUS_KM
+    ]
+    return within[0] if len(within) == 1 else None
 
 
 def merge_military_bases(curated: list[dict], osm_sites: list[dict]) -> list[dict]:
@@ -1906,19 +1939,19 @@ def merge_military_bases(curated: list[dict], osm_sites: list[dict]) -> list[dic
     site is included only when its `kind` is one of MILITARY_OSM_KINDS (the
     plain `landuse=military` area class, or any other kind osm_sites happens
     to carry, is left out -- this is a list of installations, not everything
-    the sweep found); it is stamped `source: "osm"`, and, when a curated site
-    sits within BASE_MATCH_RADIUS_KM, `matched_curated_id` names it. That flag
-    is what count_distinct_bases below reads to avoid reporting two
-    installations where a human curator and OpenStreetMap's mappers both
-    independently found the same one.
+    the sweep found); it is stamped `source: "osm"`, and, when exactly one
+    curated site sits within BASE_MATCH_RADIUS_KM (see
+    _closest_curated_match), `matched_curated_id` names it. That flag is what
+    count_distinct_bases below reads to avoid reporting two installations
+    where a human curator and OpenStreetMap's mappers both independently
+    found the same one.
     """
     out = [{**site, "source": "curated"} for site in curated]
-    index = ProximityIndex(curated)
     for site in osm_sites:
         if site.get("kind") not in MILITARY_OSM_KINDS:
             continue
         record = {**site, "source": "osm"}
-        match = index.nearest(site["lat"], site["lon"], BASE_MATCH_RADIUS_KM)
+        match = _closest_curated_match(site, curated)
         if match is not None:
             record["matched_curated_id"] = match["id"]
         out.append(record)
@@ -1932,6 +1965,14 @@ def count_distinct_bases(merged: list[dict]) -> int:
     Summing every record in the merged list would double-count: an OSM entry
     with `matched_curated_id` set is corroborating evidence for a site already
     counted once as its curated entry, not a second installation.
+
+    Task 29 review (Minor 2): this dedups an OSM record against a *curated*
+    one only. Two separate OSM records for one joint-use installation (a
+    base two different mappers each traced a polygon for) are not deduped
+    against each other and both count -- outside the brief's ask, which was
+    pairing curated against OSM, not OSM against itself. Noted rather than
+    fixed here; an OSM-vs-OSM dedup would need its own distance/ambiguity
+    rule, the same shape as _closest_curated_match's, and its own review.
     """
     return sum(
         1 for site in merged

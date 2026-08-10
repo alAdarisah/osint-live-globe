@@ -8,6 +8,8 @@ Pure functions over plain dicts, so no network and no database are needed --
 same discipline test_osm_infra.py already holds its own parsing to.
 """
 
+import pytest
+
 from backend import infrastructure
 
 
@@ -159,3 +161,68 @@ def test_real_military_bases_list_merges_without_error():
     assert len(merged) == len(infrastructure.MILITARY_BASES)
     assert all(s["source"] == "curated" for s in merged)
     assert infrastructure.count_distinct_bases(merged) == len(infrastructure.MILITARY_BASES)
+
+
+# --- Task 29 review (Important 1): ambiguous matches are refused, not guessed
+
+
+def _real_base(base_id):
+    return next(b for b in infrastructure.MILITARY_BASES if b["id"] == base_id)
+
+
+def test_camp_lemonnier_and_jsdf_djibouti_are_the_real_failing_case():
+    """The distance the review computed and the earlier docstring got wrong:
+    these two are 1.56km apart, well inside BASE_MATCH_RADIUS_KM (5km) of a
+    point near either one -- not "the closest case checked" and outside it,
+    as this file's comment used to claim before anyone measured it."""
+    lemonnier = _real_base("camp_lemonnier")
+    jsdf = _real_base("jsdf_djibouti")
+    from backend.sources.proximity import haversine_km
+    distance = haversine_km(lemonnier["lat"], lemonnier["lon"], jsdf["lat"], jsdf["lon"])
+    assert distance < infrastructure.BASE_MATCH_RADIUS_KM
+    assert distance == pytest.approx(1.56, abs=0.05)
+
+
+def test_an_osm_site_near_the_djibouti_cluster_is_not_matched_to_either():
+    """An OSM centroid landing near Camp Lemonnier (documented drift of a
+    couple of km is exactly what would put it here) must not be matched to
+    Camp Lemonnier OR to JSDF Djibouti -- both curated points are within
+    range, and claiming either as the match would be a coin flip stated as a
+    fact, on the one layer where that fact is "which country's base this
+    is"."""
+    lemonnier = _real_base("camp_lemonnier")
+    near_lemonnier = osm_site(kind="military_base", lat=lemonnier["lat"] + 0.005, lon=lemonnier["lon"])
+    merged = infrastructure.merge_military_bases(infrastructure.MILITARY_BASES, [near_lemonnier])
+    osm_rec = next(s for s in merged if s["source"] == "osm")
+    assert "matched_curated_id" not in osm_rec
+
+
+def test_an_osm_site_far_from_any_cluster_still_matches_its_one_curated_neighbour():
+    """The refusal is specific to ambiguity, not a blanket "never match near
+    the real list" regression -- a curated site with no other curated
+    installation nearby still gets a genuine, unambiguous match. Uses
+    Pituffik/Thule (Greenland) rather than Camp Lemonnier for this: the whole
+    Djibouti cluster (Camp Lemonnier, JSDF, Doraleh) sits close enough
+    together that almost anywhere within range of one is within range of a
+    second, which is the point of the two tests above, not this one."""
+    thule = _real_base("thule_ab")
+    near_thule_only = osm_site(kind="military_base", lat=thule["lat"] - 0.02, lon=thule["lon"] - 0.02)
+    merged = infrastructure.merge_military_bases(infrastructure.MILITARY_BASES, [near_thule_only])
+    osm_rec = next(s for s in merged if s["source"] == "osm")
+    assert osm_rec.get("matched_curated_id") == "thule_ab"
+
+
+def test_two_curated_sites_within_radius_of_each_other_synthetic_case():
+    """The same ambiguity rule, isolated from the real list's own noise (a
+    third nearby curated site elsewhere would change which ones are "within
+    radius" of the probe point) -- two curated sites 1.5km apart, an OSM site
+    exactly between them, refused."""
+    a = curated(id_="a", lat=10.0, lon=10.0)
+    b = curated(id_="b", lat=10.0135, lon=10.0)  # ~1.5km north of a
+    midpoint = osm_site(lat=10.007, lon=10.0)  # ~0.75km from each
+    merged = infrastructure.merge_military_bases([a, b], [midpoint])
+    osm_rec = next(s for s in merged if s["source"] == "osm")
+    assert "matched_curated_id" not in osm_rec
+    # Distinct-count arithmetic still holds: the unmatched OSM site is its
+    # own installation, on top of the two curated ones.
+    assert infrastructure.count_distinct_bases(merged) == 3
