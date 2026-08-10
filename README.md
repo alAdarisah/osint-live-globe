@@ -1031,6 +1031,28 @@ depends on them, so stopping all three costs the graphs and nothing else:
 docker compose stop prometheus postgres-exporter grafana
 ```
 
+### Watching it run from the terminal: `cc`
+
+Grafana answers *is the database coping, and what did it do overnight?* — from a
+browser, which on a headless server means a tunnel. `ops/cc` answers the
+question you actually have while sitting on the box: *is it all up, and is it
+doing anything?* Container state, what each source is producing, the half-dozen
+database numbers worth a glance, and the live log, on one screen.
+
+It exists because the alternative was four SSH sessions, and the failures worth
+catching are the ones where two of them disagree — a container that is up while
+the source it feeds has stopped producing.
+
+```bash
+./ops/cc/install.sh /opt/osint
+cc
+```
+
+It reads `docker compose ps`, `/api/health` and Prometheus, and shells out to
+`deploy.sh` for rebuilds rather than repeating its staleness rules — so there
+stays one definition of which image is behind its source. `--read-only` disables
+every key that changes something. Full key list in `ops/cc/README.md`.
+
 ### What the Postgres dashboard shows
 
 Top row, at a glance: whether Postgres is up, how much of the connection budget
