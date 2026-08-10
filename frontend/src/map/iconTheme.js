@@ -182,6 +182,14 @@ export const PALETTE_GROUPS = [
       // DeFlock ALPR camera locations. A muted violet, deliberately quiet: this is
       // crowd-sourced surveillance-infrastructure metadata, not a live feed.
       { id: "deflock.camera", label: "ALPR camera (DeFlock / OpenStreetMap)", value: "#a78bba" },
+      // Dark-ship reachability (Task 21): the contour bands and the
+      // went-dark -> resumed line both dark_vessels' ais_gap and gfw_gaps
+      // records can draw, once a gap has closed, in the shared
+      // uncertaintyPane. One token for both shapes -- a 50/80/95% nesting and
+      // the line back to where the gap actually closed are one claim about
+      // one silence, not two different things -- and it is not filed under
+      // either layer (see TOKEN_LAYER) because it belongs to neither alone.
+      { id: "reach.contour", label: "Dark-ship reachability region", value: "#9d8bf0" },
     ],
   },
   {
@@ -235,7 +243,7 @@ export const DEFAULT_COLORS = Object.freeze(
  */
 const COLOUR_ONLY_TOKENS = new Set([
   "event.corroborated", "sanctions.designated", "cable.route", "railway.line",
-  "lanes.route", "lanes.density",
+  "lanes.route", "lanes.density", "reach.contour",
   "choropleth.low", "choropleth.mid", "choropleth.high",
   "water.fill", "water.outline", "water.selected",
 ]);

@@ -2623,6 +2623,37 @@ function gfwPriorCredit(prior) {
   return `<div class="meta">Prior from: Global Fishing Watch AIS disabling events (CC BY-NC 4.0)</div>`;
 }
 
+// The reachability region's own numbers, in words -- see
+// backend/sources/dark_vessels.py's module docstring for the model in full.
+// Its own block, kept apart from the plain gap facts above it, so the
+// self-score (the one line the brief treats as non-optional -- "a model that
+// reports its own accuracy is worth more than one that does not") is never
+// buried inside them.
+function reachabilityDetail(d) {
+  if (!Number.isFinite(Number(d.reach_radius_km))) return "";
+  const basis = d.speed_basis === "measured"
+    ? "this hull's own recent speed history"
+    : "a generic ceiling for its vessel class (its own speed history was too thin to trust)";
+  const scored = Number.isFinite(Number(d.prediction_error_km))
+    ? `<div>The model's own dead-reckoned guess landed <b>${esc(fmtNumber(Number(d.prediction_error_km)))} km</b>
+        from where the vessel actually reappeared.</div>`
+    : "";
+  const dest = d.destination_prior_used
+    ? `<div class="meta">Nudged toward its declared destination, ${esc(d.destination_prior_used.port)},
+        at ${esc(Math.round(d.destination_prior_used.weight * 100))}% weight.</div>`
+    : "";
+  return `
+    <div class="inferred-block">
+      <div>Could have reached up to <b>${esc(fmtNumber(Number(d.reach_radius_km)))} km</b> from where it went
+        dark, using ${basis}.</div>
+      ${scored}
+      ${d.masked_by_land
+        ? '<div class="meta">The region shown is pulled back off dry land using Natural Earth\'s sea/lake outlines.</div>'
+        : ""}
+      ${dest}
+    </div>`;
+}
+
 function decorateAisGap(d) {
   const vessel = d.name || `MMSI ${d.mmsi}`;
   const tooltip = `<b>${esc(vessel)}</b> &middot; went dark<br/>` +
@@ -2641,6 +2672,7 @@ function decorateAisGap(d) {
       }.</div>
       <div class="meta">Last heard ${esc(timeAgoFromUnix(d.went_dark_at))}, back ${esc(timeAgoFromUnix(d.resumed_at))}.</div>
     </div>
+    ${reachabilityDetail(d)}
     ${gfwPriorDetail(d.gfw_prior)}
     <p class="meta"><b>This is an inference from our own AIS history, not a detection.</b> A receiver or
       upstream outage produces the identical signature; gaps spanning a measured drop in our own feed are
@@ -2678,6 +2710,16 @@ function decorateStsPair(d) {
     <div class="meta">Derived from: aisstream.io position history recorded by this backend</div>
     ${gfwPriorCredit(vessels.map((v) => v.gfw_prior).find((p) => p && p.events))}`;
   return { tooltip, detail };
+}
+
+// One token for the reachability geometry both this layer's ais_gap records
+// and gfw_gaps' ais_disabling records can draw -- see iconTheme.js's
+// "reach.contour" and createMapController.js's renderReachGeometry. Read as a
+// function, not a module-level constant, because the palette can change at
+// runtime (see setIconTheme) and a constant captured at import time would
+// freeze the shipped colour regardless of what Admin Mode set it to.
+export function reachContourColor() {
+  return paletteColor("reach.contour", "#9d8bf0");
 }
 
 export function decorateDarkVessel(d, { offset } = {}) {

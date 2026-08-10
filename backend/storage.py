@@ -1563,15 +1563,16 @@ async def history_at(kind: str, at: float, window_seconds: int | None = None) ->
 # "it sat still".
 _POSITION_GAPS = """
 WITH steps AS (
-  SELECT entity_id, ts, lat, lon,
-         LAG(ts)  OVER w AS prev_ts,
-         LAG(lat) OVER w AS prev_lat,
-         LAG(lon) OVER w AS prev_lon
+  SELECT entity_id, ts, lat, lon, payload,
+         LAG(ts)      OVER w AS prev_ts,
+         LAG(lat)     OVER w AS prev_lat,
+         LAG(lon)     OVER w AS prev_lon,
+         LAG(payload) OVER w AS prev_payload
     FROM entity_history
    WHERE kind = $1 AND ts >= $2
   WINDOW w AS (PARTITION BY entity_id ORDER BY ts)
 )
-SELECT entity_id, prev_ts, prev_lat, prev_lon, ts, lat, lon,
+SELECT entity_id, prev_ts, prev_lat, prev_lon, prev_payload, ts, lat, lon,
        EXTRACT(EPOCH FROM (ts - prev_ts)) AS gap_seconds
   FROM steps
  WHERE prev_ts IS NOT NULL
@@ -1585,7 +1586,14 @@ async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: 
     """Where an entity stopped reporting and later reappeared.
 
     Each row is the pair of positions either side of the silence, so a caller
-    can say both where it went quiet and where it came back.
+    can say both where it went quiet and where it came back. `from_payload` is
+    the full recorded payload of the fix immediately before the silence --
+    speed, course, ship type, declared destination, whatever record_snapshot
+    was given at that moment -- which is what lets a caller (see
+    backend/sources/dark_vessels.py's reachability model) reason about "the
+    last thing we knew before it went dark" rather than the hull's current
+    state, which by the time this row exists already reflects whatever
+    happened after it reappeared.
     """
     if _pool is None:
         return []
@@ -1598,6 +1606,7 @@ async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: 
             "from_ts": r["prev_ts"].timestamp(),
             "from_lat": r["prev_lat"],
             "from_lon": r["prev_lon"],
+            "from_payload": json.loads(r["prev_payload"]) if r["prev_payload"] else {},
             "to_ts": r["ts"].timestamp(),
             "to_lat": r["lat"],
             "to_lon": r["lon"],
@@ -1605,6 +1614,74 @@ async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: 
         }
         for r in rows
     ]
+
+
+# Per-hull speed statistics immediately before a given moment, batched across
+# many (entity_id, before_ts) pairs in one round trip rather than one query per
+# vessel -- dark_vessels.py's reachability model needs this for up to
+# MAX_GAP_RECORDS hulls every pass. `idx` carries the caller's own row number
+# through the join and back out, because GROUP BY entity_id alone would merge
+# two different `before_ts` windows for the same hull (a vessel with two
+# separate gaps in the retained window) into one answer.
+#
+# The speed cast excludes AIS's own "not available" sentinel (102.3 kn, the
+# raw SOG field's all-ones value) so a decoder that ever forwards it raw does
+# not pull a hull's 95th-percentile speed up to a value nothing measured.
+_SPEED_STATS_BEFORE = """
+WITH targets AS (
+  SELECT unnest($2::int[])       AS idx,
+         unnest($3::text[])      AS entity_id,
+         unnest($4::timestamptz[]) AS before_ts
+)
+SELECT t.idx,
+       percentile_cont($5) WITHIN GROUP (ORDER BY (h.payload->>'speed')::float) AS p,
+       stddev_samp((h.payload->>'speed')::float) AS sd,
+       count(*) AS n
+  FROM targets t
+  JOIN entity_history h
+    ON h.kind = $1 AND h.entity_id = t.entity_id
+   AND h.ts <= t.before_ts
+   AND h.ts >= t.before_ts - ($6 * INTERVAL '1 second')
+   AND h.payload->>'speed' IS NOT NULL
+   AND h.payload->>'speed' ~ '^-?[0-9]+(\\.[0-9]+)?$'
+   AND (h.payload->>'speed')::float < 102.3
+ GROUP BY t.idx
+"""
+
+
+async def speed_stats_before(
+    kind: str, targets: list[tuple[str, float]], lookback_seconds: float, pct: float
+) -> list[dict | None]:
+    """95th-percentile (or `pct`) speed, its sample stdev, and how many samples
+    fed both -- one entry per `(entity_id, before_ts)` pair in `targets`, in
+    the same order, over the `lookback_seconds` immediately before each
+    `before_ts`. A caller zips this straight back onto the list it built
+    `targets` from (see backend/sources/dark_vessels.py's `add_reachability`).
+
+    None where nothing in entity_history matched at all -- a hull with no
+    decoded speed reports in the window -- which is a different case from
+    "matched, but not enough of them" (a real dict with a low `sample_count`),
+    and the caller's own REACH_MIN_SPEED_SAMPLES threshold is what tells the
+    two apart rather than this function silently treating them the same.
+    """
+    if _pool is None or not targets:
+        return [None] * len(targets)
+    idxs = list(range(len(targets)))
+    ids = [str(t[0]) for t in targets]
+    befores = [datetime.fromtimestamp(t[1], tz=timezone.utc) for t in targets]
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            _SPEED_STATS_BEFORE, kind, idxs, ids, befores, float(pct), float(lookback_seconds)
+        )
+    by_idx = {
+        r["idx"]: {
+            "p_kn": float(r["p"]) if r["p"] is not None else None,
+            "stdev_kn": float(r["sd"]) if r["sd"] is not None else None,
+            "sample_count": int(r["n"]),
+        }
+        for r in rows
+    }
+    return [by_idx.get(i) for i in idxs]
 
 
 _HISTORY_SINCE_ID = """

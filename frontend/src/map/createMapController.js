@@ -85,6 +85,7 @@ import {
   airportIconSize,
   decorateDarkVessel,
   darkVesselIconSize,
+  reachContourColor,
   decorateCableLanding,
   cableLandingIconSize,
   cableRouteColor,
@@ -131,6 +132,7 @@ import {
   normalizeArticleUrl,
 } from "./crossSource";
 import { resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST } from "./scene";
+import { reachLineEnds, reachContourRings, reachOnScreen } from "./reachGeometry";
 import { profileViewport } from "./viewportProfile";
 import { buildCountryIndex, findCountryAt, representativePointOf } from "./countryHitTest";
 import { createBorderEditor } from "./borderEdit";
@@ -680,6 +682,15 @@ export function createMapController(container, initial, callbacks) {
   // Same layer, separate diff: a refined event has both a circle and a line,
   // and one Map keyed by event id cannot hold two shapes for one key.
   const refinementLines = new Map();
+  // Dark-ship reachability geometry (Task 21): a group of shapes per record
+  // (the went-dark -> resumed line, plus up to three contour polygons for an
+  // ais_gap record), one Map per layer key for the same reason
+  // markersByKey has one entry per key -- darkVessels and gfwGaps ids are not
+  // guaranteed unique against each other, and even where they are, mixing two
+  // layers' diffs into one Map would let toggling one layer off remove
+  // shapes that belong to the other's still-visible records.
+  const darkVesselReachShapes = new Map();
+  const gfwGapReachShapes = new Map();
   const shipTrails = new Map();
   const aircraftTrails = new Map();
   const satelliteTrails = new Map();
@@ -3268,6 +3279,63 @@ export function createMapController(container, initial, callbacks) {
     );
   }
 
+  // Dark-ship reachability geometry (Task 21): the went-dark -> resumed line
+  // (ais_gap and gfw_gaps records both carry resumed_lat/resumed_lon once
+  // their gap has closed) and, for ais_gap records only, the 50/80/95%
+  // contour bands backend/sources/dark_vessels.py builds around the
+  // dead-reckoned point -- see that module's docstring for the model.
+  //
+  // Drawn as children of `groups[key]` itself (with `pane: "uncertaintyPane"`
+  // set per-shape, not on a wrapping group of its own) rather than in a
+  // separate layer -- Leaflet resolves each child's pane independently of
+  // which LayerGroup manages its add/remove, so this rides the same
+  // map.addLayer/removeLayer toggle darkVessels/gfwGaps already have for
+  // free, and the last-known pin -- a plain marker in the default pane --
+  // keeps drawing on top of both without anything here having to order that.
+  function reachLineStyle() {
+    return {
+      pane: "uncertaintyPane", interactive: false,
+      color: reachContourColor(), weight: 1, opacity: 0.5, dashArray: "2 4",
+    };
+  }
+  // Faintest for the widest band, so the three overlapping polygons read as
+  // one gradient rather than three flat washes stacked on each other.
+  const REACH_CONTOUR_OPACITY = { 50: [0.6, 0.16], 80: [0.4, 0.09], 95: [0.25, 0.04] };
+  function reachContourStyle(percentile) {
+    const color = reachContourColor();
+    const [stroke, fill] = REACH_CONTOUR_OPACITY[percentile] || REACH_CONTOUR_OPACITY[95];
+    return {
+      pane: "uncertaintyPane", interactive: false,
+      color, weight: 1, opacity: stroke, dashArray: "4 4", fillColor: color, fillOpacity: fill,
+    };
+  }
+  function paintReachShape(group, item, copy) {
+    const ends = reachLineEnds(item);
+    if (ends) L.polyline(drawPath(ends, copy), reachLineStyle()).addTo(group);
+    for (const { percentile, points } of reachContourRings(item)) {
+      L.polygon(drawPath(points, copy), reachContourStyle(percentile)).addTo(group);
+    }
+  }
+  function buildReachShape(item, copy) {
+    const group = L.layerGroup();
+    paintReachShape(group, item, copy);
+    return group;
+  }
+  function updateReachShape(group, item, copy) {
+    group.clearLayers();
+    paintReachShape(group, item, copy);
+  }
+  function renderReachGeometry(key, shapeMap, visible) {
+    syncAcrossWorldCopies(
+      shapeMap,
+      groups[key],
+      visible.filter(reachOnScreen),
+      (item) => item[ID_FIELD[key]],
+      buildReachShape,
+      updateReachShape
+    );
+  }
+
   function renderMarkerLayer(key) {
     if (key === "adsb") {
       renderAdsbLayer();
@@ -3321,6 +3389,8 @@ export function createMapController(container, initial, callbacks) {
     visible = capByRank(key, visible);
     // After the cap, so a circle can never outlive the pin it belongs to.
     if (key === "events") renderEventUncertainty(visible);
+    if (key === "darkVessels") renderReachGeometry(key, darkVesselReachShapes, visible);
+    if (key === "gfwGaps") renderReachGeometry(key, gfwGapReachShapes, visible);
     visible = collapseFor(key, visible, map.getZoom());
     registerPlacement(
       key,
