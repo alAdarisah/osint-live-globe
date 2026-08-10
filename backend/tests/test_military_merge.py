@@ -226,3 +226,41 @@ def test_two_curated_sites_within_radius_of_each_other_synthetic_case():
     # Distinct-count arithmetic still holds: the unmatched OSM site is its
     # own installation, on top of the two curated ones.
     assert infrastructure.count_distinct_bases(merged) == 3
+
+
+# --- Task 32 review (empty-state sweep): a refusal is not the same silence
+# as "no curated site nearby" -----------------------------------------------
+
+
+def test_an_ambiguous_refusal_is_flagged_not_left_indistinguishable_from_no_match():
+    """Before this task, `merge_military_bases` reported the two cases the
+    same way -- a bare absence of `matched_curated_id`. A caller checking only
+    that key (popups.js used to be exactly this caller) could not tell "OSM
+    found something here but two curated sites made the match too close to
+    call" from "there is nothing curated near here at all". `ambiguous_match`
+    is the fix: set only on the refused-for-ambiguity case."""
+    a = curated(id_="a", lat=10.0, lon=10.0)
+    b = curated(id_="b", lat=10.0135, lon=10.0)
+    midpoint = osm_site(lat=10.007, lon=10.0)
+    merged = infrastructure.merge_military_bases([a, b], [midpoint])
+    osm_rec = next(s for s in merged if s["source"] == "osm")
+    assert osm_rec.get("ambiguous_match") is True
+
+
+def test_a_genuinely_unmatched_site_carries_no_ambiguous_flag_either():
+    """The other half of the same distinction: zero curated sites within
+    range is neither a match nor an ambiguous refusal -- it is the ordinary
+    "nothing curated nearby" case, and must not be stamped ambiguous just
+    because it also lacks matched_curated_id."""
+    far_away = osm_site(lat=10.0, lon=10.0)
+    merged = infrastructure.merge_military_bases([curated(lat=-40.0, lon=170.0)], [far_away])
+    osm_rec = next(s for s in merged if s["source"] == "osm")
+    assert "matched_curated_id" not in osm_rec
+    assert "ambiguous_match" not in osm_rec
+
+
+def test_a_clean_match_carries_no_ambiguous_flag():
+    merged = infrastructure.merge_military_bases([curated(id_="al_udeid_ab")], [osm_site()])
+    osm_rec = next(s for s in merged if s["source"] == "osm")
+    assert osm_rec["matched_curated_id"] == "al_udeid_ab"
+    assert "ambiguous_match" not in osm_rec

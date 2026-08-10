@@ -214,7 +214,16 @@ function buildLivePicture(bounds, raw) {
   // No heading of its own: the card's fold is labelled (see
   // countryCardSections), and a section that restates its own title inside
   // itself just costs a line in a 320px column.
-  if (!cells) return "";
+  //
+  // Task 32: an empty `cells` used to mean drop the whole section, whether or
+  // not these six feeds had actually been checked against this country's
+  // bounds yet -- see emptyFoldReason's own docstring for the conflation
+  // ("looked and found nothing" vs "did not look here") this sweep exists to
+  // close everywhere it was found, not just here.
+  if (!cells) {
+    const reason = emptyFoldReason(["adsb", "ais", "jamming", "firms", "infra"], bounds, raw);
+    return reason ? emptyFoldNote(reason) : "";
+  }
 
   // Two of the six feeds behind these numbers are now clipped to a snapped
   // viewport box (fires and jamming -- see `scoped` in map/scene.js), so for a
@@ -646,14 +655,31 @@ export function formatOutageWindow(windowStart, windowEnd) {
 
 function buildConnectivity(props, raw) {
   const outage = outageFor(props, raw);
-  if (!outage) return "";
+  // Task 32 review (known instance 1): regionSummary used to be computed only
+  // once an `outage` record already existed, keyed off outage.country_code --
+  // so a country whose own aggregate score sat under IODA's reporting floor
+  // (raw.outages carries only countries above it) lost this whole section,
+  // sub-national tally included, even when some of its regions genuinely had
+  // scored. Computed here, before the early return, off props' own ISO2 --
+  // the same "-99" resolution outageFor does for the country record -- so a
+  // quiet country score can no longer hide a region that was not quiet.
+  const iso2 = props.iso_a2 && props.iso_a2 !== "-99" ? props.iso_a2 : (outage ? outage.country_code : null);
+  const regionSummary = regionMatchSummary(iso2, raw);
+  if (!outage) {
+    if (!regionSummary) return "";
+    return `
+      <div>No national-level internet disruption detected for this country over the current window.</div>
+      <p class="meta">IODA also scored ${regionSummary.total} region(s) here over the same window &mdash;
+        ${regionSummary.matched} matched to a state or province boundary here (see its own card)${
+          regionSummary.unmatched
+            ? `, and ${regionSummary.unmatched} could not be matched to one and are not drawn`
+            : ""
+        }. A quiet country-level score does not mean every region inside it was quiet too.</p>
+      <p class="meta">Reported by IODA (Georgia Tech). The score is a composite that is only meaningful
+        <b>in comparison</b> &mdash; against a region's own normal and against others in the same window.</p>`;
+  }
   const signals = Object.keys(outage.signals || {});
   const windowText = formatOutageWindow(outage.window_start, outage.window_end);
-  // regionMatchSummary reads outage.country_code rather than props.iso_a2 --
-  // outageFor already resolved the "-99" cases (France, Norway, Kosovo) to get
-  // this record at all, and its own answer is the more direct route to the
-  // same ISO2 than re-deriving it from props a second time.
-  const regionSummary = regionMatchSummary(outage.country_code, raw);
   return `
     <div class="outage-block">
       <div class="outage-head">Internet disruption detected</div>
@@ -1052,7 +1078,13 @@ function buildEnergyInfrastructure(bounds, raw) {
   const curatedEnergySites = itemsInBounds(raw.infra, bounds, (d) => CURATED_ENERGY_INFRA_TYPES.has(d.type));
   const osmEnergySites = itemsInBounds(raw.osmInfra, bounds, (d) => OSM_ENERGY_INFRA_KINDS.has(d.kind));
   if (!plants.length && !dams.length && !landings.length
-    && !curatedEnergySites.length && !osmEnergySites.length && !substations.length) return "";
+    && !curatedEnergySites.length && !osmEnergySites.length && !substations.length) {
+    // Task 32: powerPlants/substations read osmInfra's own coverage record --
+    // see COVERAGE_FEEDS' note on why that split has no fetchCoverage entry
+    // of its own.
+    const reason = emptyFoldReason(["osmInfra", "dams", "cableLandings", "infra"], bounds, raw);
+    return reason ? emptyFoldNote(reason) : "";
+  }
 
   const summary = summarizePowerPlants(plants);
   const shownFuels = summary.byFuel.slice(0, ENERGY_SOURCE_CAP);
@@ -1186,6 +1218,13 @@ function baseTypeLabel(site) {
 // `matched_curated_id` says so in its own row rather than being hidden or
 // summed into its curated twin (see merge_military_bases' own docstring on
 // why the two never blend into one record).
+//
+// Task 32 review (empty-state sweep, known instance 2): `ambiguous_match`
+// (backend/infrastructure.py's `_closest_curated_match`) is the other half
+// of the same record -- an OSM site that sat within range of *more than one*
+// curated site had its match refused on purpose, which used to look
+// identical to "no curated site nearby" (both left `matched_curated_id`
+// unset). Read here so the row says which of the two actually happened.
 function militaryBaseRows(sites) {
   const rows = sites.slice(0, BASE_LIST_CAP).map((site) => {
     const open = openableRow(site.source === "curated" ? "infra" : "osmInfra", site.id);
@@ -1194,6 +1233,8 @@ function militaryBaseRows(sites) {
       <div class="event-meta">${esc(baseTypeLabel(site))} &middot; ${
         site.source === "curated" ? "curated" : "OpenStreetMap"
       }${corroborated ? " &middot; also on the curated list" : ""}${
+        site.ambiguous_match ? " &middot; more than one curated site within 5km, match refused" : ""
+      }${
         site.operator ? ` &middot; operator per OSM: ${esc(site.operator)}` : ""
       }</div></div>`;
   }).join("");
@@ -1321,7 +1362,13 @@ function buildMilitary(bounds, raw, props) {
 
   if (!militaryAreas.length && !basesInBounds.length && !aircraft.length && !navy.length
     && !sanctionedShips.length && !sanctionedAircraft.length && !airActivity.length
-    && !navalHtml && !czibBulletins.length) return "";
+    && !navalHtml && !czibBulletins.length) {
+    // Task 32: militaryBases rides raw.infra's own coverage record (both
+    // arrive on the same one-shot /api/infrastructure payload -- see
+    // useOsintData.js's publishFetchOutcome call for it).
+    const reason = emptyFoldReason(["osmInfra", "infra", "adsb", "ais"], bounds, raw);
+    return reason ? emptyFoldNote(reason) : "";
+  }
 
   const roleCounts = tallyBy(aircraft, (a) => (a.military_role && MILITARY_ROLE_STYLE[a.military_role] ? a.military_role : null));
   const roleEntries = Object.entries(roleCounts.counts).sort((a, b) => b[1] - a[1]);
@@ -1400,7 +1447,12 @@ function buildTransport(bounds, raw) {
   // raw.railwayPoints (see createMapController.js's applyData note) -- same
   // OpenStreetMap sweep, just its own array now, so no predicate is needed.
   const rail = itemsInBounds(raw.railwayPoints, bounds);
-  if (!airports.length && !ports.length && !crossings.length && !rail.length) return "";
+  if (!airports.length && !ports.length && !crossings.length && !rail.length) {
+    // Task 32: railwayPoints rides osmInfra's own coverage record -- same
+    // client-side split as powerPlants (see buildEnergyInfrastructure).
+    const reason = emptyFoldReason(["airports", "ports", "osmInfra"], bounds, raw);
+    return reason ? emptyFoldNote(reason) : "";
+  }
 
   const airportBuckets = bucketAirportsByType(airports);
   const portBuckets = bucketPortsBySize(ports);
@@ -1532,6 +1584,15 @@ const BBOX_CELL_TOLERANCE_DEG = 0.05;
  */
 function bboxCellCoversCountry(bboxCell, bounds) {
   if (!bboxCell) return true;
+  // Task 32: emptyFoldReason's water-card callers can legitimately have no
+  // `bounds` at all (a marine feature with no stored bbox -- see
+  // waterCardFor's own null fallback) and still have run a real containment
+  // test through insideWaterFeature, which does not need bounds either. With
+  // no bounds to compare against, this cannot say the fetch missed the area --
+  // that would be a false "scoped elsewhere" for a check that in fact ran --
+  // so it defers to the caller's own real answer instead, same as an
+  // unparseable cell does just below.
+  if (!bounds) return true;
   const parts = String(bboxCell).split(",").map(Number);
   if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return true; // unparseable: not this function's failure to report
   const [south, west, north, east] = parts;
@@ -1599,6 +1660,76 @@ function coverageReason(key, bounds, raw) {
     return "Fetched, but for a different area — coverage here is unknown, not zero.";
   }
   return null;
+}
+
+/**
+ * Task 32's shared mechanism -- the one place a bbox-scoped fold asks "is an
+ * empty result here real, or did this map just not look?" before it decides
+ * to say nothing.
+ *
+ * Confusing those two has been the single most repeated defect across this
+ * plan (caught separately in Tasks 7, 9, 11, 16, 23, 26 and 29, each time in
+ * a different component). The fix each time was local; this is the fix that
+ * is not: every bbox-scoped section that counts records out of one or more
+ * `raw[key]` feeds and drops itself when the count is zero calls this first,
+ * with the list of feed keys its own counts actually came from. Built
+ * entirely on coverageStateFor -- the same per-feed truth buildCoverage's own
+ * table reads -- so a fold's silence and that table's own row for the same
+ * feed can never disagree about which of the three states applies.
+ *
+ * Returns null when every key was genuinely checked against these bounds
+ * (a real answer -- if the section's own counts are all zero, that is an
+ * honest "looked and found nothing", and the section is entitled to drop
+ * itself exactly as it always has). Otherwise returns one sentence explaining
+ * why the section could not be a fair witness: no bounding box at all, one or
+ * more of its feeds never fetched (most often a zoom gate that has not
+ * lifted), or fetched for a different area. "Not loaded" outranks "scoped
+ * elsewhere" when a section draws on several feeds in different states,
+ * because "this map never looked" is the stronger caveat of the two.
+ *
+ * `keys` are COVERAGE_FEEDS keys (or the key another feed's coverage record
+ * is deliberately read under -- powerPlants/railwayPoints/airDefense ride
+ * osmInfra's, militaryBases rides infra's, cables rides cableLandings' --
+ * see those keys' own notes on COVERAGE_FEEDS and useOsintData.js for why
+ * they have no fetchCoverage entry of their own).
+ *
+ * `boundsOptional` is for the water-card callers: their real containment
+ * test (insideWaterFeature) does not require bounds the way a country or
+ * admin card's countInBounds/itemsInFeature does (see waterCardFor's own
+ * note on `bounds` there being "a cheap pre-filter, not the containment test
+ * itself") -- a water feature with no stored bbox still gets a real check, so
+ * missing bounds must not read as "did not look" for those two callers the
+ * way it correctly does for every count-based one.
+ */
+export function emptyFoldReason(keys, bounds, raw, { boundsOptional = false } = {}) {
+  if (!bounds && !boundsOptional) return NO_BOUNDS_REASON;
+  let worst = null;
+  for (const key of keys) {
+    const state = coverageStateFor(key, bounds, raw);
+    if (state === "not_loaded") {
+      worst = "not_loaded";
+      break; // the stronger caveat of the two -- no need to keep checking
+    }
+    if (state === "scoped_elsewhere") worst = "scoped_elsewhere";
+  }
+  if (worst === "not_loaded") {
+    return "Not loaded this session yet — most often because one of this section's own feeds has not "
+      + "cleared its zoom gate. An empty section here is “not checked”, not “checked and empty”.";
+  }
+  if (worst === "scoped_elsewhere") {
+    return "Fetched, but for a different area — coverage here is unknown, not zero.";
+  }
+  return null;
+}
+
+/**
+ * The standard shape a bbox-scoped section renders when emptyFoldReason found
+ * something to say and the section has no real cells to show either: one
+ * caveat line, in the same "meta" register buildCoverage and the summary
+ * strip's own tooltips use, rather than the section simply vanishing.
+ */
+function emptyFoldNote(reason) {
+  return `<p class="meta">${esc(reason)}</p>`;
 }
 
 function tile(key, label, value, reason) {
@@ -1988,7 +2119,10 @@ function buildWaterTraffic(feature, raw, bounds) {
   // has since moved on), so this is checked and shown regardless of `total`
   // -- the one place in this function that is not itself gated on it.
   const navalTrend = navalPresenceRegion(bounds, raw);
-  if (!total && !navalTrend) return "";
+  if (!total && !navalTrend) {
+    const reason = emptyFoldReason(["ais"], bounds, raw, { boundsOptional: true });
+    return reason ? emptyFoldNote(reason) : "";
+  }
   const rows = VESSEL_TRAFFIC_ORDER.map((k) => statRow("", VESSEL_TRAFFIC_LABEL[k], counts[k])).join("");
   return `${total ? `<div class="cstats">${rows}${statRow("", "total", total, "hot")}</div>${AIS_COVERAGE_CAVEAT}` : ""}
     ${navalTrend ? `<p>${navalPresenceSentence(navalTrend.label, navalTrend)}</p>
@@ -2182,7 +2316,13 @@ function buildWaterInfrastructure(feature, raw, bounds) {
   );
   const landings = (raw.cableLandings || []).filter((p) => insideWaterFeature(feature, bounds, p.lat, p.lon));
   const shorePorts = (raw.ports || []).filter((p) => insideWaterFeature(feature, bounds, p.lat, p.lon));
-  if (!crossing.length && !landings.length && !shorePorts.length) return "";
+  if (!crossing.length && !landings.length && !shorePorts.length) {
+    // Task 32: raw.cables rides cableLandings' own coverage record -- both
+    // arrive on the one-shot /api/cables payload (see useOsintData.js's
+    // publishFetchOutcome call for it).
+    const reason = emptyFoldReason(["cableLandings", "ports"], bounds, raw, { boundsOptional: true });
+    return reason ? emptyFoldNote(reason) : "";
+  }
 
   return `
     <div class="cstats">
@@ -2460,7 +2600,10 @@ const ADMIN_CITY_CAP = 8;
 function buildAdminCities(entry, raw, bounds) {
   const cities = itemsInFeature(raw.cities, entry, bounds)
     .sort((a, b) => (b.population || 0) - (a.population || 0));
-  if (!cities.length) return "";
+  if (!cities.length) {
+    const reason = emptyFoldReason(["cities"], bounds, raw, { boundsOptional: true });
+    return reason ? emptyFoldNote(reason) : "";
+  }
   const largest = cities[0];
   const shown = cities.slice(0, ADMIN_CITY_CAP);
   const rows = shown.map((c) => `<div class="event-row"><b>${esc(c.name)}</b>${c.is_capital ? " &middot; capital" : ""}
@@ -2490,7 +2633,10 @@ function buildAdminLive(entry, raw, bounds) {
     statRow("", "active fires", fires),
     statRow("", "GPS jamming cells", jamming, "hot"),
   ].join("");
-  if (!cells) return "";
+  if (!cells) {
+    const reason = emptyFoldReason(["adsb", "ais", "firms", "jamming"], bounds, raw, { boundsOptional: true });
+    return reason ? emptyFoldNote(reason) : "";
+  }
   return `<div class="cstats">${cells}</div>
     ${BBOX_LOAD_CAVEAT}
     <div class="meta">Aircraft: ADS-B, <i>measured</i>. Ships: AIS (aisstream.io), <i>measured</i>. Fires:
@@ -2517,7 +2663,8 @@ function buildAdminInfrastructure(entry, raw, bounds) {
   const rail = inside(raw.railwayPoints);
   const crossings = inside(raw.osmInfra, (d) => d.kind === "border_control");
   if (!plants.length && !dams.length && !airports.length && !ports.length && !rail.length && !crossings.length) {
-    return "";
+    const reason = emptyFoldReason(["osmInfra", "dams", "airports", "ports"], bounds, raw, { boundsOptional: true });
+    return reason ? emptyFoldNote(reason) : "";
   }
 
   const summary = summarizePowerPlants(plants);
@@ -2595,15 +2742,42 @@ function adminOutageRecord(props, raw) {
  * same shape and same wording discipline as the country card's own
  * buildConnectivity above, just matched to this one boundary (or, for a
  * district, its parent state -- see adminOutageRecord) instead of the whole
- * country. Empty, like buildConnectivity, when there is nothing to show: a
- * state IODA has not scored is not different enough from a state nobody has
- * looked at to be worth a fold saying so, which is the same call the country
- * card already makes for this exact feed.
+ * country. Empty, like buildConnectivity, when there is genuinely nothing to
+ * show: a state IODA has not scored is not different enough from a state
+ * nobody has looked at to be worth a fold saying so, which is the same call
+ * the country card already makes for this exact feed.
+ *
+ * Task 32 (this task's own inventory names this the "unmatched-region case"):
+ * "genuinely nothing to show" is not the same claim as "adminOutageRecord
+ * found no record for this exact boundary", and the old version conflated
+ * them. A state whose IODA region record could not be geometrically matched
+ * to any admin-1 shape (see regionMatchSummary's own docstring -- roughly a
+ * quarter of a country's regions land there) reads identically, from here,
+ * to a state IODA never looked at near at all -- both were a bare `null`
+ * from adminOutageRecord. buildAdminCoverage already states the country-wide
+ * version of this tally, but a reader who opened this fold specifically for
+ * connectivity should not have to go find that one to learn the difference.
  */
 function buildAdminConnectivity(props, raw) {
   const isDistrict = !props?.code && !!props?.pcode;
   const outage = adminOutageRecord(props, raw);
-  if (!outage) return "";
+  if (!outage) {
+    const reason = coverageReason("outages", null, raw); // unscoped, same as connectivityTile
+    if (reason) return emptyFoldNote(reason);
+    // State and district entries both carry their own country_code (ISO3 --
+    // see subdivisionCardSections/districtCardSections' own docstrings), so
+    // no state/district resolution is needed just to find the country this
+    // boundary sits in, unlike adminOutageRecord's own district-to-state
+    // lookup (which exists to find a *specific* state's outage record, not
+    // merely its country).
+    const regionSummary = regionMatchSummary(iso2ForIso3(props?.country_code, raw), raw);
+    if (!regionSummary) return "";
+    return `<p class="meta">IODA scored ${regionSummary.total} region(s) in this country over the current
+      window, but none matched to this exact boundary &mdash; ${regionSummary.matched} matched to some
+      other state or province here, and ${regionSummary.unmatched} could not be placed on any boundary at
+      all (see the Data coverage fold below for the full tally). That is not the same as IODA finding
+      nothing near here.</p>`;
+  }
   const signals = Object.keys(outage.signals || {});
   const windowText = formatOutageWindow(outage.window_start, outage.window_end);
   const matchWord = outage.matched === "exact" ? "an exact" : "a fuzzy (name-normalised)";

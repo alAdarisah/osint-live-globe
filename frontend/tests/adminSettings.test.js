@@ -51,7 +51,9 @@ function preTask31Config() {
 }
 
 test("the settings version was bumped for this task's shape change", () => {
-  assert.equal(SETTINGS_VERSION, 3);
+  // 3 for Task 31's own five keys, 4 for Task 32's `units` addition on top --
+  // this test just asserts "a real bump happened since 2", not which task.
+  assert.equal(SETTINGS_VERSION, 4);
 });
 
 test("an old config missing all five new keys merges to the shipped defaults", () => {

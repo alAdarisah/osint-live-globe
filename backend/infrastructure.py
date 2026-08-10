@@ -1911,20 +1911,31 @@ AIR_DEFENSE_OSM_KINDS = frozenset({"radar_station", "military_bunker", "military
 BASE_MATCH_RADIUS_KM = 5.0
 
 
-def _closest_curated_match(site: dict, curated: list[dict]) -> dict | None:
-    """The one curated site an OSM record should be matched to, or None when
-    zero or more-than-one curated site falls within BASE_MATCH_RADIUS_KM --
-    see that constant's own note on why "more than one" refuses rather than
-    picks the nearest. `curated` is the small (~100-entry) MILITARY_BASES
-    list, so a plain per-call scan is simpler than building a spatial index
-    for it and no source of the bug a coarse grid cell could introduce at a
-    cluster boundary.
+def _closest_curated_match(site: dict, curated: list[dict]) -> tuple[dict | None, bool]:
+    """The one curated site an OSM record should be matched to, or (None,
+    ambiguous) when the match was refused -- see BASE_MATCH_RADIUS_KM's own
+    note on why "more than one" refuses rather than picks the nearest.
+    `curated` is the small (~100-entry) MILITARY_BASES list, so a plain
+    per-call scan is simpler than building a spatial index for it and no
+    source of the bug a coarse grid cell could introduce at a cluster
+    boundary.
+
+    Task 32 review (empty-state sweep): a refusal used to come back as a bare
+    None, indistinguishable from "zero curated sites nearby" -- both read as
+    "no curated site nearby" to a caller that only checks `matched_curated_id`,
+    which is exactly the "found nothing" vs "did not look" conflation this
+    module's own docstring warns the merge step must not make. `ambiguous`
+    tells the two apart: True means this OSM site sits within range of more
+    than one curated site and the match was refused on purpose, not that
+    nothing curated is nearby at all.
     """
     within = [
         c for c in curated
         if haversine_km(site["lat"], site["lon"], c["lat"], c["lon"]) <= BASE_MATCH_RADIUS_KM
     ]
-    return within[0] if len(within) == 1 else None
+    if len(within) == 1:
+        return within[0], False
+    return None, len(within) > 1
 
 
 def merge_military_bases(curated: list[dict], osm_sites: list[dict]) -> list[dict]:
@@ -1945,15 +1956,23 @@ def merge_military_bases(curated: list[dict], osm_sites: list[dict]) -> list[dic
     count_distinct_bases below reads to avoid reporting two installations
     where a human curator and OpenStreetMap's mappers both independently
     found the same one.
+
+    An OSM site refused a match because more than one curated site sits
+    within range is stamped `ambiguous_match: True` instead -- the refusal
+    itself is information (the frontend's own popup says so, see popups.js's
+    militaryBaseRows), not the same silence as an OSM site with no curated
+    neighbour at all.
     """
     out = [{**site, "source": "curated"} for site in curated]
     for site in osm_sites:
         if site.get("kind") not in MILITARY_OSM_KINDS:
             continue
         record = {**site, "source": "osm"}
-        match = _closest_curated_match(site, curated)
+        match, ambiguous = _closest_curated_match(site, curated)
         if match is not None:
             record["matched_curated_id"] = match["id"]
+        elif ambiguous:
+            record["ambiguous_match"] = True
         out.append(record)
     return out
 

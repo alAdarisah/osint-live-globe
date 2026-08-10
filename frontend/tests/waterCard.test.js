@@ -61,9 +61,20 @@ function countryEntry(name, box) {
   return buildCountryIndex(collection);
 }
 
+// Task 32: buildWaterTraffic/buildWaterInfrastructure now check
+// raw.fetchCoverage before dropping themselves on a zero count (see
+// emptyFoldReason in map/popups.js) -- so, same reasoning as districtCard.
+// test.js's own note by its emptyRaw(), the feeds those two folds read are
+// marked "fetched, unscoped" by default here, and a dedicated test below
+// covers the genuinely-never-fetched case on its own.
+function fetchedUnscoped(at = Date.now()) {
+  return { status: "fetched", fetchedAt: at, bbox: null, scoped: false };
+}
+
 const emptyRaw = () => ({
   ais: [], darkVessels: [], gfwGaps: [], cables: [], cableLandings: [], ports: [],
   events: [], gdelt: [], officials: [], countryIndex: [],
+  fetchCoverage: { ais: fetchedUnscoped(), cableLandings: fetchedUnscoped(), ports: fetchedUnscoped() },
 });
 
 test("countVesselsByClass -- the five-way traffic tally", async (t) => {
@@ -274,6 +285,26 @@ test("waterCardSections -- section shape and empty-section dropping", async (t) 
     const bounds = { south: -5, west: -5, north: 5, east: 5 };
     const { sections } = waterCardSections(sea, emptyRaw(), bounds);
     assert.equal(sections.find((s) => s.id === "traffic"), undefined);
+  });
+
+  // Task 32 (empty-state sweep): before this task, a water body whose AIS/
+  // cables/ports feeds had genuinely never been fetched this session read
+  // identically to one this map had checked and found quiet -- both were a
+  // silently absent fold. `bounds` here is null too, deliberately: water's
+  // own bounds is only ever a pre-filter (see insideWaterFeature), so a
+  // missing one must not itself read as "did not look" the way it correctly
+  // does for a country's count-based folds -- see emptyFoldReason's own
+  // `boundsOptional` note.
+  await t.test("AIS/cables/ports never fetched this session: traffic and infrastructure say so, not drop", () => {
+    const sea = makeSea();
+    const raw = { ...emptyRaw(), fetchCoverage: {} };
+    const { sections } = waterCardSections(sea, raw, null);
+    const traffic = sections.find((s) => s.id === "traffic");
+    const infra = sections.find((s) => s.id === "infrastructure");
+    assert.ok(traffic, "traffic no longer silently drops when AIS was never fetched");
+    assert.ok(infra, "infrastructure no longer silently drops either");
+    assert.match(traffic.html, /Not loaded this session/);
+    assert.match(infra.html, /Not loaded this session/);
   });
 });
 

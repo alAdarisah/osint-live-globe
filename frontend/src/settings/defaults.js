@@ -40,7 +40,14 @@ import { CARD_TYPES, CARD_SECTIONS } from "./cardSections";
 // `stored.water` etc. at all, so mergeSettings' own isPlainObject guards
 // leave defaultSettings()' shipped values in place rather than needing a
 // converter. The bump is the same kind of record 2's own note describes.
-export const SETTINGS_VERSION = 3;
+//
+// 4 (Task 32): added `units` -- the metric/imperial/nautical and UTC/local/
+// browser preference (see utils/format.js's formatDistanceKm/formatSpeedKmh/
+// formatAltitudeM/formatClockAt). Additive for the same reason as every bump
+// above it: a config saved before this task has no `stored.units` at all, so
+// mergeSettings leaves defaultSettings()' shipped `{ system: "metric",
+// timezone: "utc" }` in place for it.
+export const SETTINGS_VERSION = 4;
 
 /**
  * The layers whose appearance can be configured, in the order the admin panel
@@ -498,6 +505,18 @@ export function defaultSettings() {
         weather: { ...DEFAULT_TILE_DIAL },
       },
     },
+    // Task 32 item 4: the units/timezone preference every card's numbers and
+    // clocks read through (see utils/format.js's formatDistanceKm/
+    // formatSpeedKmh/formatAltitudeM/formatClockAt). `system` is the reader's
+    // choice of unit family; `timezone` is "utc" (fixed), "browser" (follow
+    // this device's own zone) or an IANA zone name an operator names
+    // directly -- validated against Intl at merge time below rather than
+    // against a fixed list, since the set of valid zone names is Intl's own
+    // and not this app's to maintain a second copy of.
+    units: {
+      system: "metric",
+      timezone: "utc",
+    },
     // Task 31's Water section -- fill/outline weight and which marine
     // classes draw. Colours are not repeated here: water.fill/water.outline/
     // water.selected already live in icons.colors like every other palette
@@ -809,6 +828,30 @@ export function mergeSettings(stored) {
       base.ui.tiles.basemap = mergeTileDial(stored.ui.tiles.basemap);
       base.ui.tiles.imagery = mergeTileDial(stored.ui.tiles.imagery);
       base.ui.tiles.weather = mergeTileDial(stored.ui.tiles.weather);
+    }
+  }
+
+  // Task 32 item 4: the units/timezone preference. `system` is checked
+  // against UNIT_SIZES' own three values; `timezone` against Intl directly
+  // (constructing a DateTimeFormat with an unrecognised zone name throws),
+  // which is also what formatClockAt itself falls back on for a zone that
+  // slips through -- this is the earlier, preferred point to catch it, but
+  // that fallback stays as the second line of defence for a value that
+  // reaches formatClockAt some other way.
+  if (isPlainObject(stored.units)) {
+    base.units.system = ["metric", "imperial", "nautical"].includes(stored.units.system)
+      ? stored.units.system
+      : "metric";
+    if (stored.units.timezone === "utc" || stored.units.timezone === "browser") {
+      base.units.timezone = stored.units.timezone;
+    } else if (typeof stored.units.timezone === "string" && stored.units.timezone) {
+      try {
+        // eslint-disable-next-line no-new -- constructed only to validate; Intl throws on an unknown zone
+        new Intl.DateTimeFormat("en-US", { timeZone: stored.units.timezone });
+        base.units.timezone = stored.units.timezone;
+      } catch {
+        base.units.timezone = "utc";
+      }
     }
   }
 

@@ -182,9 +182,12 @@ export default function App() {
   });
   replayActiveRef.current = replayApi.isReplaying;
 
-  // Source-health polling is for the panel that displays it, and that panel is
-  // now admin-only -- so a reader's session stops making the request entirely
-  // rather than fetching a status nothing will render.
+  // Task 32 item 1: polls unconditionally now -- every layer row's freshness
+  // badge (LayerCheck.jsx, via HealthContext just below) reads this, not
+  // only the Source status fold, which stays Admin Mode-only. `adminMode`
+  // still controls the cadence: 15s while that fold is actually on screen
+  // wanting to feel live, 60s ("cheaply", per this task's own brief)
+  // otherwise -- see useHealth's own note.
   const { health, owmConfigured } = useHealth(adminMode);
 
   // Entering or leaving Admin Mode moves the map's left edge by 320px, and

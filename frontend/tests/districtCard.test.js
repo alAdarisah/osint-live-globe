@@ -54,6 +54,19 @@ function makeDistrict(overrides = {}) {
   return entry;
 }
 
+// Task 32: every count-based fold below (cities/live/infrastructure) now
+// checks raw.fetchCoverage before it drops itself on a zero count -- see
+// emptyFoldReason in map/popups.js. This file's fixtures are about polygon
+// clipping and the archive's own month/loading logic, not about coverage
+// honesty (that gets its own dedicated tests further down), so every feed
+// these three folds read is marked "fetched, unscoped" by default here --
+// the same "we have data, there's just nothing in it" state these tests were
+// already written to exercise, now made explicit instead of accidentally
+// reading as "never fetched".
+function fetchedUnscoped(at = Date.now()) {
+  return { status: "fetched", fetchedAt: at, bbox: null, scoped: false };
+}
+
 const emptyRaw = () => ({
   events: [], cities: [], adsb: [], ais: [], firms: [], jamming: [],
   // Task 27: railwayPoints is its own array now, split out of osmInfra at
@@ -61,6 +74,12 @@ const emptyRaw = () => ({
   // own note in popups.js.
   osmInfra: [], railwayPoints: [], dams: [], airports: [], ports: [],
   districtCounts: new Map(), districtMonthLoading: false, districtSeries: {},
+  fetchCoverage: {
+    cities: fetchedUnscoped(), adsb: fetchedUnscoped(), ais: fetchedUnscoped(),
+    firms: fetchedUnscoped(), jamming: fetchedUnscoped(), osmInfra: fetchedUnscoped(),
+    dams: fetchedUnscoped(), airports: fetchedUnscoped(), ports: fetchedUnscoped(),
+    outages: fetchedUnscoped(),
+  },
 });
 
 test("subdivisionCardSections -- polygon clipping against a hand-built state", async (t) => {
@@ -336,7 +355,11 @@ test("districtCardSections -- the 24-month trend, built from this district's own
 test("districtCardSections -- the empty-district path: no record, and loading kept apart from it", async (t) => {
   const district = makeDistrict();
 
-  await t.test("an entirely empty raw bag still returns profile, conflict and coverage; optional folds drop", () => {
+  await t.test("an entirely empty raw bag (but every feed marked fetched) still returns profile, conflict and coverage; optional folds drop", () => {
+    // emptyRaw() marks cities/adsb/ais/firms/jamming/osmInfra/dams/airports/
+    // ports as fetched-unscoped (see its own note) -- so an empty count here
+    // is a real, checked "nothing here", and these folds are entitled to
+    // drop themselves exactly as they always have.
     const { title, sections } = districtCardSections(district, emptyRaw(), null, null);
     assert.equal(title, "Test District");
     const ids = sections.map((s) => s.id);
@@ -345,6 +368,26 @@ test("districtCardSections -- the empty-district path: no record, and loading ke
     assert.ok(!ids.includes("cities"));
     assert.ok(!ids.includes("live"));
     assert.ok(!ids.includes("infrastructure"));
+  });
+
+  // Task 32 (empty-state sweep): the surface this test guards against
+  // regressing -- before this task, a raw bag with no fetchCoverage entry at
+  // all (this session has genuinely never fetched cities/adsb/ais/etc.) read
+  // exactly the same as the checked-and-empty case just above: all three
+  // folds silently absent. That is "did not look" wearing "found nothing"'s
+  // clothes, and it is what emptyFoldReason exists to stop.
+  await t.test("a raw bag with no fetchCoverage at all -- cities/live/infrastructure say they were never checked, not drop", () => {
+    const raw = { ...emptyRaw(), fetchCoverage: {} };
+    const { sections } = districtCardSections(district, raw, null, null);
+    const cities = sections.find((s) => s.id === "cities");
+    const live = sections.find((s) => s.id === "live");
+    const infra = sections.find((s) => s.id === "infrastructure");
+    assert.ok(cities, "cities no longer silently drops when its feed was never fetched");
+    assert.ok(live, "live picture no longer silently drops either");
+    assert.ok(infra, "infrastructure no longer silently drops either");
+    for (const section of [cities, live, infra]) {
+      assert.match(section.html, /Not loaded this session/, `${section.id} says why it has nothing to show`);
+    }
   });
 
   await t.test("no month selected yet: 'No record for the archive', never a fabricated zero", () => {

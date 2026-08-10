@@ -26,6 +26,25 @@
 //   real arrangement (see applyScene) and used to look like a broken tick.
 
 import { useEffect, useRef } from "react";
+import { useLayerHealth } from "./HealthContext";
+import { LAYER_HEALTH_KEY } from "./layerHealthKeys";
+import { timeAgoFromUnix } from "../../utils/format";
+
+// Task 32 item 1: "last-updated per layer" -- appended to this same checkbox's
+// title tooltip rather than a new element next to it, so all ~40 rows in
+// LayersSection.jsx get it without a layout change to any of them. Returns ""
+// (nothing appended) when this layer has no mapped health key (a curated or
+// purely static feed -- see LAYER_HEALTH_KEY's own note) or health has not
+// loaded yet, rather than guess at a number no source supplied.
+function freshnessTitle(layerKey, health) {
+  const healthKey = LAYER_HEALTH_KEY[layerKey];
+  const info = healthKey ? health?.[healthKey] : null;
+  if (!info) return "";
+  if (info.last_success == null) {
+    return info.last_error ? ` Data: never succeeded (${info.last_error}).` : " Data: never succeeded.";
+  }
+  return ` Data: updated ${timeAgoFromUnix(info.last_success)}.`;
+}
 
 /**
  * @param {string} layerKey
@@ -37,6 +56,7 @@ import { useEffect, useRef } from "react";
 export default function LayerCheck({ layerKey, on, wish, onToggle, ariaLabel, disabled = false }) {
   const ref = useRef(null);
   const pinned = wish !== undefined;
+  const health = useLayerHealth();
 
   // `indeterminate` is a DOM property, not an attribute -- React cannot set it
   // from JSX, so it has to be written after every render that could change it.
@@ -45,13 +65,14 @@ export default function LayerCheck({ layerKey, on, wish, onToggle, ariaLabel, di
   }, [pinned, on]);
 
   const withheld = wish === true && !on;
-  const title = !pinned
+  const title = (!pinned
     ? "Chosen by the scene: zoom, what the camera is over, and what you have clicked. Tick to override."
     : withheld
       ? "Pinned on, but held back by this layer's zoom gate — zoom in, or lower the gate in Admin Mode."
       : wish
         ? "Pinned on. Overrides the scene for every reader of this deployment."
-        : "Pinned off. Overrides the scene for every reader of this deployment.";
+        : "Pinned off. Overrides the scene for every reader of this deployment.")
+    + freshnessTitle(layerKey, health);
 
   return (
     <>

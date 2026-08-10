@@ -62,6 +62,17 @@ function fetchedScopedTo(box, at = Date.now()) {
   return { status: "fetched", fetchedAt: at, bbox: box, scoped: true };
 }
 
+// Task 32: buildMilitary now asks emptyFoldReason(["osmInfra", "infra",
+// "adsb", "ais"], ...) before it drops itself -- every test below that
+// expects the military section to be absent because there is genuinely
+// nothing in it (as opposed to nothing *fetched* yet, which is
+// emptyState.test.js's own concern) has to say these four feeds were
+// actually checked, or it would now assert against the wrong one of the two
+// honest reasons a fold can have nothing to show.
+const MILITARY_FEEDS_CHECKED = {
+  osmInfra: fetchedUnscoped(), infra: fetchedUnscoped(), adsb: fetchedUnscoped(), ais: fetchedUnscoped(),
+};
+
 test("summarizePowerPlants -- the tagged-fraction sum, including all-untagged", async (t) => {
   await t.test("a mix of tagged and untagged plants sums only the tagged ones", () => {
     // Every real record carries both the raw OSM tag and the backend's own
@@ -179,8 +190,19 @@ test("countryCardSections -- energy infrastructure: the mandatory OSM tagged-fra
     assert.doesNotMatch(energy.html, /<b>\d[\d.,]* MW<\/b>/, "no capacity number is fabricated when nothing is tagged");
   });
 
-  await t.test("no plants, dams or landings in bounds: the section is dropped", () => {
-    const { sections } = countryCardSections(baseProps, emptyRaw(), bounds);
+  await t.test("no plants, dams or landings in bounds, but every feed genuinely checked: the section is dropped", () => {
+    // Task 32: buildEnergyInfrastructure now asks emptyFoldReason before it
+    // drops itself on a zero count -- so this test, which is about the
+    // "checked and truly empty" path, has to say so explicitly rather than
+    // rely on emptyRaw()'s own default of an unfetched fetchCoverage (which
+    // is deliberately the *other* path -- see emptyState.test.js for that one).
+    const raw = emptyRaw({
+      fetchCoverage: {
+        osmInfra: fetchedUnscoped(), dams: fetchedUnscoped(),
+        cableLandings: fetchedUnscoped(), infra: fetchedUnscoped(),
+      },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "energy"), undefined);
   });
 
@@ -246,7 +268,13 @@ test("countryCardSections -- energy infrastructure: Task 28 additions (substatio
   });
 
   await t.test("a curated port that is not energy-related (no refinery/lng_terminal/port type match) is excluded", () => {
-    const raw = emptyRaw({ infra: [{ id: "x", type: "fab", lat: 5, lon: 5, name: "Some Fab" }] });
+    const raw = emptyRaw({
+      infra: [{ id: "x", type: "fab", lat: 5, lon: 5, name: "Some Fab" }],
+      fetchCoverage: {
+        osmInfra: fetchedUnscoped(), dams: fetchedUnscoped(),
+        cableLandings: fetchedUnscoped(), infra: fetchedUnscoped(),
+      },
+    });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "energy"), undefined);
   });
@@ -325,6 +353,7 @@ test("countryCardSections -- military: bbox caveat reused verbatim, sanctioned l
   await t.test("a sanctioned vessel flagged to a different country is not listed", () => {
     const raw = emptyRaw({
       ais: [{ mmsi: 1, lat: 5, lon: 5, name: "MV Other", sanctions: { flag: "Nowhereland", program: "SDN" } }],
+      fetchCoverage: MILITARY_FEEDS_CHECKED,
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "military"), undefined);
@@ -409,6 +438,7 @@ test("countryCardSections -- military: bbox caveat reused verbatim, sanctioned l
         },
         ports: {},
       },
+      fetchCoverage: MILITARY_FEEDS_CHECKED,
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "military"), undefined);
@@ -427,6 +457,7 @@ test("countryCardSections -- military: bbox caveat reused verbatim, sanctioned l
   await t.test("a withdrawn CZIB bulletin is not cross-referenced", () => {
     const raw = emptyRaw({
       czib: [{ id: "czib:2:TL", active: false, country_code: "TL", name: "Old Airspace Warning", reference: "CZIB-2018-02" }],
+      fetchCoverage: MILITARY_FEEDS_CHECKED,
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "military"), undefined);
@@ -435,13 +466,22 @@ test("countryCardSections -- military: bbox caveat reused verbatim, sanctioned l
   await t.test("a CZIB bulletin for a different country is not cross-referenced", () => {
     const raw = emptyRaw({
       czib: [{ id: "czib:3:XX", active: true, country_code: "XX", name: "Airspace of Nowhere", reference: "CZIB-2026-02" }],
+      fetchCoverage: MILITARY_FEEDS_CHECKED,
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "military"), undefined);
   });
 
-  await t.test("nothing military in view: the section is dropped", () => {
-    const { sections } = countryCardSections(baseProps, emptyRaw(), bounds);
+  await t.test("nothing military in view, but every feed genuinely checked: the section is dropped", () => {
+    // Task 32: same reasoning as energy's own equivalent test just above --
+    // buildMilitary now asks emptyFoldReason first.
+    const raw = emptyRaw({
+      fetchCoverage: {
+        osmInfra: fetchedUnscoped(), infra: fetchedUnscoped(),
+        adsb: fetchedUnscoped(), ais: fetchedUnscoped(),
+      },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "military"), undefined);
   });
 });
@@ -469,8 +509,13 @@ test("countryCardSections -- transport: airports/ports bucketed, oil terminals c
     assert.match(transport.html, /Counted within the area currently loaded\./);
   });
 
-  await t.test("nothing in view: the section is dropped", () => {
-    const { sections } = countryCardSections(baseProps, emptyRaw(), bounds);
+  await t.test("nothing in view, but every feed genuinely checked: the section is dropped", () => {
+    // Task 32: buildTransport now asks emptyFoldReason(["airports", "ports",
+    // "osmInfra"], ...) before it drops itself.
+    const raw = emptyRaw({
+      fetchCoverage: { airports: fetchedUnscoped(), ports: fetchedUnscoped(), osmInfra: fetchedUnscoped() },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "transport"), undefined);
   });
 });
