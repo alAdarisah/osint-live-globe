@@ -1108,13 +1108,23 @@ def _matches_callsign_query(value, query: str) -> bool:
     the two filters is authoritative and why keeping this one narrow to
     *only* callsign, rather than growing it to match the client's callsign/
     name/mmsi/imo, is deliberate.
+
+    An empty query matches everything, including a ship with no callsign at
+    all -- checked before the value is, so the two clauses agree with
+    matchQuery's own "no query is not a query about this field" rule instead
+    of just happening to coincide with it. The route above only ever calls
+    this when `callsign` is truthy, so this ordering is currently unreachable
+    from the one caller this module has, not a live bug -- it is here so a
+    future caller (or a test) reading this function in isolation gets the
+    same answer matchQuery would, rather than one that only matches it by
+    accident of how the route happens to guard the call.
     """
-    if not value:
-        return False
-    haystack = str(value).strip().upper()
+    haystack = str(value).strip().upper() if value else ""
     needle = query.strip().upper()
     if not needle:
         return True
+    if not haystack:
+        return False
     if "*" not in needle:
         return haystack.startswith(needle)
     pattern = "^" + re.escape(needle).replace(r"\*", ".*") + "$"

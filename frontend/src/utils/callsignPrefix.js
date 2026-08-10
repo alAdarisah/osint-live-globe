@@ -27,6 +27,22 @@
 // and quietly dropping real rows from a source table is exactly the kind of
 // invented-by-omission this project's provenance rule warns against.
 //
+// The first pass through this table (an AI-summarised read of the article)
+// dropped two rows: a smaller territory's own carve-out nested *inside* a
+// larger country's block, which a plain "list every prefix range" pass has
+// no reason to notice is two rows rather than one. B is China's block, but
+// BM-BQ and BU-BX inside it are Taiwan's; HB is Switzerland's, but HB0,
+// HB3Y and HBL inside it are Liechtenstein's. Both were caught by re-pulling
+// the article's raw wikitext (github.com/... mirrors of ITU RR Appendix 42
+// agree) and diffing every one of its ~230 rows against this table, rather
+// than the spot-check of a dozen entries the first pass shipped with -- the
+// spot check had no way to catch an omission, only a wrong entry. The two
+// carve-outs sit as their own rows below, immediately after the block they
+// nest inside, and are ordered ahead of it by parseSeries/PARSED_SERIES'
+// longest-commonPrefix-first sort (see there) precisely so a Taiwanese or
+// Liechtenstein callsign resolves to the carve-out and not the country
+// wrapped around it.
+//
 // Each row is [series, name]. `series` is either an exact prefix ("A2", "B")
 // or a range over one shared trailing position ("AA-AL", "SSA-SSM") -- see
 // parseSeries for how the two shapes are told apart and reduced to the same
@@ -37,6 +53,8 @@ const CALLSIGN_SERIES = [
   ["A2", "Botswana"], ["A3", "Tonga"], ["A4", "Oman"], ["A5", "Bhutan"],
   ["A6", "United Arab Emirates"], ["A7", "Qatar"], ["A8", "Liberia"], ["A9", "Bahrain"],
   ["B", "China"],
+  // Taiwan's carve-out inside China's B block -- see the header note above.
+  ["BM-BQ", "Taiwan"], ["BU-BX", "Taiwan"],
   ["CA-CE", "Chile"], ["CF-CK", "Canada"], ["CL-CM", "Cuba"], ["CN", "Morocco"],
   ["CO", "Cuba"], ["CP", "Bolivia"], ["CQ-CU", "Portugal"], ["CV-CX", "Uruguay"],
   ["CY-CZ", "Canada"], ["C2", "Nauru"], ["C3", "Andorra"], ["C4", "Cyprus"],
@@ -53,7 +71,11 @@ const CALLSIGN_SERIES = [
   ["E7", "Bosnia and Herzegovina"],
   ["F", "France"],
   ["G", "United Kingdom"],
-  ["HA", "Hungary"], ["HB", "Switzerland"], ["HC-HD", "Ecuador"], ["HE", "Switzerland"],
+  ["HA", "Hungary"], ["HB", "Switzerland"],
+  // Liechtenstein's carve-out inside Switzerland's HB block -- see the
+  // header note above. Three specific series, not a contiguous range.
+  ["HB0", "Liechtenstein"], ["HB3Y", "Liechtenstein"], ["HBL", "Liechtenstein"],
+  ["HC-HD", "Ecuador"], ["HE", "Switzerland"],
   ["HF", "Poland"], ["HG", "Hungary"], ["HH", "Haiti"], ["HI", "Dominican Republic"],
   ["HJ-HK", "Colombia"], ["HL", "South Korea"], ["HM", "North Korea"], ["HN", "Iraq"],
   ["HO-HP", "Panama"], ["HQ-HR", "Honduras"], ["HS", "Thailand"], ["HT", "Nicaragua"],

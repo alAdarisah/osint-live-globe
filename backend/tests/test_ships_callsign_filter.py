@@ -31,6 +31,8 @@ from backend import regions
         ("5BXY2", "5BXY99", False),
         (None, "5BX", False),          # nothing to match against
         ("5BXY2", "", True),           # an empty query matches everything
+        (None, "", True),              # ...even against a ship with no callsign at all --
+                                        # see matchQuery's identical rule on the client side
     ],
 )
 def test_matches_callsign_query(value, query, expected):

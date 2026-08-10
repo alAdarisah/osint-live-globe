@@ -42,6 +42,24 @@ test("countryForCallsign: case-insensitive, and punctuation/whitespace is stripp
   assert.equal(countryForCallsign("9V*"), "Singapore"); // a filter-box wildcard, not a real character
 });
 
+test("countryForCallsign: a smaller territory's carve-out inside a larger country's block wins over that block", () => {
+  // Taiwan's BM-BQ and BU-BX sit inside China's plain "B" block. A first pass
+  // over the source table dropped both carve-outs and resolved every B-series
+  // callsign to China -- this is the regression test for that.
+  assert.equal(countryForCallsign("BV1234"), "Taiwan");  // in BU-BX
+  assert.equal(countryForCallsign("BM100"), "Taiwan");   // in BM-BQ, the low end
+  assert.equal(countryForCallsign("BX999"), "Taiwan");   // in BU-BX, the high end
+  assert.equal(countryForCallsign("BR100"), "China");    // between the two Taiwan ranges
+  assert.equal(countryForCallsign("BABCD"), "China");    // outside both ranges entirely
+
+  // Liechtenstein's HB0, HB3Y and HBL sit inside Switzerland's plain "HB"
+  // block -- three specific series, not one contiguous range.
+  assert.equal(countryForCallsign("HB0123"), "Liechtenstein");
+  assert.equal(countryForCallsign("HB3Y1"), "Liechtenstein");
+  assert.equal(countryForCallsign("HBL12"), "Liechtenstein");
+  assert.equal(countryForCallsign("HB9AB"), "Switzerland"); // outside all three carve-outs
+});
+
 test("countryForCallsign: a prefix outside every series, or too short to have one, resolves to null rather than a guess", () => {
   assert.equal(countryForCallsign("1ABCD"), null); // ITU never allocated a series starting with a bare "1"
   assert.equal(countryForCallsign("SS9"), null);    // "SS" + a digit falls in neither SSA-SSM nor SSN-SSZ

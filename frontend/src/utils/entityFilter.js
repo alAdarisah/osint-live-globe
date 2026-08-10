@@ -97,7 +97,15 @@ export function matchesVesselFilter(item, filter = DEFAULT_VESSEL_FILTER) {
  * under node --test the way mmsi.js and this file otherwise both can.
  */
 export function matchesAircraftFilter(item, filter = DEFAULT_AIRCRAFT_FILTER) {
-  if (filter.militaryOnly && !(item?.military || item?.callsign_military)) return false;
+  // Strict === true, not a truthiness check, to actually match the two
+  // fields the same way decorators.js's classifyAircraft reads them (see
+  // this function's own docstring) -- today the backend only ever sends
+  // real booleans so the two read identically, but a truthiness check would
+  // silently stop matching that the moment either field arrived as a 1 or
+  // a "true" string instead.
+  if (filter.militaryOnly && !(item?.military === true || item?.callsign_military === true)) {
+    return false;
+  }
   return matchesAnyField(item, AIRCRAFT_TEXT_FIELDS, filter.text);
 }
 

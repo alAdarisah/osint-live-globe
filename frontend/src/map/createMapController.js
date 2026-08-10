@@ -18,7 +18,7 @@ import {
   severityBand, severityColor,
 } from "./severity";
 import {
-  matchesVesselFilter, matchesAircraftFilter, DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER,
+  filterVessels, filterAircraft, DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER,
 } from "../utils/entityFilter";
 import {
   createBaseLayer,
@@ -3355,22 +3355,30 @@ export function createMapController(container, initial, callbacks) {
     const belowTankerPinZoom = zoom < (tokenZoom("ship.tanker") ?? -Infinity);
     const belowCivilianPinZoom = zoom < (tokenZoom("ship.other") ?? -Infinity);
 
-    let civilianVisible = [];
-    const tankerVisible = [];
-    const navyVisible = [];
     // The filter bar's free text/prefix and sanctions/watchlist flags (Task
     // 18), applied before the class split below rather than after: a ship
     // the filter rejects must never reach any of the three buckets, which is
     // what "combines with the existing class filters" means -- the class
     // toggles and the sanction ring still apply to whatever the filter left,
-    // exactly as if the rejected ships were never in the feed.
-    let vesselFilterMatch = 0;
-    for (const item of raw.ais) {
-      const passesFilter = matchesVesselFilter(item, vesselFilter);
-      if (passesFilter) vesselFilterMatch += 1;
+    // exactly as if the rejected ships were never in the feed. filterVessels
+    // returns a new array (raw.ais itself is never touched), which is the
+    // "shortening the list before it reaches updateEntities" webglLayer.js
+    // needs -- the loop below narrows that list further, by viewport/zoom/
+    // class, but every ship it starts from has already passed the filter.
+    const filteredAis = filterVessels(raw.ais, vesselFilter);
+    // Deliberately not scoped to the viewport or zoom gates below -- see the
+    // note on counts.vesselFilterMatch in its initial-value block: a reader
+    // typing a callsign wants to know how much of the whole feed matches,
+    // not how much of it happens to be on screen this instant.
+    counts.vesselFilterMatch = filteredAis.length;
+    totals.vesselFilterMatch = raw.ais.length;
+
+    let civilianVisible = [];
+    const tankerVisible = [];
+    const navyVisible = [];
+    for (const item of filteredAis) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!inView(item.lat, item.lon)) continue;
-      if (!passesFilter) continue;
       const type = classifyShip(item);
       if (type === "navy") {
         if (!belowNavyPinZoom) navyVisible.push(item);
@@ -3380,11 +3388,6 @@ export function createMapController(container, initial, callbacks) {
         civilianVisible.push(item);
       }
     }
-    // Deliberately not scoped to the viewport or zoom gates above -- see the
-    // note on counts.vesselFilterMatch in its initial-value block. Read once
-    // here rather than a second full pass over raw.ais.
-    counts.vesselFilterMatch = vesselFilterMatch;
-    totals.vesselFilterMatch = raw.ais.length;
     // Only the anonymous bucket is thinned. Navy hulls and designated tankers
     // are what this layer is for and neither is dense enough to need it; a
     // sanctioned merchant hull is lifted clear of the cap for the same reason.
@@ -3523,6 +3526,15 @@ export function createMapController(container, initial, callbacks) {
     const militaryPerPin = (layerHasTokenZoom("adsbMilitary") || layerHasTokenZoomMax("adsbMilitary"));
     const flaggedPerPin = (layerHasTokenZoom("adsbFlagged") || layerHasTokenZoomMax("adsbFlagged"));
 
+    // Same shape as renderAisLayer's filteredAis above: a real array-level
+    // filter, applied before the flagged/military/civilian split, so every
+    // aircraft the loop below sees has already passed it. Counted over the
+    // whole raw feed regardless of viewport or zoom -- see
+    // counts.aircraftFilterMatch's own note in its initial-value block.
+    const filteredAdsb = filterAircraft(raw.adsb, aircraftFilter);
+    counts.aircraftFilterMatch = filteredAdsb.length;
+    totals.aircraftFilterMatch = raw.adsb.length;
+
     let civilianVisible = [];
     const militaryVisible = [];
     // Aircraft squawking an emergency code, or listed under LADD/PIA, get their
@@ -3532,17 +3544,9 @@ export function createMapController(container, initial, callbacks) {
     // bucket has no zoom gate, because "somewhere in the world an aircraft is
     // squawking 7500" is worth seeing at world zoom.
     const flaggedVisible = [];
-    // Same shape as renderAisLayer's vesselFilterMatch above: applied before
-    // the flagged/military/civilian split, and counted over the whole raw
-    // feed regardless of viewport or zoom (see counts.aircraftFilterMatch's
-    // own note).
-    let aircraftFilterMatch = 0;
-    for (const item of raw.adsb) {
-      const passesFilter = matchesAircraftFilter(item, aircraftFilter);
-      if (passesFilter) aircraftFilterMatch += 1;
+    for (const item of filteredAdsb) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!inView(item.lat, item.lon)) continue;
-      if (!passesFilter) continue;
       if (flagOf(item)) {
         if (!flaggedPerPin || pinDrawsAt("adsbFlagged", item, zoom, minZoomFor("adsbFlagged"))) {
           flaggedVisible.push(item);
@@ -3562,8 +3566,6 @@ export function createMapController(container, initial, callbacks) {
     // lifted every emergency, display-limited and designated airframe out of
     // here, so nothing that needs keeping is left to a distance rank.
     civilianVisible = capByRank("adsbCivilian", civilianVisible, nearestToCentreRank());
-    counts.aircraftFilterMatch = aircraftFilterMatch;
-    totals.aircraftFilterMatch = raw.adsb.length;
 
     // If the selected aircraft is no longer in the feed at all (out of
     // ADS-B range / stopped reporting), drop the selection so the
