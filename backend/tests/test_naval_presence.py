@@ -12,8 +12,6 @@ from backend.refine import naval_presence
 
 
 NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
-LATEST_DAY = NOW.date()
-OLDEST_DAY = (NOW - timedelta(days=naval_presence.WINDOW_DAYS)).date()
 
 HORMUZ_BOUNDS = (23.0, 47.0, 31.0, 58.0)
 
@@ -40,28 +38,28 @@ def small_port_table(monkeypatch):
     ])
 
 
-def latest():
-    return datetime.combine(LATEST_DAY, datetime.min.time(), tzinfo=timezone.utc)
+# A timestamp inside the "current" 24h window (ending at NOW) and one inside
+# the "baseline" 24h window (ending WINDOW_DAYS before NOW) -- the two
+# windows build_document actually compares, replacing the old calendar-day
+# buckets a Task 29 review finding (Important 3) rejected: "right now" has to
+# mean the same trailing-24h thing regardless of what hour a pass runs at.
+def in_current_window():
+    return NOW - timedelta(hours=1)
 
 
-def oldest():
-    return datetime.combine(OLDEST_DAY, datetime.min.time(), tzinfo=timezone.utc)
+def in_baseline_window():
+    return NOW - timedelta(days=naval_presence.WINDOW_DAYS, hours=1)
 
 
-def navy_row(day, entity_id, lat=26.2, lon=50.6):
-    return {"day": day, "entity_id": entity_id, "lat": lat, "lon": lon}
+def navy_row(ts, entity_id, lat=26.2, lon=50.6):
+    return {"ts": ts, "entity_id": entity_id, "lat": lat, "lon": lon}
 
 
-def coverage(day, reports):
-    # date_trunc('day', ts) on a timestamptz column comes back from asyncpg as
-    # a datetime, not a bare date -- same shape navy_row's own "day" carries.
-    return {"day": day, "reports": reports}
-
-
-FULL_COVERAGE = [
-    coverage(latest(), naval_presence.MIN_DAILY_AIS_REPORTS),
-    coverage(oldest(), naval_presence.MIN_DAILY_AIS_REPORTS),
-]
+def full_coverage():
+    return {
+        "current_reports": naval_presence.MIN_WINDOW_AIS_REPORTS,
+        "baseline_reports": naval_presence.MIN_WINDOW_AIS_REPORTS,
+    }
 
 
 # --- region counts and trend -------------------------------------------------
@@ -69,10 +67,10 @@ FULL_COVERAGE = [
 
 def test_current_and_week_ago_counts_per_region():
     rows = [
-        navy_row(latest(), "111111111"), navy_row(latest(), "222222222"),
-        navy_row(oldest(), "333333333"),
+        navy_row(in_current_window(), "111111111"), navy_row(in_current_window(), "222222222"),
+        navy_row(in_baseline_window(), "333333333"),
     ]
-    doc = naval_presence.build_document(rows, FULL_COVERAGE, NOW)
+    doc = naval_presence.build_document(rows, full_coverage(), NOW)
     zone = doc["regions"]["test_theatre"]
     assert zone["current"] == 2
     assert zone["week_ago"] == 1
@@ -84,7 +82,7 @@ def test_current_and_week_ago_counts_per_region():
 def test_a_region_with_no_navy_activity_still_appears_at_zero():
     """"Nothing here" and "not computed" are different answers -- a theatre
     stays in the document at 0/0 rather than being omitted."""
-    doc = naval_presence.build_document([], FULL_COVERAGE, NOW)
+    doc = naval_presence.build_document([], full_coverage(), NOW)
     zone = doc["regions"]["test_theatre"]
     assert zone["current"] == 0
     assert zone["week_ago"] == 0
@@ -92,54 +90,72 @@ def test_a_region_with_no_navy_activity_still_appears_at_zero():
 
 
 def test_a_position_outside_the_regions_bounds_is_not_counted():
-    rows = [navy_row(latest(), "999999999", lat=0.0, lon=0.0)]  # nowhere near HORMUZ_BOUNDS
-    doc = naval_presence.build_document(rows, FULL_COVERAGE, NOW)
+    rows = [navy_row(in_current_window(), "999999999", lat=0.0, lon=0.0)]  # nowhere near HORMUZ_BOUNDS
+    doc = naval_presence.build_document(rows, full_coverage(), NOW)
     assert doc["regions"]["test_theatre"]["current"] == 0
 
 
-def test_the_same_hull_seen_twice_in_a_day_counts_once():
-    rows = [navy_row(latest(), "111111111"), navy_row(latest(), "111111111", lat=26.3, lon=50.7)]
-    doc = naval_presence.build_document(rows, FULL_COVERAGE, NOW)
+def test_the_same_hull_seen_twice_in_the_window_counts_once():
+    rows = [
+        navy_row(in_current_window(), "111111111"),
+        navy_row(in_current_window(), "111111111", lat=26.3, lon=50.7),
+    ]
+    doc = naval_presence.build_document(rows, full_coverage(), NOW)
+    assert doc["regions"]["test_theatre"]["current"] == 1
+
+
+def test_a_position_just_outside_the_current_window_does_not_count_as_current():
+    """The rolling-window fix itself, pinned: a fix from 25 hours ago is
+    outside the trailing 24h "current" window and must not be counted as
+    happening right now, the exact miscount date_trunc('day', ts) allowed."""
+    just_before = NOW - timedelta(hours=25)
+    doc = naval_presence.build_document([navy_row(just_before, "111111111")], full_coverage(), NOW)
+    assert doc["regions"]["test_theatre"]["current"] == 0
+
+
+def test_a_position_from_earlier_today_still_counts_as_current():
+    """The old calendar-day version undercounted "right now" whenever a pass
+    ran early in the UTC day -- a fix from three hours ago, safely inside the
+    trailing 24h window, must count regardless of what the calendar date
+    happens to be."""
+    three_hours_ago = NOW - timedelta(hours=3)
+    doc = naval_presence.build_document([navy_row(three_hours_ago, "111111111")], full_coverage(), NOW)
     assert doc["regions"]["test_theatre"]["current"] == 1
 
 
 # --- coverage-change computability -------------------------------------------
 
 
-def test_trend_is_not_computable_when_the_current_days_coverage_is_thin():
-    thin_coverage = [
-        coverage(latest(), naval_presence.MIN_DAILY_AIS_REPORTS - 1),
-        coverage(oldest(), naval_presence.MIN_DAILY_AIS_REPORTS),
-    ]
-    doc = naval_presence.build_document([navy_row(latest(), "111111111")], thin_coverage, NOW)
+def test_trend_is_not_computable_when_the_current_windows_coverage_is_thin():
+    thin = {"current_reports": naval_presence.MIN_WINDOW_AIS_REPORTS - 1,
+            "baseline_reports": naval_presence.MIN_WINDOW_AIS_REPORTS}
+    doc = naval_presence.build_document([navy_row(in_current_window(), "111111111")], thin, NOW)
     zone = doc["regions"]["test_theatre"]
     assert zone["trend_computable"] is False
     assert zone["trend"] is None
     assert zone["reason"] and "coverage" in zone["reason"]
 
 
-def test_trend_is_not_computable_when_the_week_ago_days_coverage_is_thin():
-    thin_coverage = [
-        coverage(latest(), naval_presence.MIN_DAILY_AIS_REPORTS),
-        coverage(oldest(), naval_presence.MIN_DAILY_AIS_REPORTS - 1),
-    ]
-    doc = naval_presence.build_document([], thin_coverage, NOW)
+def test_trend_is_not_computable_when_the_baseline_windows_coverage_is_thin():
+    thin = {"current_reports": naval_presence.MIN_WINDOW_AIS_REPORTS,
+            "baseline_reports": naval_presence.MIN_WINDOW_AIS_REPORTS - 1}
+    doc = naval_presence.build_document([], thin, NOW)
     assert doc["regions"]["test_theatre"]["trend_computable"] is False
 
 
-def test_trend_is_not_computable_with_no_coverage_rows_at_all():
+def test_trend_is_not_computable_with_no_coverage_data_at_all():
     """A cold database, or a window shorter than WINDOW_DAYS -- either way,
-    "cannot compare" rather than a division silently reading zero rows as
-    zero coverage change."""
-    doc = naval_presence.build_document([], [], NOW)
+    "cannot compare" rather than a division silently reading a missing key as
+    zero coverage."""
+    doc = naval_presence.build_document([], {}, NOW)
     assert doc["regions"]["test_theatre"]["trend_computable"] is False
 
 
-def test_a_thin_coverage_day_still_reports_the_real_counts_alongside_null_trend():
+def test_a_thin_coverage_window_still_reports_the_real_counts_alongside_null_trend():
     """The current/week_ago figures themselves are still measured and shown --
     only the *trend* (their difference) is withheld."""
-    thin_coverage = [coverage(latest(), 1), coverage(oldest(), naval_presence.MIN_DAILY_AIS_REPORTS)]
-    doc = naval_presence.build_document([navy_row(latest(), "111111111")], thin_coverage, NOW)
+    thin = {"current_reports": 1, "baseline_reports": naval_presence.MIN_WINDOW_AIS_REPORTS}
+    doc = naval_presence.build_document([navy_row(in_current_window(), "111111111")], thin, NOW)
     zone = doc["regions"]["test_theatre"]
     assert zone["current"] == 1
     assert zone["trend"] is None
@@ -149,32 +165,32 @@ def test_a_thin_coverage_day_still_reports_the_real_counts_alongside_null_trend(
 
 
 def test_a_navy_hull_near_a_port_is_matched_to_it():
-    rows = [navy_row(latest(), "111111111", lat=26.21, lon=50.61)]  # ~1.5km from test_port
-    doc = naval_presence.build_document(rows, FULL_COVERAGE, NOW)
+    rows = [navy_row(in_current_window(), "111111111", lat=26.21, lon=50.61)]  # ~1.5km from test_port
+    doc = naval_presence.build_document(rows, full_coverage(), NOW)
     assert doc["ports"]["test_port"]["current"] == 1
     assert doc["ports"]["test_port"]["name"] == "Test Port"
 
 
 def test_a_position_beyond_the_match_radius_is_not_matched_to_any_port():
-    far = navy_row(latest(), "111111111", lat=26.2 + 1.0, lon=50.6)  # ~111km north
-    doc = naval_presence.build_document([far], FULL_COVERAGE, NOW)
+    far = navy_row(in_current_window(), "111111111", lat=26.2 + 1.0, lon=50.6)  # ~111km north
+    doc = naval_presence.build_document([far], full_coverage(), NOW)
     assert doc["ports"] == {}
 
 
-def test_a_port_with_no_navy_traffic_on_either_edge_day_is_omitted():
+def test_a_port_with_no_navy_traffic_in_either_window_is_omitted():
     """Most of the curated port list never sees a warship -- the document
     only carries a port that was actually matched, the same "carried only
     where there is something to carry" rule airfield_activity's own
     hourly_military applies."""
-    doc = naval_presence.build_document([], FULL_COVERAGE, NOW)
+    doc = naval_presence.build_document([], full_coverage(), NOW)
     assert doc["ports"] == {}
 
 
 def test_a_curated_site_that_is_not_a_port_is_never_matched():
     """not_a_port sits at the identical coordinates as test_port -- proving
     the type=="port" filter, not just distance, decides what can match."""
-    rows = [navy_row(latest(), "111111111", lat=26.2, lon=50.6)]
-    doc = naval_presence.build_document(rows, FULL_COVERAGE, NOW)
+    rows = [navy_row(in_current_window(), "111111111", lat=26.2, lon=50.6)]
+    doc = naval_presence.build_document(rows, full_coverage(), NOW)
     assert set(doc["ports"]) == {"test_port"}
 
 
@@ -182,13 +198,14 @@ def test_a_curated_site_that_is_not_a_port_is_never_matched():
 
 
 def test_the_document_carries_its_own_window_and_timestamp():
-    doc = naval_presence.build_document([], FULL_COVERAGE, NOW)
+    doc = naval_presence.build_document([], full_coverage(), NOW)
     assert doc["window_days"] == naval_presence.WINDOW_DAYS
+    assert doc["current_window_hours"] == naval_presence.CURRENT_WINDOW_HOURS
     assert isinstance(doc["as_of"], float)
 
 
 def test_an_empty_input_is_not_an_error():
-    doc = naval_presence.build_document([], [], NOW)
+    doc = naval_presence.build_document([], {}, NOW)
     assert doc["ports"] == {}
     assert set(doc["regions"]) == {"test_theatre"}
 
@@ -197,5 +214,5 @@ def test_each_region_carries_its_own_bounds():
     """So the frontend can match a country card to the theatre it sits
     inside, the same bounds-containment test it already runs against
     escalation.py's own document."""
-    doc = naval_presence.build_document([], FULL_COVERAGE, NOW)
+    doc = naval_presence.build_document([], full_coverage(), NOW)
     assert doc["regions"]["test_theatre"]["bounds"] == list(HORMUZ_BOUNDS)
