@@ -101,6 +101,8 @@ import {
   railwayPointIconSize,
   decorateRailLive,
   railLiveIconSize,
+  decorateRailStation,
+  railStationIconSize,
   shippingLaneColor,
   laneDensityColor,
   laneDensityIntensity,
@@ -308,8 +310,9 @@ const ID_FIELD = {
   // applyData's own note on where that split happens). railLive's id is
   // digitraffic_rail's synthetic "departureDate:trainNumber" composite (see
   // backend/sources/digitraffic_rail.py's own note on why trainNumber alone
-  // is not a stable identity).
-  railwayPoints: "id", railLive: "id",
+  // is not a stable identity). railStations' id is the station's own short
+  // code (see digitraffic_rail.parse_station).
+  railwayPoints: "id", railLive: "id", railStations: "id",
   // One pin per country, so the country code *is* the identity -- a country
   // whose score changes between polls has to update its existing marker rather
   // than be torn down and rebuilt under a new key.
@@ -328,7 +331,7 @@ const DECORATORS = {
   gfwGaps: decorateGfwGap, gfwDetections: decorateGfwDetection,
   czib: decorateCzib, floods: decorateFlood, ports: decoratePort, dams: decorateDam,
   deflock: decorateDeflock,
-  railwayPoints: decorateRailwayPoint, railLive: decorateRailLive,
+  railwayPoints: decorateRailwayPoint, railLive: decorateRailLive, railStations: decorateRailStation,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
@@ -342,7 +345,7 @@ const ICON_SIZE_FOR_GLYPH = {
   gfwGaps: gfwGapIconSize, gfwDetections: gfwDetectionIconSize,
   czib: czibIconSize, floods: floodIconSize, ports: portIconSize, dams: damIconSize,
   deflock: deflockIconSize,
-  railwayPoints: railwayPointIconSize, railLive: railLiveIconSize,
+  railwayPoints: railwayPointIconSize, railLive: railLiveIconSize, railStations: railStationIconSize,
 };
 // The same sizes with the current level of detail applied, which is what the
 // placement pass has to reserve: a dot needs a dot's worth of room, and routing
@@ -629,6 +632,11 @@ export function createMapController(container, initial, callbacks) {
   // above, same "one fact, one checkbox" treatment cablesGroup+cableLandings
   // just above already gets -- see LAYER_MANIFEST's own note on railwayPoints.
   const railwaysLayer = L.layerGroup([railwaysGroup, groups.railwayPoints]);
+  // Task 27 fix: the Finnish station gazetteer rides railLive's own toggle,
+  // same "one fact, one checkbox" wrapping railwaysLayer just above uses --
+  // see LAYER_MANIFEST's own note on why the stations have no toggle of
+  // their own.
+  const railLiveLayer = L.layerGroup([groups.railLive, groups.railStations]);
   // Task 20b: the ten named corridors. Same treatment as railwaysGroup above
   // -- off by default (MANUAL, see map/scene.js), toggled on from the panel.
   const shippingLanesGroup = createShippingLanesGroup();
@@ -820,7 +828,10 @@ export function createMapController(container, initial, callbacks) {
     // Task 27: the station/halt/yard/border points, split out of osmInfra at
     // render time (see applyData's own note) -- and Digitraffic's live
     // Finnish train positions, a genuine feed with its own POLL_CONFIG row.
-    railwayPoints: [], railLive: [],
+    // railStations (fix, post-review) is the Finnish gazetteer railLive
+    // needs to mean anything -- Finland sits outside every conflict
+    // theatre, so railwayPoints above can never cover it.
+    railwayPoints: [], railLive: [], railStations: [],
     // Task 20b's corridors (a plain array, like pipelines) and Task 20a's
     // AIS density grid (a whole document -- {note, cells} -- like railways
     // above, so the popup/legend can state the endpoint's own `note` rather
@@ -862,7 +873,7 @@ export function createMapController(container, initial, callbacks) {
     gfwGaps: new Map(), gfwDetections: new Map(),
     czib: new Map(), floods: new Map(), ports: new Map(), dams: new Map(),
     deflock: new Map(),
-    railwayPoints: new Map(), railLive: new Map(),
+    railwayPoints: new Map(), railLive: new Map(), railStations: new Map(),
   };
   // Keyed by event id, same as markersByKey.events, so a circle and its pin
   // are added and dropped by the same diff against the same visible set.
@@ -2388,6 +2399,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "infra") return infraLayer; // wraps infraGroup + pipelinesGroup together
     if (key === "cables") return cablesLayer; // wraps cablesGroup + the landing-point markers
     if (key === "railways") return railwaysLayer; // wraps railwaysGroup (lines) + railwayPoints (stations)
+    if (key === "railLive") return railLiveLayer; // wraps groups.railLive (trains) + groups.railStations
     if (key === "shippingLanes") return shippingLanesGroup;
     if (key === "water") return waterLayer;
     if (key === "windArrows") return windFlowLayer;
@@ -2451,6 +2463,9 @@ export function createMapController(container, initial, callbacks) {
     // live inside the combined "railways" layer and have no toggle of their
     // own -- see railwaysLayer's construction and LAYER_MANIFEST's own note.
     if (key === "railways") layerOnMap.railwayPoints = visible;
+    // Same arrangement again, one layer over from railLive: the Finnish
+    // station gazetteer has no toggle of its own either.
+    if (key === "railLive") layerOnMap.railStations = visible;
 
     // Task 24: the seven client-propagated satellite layers. Deliberately
     // does not `return` -- satNavigation/satWeather/satScience still need
@@ -3306,7 +3321,8 @@ export function createMapController(container, initial, callbacks) {
     // Task 27: osmRailway's old lumped count is now this layer's own natural
     // count/total (railwayPoints is a real render key, not a sub-ticker of
     // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
-    railwayPoints: 0, railLive: 0,
+    // railStations (fix, post-review) is the Finnish station gazetteer.
+    railwayPoints: 0, railLive: 0, railStations: 0,
     outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
@@ -3344,7 +3360,8 @@ export function createMapController(container, initial, callbacks) {
     // Task 27: osmRailway's old lumped count is now this layer's own natural
     // count/total (railwayPoints is a real render key, not a sub-ticker of
     // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
-    railwayPoints: 0, railLive: 0,
+    // railStations (fix, post-review) is the Finnish station gazetteer.
+    railwayPoints: 0, railLive: 0, railStations: 0,
     outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
@@ -3385,6 +3402,12 @@ export function createMapController(container, initial, callbacks) {
     // useLeafletMap's EMPTY_ZOOM_NOTES read it, and generalising the cap should
     // not drag a UI change into the same commit.
     eventsCapped: 0,
+    // Task 27 fix (post-review): which conflict-theatre keys osm_infra.py's
+    // rail-line sweep hit MAX_RAIL_LINE_WAYS in, per the backend's own
+    // "railways_osm" document (see osm_infra.serialize_rail_lines) -- a
+    // truncated theatre must not read as a complete one, the same principle
+    // `capped` above already carries for a band-thinned point layer.
+    railwaysTruncated: [],
   };
 
   // Layers that report a breakdown as well as a total, so the control panel can
@@ -6268,7 +6291,14 @@ export function createMapController(container, initial, callbacks) {
     // and pipeline counts are.
     counts.railways = lines.length;
     totals.railways = lines.length;
-    scheduleReports({ counts: true });
+    // Task 27 fix (post-review): which theatres' OSM rail-line coverage hit
+    // osm_infra.py's own MAX_RAIL_LINE_WAYS cap this sweep -- read straight
+    // from the document rather than inferred, since only the backend knows
+    // the raw (pre-parse) Overpass element count. A capped theatre's lines
+    // are real, just partial, and this is what stops that partial view
+    // reading as a complete one.
+    zoomNotes.railwaysTruncated = Array.isArray(doc.truncated_regions) ? doc.truncated_regions : [];
+    scheduleReports({ counts: true, notes: true });
   }
 
   // Task 20b: the ten named corridors (backend/infrastructure.py's
@@ -6697,6 +6727,10 @@ export function createMapController(container, initial, callbacks) {
     // wherever the map panned to since the last poll, the same reasoning
     // conflictHistory's own note gives above.
     renderMarkerLayer("railLive");
+    // Static, but still bounds-filtered the same way -- the gazetteer arrives
+    // once and stays put, but "once" can be before the reader has panned
+    // anywhere near Finland.
+    renderMarkerLayer("railStations");
     // Same reasoning as hazards above -- all six bounds-filter to the viewport
     // and none polls faster than every ten minutes, so without a pan/zoom
     // re-render each would sit empty everywhere the map moved to since its last

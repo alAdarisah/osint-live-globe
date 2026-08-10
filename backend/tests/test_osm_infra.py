@@ -342,3 +342,31 @@ def test_the_rail_line_document_states_its_own_provenance():
     assert doc["attribution"] == "OpenStreetMap contributors"
     assert "railway=rail|light_rail|narrow_gauge" in doc["provenance"]
     assert doc["lines"] == [{"id": "osm:way/1", "source": "osm", "path": [[1, 1], [2, 2]]}]
+    assert doc["truncated_regions"] == []
+
+
+# --- Task 27 fix (post-review): detecting a capped response -----------------
+
+
+def test_a_response_at_the_cap_is_flagged_truncated(monkeypatch):
+    monkeypatch.setattr(osm_infra, "MAX_RAIL_LINE_WAYS", 2)
+    payload = {"elements": [rail_way(1), rail_way(2)]}
+    assert osm_infra._rail_lines_truncated(payload) is True
+
+
+def test_a_response_under_the_cap_is_not_flagged(monkeypatch):
+    monkeypatch.setattr(osm_infra, "MAX_RAIL_LINE_WAYS", 5)
+    payload = {"elements": [rail_way(1), rail_way(2)]}
+    assert osm_infra._rail_lines_truncated(payload) is False
+
+
+def test_an_empty_response_is_never_flagged_truncated():
+    assert osm_infra._rail_lines_truncated({}) is False
+    assert osm_infra._rail_lines_truncated({"elements": []}) is False
+
+
+def test_truncated_regions_are_carried_in_the_stored_document():
+    doc = osm_infra.serialize_rail_lines([], truncated_regions=["russia_ukraine", "sahel"])
+    # Sorted, so two sweeps that found the same capped set in a different
+    # order never look like a change to a reader comparing two snapshots.
+    assert doc["truncated_regions"] == ["russia_ukraine", "sahel"]

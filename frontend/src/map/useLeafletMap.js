@@ -34,6 +34,10 @@ const EMPTY_ZOOM_NOTES = {
   // and createMapController.js's SAT_ELEMENT_ZOOM_NOTE_KEYS); the other four
   // client-propagated groups are ungated and never report a note.
   satNavigation: false, satWeather: false, satImaging: false,
+  // Task 27 fix: which theatre keys osm_infra.py's rail-line sweep hit its
+  // own MAX_RAIL_LINE_WAYS cap in this pass -- a list, not a boolean, so it
+  // is empty rather than false before the first render.
+  railwaysTruncated: [],
 };
 
 const NO_BORDER_EDIT = { active: false, countryKey: null, linkMode: true, canUndo: false };

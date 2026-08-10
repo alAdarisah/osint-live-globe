@@ -232,6 +232,15 @@ const POLL_CONFIG = [
   // makes about its interval versus the server's refresh rate. Ungated
   // (LAYER_MANIFEST's railLive has no draw gate), so this fetch is not either.
   { key: "railLive", url: "/api/rail-live", intervalMs: 20000 },
+  // Task 27 fix (post-review): the Finnish station gazetteer railLive needs
+  // to mean anything -- Finland is outside every conflict theatre, so
+  // osm_infra's railwayPoints can never place a station there (see
+  // railStations' own note in map/scene.js). Static reference data, refetched
+  // server-side every six hours (config.DIGITRAFFIC_RAIL_STATIONS_INTERVAL)
+  // and hard-cached for one -- polled at the same hourly cadence ports/dams
+  // use for their own slow gazetteers, just so a long-lived tab notices a
+  // change; not about freshness the way railLive's 20s poll is.
+  { key: "railStations", url: "/api/rail-stations", intervalMs: 60 * 60000 },
 ];
 
 /**

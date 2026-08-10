@@ -369,12 +369,27 @@ export const LAYER_MANIFEST = {
   // sub-layer of the same rail group rather than a sub-ticker, because a
   // reader may want the (static) network without the (moving, Finland-only)
   // trains or the reverse. MANUAL and off by default, deliberately not tied
-  // to "railways"' own checkbox: turning on a coarse worldwide basemap must
-  // never be read as "and also Finland's live trains are now on", which is
+  // to "railways"' own checkbox: switching on the eleven-theatre rail
+  // linework must never be read as "and also Finland's live trains are now
+  // on" -- Finland sits outside every one of those eleven boxes (the
+  // nearest, russia_ukraine, tops out at 56N; Finland runs 60-70N), so the
+  // two checkboxes cover disjoint ground and conflating them would be
   // exactly the false impression of coverage this layer's own note in
   // LayersSection.jsx exists to head off. Ungated once switched on -- ~111
   // trains at most is legible at any zoom, the same argument aisNavy makes.
   railLive: {
+    draw: null,
+    fetch: FETCH_ALWAYS,
+    disposition: MANUAL,
+  },
+  // Task 27 fix (post-review): the station gazetteer railLive needs to mean
+  // anything -- Finland is outside every conflict theatre (see railLive's
+  // own note just above), so railwayPoints above, which only ever sweeps
+  // inside those theatres, can never place a station there. Mirrors
+  // "railLive"'s own visibility exactly the way railwayPoints mirrors
+  // "railways" -- one toggle for the whole Finnish picture, moving trains
+  // and the network they move on.
+  railStations: {
     draw: null,
     fetch: FETCH_ALWAYS,
     disposition: MANUAL,
@@ -801,9 +816,12 @@ export const LAYER_MANIFEST = {
  *                  one fact and being able to hide half of it helps nobody
  *   railwayPoints  same arrangement, one layer over: setLayerVisible("railways")
  *                  mirrors onto it -- see its own note in LAYER_MANIFEST above
+ *   railStations   same arrangement again, one layer over from railLive
+ *                  instead of railways -- see its own note in LAYER_MANIFEST
  */
+const MIRRORED_LAYER_KEYS = new Set(["cableLandings", "railwayPoints", "railStations"]);
 export const SCENE_APPLY_KEYS = Object.keys(LAYER_MANIFEST).filter(
-  (key) => !LAYER_MANIFEST[key].virtual && key !== "cableLandings" && key !== "railwayPoints"
+  (key) => !LAYER_MANIFEST[key].virtual && !MIRRORED_LAYER_KEYS.has(key)
 );
 
 // Sub-toggles that have no independent existence: a trail is drawn wherever its

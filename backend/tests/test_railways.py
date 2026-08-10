@@ -81,6 +81,26 @@ def test_the_stored_document_states_both_sources_provenance():
     assert doc["lines"] == [{"source": "ne", "path": [[31.0, 35.0], [32.0, 35.5]]}]
 
 
+def test_the_provenance_string_does_not_claim_worldwide_coverage():
+    """Regression: an earlier draft asserted Natural Earth was served
+    worldwide. It never has been -- start() clips it to the same eleven
+    theatre boxes as the OSM overlay, via the same _theatre_boxes() call
+    clip_railroads always used. The string has to disclaim that, not assert
+    it -- "worldwide" may appear (the honest string says "not worldwide"),
+    but never as a bare, unnegated coverage claim."""
+    doc = railways.serialize([])
+    assert "not worldwide" in doc["provenance"]
+    assert "theatres" in doc["provenance"]
+
+
+def test_truncated_regions_default_to_empty_and_pass_through_when_given():
+    """osm_infra.py is the only place that knows a theatre hit the Overpass
+    cap; this module just has to carry that flag rather than drop it."""
+    assert railways.serialize([])["truncated_regions"] == []
+    doc = railways.serialize([], truncated_regions=["russia_ukraine"])
+    assert doc["truncated_regions"] == ["russia_ukraine"]
+
+
 # --- Task 27: the NE/OSM merge, per-feature provenance ----------------------
 
 

@@ -345,12 +345,32 @@ def parse_rail_lines(payload: dict, region_key: str) -> list[dict]:
     return out
 
 
-async def _fetch_rail_lines(client: httpx.AsyncClient, key: str, bounds) -> list[dict]:
+def _rail_lines_truncated(payload: dict) -> bool:
+    """Whether this response looks like it hit MAX_RAIL_LINE_WAYS rather than
+    genuinely running out of matching ways.
+
+    Overpass's `out ... N;` silently stops at N with no truncation marker of
+    its own -- a capped response and a complete one that happens to have
+    fewer ways than the cap are otherwise indistinguishable. Comparing the
+    raw element count against the cap is the only signal available, and it is
+    a heuristic rather than a certainty: a theatre with *exactly*
+    MAX_RAIL_LINE_WAYS ways would be flagged as capped when it is not. That
+    false positive is the safe side to be wrong on -- the alternative
+    (treating >= the cap as "probably complete") is the one that lets a
+    genuinely truncated Russia/Ukraine sweep look identical to a full one,
+    which is the exact failure this exists to catch.
+    """
+    return len((payload or {}).get("elements") or []) >= MAX_RAIL_LINE_WAYS
+
+
+async def _fetch_rail_lines(client: httpx.AsyncClient, key: str, bounds) -> tuple[list[dict], bool]:
+    """The parsed lines, and whether this region's response looks capped."""
     resp = await client.post(OVERPASS_URL, content=build_rail_line_query(bounds).encode("utf-8"))
     if resp.status_code in (429, 504):
         raise RuntimeError(f"Overpass busy ({resp.status_code}) for rail lines in {key}")
     resp.raise_for_status()
-    return parse_rail_lines(resp.json(), key)
+    payload = resp.json()
+    return parse_rail_lines(payload, key), _rail_lines_truncated(payload)
 
 
 def flatten_rail_lines(by_region: dict[str, list[dict]]) -> list[dict]:
@@ -367,16 +387,21 @@ def flatten_rail_lines(by_region: dict[str, list[dict]]) -> list[dict]:
     return list(seen.values())
 
 
-def serialize_rail_lines(lines: list[dict]) -> dict:
+def serialize_rail_lines(lines: list[dict], truncated_regions: list[str] | None = None) -> dict:
     """The stored document railways.py reads back and merges with Natural Earth.
 
     Same shape discipline as railways.py's own serialize(): a provenance
-    string meant for the popup, not just a bag of lines.
+    string meant for the popup, not just a bag of lines. `truncated_regions`
+    is carried through so a reader looking at, say, Russia/Ukraine sees a
+    stated reason the network looks thinner than it is, the same way
+    zoomNotes.capped already tells a reader a band cap thinned a point layer
+    rather than letting a partial view read as a complete one.
     """
     return {
         "attribution": "OpenStreetMap contributors",
         "provenance": "OpenStreetMap Overpass, railway=rail|light_rail|narrow_gauge, swept daily across the conflict theatres",
         "lines": lines,
+        "truncated_regions": sorted(truncated_regions or []),
     }
 
 
@@ -432,22 +457,27 @@ async def _warm(state) -> dict[str, list[dict]]:
     return by_region
 
 
-async def _warm_rail_lines() -> dict[str, list[dict]]:
-    """Seed the rail-line per-theatre map from storage, for the same reason
-    _warm above seeds the point one: without it, publishing after the first
-    region of a fresh sweep would shrink the merged railways.py document from
-    however many theatres the previous sweep covered down to one, for as long
-    as the rest of this (now heavier, see RAIL_LINE_TIMEOUT's note) sweep
-    takes to catch back up.
+async def _warm_rail_lines() -> tuple[dict[str, list[dict]], set[str]]:
+    """Seed the rail-line per-theatre map (and its truncation flags) from
+    storage, for the same reason _warm above seeds the point one: without it,
+    publishing after the first region of a fresh sweep would shrink the
+    merged railways.py document from however many theatres the previous
+    sweep covered down to one, for as long as the rest of this (now heavier,
+    see RAIL_LINE_TIMEOUT's note) sweep takes to catch back up. The same
+    applies to a region's own "capped" flag -- a theatre that hit
+    MAX_RAIL_LINE_WAYS last pass should still say so until this pass has
+    actually re-swept it, not go quiet the moment the process restarts.
 
     No registry state to fill here -- unlike the point sweep, nothing in this
     process serves rail lines directly; railways.py reads the stored document
-    back in the backend process. So this only has to rebuild `by_region`.
+    back in the backend process. So this only has to rebuild `by_region` and
+    the truncated-region set.
     """
     stored = (await storage.reference("railways_osm")) or {}
     lines = stored.get("lines") or []
+    truncated = set(stored.get("truncated_regions") or [])
     if not lines:
-        return {}
+        return {}, truncated
     by_region: dict[str, list[dict]] = {}
     for line in lines:
         by_region.setdefault(line.get("region_key") or "", []).append(line)
@@ -455,7 +485,7 @@ async def _warm_rail_lines() -> dict[str, list[dict]]:
         "OSM rail lines: warmed %d stored ways across %d theatres while the sweep runs",
         len(lines), len(by_region),
     )
-    return by_region
+    return by_region, truncated
 
 
 async def sweep_forever():
@@ -477,9 +507,14 @@ async def sweep_forever():
     # comment there for why), so it gets the same warm-before-first-sweep
     # treatment as the point pass, and for the identical reason.
     rail_lines_by_region: dict[str, list[dict]] = {}
+    # Which theatres' most recent rail-line fetch looked capped at
+    # MAX_RAIL_LINE_WAYS (see _rail_lines_truncated) -- carried into the
+    # stored document so a reader sees a stated reason a dense theatre's
+    # network looks thinner than it is, rather than a silent partial view.
+    rail_lines_truncated: set[str] = set()
     if await storage.wait_for_warm_pool():
         by_region = await _warm(state)
-        rail_lines_by_region = await _warm_rail_lines()
+        rail_lines_by_region, rail_lines_truncated = await _warm_rail_lines()
     consecutive_failures = 0
     while True:
         swept = 0
@@ -513,8 +548,22 @@ async def sweep_forever():
                     # (see RAIL_LINE_TIMEOUT's note) must cost that region only
                     # its lines, never its points, and must not stop the sweep
                     # moving on to the next theatre.
+                    #
+                    # This request can itself stall for up to RAIL_LINE_TIMEOUT
+                    # (600s), and because it sits inside this same serial loop,
+                    # a stall here delays every theatre later in *this pass*,
+                    # not just this one's own freshness -- the pause before the
+                    # next region only starts once this call returns. Bounded
+                    # (worst case ~11 x 600s for one pass) and non-corrupting
+                    # (each theatre still only ever overwrites its own entry),
+                    # but worth knowing before reading a slow pass as a stuck one.
                     try:
-                        rail_lines_by_region[key] = await _fetch_rail_lines(client, key, bounds)
+                        lines, truncated = await _fetch_rail_lines(client, key, bounds)
+                        rail_lines_by_region[key] = lines
+                        if truncated:
+                            rail_lines_truncated.add(key)
+                        else:
+                            rail_lines_truncated.discard(key)
                         rail_lines_swept += 1
                     except Exception as exc:  # noqa: BLE001 - one theatre's lines are not the sweep
                         log.warning("OSM rail lines fetch failed for %s: %s", key, exc)
@@ -524,7 +573,10 @@ async def sweep_forever():
                     # clock and merges it with Natural Earth -- there is no
                     # registry state to update here, only the stored copy.
                     await storage.record_reference(
-                        "railways_osm", serialize_rail_lines(flatten_rail_lines(rail_lines_by_region))
+                        "railways_osm",
+                        serialize_rail_lines(
+                            flatten_rail_lines(rail_lines_by_region), sorted(rail_lines_truncated)
+                        ),
                     )
             if swept:
                 log.info(
@@ -545,9 +597,11 @@ async def sweep_forever():
             # module-level note on RAIL_LINE_TIMEOUT for why that trade was made.
             if rail_lines_swept:
                 log.info(
-                    "OSM rail lines: %d ways across %d/%d theatres in %ds",
+                    "OSM rail lines: %d ways across %d/%d theatres in %ds%s",
                     len(flatten_rail_lines(rail_lines_by_region)), rail_lines_swept,
                     len(_regions_to_sweep()), round(time.time() - started),
+                    f" -- capped at {MAX_RAIL_LINE_WAYS}: {sorted(rail_lines_truncated)}"
+                    if rail_lines_truncated else "",
                 )
             else:
                 log.warning("OSM rail lines: no theatre returned any this pass")

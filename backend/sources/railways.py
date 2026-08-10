@@ -1,22 +1,41 @@
-"""Railway linework: Natural Earth's coarse global fallback, with an attributed
+"""Railway linework: Natural Earth's coarse linework, with an attributed
 OpenStreetMap overlay layered on top where OSM has it.
 
-Until Task 27 the lines were Natural Earth alone, for a size reason still worth
-repeating: OSM's own *full* rail linework is ~300 MB per theatre-scale sweep
-(186.8 MB for Russia/Ukraine alone, 454x the entire osm_infra point sweep),
-which is neither a polite thing to ask a volunteer Overpass instance for nor a
-payload any map can carry. What changed is the selector, not the argument --
-backend/sources/osm_infra.py now asks for exactly the running lines a train
-uses (railway=rail|light_rail|narrow_gauge, no sidings/yards/platforms/disused
-track), which is a small enough slice of that 300 MB to carry as a second,
-attributed layer rather than a replacement for the first.
+**Neither half is worldwide.** Both are clipped to the same eleven
+conflict-theatre boxes in backend/regions.py -- `_theatre_boxes()` below feeds
+`clip_railroads` exactly as it always has, and that predates Task 27. This is
+a real gap against this map's own stated intent for the layer ("NE stays as
+the global fallback because OSM coverage is uneven" -- the task brief that
+added the OSM overlay), not a new one this task introduced: pan to Japan or
+Brazil and the layer has always been empty there, before and after this
+change. What Task 27 got wrong the first time round was the *prose*, not the
+clipping -- an earlier draft of this docstring and the served `provenance`
+string both claimed Natural Earth was worldwide, which the code has never
+done. Fixed here; see the module's own git history for the mistake if it is
+ever worth learning from. Un-clipping Natural Earth to make it genuinely
+global is a real candidate for its own task -- see the note on
+`_theatre_boxes()` below for the one number that decision needs first.
 
-So this module now merges two sources rather than clipping one:
+Until Task 27 the lines were Natural Earth alone (still theatre-clipped), for
+a size reason still worth repeating: OSM's own *full* rail linework is ~300 MB
+per theatre-scale sweep (186.8 MB for Russia/Ukraine alone, 454x the entire
+osm_infra point sweep), which is neither a polite thing to ask a volunteer
+Overpass instance for nor a payload any map can carry. What changed is the
+selector, not the argument -- backend/sources/osm_infra.py now asks for
+exactly the running lines a train uses (railway=rail|light_rail|narrow_gauge,
+no sidings/yards/platforms/disused track), which is a small enough slice of
+that 300 MB to carry as a second, attributed layer rather than a replacement
+for the first.
+
+So this module now merges two sources rather than clipping one, both to the
+same eleven theatre boxes:
 
 - **Natural Earth 1:10m railroads** (nvkelso/natural-earth-vector's GeoJSON
   mirror on GitHub), fetched and clipped exactly as before. Public domain,
-  unchanged since 2021, ZERO named features -- the global fallback, everywhere
-  OSM's theatre-scoped sweep does not reach.
+  unchanged since 2021, ZERO named features -- the coarser of the two, and
+  broader than OSM's own selector *within* a theatre (it carries every
+  railroad Natural Earth has, not just running lines), but not a step outside
+  the same eleven boxes OSM is limited to.
 - **OpenStreetMap's attributed overlay**, swept daily by osm_infra.py in the
   ingest process (a different process; Overpass is a volunteer service and a
   20-minute sweep restarting on every backend redeploy would be a discourtesy
@@ -30,7 +49,8 @@ Honesty requirement, carried in the stored document and meant for the popup:
 never merged into one undifferentiated claim. A Natural Earth run is still
 unnamed 1:10m basemap context that will not sit exactly on the OSM station
 points; an OSM way is a named, attributed feature a mapper actually surveyed
-or traced, only where the conflict-theatre sweep reaches.
+or traced. Neither exists outside the conflict theatres, and the served
+document's own `provenance` string says so rather than implying otherwise.
 
 Stored as a whole document, exactly like cables.py stores cable routes: lines
 have no per-row lat/lon and belong in reference_snapshots, not entity_latest.
@@ -81,7 +101,19 @@ FAILURE_RETRY_INTERVAL = 600
 
 
 def _theatre_boxes() -> list[tuple[float, float, float, float]]:
-    """The eleven conflict-theatre boxes, the same set osm_infra sweeps."""
+    """The eleven conflict-theatre boxes, the same set osm_infra sweeps.
+
+    This is what makes Natural Earth theatre-clipped too, not just OSM -- see
+    the module docstring's note on why that is honestly stated now rather than
+    quietly implied to be global. Un-clipping Natural Earth (serving the
+    world file as-is, skipping this call for the NE half only) is plausible:
+    it is a static 38 MB file, downloaded at most weekly regardless. What is
+    not known, and what the module docstring flags as the number a decision
+    to do that needs first, is the byte size of the *stored* document at each
+    end -- the eleven-theatre clip today versus the whole world -- since that
+    is what a reader's browser actually downloads on every boot fetch of this
+    MANUAL, off-by-default layer, not the 38 MB source file itself.
+    """
     return [entry["bounds"] for entry in regions.REGIONS.values() if entry.get("bounds")]
 
 
@@ -152,8 +184,12 @@ def ne_line_records(paths: list[list[list[float]]]) -> list[dict]:
 
 
 def merge(ne_paths: list[list[list[float]]], osm_lines: list[dict]) -> list[dict]:
-    """Natural Earth's coarse global fallback + OpenStreetMap's attributed
-    theatre overlay, as one list every entry of which states its own source.
+    """Natural Earth's coarse theatre-clipped linework + OpenStreetMap's
+    attributed theatre overlay, as one list every entry of which states its
+    own source. Both inputs are already clipped to the same eleven conflict
+    theatres by the time they reach here (see _theatre_boxes) -- this
+    function does not widen or narrow either one's coverage, only combines
+    them with their provenance intact.
 
     Per-feature provenance, not a document-level flag: `source: "ne" | "osm"`
     rides every record, which is what lets the popup and the renderer treat a
@@ -168,19 +204,30 @@ def merge(ne_paths: list[list[list[float]]], osm_lines: list[dict]) -> list[dict
     return ne_line_records(ne_paths) + list(osm_lines or [])
 
 
-def serialize(lines: list[dict]) -> dict:
+def serialize(lines: list[dict], truncated_regions: list[str] | None = None) -> dict:
     """The stored document. The provenance string is not decoration: it is what
     the popup states, so a reader is never misled into treating basemap linework
-    as survey-accurate, or an unswept theatre's silence as "OSM has no railway
-    here" rather than "OSM has not been asked here yet"."""
+    as survey-accurate, an unswept theatre's silence as "OSM has no railway
+    here" rather than "OSM has not been asked here yet", or either half as
+    covering ground it does not -- see the module docstring's own note on the
+    coverage claim an earlier draft of this string got wrong.
+
+    `truncated_regions` is passed straight through from osm_infra.py's own
+    "railways_osm" document (see its serialize_rail_lines) rather than
+    recomputed: this module never sees the raw Overpass element count, only
+    the already-parsed lines, so it has no way to know a theatre was capped
+    except by being told.
+    """
     return {
         "attribution": "Natural Earth + OpenStreetMap contributors",
         "provenance": (
-            "Natural Earth 1:10m (2021, coarse, unnamed) worldwide, with OpenStreetMap's "
-            "attributed running lines (name, operator, gauge, electrification) layered on "
-            "top across the conflict theatres only -- every line states which of the two it is."
+            "Both clipped to this map's eleven conflict theatres, not worldwide: Natural Earth "
+            "1:10m (2021, coarse, unnamed) as the coarser of the two within a theatre, with "
+            "OpenStreetMap's attributed running lines (name, operator, gauge, electrification) "
+            "layered over it where OSM has them -- every line states which of the two it is."
         ),
         "lines": lines,
+        "truncated_regions": sorted(truncated_regions or []),
     }
 
 
@@ -221,14 +268,16 @@ async def start():
             # swept yet", the same as any other reference() miss.
             osm_doc = await storage.reference("railways_osm") or {}
             osm_lines = osm_doc.get("lines") or []
+            osm_truncated = osm_doc.get("truncated_regions") or []
             lines = merge(ne_paths, osm_lines)
-            state.data = serialize(lines)
+            state.data = serialize(lines, osm_truncated)
             state.last_success = time.time()
             state.last_error = None
             ok = True
             log.info(
-                "Railways: %d lines served (%d Natural Earth, %d OpenStreetMap)",
+                "Railways: %d lines served (%d Natural Earth, %d OpenStreetMap)%s",
                 len(lines), len(ne_paths), len(osm_lines),
+                f" -- capped in: {osm_truncated}" if osm_truncated else "",
             )
             # Lines have no per-row lat/lon, so they are a whole document in
             # reference_snapshots -- the same shape cables.py stores its routes.

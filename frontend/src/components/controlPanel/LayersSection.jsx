@@ -1126,17 +1126,45 @@ export default function LayersSection({
           {" "}Live trains (Digitraffic, Finland only)
           <span className="count">{counts.railLive} ({counts.railLiveTotal})</span>
         </label>
+        {/* Task 27 fix (post-review): Finland sits outside every conflict
+            theatre, so the OSM sweep above can never place a station there --
+            without this readout, switching on live trains showed moving dots
+            over an empty map with nothing named to orient against. */}
+        <div className="subticker-list">
+          <div className="subticker-row">
+            <LayerIcon svg={RAILWAY_LIVE_STYLE.svg} color={RAILWAY_LIVE_STYLE.color} token={RAILWAY_LIVE_STYLE.token} />
+            Stations (Digitraffic)
+            <span className="count">{counts.railStations} ({counts.railStationsTotal})</span>
+          </div>
+        </div>
+        {/* Task 27 fix (post-review): a capped theatre's OSM lines are real,
+            just partial -- Overpass' `out ... N;` truncates with no marker of
+            its own, so osm_infra.py flags it heuristically (see
+            _rail_lines_truncated) and this is where that flag has to reach a
+            reader, visibly, not just inside the fold. Named by region key
+            rather than a prettier label: no client-side region-label table
+            exists to translate it, and the raw key is still honest. */}
+        <div
+          id="railwaysCappedNote"
+          className={`sublegend${(zoomNotes.railwaysTruncated || []).length ? " visible" : ""}`}
+        >
+          OSM rail coverage hit its per-sweep limit in: {(zoomNotes.railwaysTruncated || []).join(", ")}
+          {" "}&mdash; showing a partial network there, not the whole thing OSM has.
+        </div>
         <LayerDetails id="det-railways" open={isOpen("det-railways")} onToggle={setOpen}>
           <div className="sublegend">
-            <b>Two sources, and every line says which.</b> Natural Earth 1:10m railroads (public domain,
-            unchanged since 2021, no names, no operator, no gauge) is the muted dashed hairline drawn
-            worldwide. Layered over it, across this map&apos;s conflict theatres only, is OpenStreetMap&apos;s
+            <b>Neither source is worldwide.</b> Both Natural Earth and OpenStreetMap are clipped to this
+            map&apos;s eleven conflict theatres &mdash; pan away from them and this layer has nothing to
+            draw. Natural Earth 1:10m railroads (public domain, unchanged since 2021, no names, no
+            operator, no gauge) is the muted dashed hairline, the coarser of the two but not a step wider:
+            it carries every railroad Natural Earth has inside a theatre, not just running lines, but it
+            stops at the same theatre edge OpenStreetMap does. Layered over it is OpenStreetMap&apos;s
             attributed running-line network &mdash; name, operator, gauge and electrification where its
             mappers recorded them, swept daily alongside the station points above.
           </div>
           <div className="sublegend">
             <LayerIcon svg={RAILWAY_STYLE.svg} color={RAILWAY_STYLE.color} token={RAILWAY_STYLE.token} />
-            Natural Earth (worldwide, unattributed)
+            Natural Earth (conflict theatres only, unattributed)
             <LayerIcon svg={SVG.railway} color={RAILWAY_OSM_STYLE.electrified.color} token={RAILWAY_OSM_STYLE.electrified.token} />
             {RAILWAY_OSM_STYLE.electrified.label} (OpenStreetMap)
             <LayerIcon svg={SVG.railway} color={RAILWAY_OSM_STYLE.nonElectrified.color} token={RAILWAY_OSM_STYLE.nonElectrified.token} />
@@ -1153,12 +1181,21 @@ export default function LayersSection({
             from the same daily OpenStreetMap sweep but different feature classes, and Natural Earth is a
             different, coarser source again -- none of the three is surveyed to line up with another.
           </div>
+          {/* Task 27 fix (post-review): the coverage note above replaces a
+              version of this fold that wrongly called Natural Earth
+              worldwide. It has always been theatre-clipped, same as OSM --
+              see railways.py's module docstring for the fix and what an
+              honest fix to the *coverage* itself (not just the words) would
+              need before it could be taken on. */}
           <div className="sublegend">
             <LayerIcon svg={RAILWAY_LIVE_STYLE.svg} color={RAILWAY_LIVE_STYLE.color} token={RAILWAY_LIVE_STYLE.token} />
-            <b>Live trains cover Finland only.</b> Fintraffic/Digitraffic publishes live positions for
-            Finnish rail traffic and nothing else; that is a fact about their feed, not a gap in this
-            map&apos;s coverage of the network drawn above. Off by default and switched on separately from
-            the network itself.
+            <b>Live trains, and the stations they call at, cover Finland only.</b> Fintraffic/Digitraffic
+            publishes both for Finnish rail traffic and nothing else; that is a fact about their feed, not
+            a gap in this map&apos;s coverage of the network drawn above. Finland sits outside every one
+            of this map&apos;s eleven conflict theatres, so OpenStreetMap&apos;s own station sweep can
+            never reach it &mdash; this gazetteer is the only source that ever could, which is why it
+            rides the same toggle as the trains rather than the network above. Off by default and
+            switched on separately from the network itself.
           </div>
         </LayerDetails>
 

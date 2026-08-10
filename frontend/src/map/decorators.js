@@ -2538,6 +2538,59 @@ export function decorateRailLive(d, { offset } = {}) {
   };
 }
 
+// ---------- Digitraffic rail stations (Task 27 fix, backend/sources/digitraffic_rail.py) ----------
+//
+// Wired in after the initial review: railLive's trains need something
+// stationary to orient against, and OpenStreetMap can never supply it here --
+// Finland sits entirely outside every one of the eleven conflict-theatre
+// boxes osm_infra.py sweeps (the nearest, russia_ukraine, tops out at 56N;
+// Finland runs 60-70N), so railwayPoints structurally cannot ever place a
+// station there, in this or any future sweep. This Digitraffic gazetteer
+// (563 stations) is the only dataset that ever could.
+//
+// Mirrors railLive's own visibility exactly the way railwayPoints mirrors
+// railways' (see createMapController.js's setLayerVisible) -- one toggle,
+// live trains and the network they move on together. Shares railLive's own
+// colour token rather than earning a fifth one: a station and the trains
+// calling at it are one claim ("this is what Digitraffic's Finland feed
+// covers"), not two, and an admin recolouring one recolours both on purpose.
+// Told apart from a live train by size and by shape context (a fixed point
+// vs. a moving one), not by colour.
+const RAILWAY_STATION_SIZE = 10;
+
+export function railStationStyle() {
+  const live = railLiveStyle();
+  // Smaller and a touch more transparent than the live marker it shares a
+  // token with -- a station is the background a train is read against, not
+  // the thing itself, the same figure/ground choice railway.line's own
+  // subordinate hairline makes against real data.
+  return { ...live, size: RAILWAY_STATION_SIZE, opacity: live.opacity * 0.8 };
+}
+
+export function railStationIconSize() {
+  return railStationStyle().size;
+}
+
+export function decorateRailStation(d, { offset } = {}) {
+  const style = railStationStyle();
+  const label = esc(d.name || d.short_code || "Station");
+  const tooltip = `<b>${label}</b><br/>Railway station &middot; Digitraffic (Finland)`;
+  const detail = `
+    <h3>${label}</h3>
+    <div class="meta">Short code: ${esc(d.short_code)}${d.uic_code ? ` &middot; UIC ${esc(d.uic_code)}` : ""}</div>
+    <div>${d.passenger_traffic ? "Passenger traffic" : "No scheduled passenger traffic"}</div>
+    <p class="meta">Static reference gazetteer, not a live feed &mdash; the stationary context the live
+      trains above need to mean anything. Finland only, for the same reason the trains are: it is
+      Fintraffic/Digitraffic's own coverage, not a gap in this map's.</p>
+    <div class="meta">Source: ${esc(d.publisher || "Fintraffic / digitraffic.fi")},
+      ${esc(d.license || "license CC 4.0 BY")}</div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "rail-station-marker", style.opacity, "", offset),
+    tooltip,
+    detail,
+  };
+}
+
 // ---------- shipping lanes (backend/infrastructure.py's SHIPPING_LANES) ----------
 //
 // Task 20b. The ten named corridors -- hand-drawn schematic waypoints, not a
@@ -4349,4 +4402,6 @@ export const TOKEN_FOR = {
   // moved layers, not tables (see decorateRailwayPoint's own note).
   railwayPoints: (d) => OSM_INFRA_STYLE[d?.kind]?.token ?? null,
   railLive: () => "railway.live",
+  // Shares railLive's own token -- see decorateRailStation's own note on why.
+  railStations: () => "railway.live",
 };

@@ -393,6 +393,11 @@ export function createEntityClusterGroups(map) {
     // the combined railways layer above -- a reader may want the (static)
     // network without the (live, Finland-only) trains riding along with it.
     railLive: L.layerGroup(),
+    // Task 27 fix: the Finnish station gazetteer railLive needs to mean
+    // anything -- see LAYER_MANIFEST's own note. Not added to the map here:
+    // wrapped together with railLive into one combined layer in
+    // createMapController.js, same pattern railwaysGroup+railwayPoints uses.
+    railStations: L.layerGroup(),
   };
   return { groups };
 }

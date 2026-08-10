@@ -473,6 +473,10 @@ export const STACK_ALIAS = Object.freeze({
   // position, the same way cableLandings rides cables' -- one toggle, one
   // place in the stack, for a subject that used to be split across two.
   railwayPoints: "railways",
+  // Task 27 fix: the Digitraffic station gazetteer rides railLive's position
+  // for the same reason -- one toggle, live trains and the stations they
+  // call at together.
+  railStations: "railLive",
   firmsPoints: "firms",
 });
 
