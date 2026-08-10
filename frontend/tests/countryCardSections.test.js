@@ -377,6 +377,10 @@ test("countryCardSections -- military: bbox caveat reused verbatim, sanctioned l
     const { sections } = countryCardSections(baseProps, raw, bounds);
     const military = sections.find((s) => s.id === "military");
     assert.match(military.html, /3 naval hulls in Test Theatre right now, up from 1 last week\./);
+    // Task 29 review (Important 2): this exact caveat used to appear only on
+    // the water card's own naval line -- the country card said nothing about
+    // the theatre-box substitution at all.
+    assert.match(military.html, /Reported for the wider conflict theatre this sits inside, not this exact area/);
   });
 
   await t.test("naval presence says so, honestly, when the trend is not computable", () => {

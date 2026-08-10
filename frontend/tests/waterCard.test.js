@@ -264,6 +264,9 @@ test("waterCardSections -- section shape and empty-section dropping", async (t) 
     const traffic = sections.find((s) => s.id === "traffic");
     assert.ok(traffic, "the trend alone, with zero ships currently in view, still produces the fold");
     assert.match(traffic.html, /3 naval hulls in Test Sea theatre right now, up from 1 last week\./);
+    // Task 29 review (Important 2): the same caveat the country card now
+    // carries, worded identically -- both call sites share one constant.
+    assert.match(traffic.html, /Reported for the wider conflict theatre this sits inside, not this exact area/);
   });
 
   await t.test("no matching theatre and no live traffic: the traffic fold does not appear", () => {

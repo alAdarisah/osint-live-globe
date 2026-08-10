@@ -1230,6 +1230,21 @@ function navalPresenceRegion(bounds, raw) {
   }) || null;
 }
 
+// Task 29 review (Important 2): this used to appear only on the water card's
+// own naval line, in different words, and not at all on the country card's --
+// so the identical claim ("N naval hulls in {label}") carried a different
+// level of honesty depending on which card happened to be open. Said once
+// here and reused by both call sites (navalPresenceHtml and buildWaterTraffic)
+// so that can never happen again. It matters because the theatre boxes are
+// large: south_china_sea (-4,102 -> 23,121) reaches the Gulf of Thailand and
+// the Sulu Sea; red_sea_yemen (10,38 -> 20,51) reaches the whole Gulf of
+// Aden -- a hull in either is reported here, whether or not it is actually
+// inside the sea or country a reader opened. Not shown next to a *port*
+// line: a port match is a precise id, not a theatre-box substitution, so it
+// carries no version of this caveat.
+const NAVAL_PRESENCE_THEATRE_CAVEAT =
+  "Reported for the wider conflict theatre this sits inside, not this exact area -- a hull anywhere in the theatre counts here.";
+
 // One sentence per zone/port -- "N naval hulls here, up/down/unchanged from
 // last week", or, honestly, that the trend cannot be stated at all when
 // backend/refine/naval_presence.py's own coverage check tripped (see that
@@ -1255,7 +1270,8 @@ function navalPresenceHtml(bounds, raw) {
   if (!region && !ports.length) return "";
   return `
     <div class="csection-h">Naval presence</div>
-    ${region ? `<div>${navalPresenceSentence(region.label, region)}</div>` : ""}
+    ${region ? `<div>${navalPresenceSentence(region.label, region)}</div>
+      <div class="meta">${NAVAL_PRESENCE_THEATRE_CAVEAT}</div>` : ""}
     ${ports.map((p) => `<div>${navalPresenceSentence(p.name, p.entry)}</div>`).join("")}
     <p class="meta">Navy-classified AIS contacts (ITU-R M.1371 &ldquo;military operations&rdquo;), <i>derived</i>
       from a 7-day window of this map's own recorded AIS history (backend/refine/naval_presence.py's own
@@ -1976,9 +1992,9 @@ function buildWaterTraffic(feature, raw, bounds) {
   const rows = VESSEL_TRAFFIC_ORDER.map((k) => statRow("", VESSEL_TRAFFIC_LABEL[k], counts[k])).join("");
   return `${total ? `<div class="cstats">${rows}${statRow("", "total", total, "hot")}</div>${AIS_COVERAGE_CAVEAT}` : ""}
     ${navalTrend ? `<p>${navalPresenceSentence(navalTrend.label, navalTrend)}</p>
-    <p class="meta">Navy-classified AIS contacts (ITU-R M.1371 &ldquo;military operations&rdquo;), <i>derived</i>
-      from a 7-day window of this map's own recorded AIS history, scoped to the wider conflict theatre this
-      water sits in rather than this exact polygon.</p>` : ""}`;
+    <p class="meta">${NAVAL_PRESENCE_THEATRE_CAVEAT} Navy-classified AIS contacts (ITU-R M.1371
+      &ldquo;military operations&rdquo;), <i>derived</i> from a 7-day window of this map's own recorded AIS
+      history.</p>` : ""}`;
 }
 
 /**
