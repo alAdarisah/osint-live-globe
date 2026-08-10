@@ -155,6 +155,24 @@ MAX_RAIL_LINE_WAYS = 6000  # a cap on *ways*, not vertices -- see the note above
 # if it turns out to be too small.
 MAX_INFRA_POINT_PER_FEATURE = 4000
 
+# Task 29: five more military=* values, so backend/infrastructure.py's
+# merge_military_bases has more than "military=airfield" and the noisy,
+# unnamed-fragment-prone "landuse=military" to pair the curated MILITARY_BASES
+# list against. `name` is required on training_area and danger_area for the
+# same reason it already is on landuse=military above: both are area tags
+# covering a firing range or a buffer zone as often as a whole installation,
+# so an unnamed one is exactly the kind of fragment MAX_PER_FEATURE's own note
+# exists to suppress. base/naval_base/barracks do not carry the filter, on the
+# same footing military=airfield already has one level up: each is a single
+# discrete facility rather than a fragment of a larger area, so an unnamed one
+# is still a real installation worth keeping.
+#
+# Task 29: three more classes for the air-defence/radar layer -- man_made=
+# radar_station and military=bunker are discrete facilities (no name filter,
+# same reasoning as base/naval_base/barracks above); military=checkpoint gets
+# one, on the same footing barrier=border_control already does: an unnamed
+# checkpoint is every unnamed gate post along a line of control, not a
+# distinct site worth its own pin.
 _FEATURES = (
     ('nwr["military"="airfield"]', "military_airfield", MAX_PER_FEATURE),
     ('nwr["landuse"="military"]["name"]', "military_area", MAX_PER_FEATURE),
@@ -170,6 +188,14 @@ _FEATURES = (
     ('nwr["man_made"="storage_tank"]', "storage_tank", MAX_INFRA_POINT_PER_FEATURE),
     # Node-only: a wellhead is a point, never mapped as an area.
     ('node["man_made"="petroleum_well"]', "oil_well", MAX_INFRA_POINT_PER_FEATURE),
+    ('nwr["military"="base"]', "military_base", MAX_PER_FEATURE),
+    ('nwr["military"="naval_base"]', "military_naval_base", MAX_PER_FEATURE),
+    ('nwr["military"="training_area"]["name"]', "military_training_area", MAX_PER_FEATURE),
+    ('nwr["military"="barracks"]', "military_barracks", MAX_PER_FEATURE),
+    ('nwr["military"="danger_area"]["name"]', "military_danger_area", MAX_PER_FEATURE),
+    ('nwr["man_made"="radar_station"]', "radar_station", MAX_PER_FEATURE),
+    ('nwr["military"="bunker"]', "military_bunker", MAX_PER_FEATURE),
+    ('nwr["military"="checkpoint"]["name"]', "military_checkpoint", MAX_PER_FEATURE),
 )
 
 _RAILWAY_KINDS = {
@@ -283,6 +309,23 @@ def _kind_of(tags: dict) -> str | None:
         return "storage_tank"
     if tags.get("man_made") == "petroleum_well":
         return "oil_well"
+    military = tags.get("military")
+    if military == "base":
+        return "military_base"
+    if military == "naval_base":
+        return "military_naval_base"
+    if military == "training_area":
+        return "military_training_area"
+    if military == "barracks":
+        return "military_barracks"
+    if military == "danger_area":
+        return "military_danger_area"
+    if military == "bunker":
+        return "military_bunker"
+    if military == "checkpoint":
+        return "military_checkpoint"
+    if tags.get("man_made") == "radar_station":
+        return "radar_station"
     return None
 
 
@@ -299,6 +342,14 @@ _KIND_FALLBACK_NAME = {
     "refinery": "Refinery",
     "storage_tank": "Storage tank",
     "oil_well": "Oil/gas well",
+    "military_base": "Military base",
+    "military_naval_base": "Naval base",
+    "military_training_area": "Military training area",
+    "military_barracks": "Barracks",
+    "military_danger_area": "Danger area",
+    "radar_station": "Radar station",
+    "military_bunker": "Bunker",
+    "military_checkpoint": "Military checkpoint",
 }
 
 

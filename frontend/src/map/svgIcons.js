@@ -172,6 +172,15 @@ export const SVG = {
   jointBase: '<path fill="currentColor" d="M12 2 L14.2 9.2 L21.5 9.2 L15.6 13.6 L17.8 20.8 L12 16.4 L6.2 20.8 L8.4 13.6 L2.5 9.2 L9.8 9.2 Z" fill-opacity="0.85"/>',
   logisticsBase: '<rect x="3" y="8" width="18" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" d="M3 8 L12 3 L21 8"/><line x1="12" y1="8" x2="12" y2="20" stroke="currentColor" stroke-width="1.6"/>',
   radarBase: '<path fill="none" stroke="currentColor" stroke-width="2" d="M4 18 A8 8 0 0 1 20 18"/><path fill="none" stroke="currentColor" stroke-width="2" d="M8 18 A4 4 0 0 1 16 18"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/><line x1="12" y1="18" x2="18" y2="7" stroke="currentColor" stroke-width="2"/>',
+  // Task 29: a bunker -- a low dome mostly below its own ground line, the one
+  // shape distinct enough from armyBase's tall shield/logisticsBase's shed
+  // that a reader scanning the air-defence layer's three glyphs together
+  // (this, radarBase, borderCrossing for a checkpoint) can tell them apart at
+  // a glance.
+  bunker: '<path fill="currentColor" fill-opacity="0.2" stroke="currentColor" stroke-width="1.8" ' +
+    'd="M3 19 C3 12 7 8 12 8 C17 8 21 12 21 19 Z"/>' +
+    '<rect x="10" y="14" width="4" height="5" fill="currentColor"/>' +
+    '<line x1="2" y1="19" x2="22" y2="19" stroke="currentColor" stroke-width="1.8"/>',
   // A single runway seen from above: threshold bars at both ends and a dashed
   // centreline, set on a diagonal so it never lines up with the map's own
   // graticule or with a pipeline. Two earlier attempts failed for opposite
@@ -766,6 +775,23 @@ export const GLYPH_CHOICES = Object.freeze({
   "osm.refinery": ["refinery", "powerPlant", "fab"],
   "osm.storage_tank": ["desalination", "lng", "powerPlant"],
   "osm.oil_well": ["refinery", "powerPlant", "recordMark"],
+  // Task 29: the five OSM military=* base classes merge_military_bases pairs
+  // against MILITARY_BASES -- reusing the curated list's own subtype glyphs
+  // (armyBase/navalBase/airfieldMilitary) rather than inventing a second set,
+  // since the whole point of the merge is that these are the same kind of
+  // claim as a curated site, just a different provenance.
+  "osm.military_base": ["armyBase", "jointBase", "logisticsBase"],
+  "osm.military_naval_base": ["navalBase", "anchor", "armyBase"],
+  "osm.military_training_area": ["armyBase", "recordMark", "alertRing"],
+  "osm.military_barracks": ["logisticsBase", "armyBase", "recordMark"],
+  "osm.military_danger_area": ["armyBase", "alertRing", "recordMark"],
+  // Task 29: the three air-defence/radar classes, a separate default-off
+  // layer (see LAYER_MANIFEST's airDefense entry) with its own completeness
+  // caveat -- checkpoint reuses borderCrossing, the same glyph border_control
+  // already wears, since both are the same kind of controlled-access point.
+  "osm.radar_station": ["radarBase", "recordMark", "alertRing"],
+  "osm.military_bunker": ["bunker", "armyBase", "recordMark"],
+  "osm.military_checkpoint": ["borderCrossing", "alertRing", "recordMark"],
   // Task 28: power plants, glyph-by-fuel (see osm_infra.py's own
   // _fuel_category). nuclear/hydro/wind reuse an already-correct existing
   // glyph (see SVG.nuclear/SVG.dam/SVG.wind's own notes); coal/gas/biomass

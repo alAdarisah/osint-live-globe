@@ -1481,6 +1481,34 @@ html, body {
   pointer-events: auto;
 }
 
+/* Task 29: AirfieldActivityPanel.jsx -- the mirror-image corner from
+   #intelPanel, so the two do not fight over the same one by default (a
+   reader who drags either is free to put them wherever, same as every other
+   floating HUD panel; see useDraggablePanel.js). Reuses .notable-header/
+   .notable-list/.notable-item's own generic styling wholesale rather than a
+   parallel set of classes -- this is the same board shape as IntelPanel's own
+   tabs, just one list instead of four. */
+#airfieldPanel {
+  position: fixed;
+  left: 14px;
+  bottom: 78px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#airfieldPanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#airfieldPanel.collapsed .notable-header { border-bottom: none; }
+
 /* Persistent country details widget (CountryInfoCard.jsx) -- replaces the
    old Leaflet popup on country click so pan/zoom keep working while it's
    open. Reuses countryPopupHtml()'s markup verbatim, so it needs the same
@@ -2608,6 +2636,19 @@ html, body {
     width: auto;
     max-width: none;
     max-height: 46vh;
+  }
+
+  /* Same full-width/collapsed-by-default treatment as #intelPanel just
+     above, stacked above it rather than sharing its row -- a collapsed
+     header bar is short, but two of them side by side on a phone-width
+     screen would not both fit. */
+  #airfieldPanel {
+    left: 10px;
+    right: 10px;
+    bottom: 130px;
+    width: auto;
+    max-width: none;
+    max-height: 40vh;
   }
 
   .intel-controls { grid-template-columns: 1fr 1fr; }

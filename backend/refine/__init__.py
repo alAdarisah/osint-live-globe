@@ -153,6 +153,20 @@ _JOBS = (
         health_name="flight_legs",
         health_every=config.FLIGHT_LEG_INTERVAL,
     ),
+    # Navy-classified AIS presence per theatre and per port, with a 7-day
+    # trend (Task 29). Publishes no layer of its own -- a theatre/port count
+    # attaches to coordinates the regions table and the curated ports list
+    # already carry -- so it writes one keyed reference document and
+    # GET /api/naval-presence (backend/app.py) reads it directly.
+    Job(
+        module="backend.refine.naval_presence",
+        entrypoint="derive_forever",
+        publishes=(),
+        # naval_presence.REFERENCE_NAME, copied for the same reason
+        # port_calls.HEALTH_NAME is copied above.
+        health_name="naval_presence",
+        health_every=config.NAVAL_PRESENCE_INTERVAL,
+    ),
 )
 
 

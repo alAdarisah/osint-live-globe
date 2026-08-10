@@ -243,6 +243,35 @@ test("waterCardSections -- section shape and empty-section dropping", async (t) 
     assert.ok(traffic, "a ship inside the polygon makes the traffic fold appear");
     assert.match(traffic.html, /Inside the water this map receives AIS from/);
   });
+
+  // --- Task 29: naval presence trend, "three naval hulls in this sea..." ---
+
+  await t.test("a matching theatre's naval trend appears even with no live navy contact right now", () => {
+    const sea = makeSea();
+    const bounds = { south: -5, west: -5, north: 5, east: 5 }; // makeSea's own footprint
+    const raw = {
+      ...emptyRaw(),
+      navalPresence: {
+        regions: {
+          test_theatre: {
+            label: "Test Sea theatre", bounds: [-10, -10, 10, 10],
+            current: 3, week_ago: 1, trend: 2, trend_computable: true, reason: null,
+          },
+        },
+      },
+    };
+    const { sections } = waterCardSections(sea, raw, bounds);
+    const traffic = sections.find((s) => s.id === "traffic");
+    assert.ok(traffic, "the trend alone, with zero ships currently in view, still produces the fold");
+    assert.match(traffic.html, /3 naval hulls in Test Sea theatre right now, up from 1 last week\./);
+  });
+
+  await t.test("no matching theatre and no live traffic: the traffic fold does not appear", () => {
+    const sea = makeSea();
+    const bounds = { south: -5, west: -5, north: 5, east: 5 };
+    const { sections } = waterCardSections(sea, emptyRaw(), bounds);
+    assert.equal(sections.find((s) => s.id === "traffic"), undefined);
+  });
 });
 
 // createMapController.js's waterCardFor (the wiring path a click actually

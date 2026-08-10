@@ -190,6 +190,11 @@ const POLL_CONFIG = [
   // the same document. Not zoom-gated despite attaching to a zoom-gated layer:
   // it is ~180 kB once, and the airfields toggle can be switched on at any time.
   { key: "airfieldActivity", url: "/api/airfield-activity", intervalMs: 30 * 60000 },
+  // Navy-classified AIS presence per theatre/port with a 7-day trend
+  // (backend/refine/naval_presence.py), recomputed there four times a day --
+  // same "poll no faster than the document actually changes" reasoning as
+  // escalation/airfieldActivity above.
+  { key: "navalPresence", url: "/api/naval-presence", intervalMs: 15 * 60000 },
   // Global Fishing Watch's AIS disabling events. Refetched server-side every six
   // hours, and the batch itself is five or more days behind, so the hourly poll
   // is only about a long-lived tab noticing a new batch. Most of these return
@@ -760,6 +765,11 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
             // is simply a document with no `lanes` key, same reasoning as
             // the legacy-array guard above.
             ["shippingLanes", (isLegacyArray ? [] : data.lanes) || []],
+            // Task 29: curated MILITARY_BASES beside osm_infra.py's own
+            // military=* sweep, source-tagged and pre-matched by the backend
+            // (infrastructure.merge_military_bases) -- same legacy-array
+            // guard as pipelines/lanes above.
+            ["militaryBases", (isLegacyArray ? [] : data.military_bases) || []],
           ]
         );
       })

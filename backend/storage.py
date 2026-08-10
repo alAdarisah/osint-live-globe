@@ -1897,6 +1897,32 @@ SELECT payload->'nearest_airfield'->>'code' AS code,
  GROUP BY 1, 2
 """
 
+# Task 29: which aircraft types actually made up a field's traffic, for the
+# airfield-activity panel's "top aircraft types" column -- adsb.py already
+# writes `type_code` (readsb's own ICAO type designator, e.g. "A320", "C130")
+# onto every history row (see its own note on `t`/type_desc), and this is the
+# first thing that reads it back. Scoped to the same `keep` set the hourly
+# query above is, for the same reason: the full per-field per-type breakdown
+# across 8,867 fields is exactly the "computed the whole world to throw away
+# 97% of it" shape airfield_activity's own docstring already rejected for
+# hourly.
+_AIRFIELD_TYPES = """
+SELECT payload->'nearest_airfield'->>'code' AS code,
+       payload->>'type_code' AS type_code,
+       count(DISTINCT entity_id) AS n
+  FROM entity_history
+ WHERE kind = 'adsb' AND ts >= $1
+   AND payload->'nearest_airfield'->>'code' = ANY($2::text[])
+   AND payload->>'type_code' IS NOT NULL
+ GROUP BY 1, 2
+"""
+
+# How many of a field's most-seen types to keep. Three is enough to answer
+# "what actually flies here" (a fighter type crowding out a field's usual
+# trainers is visible at three) without turning every row of the panel into
+# its own small table.
+TOP_TYPES_PER_FIELD = 3
+
 
 async def airfield_activity(since: float, hours: int = 24, top: int = 300) -> dict:
     """Traffic per airfield over the recent ADS-B log, as one document.
@@ -1928,6 +1954,7 @@ async def airfield_activity(since: float, hours: int = 24, top: int = 300) -> di
         if not keep:
             return {}
         hourly = await conn.fetch(_AIRFIELD_HOURLY, when, list(keep))
+        types = await conn.fetch(_AIRFIELD_TYPES, when, list(keep))
 
     # Bucket index 0 is the oldest hour in the window, so the series reads
     # left-to-right as time -- the order a sparkline is drawn in.
@@ -1940,6 +1967,20 @@ async def airfield_activity(since: float, hours: int = 24, top: int = 300) -> di
             continue
         series.setdefault(r["code"], [0] * hours)[idx] = r["aircraft"]
         mil_series.setdefault(r["code"], [0] * hours)[idx] = r["military"]
+
+    # Per field, most-seen type first. Ties broken on the type code itself so
+    # two runs over the same data always order a tie the same way, rather than
+    # however Postgres happened to return the rows.
+    by_code: dict[str, list] = {}
+    for r in types:
+        by_code.setdefault(r["code"], []).append(r)
+    top_types: dict[str, list[dict]] = {
+        code: [
+            {"type_code": r["type_code"], "aircraft": r["n"]}
+            for r in sorted(rows, key=lambda r: (-r["n"], r["type_code"]))[:TOP_TYPES_PER_FIELD]
+        ]
+        for code, rows in by_code.items()
+    }
 
     out = {}
     for r in totals:
@@ -1961,6 +2002,11 @@ async def airfield_activity(since: float, hours: int = 24, top: int = 300) -> di
         mil_hourly = mil_series.get(code)
         if mil_hourly and any(mil_hourly):
             out[code]["hourly_military"] = mil_hourly
+        # Same "only where there is something to carry" rule: a light aircraft
+        # with no readsb-reported type code at all leaves this field's
+        # top_types absent rather than an empty list.
+        if top_types.get(code):
+            out[code]["top_types"] = top_types[code]
     return out
 
 

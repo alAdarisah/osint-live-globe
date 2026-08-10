@@ -16,6 +16,15 @@ is a fact about the world rather than about air travel.
 Sits in the refine process alongside dark_vessels.py for the same reason: both
 derive a layer from history this system recorded rather than from anything
 outside it, and both are therefore useless until Postgres is up.
+
+NOTAMs (Notices to Air Missions -- the official, hour-by-hour airspace
+restrictions a pilot flight-plans against) are deliberately not part of this
+module or anywhere else on this map: there is no free global NOTAM feed with a
+licence this project can use, only paid resellers built on ICAO's own closed
+aggregation. What this module publishes is recorded traffic, a different and
+narrower claim -- what an ADS-B receiver actually saw fly, not what a
+regulator has published as restricted. Do not read a quiet field here as
+evidence its airspace is open, or a busy one as evidence it is not restricted.
 """
 import asyncio
 import logging

@@ -127,7 +127,7 @@ const GROUP_LAYERS = {
   // it is a place layer, and the aircraft that need it already get their
   // nearest field named inside their own popup.
   ground: [
-    "infra", "osmInfra", "powerPlants", "airports", "ports", "dams", "deflock",
+    "infra", "osmInfra", "powerPlants", "airDefense", "airports", "ports", "dams", "deflock",
     "railways", "railLive", "powerLines", "shippingLanes",
     "water", "cables", "firms", "jamming", "laneDensity",
   ],
@@ -168,6 +168,8 @@ const LAYER_LABEL = {
   // Task 28: powerPlants carries the same LOCAL cap osmInfra's own points do
   // (see LAYER_MANIFEST), so it needs a name here too.
   powerPlants: "Power plants (OSM)",
+  // Task 29: same reasoning again -- airDefense carries the identical cap.
+  airDefense: "Air defence & radar (OSM)",
 };
 
 // Task 27: railwayPoints has no checkbox of its own -- it mirrors "railways"'
@@ -985,6 +987,34 @@ export default function LayersSection({
             follows its tagged output where OpenStreetMap has one &mdash; most plants do not, and the
             country card&apos;s Energy infrastructure section states what fraction does before summing
             anything.
+          </div>
+        </LayerDetails>
+
+        {/* Task 29: same split-out-of-osmInfra treatment as powerPlants
+            above, off by default -- the brief's own requirement, and the
+            reason is stated in the layer's own detail panel below rather
+            than only here. */}
+        <label className="layer-row" data-layer="airDefense">
+          <LayerCheck
+            layerKey="airDefense"
+            on={layerVisibility.airDefense}
+            wish={layerWish?.airDefense}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SVG.radarBase} color="#ff4d4d" token="osm.radar_station" />
+          {" "}Air defence &amp; radar (OpenStreetMap)
+          <span className="count">{counts.airDefense} ({counts.airDefenseTotal})</span>
+        </label>
+        <div id="airDefenseZoomNote" className={`sublegend${zoomNotes.airDefense ? " visible" : ""}`}>
+          Zoom in to show air defence &amp; radar sites
+        </div>
+        <LayerDetails id="det-airDefense" open={isOpen("det-airDefense")} onToggle={setOpen}>
+          <div className="sublegend">
+            Radar stations, bunkers and checkpoints from the same daily OpenStreetMap sweep -- off by
+            default, deliberately, and different from every other layer in this group in one way:
+            OpenStreetMap&apos;s coverage of these sites is patchy and politically uneven in exactly the
+            theatres this map watches. A pin here is a real, mapped feature; the absence of one anywhere
+            is not evidence that nothing is there.
           </div>
         </LayerDetails>
 

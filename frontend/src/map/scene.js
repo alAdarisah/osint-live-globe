@@ -382,6 +382,22 @@ export const LAYER_MANIFEST = {
     collapse: { mode: "proximity", maxZoom: 11 },
     disposition: CORROBORATING,
   },
+  // Task 29: radar_station/military_bunker/military_checkpoint, pulled out
+  // of the generic OSM infrastructure layer the same way powerPlants was
+  // above -- gate and cap copied from osmInfra's own entry unchanged, same
+  // reasoning powerPlants' own note gives. MANUAL rather than CORROBORATING:
+  // the brief is explicit that this layer defaults off and states its own
+  // completeness caveat (OSM's coverage of air-defence sites is patchy and
+  // politically uneven in exactly the theatres this map watches), which is a
+  // stronger claim than "shown once a reader engages with the place it's
+  // about" -- a reader has to actively choose to see this layer at all.
+  airDefense: {
+    draw: { band: "LOCAL", z: 9 },
+    fetch: "LOCAL",
+    cap: { LOCAL: 800 },
+    collapse: { mode: "proximity", maxZoom: 11 },
+    disposition: MANUAL,
+  },
   // Task 28: transmission-line geometry (backend/sources/power_lines.py,
   // itself a re-serve of osm_infra.py's own Overpass sweep) -- "render
   // through the same polyline path as railways" per the brief, and that is

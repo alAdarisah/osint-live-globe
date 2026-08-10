@@ -396,6 +396,14 @@ VESSEL_PROFILE_INTERVAL = int(os.getenv("VESSEL_PROFILE_INTERVAL", "1800"))
 # that has to claw back a huge swing every pass.
 LANE_DENSITY_INTERVAL = int(os.getenv("LANE_DENSITY_INTERVAL", "3600"))
 
+# How often backend/refine/naval_presence.py recomputes navy-classified AIS
+# presence per theatre/port. The figure it produces is a same-day count
+# against a week-old one, so nothing about it is made more correct by
+# revisiting it faster than a few times a day -- four passes (six hours
+# apart) is enough that a reader who opens the map in the morning is never
+# looking at yesterday's number.
+NAVAL_PRESENCE_INTERVAL = int(os.getenv("NAVAL_PRESENCE_INTERVAL", str(6 * 3600)))
+
 # The laden/ballast thresholds themselves -- named constants rather than
 # numbers inline in backend/refine/vessel_profile.py because Task 33's admin
 # panel exposes them in an "Inference" section, where a reader can see exactly

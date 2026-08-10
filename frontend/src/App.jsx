@@ -25,6 +25,7 @@ import MapView from "./components/MapView";
 import TitleBar from "./components/TitleBar";
 import RegionBar from "./components/RegionBar";
 import IntelPanel from "./components/IntelPanel";
+import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
@@ -641,6 +642,13 @@ export default function App() {
         onLocate={onLocateNewsItem}
         isMobile={isMobileViewport}
       />
+
+      {/* Task 29: /api/airfield-activity has existed since before this plan
+          and nothing in the frontend called it -- see AirfieldActivityPanel.jsx's
+          own module note. Self-contained (fetches its own two documents rather
+          than riding useOsintData's poller table), so mounting it is this one
+          line. */}
+      <AirfieldActivityPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
 
       {/* Opened by picking a theatre in the RegionBar above, which is a public
           control -- so gating this behind Admin Mode meant a reader could make

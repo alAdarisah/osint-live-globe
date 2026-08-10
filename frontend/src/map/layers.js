@@ -349,6 +349,11 @@ export function createEntityClusterGroups(map) {
     // another layer's, since nothing else on the map already carries a "the
     // whole power picture" toggle for them to ride.
     powerPlants: L.layerGroup(),
+    // Task 29: radar_station/military_bunker/military_checkpoint, split out
+    // of osmInfra above the same way powerPlants is -- its own checkbox,
+    // default off (see LAYER_MANIFEST's own note on why this one in
+    // particular defaults off rather than being a corroborating layer).
+    airDefense: L.layerGroup(),
     // One pin per country IODA currently reports offline, at that country's
     // representative interior point. Added here, i.e. on by default, because
     // the country tint it replaced was unconditional too -- a national blackout

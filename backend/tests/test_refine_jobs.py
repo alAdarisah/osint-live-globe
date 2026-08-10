@@ -51,6 +51,10 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # aviation twin of port_calls. Publishes no layer either -- it writes
         # flight_legs rows, read per airframe by GET /api/aircraft/{icao24}.
         "backend.refine.flight_legs",
+        # Navy-classified AIS presence per theatre and per port, with a 7-day
+        # trend. Publishes no layer either -- one reference_snapshots
+        # document, read directly by GET /api/naval-presence.
+        "backend.refine.naval_presence",
     }
 
 

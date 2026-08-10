@@ -57,10 +57,12 @@ def test_rail_points_get_a_far_higher_cap_than_the_noisy_area_classes():
     at the collector, which is the renderer's job to thin, not ours to drop."""
     assert osm_infra.MAX_RAIL_PER_FEATURE > osm_infra.MAX_PER_FEATURE
     query = osm_infra.build_query((0, 0, 1, 1))
-    # The four rail classes carry the rail cap; the six MAX_PER_FEATURE classes
-    # (Task 28 added power_substation and refinery beside the original four) do not.
+    # The four rail classes carry the rail cap; the fourteen MAX_PER_FEATURE
+    # classes (Task 28 added power_substation and refinery beside the original
+    # four; Task 29 added five military=* base classes plus radar_station/
+    # military_bunker/military_checkpoint for the air-defence layer) do not.
     assert query.count(f"out center tags {osm_infra.MAX_RAIL_PER_FEATURE};") == 4
-    assert query.count(f"out center tags {osm_infra.MAX_PER_FEATURE};") == 6
+    assert query.count(f"out center tags {osm_infra.MAX_PER_FEATURE};") == 14
 
 
 def test_dense_infra_point_classes_get_their_own_higher_cap():
@@ -91,6 +93,81 @@ def test_the_oil_well_selector_is_node_only():
     """A wellhead is always mapped as a point, never an area."""
     query = osm_infra.build_query((0, 0, 1, 1))
     assert 'node["man_made"="petroleum_well"](' in query
+
+
+# --- Task 29: bases merge (five more military=* classes) --------------------
+
+
+def test_the_five_task_29_base_tags_map_to_their_own_kinds():
+    kinds = [
+        parse(element(tags={"military": "base"}))[0]["kind"],
+        parse(element(tags={"military": "naval_base"}))[0]["kind"],
+        parse(element(tags={"military": "training_area", "name": "x"}))[0]["kind"],
+        parse(element(tags={"military": "barracks"}))[0]["kind"],
+        parse(element(tags={"military": "danger_area", "name": "x"}))[0]["kind"],
+    ]
+    assert kinds == [
+        "military_base", "military_naval_base", "military_training_area",
+        "military_barracks", "military_danger_area",
+    ]
+
+
+def test_training_area_and_danger_area_require_a_name_but_base_and_barracks_do_not():
+    """The same fragment-vs-whole-feature distinction landuse=military and
+    military=airfield already draw one level up: training_area/danger_area are
+    area tags a firing range or a buffer strip carries as often as a whole
+    base, while base/naval_base/barracks are single discrete facilities."""
+    query = osm_infra.build_query((0, 0, 1, 1))
+    assert '"military"="training_area"]["name"]' in query
+    assert '"military"="danger_area"]["name"]' in query
+    assert '"military"="base"](' in query
+    assert '"military"="base"]["name"]' not in query
+    assert '"military"="naval_base"](' in query
+    assert '"military"="barracks"](' in query
+    assert '"military"="barracks"]["name"]' not in query
+
+
+# --- Task 29: air-defence/radar classes --------------------------------------
+
+
+def test_the_three_air_defence_tags_map_to_their_own_kinds():
+    kinds = [
+        parse(element(tags={"man_made": "radar_station"}))[0]["kind"],
+        parse(element(tags={"military": "bunker"}))[0]["kind"],
+        parse(element(tags={"military": "checkpoint", "name": "x"}))[0]["kind"],
+    ]
+    assert kinds == ["radar_station", "military_bunker", "military_checkpoint"]
+
+
+def test_checkpoint_requires_a_name_but_radar_and_bunker_do_not():
+    """An unnamed checkpoint is every unmapped gate post along a line of
+    control -- the same noise barrier=border_control's own name filter exists
+    to suppress -- while a radar station or a bunker is a discrete facility."""
+    query = osm_infra.build_query((0, 0, 1, 1))
+    assert '"military"="checkpoint"]["name"]' in query
+    assert '"man_made"="radar_station"](' in query
+    assert '"man_made"="radar_station"]["name"]' not in query
+    assert '"military"="bunker"](' in query
+    assert '"military"="bunker"]["name"]' not in query
+
+
+def test_the_eight_task_29_classes_get_a_type_fallback_label():
+    for tags, expected in [
+        ({"military": "base"}, "Military base"),
+        ({"military": "naval_base"}, "Naval base"),
+        ({"military": "training_area", "name": "x"}, "Military training area"),
+        ({"military": "barracks"}, "Barracks"),
+        ({"military": "danger_area", "name": "x"}, "Danger area"),
+        ({"man_made": "radar_station"}, "Radar station"),
+        ({"military": "bunker"}, "Bunker"),
+        ({"military": "checkpoint", "name": "x"}, "Military checkpoint"),
+    ]:
+        (site,) = parse(element(tags=tags))
+        if "name" not in tags:
+            assert site["name"] == expected
+            assert site["named"] is False
+        else:
+            assert site["named"] is True
 
 
 def test_the_noisy_selectors_require_a_name_and_the_sparse_ones_do_not():

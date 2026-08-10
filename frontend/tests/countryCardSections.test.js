@@ -293,8 +293,14 @@ test("countryCardSections -- grid stress (Task 28): net exchange and outage scor
 
 test("countryCardSections -- military: bbox caveat reused verbatim, sanctioned list is flag- not bbox-scoped", async (t) => {
   await t.test("reuses the exact live-section caveat sentence", () => {
+    // Task 29: military_airfield (and the other five installation kinds) now
+    // reach this section through the backend's own pre-merged raw.militaryBases
+    // (see backend/infrastructure.py's merge_military_bases), not by filtering
+    // raw.osmInfra directly -- landuse=military ("military_area") is the one
+    // kind still read off raw.osmInfra here, since it deliberately stays out
+    // of that merge (see osm_infra.py's own note on why).
     const raw = emptyRaw({
-      osmInfra: [{ id: "osm:way/1", kind: "military_airfield", lat: 5, lon: 5, name: "Base One" }],
+      militaryBases: [{ id: "curated_base_one", source: "curated", lat: 5, lon: 5, name: "Base One" }],
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     const military = sections.find((s) => s.id === "military");
@@ -319,6 +325,112 @@ test("countryCardSections -- military: bbox caveat reused verbatim, sanctioned l
   await t.test("a sanctioned vessel flagged to a different country is not listed", () => {
     const raw = emptyRaw({
       ais: [{ mmsi: 1, lat: 5, lon: 5, name: "MV Other", sanctions: { flag: "Nowhereland", program: "SDN" } }],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    assert.equal(sections.find((s) => s.id === "military"), undefined);
+  });
+
+  // --- Task 29: bases merge, naval presence, CZIB cross-reference --------
+
+  await t.test("a curated/OSM pair matched by the backend is not double-counted", () => {
+    const raw = emptyRaw({
+      militaryBases: [
+        { id: "al_udeid_ab", source: "curated", subtype: "air", lat: 5, lon: 5, name: "Al Udeid Air Base" },
+        {
+          id: "osm:way/1", source: "osm", kind: "military_airfield", lat: 5.01, lon: 5.01,
+          name: "Al Udeid", matched_curated_id: "al_udeid_ab",
+        },
+      ],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const military = sections.find((s) => s.id === "military");
+    // Both rows still render (provenance kept, never blended)...
+    assert.match(military.html, /Al Udeid Air Base/);
+    assert.match(military.html, /also on the curated list/);
+    // ...but the installations stat counts one site, not two.
+    assert.match(military.html, /<span class="cstat-v">1<\/span><span class="cstat-l">installations \(curated \+ OSM\)/);
+  });
+
+  await t.test("an unmatched OSM site counts as its own installation", () => {
+    const raw = emptyRaw({
+      militaryBases: [
+        { id: "osm:way/2", source: "osm", kind: "military_naval_base", lat: 5, lon: 5, name: "Some Naval Base" },
+      ],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const military = sections.find((s) => s.id === "military");
+    assert.match(military.html, /<span class="cstat-v">1<\/span><span class="cstat-l">installations \(curated \+ OSM\)/);
+  });
+
+  await t.test("naval presence states the trend when the theatre matches this country's bbox", () => {
+    const raw = emptyRaw({
+      navalPresence: {
+        regions: {
+          test_theatre: {
+            label: "Test Theatre", bounds: [0, 0, 10, 10],
+            current: 3, week_ago: 1, trend: 2, trend_computable: true, reason: null,
+          },
+        },
+        ports: {},
+      },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const military = sections.find((s) => s.id === "military");
+    assert.match(military.html, /3 naval hulls in Test Theatre right now, up from 1 last week\./);
+  });
+
+  await t.test("naval presence says so, honestly, when the trend is not computable", () => {
+    const raw = emptyRaw({
+      navalPresence: {
+        regions: {
+          test_theatre: {
+            label: "Test Theatre", bounds: [0, 0, 10, 10],
+            current: 2, week_ago: 0, trend: null, trend_computable: false,
+            reason: "AIS coverage changed",
+          },
+        },
+        ports: {},
+      },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const military = sections.find((s) => s.id === "military");
+    assert.match(military.html, /trend not shown: AIS coverage changed/);
+  });
+
+  await t.test("naval presence for a theatre outside this country's bbox is not shown", () => {
+    const raw = emptyRaw({
+      navalPresence: {
+        regions: {
+          elsewhere: { label: "Elsewhere", bounds: [40, 40, 50, 50], current: 5, week_ago: 5, trend: 0, trend_computable: true },
+        },
+        ports: {},
+      },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    assert.equal(sections.find((s) => s.id === "military"), undefined);
+  });
+
+  await t.test("an active CZIB bulletin for this country is cross-referenced into the military section", () => {
+    const raw = emptyRaw({
+      czib: [{ id: "czib:1:TL", active: true, country_code: "TL", name: "Airspace of Testland", reference: "CZIB-2026-01" }],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const military = sections.find((s) => s.id === "military");
+    assert.match(military.html, /Airspace warnings \(EASA CZIB\)/);
+    assert.match(military.html, /Airspace of Testland/);
+  });
+
+  await t.test("a withdrawn CZIB bulletin is not cross-referenced", () => {
+    const raw = emptyRaw({
+      czib: [{ id: "czib:2:TL", active: false, country_code: "TL", name: "Old Airspace Warning", reference: "CZIB-2018-02" }],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    assert.equal(sections.find((s) => s.id === "military"), undefined);
+  });
+
+  await t.test("a CZIB bulletin for a different country is not cross-referenced", () => {
+    const raw = emptyRaw({
+      czib: [{ id: "czib:3:XX", active: true, country_code: "XX", name: "Airspace of Nowhere", reference: "CZIB-2026-02" }],
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     assert.equal(sections.find((s) => s.id === "military"), undefined);

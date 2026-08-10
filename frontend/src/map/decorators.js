@@ -1853,12 +1853,34 @@ export const OSM_INFRA_STYLE = {
   railway_halt: { svg: SVG.railway, color: "#8aa0c4", size: 12, label: "Railway halt", token: "osm.railway_halt" },
   railway_yard: { svg: SVG.railway, color: "#8aa0c4", size: 13, label: "Railway yard", token: "osm.railway_yard" },
   railway_border: { svg: SVG.railway, color: "#8aa0c4", size: 13, label: "Railway border crossing", token: "osm.railway_border" },
+  // Task 29: five more military=* base classes -- backend/infrastructure.py's
+  // merge_military_bases pairs these against the curated MILITARY_BASES list
+  // for the country card, but the pins themselves stay on this generic OSM
+  // layer, same as military_airfield/military_area above, reusing the
+  // curated list's own subtype glyphs (see MILITARY_SUBTYPE_STYLE) rather
+  // than inventing a second set for the same kind of installation.
+  military_base: { svg: SVG.armyBase, color: "#ff8c3a", size: 15, label: "Military base", token: "osm.military_base" },
+  military_naval_base: { svg: SVG.navalBase, color: "#ff8c3a", size: 15, label: "Naval base", token: "osm.military_naval_base" },
+  military_training_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 13, label: "Military training area", token: "osm.military_training_area" },
+  military_barracks: { svg: SVG.logisticsBase, color: "#ff8c3a", size: 13, label: "Barracks", token: "osm.military_barracks" },
+  military_danger_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 13, label: "Danger area", token: "osm.military_danger_area" },
+  // Task 29: the three air-defence/radar classes -- a separate default-off
+  // layer (see LAYER_MANIFEST's airDefense entry in scene.js and
+  // decorateOsmInfra's own "airDefense" completeness caveat above), drawn in
+  // red rather than the base orange so a reader who has switched this layer
+  // on can tell it apart from an ordinary installation pin at a glance.
+  radar_station: { svg: SVG.radarBase, color: "#ff4d4d", size: 14, label: "Radar station", token: "osm.radar_station" },
+  military_bunker: { svg: SVG.bunker, color: "#ff4d4d", size: 12, label: "Bunker", token: "osm.military_bunker" },
+  military_checkpoint: { svg: SVG.borderCrossing, color: "#ff4d4d", size: 12, label: "Checkpoint", token: "osm.military_checkpoint" },
 };
 const OSM_INFRA_FALLBACK = OSM_INFRA_STYLE.military_area;
 export const OSM_INFRA_ORDER = [
   "military_airfield", "military_area", "power_plant", "border_control",
   "railway_station", "railway_halt", "railway_yard", "railway_border",
   "power_substation", "refinery", "storage_tank", "oil_well",
+  "military_base", "military_naval_base", "military_training_area",
+  "military_barracks", "military_danger_area",
+  "radar_station", "military_bunker", "military_checkpoint",
 ];
 
 // `layerKey` picks which layer's admin opacity/theme dial applies (see
@@ -1917,7 +1939,15 @@ export function decorateOsmInfra(d, { offset, layerKey = "osmInfra" } = {}) {
   // against whichever neighbour a reader actually sees it next to.
   const context = layerKey === "railwayPoints"
     ? "The rail linework beside it is Natural Earth's coarser basemap context, a different, unattributed source."
-    : "The separate Critical Infrastructure layer is the curated one; this is the wider, noisier picture.";
+    // Task 29: the completeness caveat the brief requires for the
+    // air-defence/radar layer, stated on every one of its pins rather than
+    // only once in a legend a reader may never open -- absence of a radar
+    // site here means nobody has mapped one, not that none exists, and
+    // OpenStreetMap's coverage of military sites is uneven in exactly the
+    // theatres this map watches.
+    : layerKey === "airDefense"
+      ? "This layer is off by default and its coverage is patchy: OpenStreetMap's mapping of radar sites, bunkers and checkpoints is uneven and politically contested in exactly the theatres this map watches. A pin here is a real, mapped feature; the absence of one anywhere is not evidence that nothing is there."
+      : "The separate Critical Infrastructure layer is the curated one; this is the wider, noisier picture.";
   const detail = `
     <h3>${esc(d.name)}</h3>
     <div class="meta">${esc(style.label)}${d.operator ? ` &middot; ${esc(d.operator)}` : ""}</div>
@@ -2021,6 +2051,20 @@ export function decorateRailwayPoint(d, opts = {}) {
 
 export function railwayPointIconSize(d) {
   return osmInfraIconSize(d, "railwayPoints");
+}
+
+// ---------- air-defence / radar, riding its own default-off layer (Task 29) -
+//
+// Same thin-wrapper treatment as railway points above: same table, same
+// glyphs, only the layer key (and so the admin opacity dial, the zoom-gate
+// lookup and the completeness caveat decorateOsmInfra's own "airDefense"
+// branch states) moves from osmInfra to airDefense.
+export function decorateAirDefense(d, opts = {}) {
+  return decorateOsmInfra(d, { ...opts, layerKey: "airDefense" });
+}
+
+export function airDefenseIconSize(d) {
+  return osmInfraIconSize(d, "airDefense");
 }
 
 // ---------- EASA conflict-zone bulletins (backend/sources/czib.py) ----------

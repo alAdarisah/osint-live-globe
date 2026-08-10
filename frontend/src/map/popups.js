@@ -9,7 +9,7 @@ import {
   classifyAircraft, classifyShip, classifyVesselTraffic, isSanctioned,
   AIS_COVERAGE_CAVEAT, EMPTY_WATER_HEADLINE,
   OSM_INFRA_STYLE, OSM_INFRA_ORDER, AIRFIELD_STYLE, AIRFIELD_ORDER, MILITARY_ROLE_STYLE,
-  POWER_PLANT_FUEL_STYLE,
+  POWER_PLANT_FUEL_STYLE, MILITARY_SUBTYPE_STYLE,
   satellitePassesSectionHtml,
 } from "./decorators";
 import { countryContainsPoint } from "./countryHitTest";
@@ -1162,24 +1162,157 @@ function sanctionedRows(ships, aircraft) {
   return shipRows + aircraftRows;
 }
 
+// Task 29: how many distinct physical installations raw.militaryBases
+// reports, treating an OSM record the backend already matched to a curated
+// one (matched_curated_id) as corroborating evidence for that site rather
+// than a second installation -- the same arithmetic backend/infrastructure.py's
+// own count_distinct_bases applies, over the pre-merged document that same
+// module's merge_military_bases already served (see /api/infrastructure).
+function distinctBaseCount(bases) {
+  return bases.reduce((n, s) => n + (s.source === "curated" || !s.matched_curated_id ? 1 : 0), 0);
+}
+
+const BASE_LIST_CAP = 8;
+
+function baseTypeLabel(site) {
+  if (site.source === "curated") {
+    return (MILITARY_SUBTYPE_STYLE[site.subtype] || {}).label || site.subtype || "Military site";
+  }
+  return OSM_INFRA_STYLE[site.kind]?.label || site.kind;
+}
+
+// One row per site, mixed provenance -- a curated entry opens the `infra`
+// marker it already is, an OSM entry opens `osmInfra`, and one stamped
+// `matched_curated_id` says so in its own row rather than being hidden or
+// summed into its curated twin (see merge_military_bases' own docstring on
+// why the two never blend into one record).
+function militaryBaseRows(sites) {
+  const rows = sites.slice(0, BASE_LIST_CAP).map((site) => {
+    const open = openableRow(site.source === "curated" ? "infra" : "osmInfra", site.id);
+    const corroborated = site.source === "osm" && site.matched_curated_id;
+    return `<div${open || ' class="event-row"'}>${esc(site.name)}
+      <div class="event-meta">${esc(baseTypeLabel(site))} &middot; ${
+        site.source === "curated" ? "curated" : "OpenStreetMap"
+      }${corroborated ? " &middot; also on the curated list" : ""}${
+        site.operator ? ` &middot; operator per OSM: ${esc(site.operator)}` : ""
+      }</div></div>`;
+  }).join("");
+  const more = sites.length > BASE_LIST_CAP ? `<div class="meta">+${esc(sites.length - BASE_LIST_CAP)} more</div>` : "";
+  return rows + more;
+}
+
+// Which airfields in view have actually moved military traffic in the last
+// 24h, per backend/sources/airfield_activity.py -- joined against raw.airports
+// (the only place a code from that document has a coordinate at all, see that
+// module's own docstring) rather than treated as a layer of its own.
+function militaryAirfieldActivity(bounds, raw) {
+  const activity = raw.airfieldActivity || {};
+  return itemsInBounds(raw.airports, bounds)
+    .map((a) => activity[a.id] || activity[a.icao] || activity[a.iata])
+    .filter((entry) => entry && entry.military_aircraft > 0)
+    .sort((a, b) => b.military_aircraft - a.military_aircraft);
+}
+
+// The same region-bounds-containment test countryCardSections' own
+// escalationZone already runs against raw.escalation -- restated rather than
+// shared, since the two documents key their per-zone entries differently
+// (escalation by array index, this by region_key) and factoring one helper
+// out for two call sites with different input shapes was not worth the
+// indirection here.
+function navalPresenceRegion(bounds, raw) {
+  if (!bounds) return null;
+  const cLat = (bounds.south + bounds.north) / 2;
+  const cLon = (bounds.west + bounds.east) / 2;
+  return Object.values(raw.navalPresence?.regions || {}).find((z) => {
+    if (!Array.isArray(z.bounds)) return false;
+    const [zs, zw, zn, ze] = z.bounds;
+    return cLat >= zs && cLat <= zn && cLon >= zw && cLon <= ze;
+  }) || null;
+}
+
+// One sentence per zone/port -- "N naval hulls here, up/down/unchanged from
+// last week", or, honestly, that the trend cannot be stated at all when
+// backend/refine/naval_presence.py's own coverage check tripped (see that
+// module's docstring on why the check exists and what it protects against:
+// a change in how much of the world this map is listening to, read as a
+// change in how many hulls are at sea).
+function navalPresenceSentence(label, entry) {
+  const current = entry.current || 0;
+  const noun = current === 1 ? "naval hull" : "naval hulls";
+  if (!entry.trend_computable) {
+    return `${current} ${noun} in ${esc(label)} right now &mdash; trend not shown: ${esc(entry.reason || "AIS coverage changed across the comparison window")}.`;
+  }
+  if (entry.trend > 0) return `${current} ${noun} in ${esc(label)} right now, up from ${entry.week_ago} last week.`;
+  if (entry.trend < 0) return `${current} ${noun} in ${esc(label)} right now, down from ${entry.week_ago} last week.`;
+  return `${current} ${noun} in ${esc(label)} right now, unchanged from last week.`;
+}
+
+function navalPresenceHtml(bounds, raw) {
+  const region = navalPresenceRegion(bounds, raw);
+  const ports = itemsInBounds(raw.infra, bounds, (d) => d.type === "port")
+    .map((p) => ({ name: p.name, entry: raw.navalPresence?.ports?.[p.id] }))
+    .filter((r) => r.entry);
+  if (!region && !ports.length) return "";
+  return `
+    <div class="csection-h">Naval presence</div>
+    ${region ? `<div>${navalPresenceSentence(region.label, region)}</div>` : ""}
+    ${ports.map((p) => `<div>${navalPresenceSentence(p.name, p.entry)}</div>`).join("")}
+    <p class="meta">Navy-classified AIS contacts (ITU-R M.1371 &ldquo;military operations&rdquo;), <i>derived</i>
+      from a 7-day window of this map's own recorded AIS history (backend/refine/naval_presence.py's own
+      WINDOW_DAYS). A warship broadcasting no AIS, or a navy that does not use this classification, is
+      invisible to this count entirely -- absence here is not evidence of absence at sea.</p>`;
+}
+
+// EASA's Conflict Zone Information Bulletins (backend/sources/czib.py),
+// cross-referenced into this section by the same country_code every CZIB pin
+// already carries -- see buildEnergyInfrastructure for the sibling pattern of
+// pulling a country-scoped list off a feed that mostly renders as pins of
+// its own.
+//
+// NOTAMs (Notices to Air Missions -- the actual, hour-by-hour airspace
+// closures a pilot flight-plans against) are out of scope for this map
+// entirely, here and everywhere else: there is no free global NOTAM feed
+// with a licence this project can use. CZIB is the closest attributed,
+// licence-clear substitute this map has -- a named regulator's own standing
+// advisory -- and it is presented as exactly that, not as a NOTAM stand-in.
+function czibForCountry(raw, props) {
+  const iso2 = props.iso_a2 && props.iso_a2 !== "-99" ? props.iso_a2 : null;
+  if (!iso2) return [];
+  return (raw.czib || []).filter((b) => b.active && b.country_code === iso2);
+}
+
+function czibRows(bulletins) {
+  return bulletins.slice(0, 4).map((b) => {
+    const open = openableRow("czib", b.id);
+    const scope = b.bulletin_countries?.length > 1 ? ` &middot; covers ${b.bulletin_countries.length} countries` : "";
+    return `<div${open || ' class="event-row"'}>${esc(b.name)}
+      <div class="event-meta">${esc(b.reference || "EASA CZIB")}${scope}</div></div>`;
+  }).join("");
+}
+
 function buildMilitary(bounds, raw, props) {
-  const airfields = itemsInBounds(raw.osmInfra, bounds, (d) => d.kind === "military_airfield" || d.kind === "military_area");
-  // Curated infra (backend/infrastructure.py) tags every military site
-  // type: "military" -- the same field decorators.js reads to colour it.
-  const bases = itemsInBounds(raw.infra, bounds, (d) => d.type === "military");
+  // The broader, fragment-heavy landuse=military area class stays its own
+  // stat -- see osm_infra.py's own note on why it is deliberately not one of
+  // the six kinds merge_military_bases treats as an installation.
+  const militaryAreas = itemsInBounds(raw.osmInfra, bounds, (d) => d.kind === "military_area");
+  const basesInBounds = itemsInBounds(raw.militaryBases, bounds);
   const aircraft = itemsInBounds(raw.adsb, bounds, (a) => classifyAircraft(a) === "military");
   const navy = itemsInBounds(raw.ais, bounds, (s) => classifyShip(s) === "navy");
   const { ships: sanctionedShips, aircraft: sanctionedAircraft } = sanctionedByFlag(props, raw);
+  const airActivity = militaryAirfieldActivity(bounds, raw);
+  const navalHtml = navalPresenceHtml(bounds, raw);
+  const czibBulletins = czibForCountry(raw, props);
 
-  if (!airfields.length && !bases.length && !aircraft.length && !navy.length
-    && !sanctionedShips.length && !sanctionedAircraft.length) return "";
+  if (!militaryAreas.length && !basesInBounds.length && !aircraft.length && !navy.length
+    && !sanctionedShips.length && !sanctionedAircraft.length && !airActivity.length
+    && !navalHtml && !czibBulletins.length) return "";
 
   const roleCounts = tallyBy(aircraft, (a) => (a.military_role && MILITARY_ROLE_STYLE[a.military_role] ? a.military_role : null));
   const roleEntries = Object.entries(roleCounts.counts).sort((a, b) => b[1] - a[1]);
 
   const cells = [
-    statRow("", "military airfields/areas (OSM)", airfields.length, "hot"),
-    statRow("", "curated bases", bases.length),
+    statRow("", "installations (curated + OSM)", distinctBaseCount(basesInBounds), "hot"),
+    statRow("", "military areas (OSM, broader)", militaryAreas.length),
     statRow("", "military aircraft", aircraft.length, "hot"),
     statRow("", "navy vessels", navy.length),
   ].join("");
@@ -1190,10 +1323,28 @@ function buildMilitary(bounds, raw, props) {
     ${roleEntries.length
       ? `<div class="meta">Aircraft by role: ${roleEntries.map(([role, n]) => `${esc(MILITARY_ROLE_STYLE[role].label)} (${n})`).join(", ")}</div>`
       : ""}
-    ${airfields.length ? `<div class="csection-h">Airfields & areas (OpenStreetMap)</div>${
-      infraListRows(airfields, "osmInfra", (d) => `${d.name} &mdash; ${OSM_INFRA_STYLE[d.kind]?.label || d.kind}`)
-    }<p class="meta">${OSM_SWEEP_CAVEAT}</p>` : ""}
-    ${bases.length ? `<div class="csection-h">Curated bases</div>${infraListRows(bases, null, (d) => d.name)}` : ""}
+    ${basesInBounds.length ? `<div class="csection-h">Bases &amp; installations</div>
+    <p class="meta">This app's own curated list beside OpenStreetMap's military=* sweep -- two independent
+      claims, kept apart rather than blended (see any site's own popup for which one it is). A site OSM also
+      corroborates against the curated list is noted, not summed twice into the count above.</p>
+    ${militaryBaseRows(basesInBounds)}` : ""}
+    ${militaryAreas.length ? `<div class="csection-h">Military areas (OpenStreetMap)</div>${
+      infraListRows(militaryAreas, "osmInfra", (d) => d.name)
+    }<p class="meta">${OSM_SWEEP_CAVEAT} Recent conflict activity within 75km of any of the pins above shows on
+      that pin's own popup, not repeated here.</p>` : ""}
+    ${airActivity.length ? `<div class="csection-h">Airfields with recent military movements</div>
+    ${airActivity.slice(0, 6).map((entry) => `<div class="event-row">${esc(entry.name || entry.code)}
+      <div class="event-meta">${entry.military_aircraft} of ${entry.aircraft} movements in the last 24h were
+        military</div></div>`).join("")}
+    <p class="meta">Derived from this map's own recorded ADS-B history (backend/sources/airfield_activity.py),
+      ranked so a small field where nearly every movement is military is not crowded out by a busy civil hub's
+      much larger raw count. NOTAMs (official notice-to-airmen airspace restrictions) are out of scope for this
+      map -- no free global feed publishes them under a usable licence -- so this is recorded traffic, not a
+      published closure.</p>` : ""}
+    ${navalHtml}
+    ${czibBulletins.length ? `<div class="csection-h">Airspace warnings (EASA CZIB)</div>
+    ${czibRows(czibBulletins)}
+    <p class="meta">Standing regulator advisories, not incidents -- see the Airspace layer for the full set.</p>` : ""}
     ${(sanctionedShips.length || sanctionedAircraft.length) ? `
     <div class="csection-h">Sanctioned hulls & tails flagged to ${esc(props.name || "this country")}</div>
     ${sanctionedRows(sanctionedShips, sanctionedAircraft)}
@@ -1205,8 +1356,9 @@ function buildMilitary(bounds, raw, props) {
       curated infrastructure list (this app, hand-checked coordinates), <i>reported</i> &middot; ADS-B
       military classification, <i>inferred</i> from callsign/registry heuristics where no confirmed flag is
       available (see the aircraft's own popup) &middot; AIS navy classification, <i>derived</i> from the
-      vessel's own broadcast ship-type code &middot; OFAC Specially Designated Nationals list (US
-      Treasury), <i>reported</i>.</div>`;
+      vessel's own broadcast ship-type code &middot; recorded ADS-B movement history, <i>derived</i> &middot;
+      recorded AIS movement history, <i>derived</i> &middot; EASA Conflict Zone Information Bulletins,
+      <i>reported</i> &middot; OFAC Specially Designated Nationals list (US Treasury), <i>reported</i>.</div>`;
 }
 
 // ---------- transport ----------
@@ -1813,10 +1965,18 @@ export function countVesselsByClass(ships, feature, bounds) {
 
 function buildWaterTraffic(feature, raw, bounds) {
   const { counts, total } = countVesselsByClass(raw.ais, feature, bounds);
-  if (!total) return "";
+  // Task 29: the 7-day naval trend can have something to say even when this
+  // instant's live navy count is zero (a hull that was here a week ago and
+  // has since moved on), so this is checked and shown regardless of `total`
+  // -- the one place in this function that is not itself gated on it.
+  const navalTrend = navalPresenceRegion(bounds, raw);
+  if (!total && !navalTrend) return "";
   const rows = VESSEL_TRAFFIC_ORDER.map((k) => statRow("", VESSEL_TRAFFIC_LABEL[k], counts[k])).join("");
-  return `<div class="cstats">${rows}${statRow("", "total", total, "hot")}</div>
-    ${AIS_COVERAGE_CAVEAT}`;
+  return `${total ? `<div class="cstats">${rows}${statRow("", "total", total, "hot")}</div>${AIS_COVERAGE_CAVEAT}` : ""}
+    ${navalTrend ? `<p>${navalPresenceSentence(navalTrend.label, navalTrend)}</p>
+    <p class="meta">Navy-classified AIS contacts (ITU-R M.1371 &ldquo;military operations&rdquo;), <i>derived</i>
+      from a 7-day window of this map's own recorded AIS history, scoped to the wider conflict theatre this
+      water sits in rather than this exact polygon.</p>` : ""}`;
 }
 
 /**

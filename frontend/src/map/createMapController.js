@@ -114,6 +114,8 @@ import {
   osmInfraIconSize,
   decoratePowerPlant,
   powerPlantIconSize,
+  decorateAirDefense,
+  airDefenseIconSize,
   decorateOutage,
   outageIconSize,
   decorateOutageRegion,
@@ -321,6 +323,9 @@ const ID_FIELD = {
   // the same reason railwayPoints does just above -- it reads the same raw
   // items, split into their own array (see applyData's own note).
   powerPlants: "id",
+  // Task 29: same reasoning again -- airDefense reads the same osm_infra
+  // sweep, split into its own array.
+  airDefense: "id",
   // One pin per country, so the country code *is* the identity -- a country
   // whose score changes between polls has to update its existing marker rather
   // than be torn down and rebuilt under a new key.
@@ -341,6 +346,7 @@ const DECORATORS = {
   deflock: decorateDeflock,
   railwayPoints: decorateRailwayPoint, railLive: decorateRailLive, railStations: decorateRailStation,
   powerPlants: decoratePowerPlant,
+  airDefense: decorateAirDefense,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
@@ -356,6 +362,7 @@ const ICON_SIZE_FOR_GLYPH = {
   deflock: deflockIconSize,
   railwayPoints: railwayPointIconSize, railLive: railLiveIconSize, railStations: railStationIconSize,
   powerPlants: powerPlantIconSize,
+  airDefense: airDefenseIconSize,
 };
 // The same sizes with the current level of detail applied, which is what the
 // placement pass has to reserve: a dot needs a dot's worth of room, and routing
@@ -420,6 +427,12 @@ const COUNTRY_CARD_FEEDS = new Set([
   // would keep showing its own "not loaded" coverage line indefinitely, since
   // nothing would tell it to look again.
   "osmInfra", "dams", "airports", "ports",
+  // Task 29: naval_presence.py recomputes every 15 minutes and czib.py every
+  // hour -- both genuinely move mid-session, unlike the one-shot
+  // /api/infrastructure fetch militaryBases/pipelines/shippingLanes ride
+  // (not listed here for the same reason "infra" itself is not: nothing
+  // about a boot-time fetch benefits from a rebuild trigger).
+  "navalPresence", "czib",
 ]);
 
 // The water-card counterpart to COUNTRY_CARD_FEEDS above, same reasoning and
@@ -432,7 +445,10 @@ const COUNTRY_CARD_FEEDS = new Set([
 // selecting text in the card. The curated infrastructure gazetteers (cables,
 // cableLandings, ports) are left out too: none of them refreshes more than
 // about once a day, so there is nothing here for a mid-session poll to move.
-const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps"]);
+// Task 29: navalPresence added -- the water card's own "three naval hulls in
+// this sea" line reads it directly (buildWaterTraffic), and it recomputes
+// every 15 minutes, well inside a plausible card session.
+const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps", "navalPresence"]);
 
 // The admin-1/admin-2 card counterpart to COUNTRY_CARD_FEEDS/WATER_CARD_FEEDS
 // above -- same reasoning: an open card is built from `raw` at the moment it
@@ -765,6 +781,14 @@ export function createMapController(container, initial, callbacks) {
     // and read by renderPipelines() below -- same shape and reason as
     // raw.railways/raw.powerLines carrying their own truncated_regions.
     pipelinesTruncatedRegions: [],
+    // Task 29: curated MILITARY_BASES beside osm_infra.py's own military=*
+    // sweep, pre-merged and source-tagged by the backend (see
+    // infrastructure.merge_military_bases) -- consumed only by the country
+    // card's Military & security section (map/popups.js), not drawn as a
+    // marker layer of its own: the two provenances already ride the map as
+    // the existing `infra`/`osmInfra` pins, and this is the one list that
+    // pairs them without blending the two data models.
+    militaryBases: [],
     jamming: [], satellites: [],
     // buildCountryIndex's own output, cached here (not just in the `countryIndex`
     // local below) so the water body card's bordering-country match
@@ -832,6 +856,11 @@ export function createMapController(container, initial, callbacks) {
     // (see backend/sources/airfield_activity.py) rather than fetched, and
     // attached to existing pins rather than drawn as a layer.
     airfieldActivity: {},
+    // Task 29: backend/refine/naval_presence.py's document -- also consumed
+    // only by the country card, not drawn as its own layer (the hulls
+    // themselves already draw as ordinary AIS navy pins; this is the
+    // per-theatre/per-port trend over them).
+    navalPresence: {},
     // Global Fishing Watch's two published maritime layers. Kept apart from
     // darkVessels above on purpose: that array is this app's inference from its
     // own three-day AIS history, these are another organisation's findings
@@ -861,6 +890,11 @@ export function createMapController(container, initial, callbacks) {
     // transmission-line document power_lines.py serves, a whole-document set
     // of lines on the same footing as `railways` above.
     powerPlants: [], powerLines: { lines: [] },
+    // Task 29: radar_station/military_bunker/military_checkpoint, split out
+    // of osmInfra at render time the same way powerPlants is just above --
+    // its own default-off layer with its own completeness caveat (see
+    // decorateOsmInfra's "airDefense" branch in decorators.js).
+    airDefense: [],
     // Task 20b's corridors (a plain array, like pipelines) and Task 20a's
     // AIS density grid (a whole document -- {note, cells} -- like railways
     // above, so the popup/legend can state the endpoint's own `note` rather
@@ -904,6 +938,7 @@ export function createMapController(container, initial, callbacks) {
     deflock: new Map(),
     railwayPoints: new Map(), railLive: new Map(), railStations: new Map(),
     powerPlants: new Map(),
+    airDefense: new Map(),
   };
   // Keyed by event id, same as markersByKey.events, so a circle and its pin
   // are added and dropped by the same diff against the same visible set.
@@ -1600,6 +1635,14 @@ export function createMapController(container, initial, callbacks) {
   // rather than mirroring another one).
   function isPowerPlantItem(item) {
     return item.kind === "power_plant";
+  }
+
+  // Task 29: the same rendering split, for the three air-defence/radar
+  // kinds -- applyData reads this to pull them off raw.osmInfra onto their
+  // own raw.airDefense array, default-off with its own completeness caveat.
+  const AIR_DEFENSE_KINDS = new Set(["radar_station", "military_bunker", "military_checkpoint"]);
+  function isAirDefenseItem(item) {
+    return AIR_DEFENSE_KINDS.has(item.kind);
   }
 
   const LAYER_ITEM_FILTER = {
@@ -3375,7 +3418,7 @@ export function createMapController(container, initial, callbacks) {
     // Task 28: powerPlants is a real render key (split out of osmInfra, same
     // treatment as railwayPoints above); powerLines is a whole-document line
     // count, same treatment as railways below.
-    powerPlants: 0, powerLines: 0,
+    powerPlants: 0, powerLines: 0, airDefense: 0,
     outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
@@ -3415,7 +3458,7 @@ export function createMapController(container, initial, callbacks) {
     // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
     // railStations (fix, post-review) is the Finnish station gazetteer.
     railwayPoints: 0, railLive: 0, railStations: 0,
-    powerPlants: 0, powerLines: 0,
+    powerPlants: 0, powerLines: 0, airDefense: 0,
     outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
@@ -3442,7 +3485,7 @@ export function createMapController(container, initial, callbacks) {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
     gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
-    deflock: false, laneDensity: false, railwayPoints: false, powerPlants: false,
+    deflock: false, laneDensity: false, railwayPoints: false, powerPlants: false, airDefense: false,
     // Task 24's three on-by-default, THEATRE-gated groups -- see
     // SAT_ELEMENT_ZOOM_NOTE_KEYS. The four off-by-default groups are
     // ungated and never report a note.
@@ -6874,6 +6917,8 @@ export function createMapController(container, initial, callbacks) {
     // Task 28: bounds-filtered the same way and for the same reason --
     // reads the same raw sweep as osmInfra/railwayPoints above, just split.
     renderMarkerLayer("powerPlants");
+    // Task 29: same reasoning again -- reads the same raw sweep, just split.
+    renderMarkerLayer("airDefense");
     // Live and ungated, but still bounds-filtered like every other marker
     // layer here -- without this it would render once and sit empty
     // wherever the map panned to since the last poll, the same reasoning
@@ -7381,9 +7426,15 @@ export function createMapController(container, initial, callbacks) {
         // every generic consumer (counts, totals, the country card, the data
         // editor) then reads raw.osmInfra expecting infrastructure, not
         // plants, with no further changes required of any of them.
-        raw.osmInfra = items.filter((item) => !isRailwayPointItem(item) && !isPowerPlantItem(item));
+        //
+        // Task 29: airDefense gets the same treatment as a third split, for
+        // the same reason.
+        raw.osmInfra = items.filter(
+          (item) => !isRailwayPointItem(item) && !isPowerPlantItem(item) && !isAirDefenseItem(item)
+        );
         raw.railwayPoints = items.filter(isRailwayPointItem);
         raw.powerPlants = items.filter(isPowerPlantItem);
+        raw.airDefense = items.filter(isAirDefenseItem);
       } else {
         raw[key] = data;
       }
@@ -7409,12 +7460,14 @@ export function createMapController(container, initial, callbacks) {
           if (layer !== key) renderMarkerLayer(layer);
         }
       }
-      // railwayPoints/powerPlants have just been rebuilt above; redraw both
-      // whenever a fresh OSM sweep lands, the same "whichever lands gets
-      // redrawn" rule the twin-rebuild block just above already follows.
+      // railwayPoints/powerPlants/airDefense have just been rebuilt above;
+      // redraw all three whenever a fresh OSM sweep lands, the same
+      // "whichever lands gets redrawn" rule the twin-rebuild block just
+      // above already follows.
       if (key === "osmInfra") {
         renderMarkerLayer("railwayPoints");
         renderMarkerLayer("powerPlants");
+        renderMarkerLayer("airDefense");
       }
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();

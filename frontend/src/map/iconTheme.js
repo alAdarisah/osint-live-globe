@@ -159,6 +159,24 @@ export const PALETTE_GROUPS = [
       { id: "osm.refinery", label: "Refinery (OpenStreetMap)", value: "#ff9500" },
       { id: "osm.storage_tank", label: "Storage tank (OpenStreetMap)", value: "#ffb347" },
       { id: "osm.oil_well", label: "Oil/gas well (OpenStreetMap)", value: "#c17a4a" },
+      // Task 29: the five more OSM military=* base classes
+      // merge_military_bases pairs against the curated MILITARY_BASES list --
+      // the same orange osm.military_airfield/osm.military_area already wear,
+      // since these are the same "military installation" claim, just five
+      // more of OpenStreetMap's own tag values for it.
+      { id: "osm.military_base", label: "Military base (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_naval_base", label: "Naval base (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_training_area", label: "Military training area (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_barracks", label: "Barracks (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_danger_area", label: "Danger area (OpenStreetMap)", value: "#ff8c3a" },
+      // Task 29: the three air-defence/radar classes, riding their own
+      // default-off layer (see LAYER_MANIFEST's airDefense entry in scene.js)
+      // rather than osmInfra -- a distinct red rather than the base orange, so
+      // a reader who has switched this layer on can tell a radar/bunker/
+      // checkpoint pin from an ordinary installation at a glance.
+      { id: "osm.radar_station", label: "Radar station (OpenStreetMap)", value: "#ff4d4d" },
+      { id: "osm.military_bunker", label: "Bunker (OpenStreetMap)", value: "#ff4d4d" },
+      { id: "osm.military_checkpoint", label: "Checkpoint (OpenStreetMap)", value: "#ff4d4d" },
       // Task 28: power plants, glyph and colour by fuel (see osm_infra.py's
       // own _fuel_category) -- eight rows rather than one shared "power
       // plant" colour, the same reasoning the four railway node kinds were
@@ -414,6 +432,21 @@ export const TOKEN_LAYER = Object.freeze({
   "osm.refinery": "osmInfra",
   "osm.storage_tank": "osmInfra",
   "osm.oil_well": "osmInfra",
+  // Task 29: the five base classes stay on osmInfra's own zoom gate --
+  // merge_military_bases pairs them with the curated list for the country
+  // card, but the pins themselves still ride the generic OSM layer, same as
+  // military_airfield/military_area above.
+  "osm.military_base": "osmInfra",
+  "osm.military_naval_base": "osmInfra",
+  "osm.military_training_area": "osmInfra",
+  "osm.military_barracks": "osmInfra",
+  "osm.military_danger_area": "osmInfra",
+  // Task 29: the three air-defence/radar classes ride their own layer
+  // (LAYER_MANIFEST's airDefense), default off with its own completeness
+  // caveat -- see decorateOsmInfra's "airDefense" branch.
+  "osm.radar_station": "airDefense",
+  "osm.military_bunker": "airDefense",
+  "osm.military_checkpoint": "airDefense",
   // Task 28: power plants moved off osmInfra onto their own layer -- these
   // eight fuel tokens are checked against powerPlants' own zoom gate, not
   // osmInfra's, the same reason the four railway_* tokens moved to
@@ -495,6 +528,10 @@ export const PIN_STACK = [
   // it was pulled off of) rather than mirroring anything -- see its own note
   // in map/scene.js on why it has no natural parent toggle to ride.
   "powerPlants",
+  // Task 29: same reasoning as powerPlants just above -- a genuine
+  // independent toggle (default off, see LAYER_MANIFEST's airDefense entry),
+  // placed beside the layer it was pulled off of.
+  "airDefense",
   "deflock", "airports", "ports", "dams",
   // Task 27: railLive gets its own position -- a genuine independent toggle,
   // unlike railwayPoints just below it, which has none (see STACK_ALIAS).

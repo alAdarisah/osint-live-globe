@@ -67,6 +67,10 @@ export const SETTINGS_LAYERS = [
   // railwayPoints, which mirrors "railways"), so they need their own
   // zoom-gate/colour dials the same as any other layer.
   { key: "powerPlants", label: "Power plants (OpenStreetMap)" },
+  // Task 29: radar/bunker/checkpoint, off by default with its own
+  // completeness caveat (see decorateOsmInfra's "airDefense" branch) --
+  // same independent-toggle treatment as powerPlants above.
+  { key: "airDefense", label: "Air defence & radar (OpenStreetMap, off by default)" },
   { key: "gfwGaps", label: "AIS disabling (GFW)" },
   { key: "gfwDetections", label: "Satellite vessel detections (GFW)" },
   { key: "czib", label: "Airspace warnings (EASA CZIB)" },

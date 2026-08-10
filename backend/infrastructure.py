@@ -12,6 +12,8 @@ always rendered, same as everything else here -- the frontend has no region
 filter on this endpoint.
 """
 
+from backend.sources.proximity import ProximityIndex
+
 INFRA_SITES: list[dict] = [
     # ---- Persian Gulf / Strait of Hormuz ----
     {
@@ -1855,3 +1857,83 @@ def serialize() -> dict:
         "pipelines": PIPELINE_ROUTES,
         "lanes": SHIPPING_LANES,
     }
+
+
+# Task 29: which of osm_infra.py's kinds are a comparable claim to a
+# MILITARY_BASES entry -- an installation, not the broader (often
+# fragment-heavy) `landuse=military` area class, which stays out of this list
+# and continues to ride the plain OSM infrastructure layer unchanged. See
+# osm_infra.py's own _FEATURES comment for why each of these six carries (or
+# does not carry) a `["name"]` filter.
+MILITARY_OSM_KINDS = frozenset({
+    "military_airfield", "military_base", "military_naval_base",
+    "military_training_area", "military_barracks", "military_danger_area",
+})
+
+# The three air-defence/radar classes (Task 29 item 4) are a different layer
+# with a different completeness promise -- see decorateOsmInfra's own
+# "airDefense" branch on the frontend for the caveat this set exists to keep
+# separate from the bases merge below (the frontend's own split happens in
+# createMapController.js's isAirDefenseItem, a plain JS literal rather than an
+# import of this constant -- there is no cross-language import to have).
+# Exported and named here anyway, alongside MILITARY_OSM_KINDS, as the one
+# place in the backend that documents and tests the boundary between the two:
+# see test_military_merge.py's own check that these three can never inflate
+# an installation count.
+AIR_DEFENSE_OSM_KINDS = frozenset({"radar_station", "military_bunker", "military_checkpoint"})
+
+# A curated pin is hand-placed at the installation's own coordinates; an OSM
+# way's `out center` is a computed centroid of whatever polygon a mapper
+# traced for the same footprint, which for a sprawling base (an airfield's
+# runways plus its whole cantonment area, say) can land a couple of
+# kilometres from the curated point without being a different installation.
+# 5km is wide enough to bridge that gap and narrow enough that two genuinely
+# separate nearby facilities (an air base and a naval base sharing one port
+# city -- Djibouti's cluster is the closest case checked) are never folded
+# into the same site.
+BASE_MATCH_RADIUS_KM = 5.0
+
+
+def merge_military_bases(curated: list[dict], osm_sites: list[dict]) -> list[dict]:
+    """Curated MILITARY_BASES beside OpenStreetMap's military=* sweep, each
+    site keeping its own `source` rather than being blended into one record --
+    see osm_infra.py's own module docstring for why that promise matters here
+    specifically (this list is the one place in the app where the two claims
+    a reader could most easily mistake for confirming each other actually
+    meet).
+
+    Every curated site passes through unchanged, `source: "curated"`. An OSM
+    site is included only when its `kind` is one of MILITARY_OSM_KINDS (the
+    plain `landuse=military` area class, or any other kind osm_sites happens
+    to carry, is left out -- this is a list of installations, not everything
+    the sweep found); it is stamped `source: "osm"`, and, when a curated site
+    sits within BASE_MATCH_RADIUS_KM, `matched_curated_id` names it. That flag
+    is what count_distinct_bases below reads to avoid reporting two
+    installations where a human curator and OpenStreetMap's mappers both
+    independently found the same one.
+    """
+    out = [{**site, "source": "curated"} for site in curated]
+    index = ProximityIndex(curated)
+    for site in osm_sites:
+        if site.get("kind") not in MILITARY_OSM_KINDS:
+            continue
+        record = {**site, "source": "osm"}
+        match = index.nearest(site["lat"], site["lon"], BASE_MATCH_RADIUS_KM)
+        if match is not None:
+            record["matched_curated_id"] = match["id"]
+        out.append(record)
+    return out
+
+
+def count_distinct_bases(merged: list[dict]) -> int:
+    """How many distinct physical installations `merge_military_bases`
+    reports, treating a matched OSM/curated pair as one site rather than two.
+
+    Summing every record in the merged list would double-count: an OSM entry
+    with `matched_curated_id` set is corroborating evidence for a site already
+    counted once as its curated entry, not a second installation.
+    """
+    return sum(
+        1 for site in merged
+        if site.get("source") == "curated" or not site.get("matched_curated_id")
+    )

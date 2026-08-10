@@ -21,7 +21,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.refine import flight_legs, lane_density, port_call_thresholds
+from backend.refine import flight_legs, lane_density, naval_presence, port_call_thresholds
 # Aliased: this module already has a route handler literally named
 # `satellites` (see /api/satellites below, unchanged from before this task),
 # and that function def rebinds the bare module-level name `satellites` --
@@ -346,6 +346,17 @@ async def infrastructure_list():
     osm_doc = (await storage.reference("pipelines_osm")) or {}
     curated = await _curated_pipeline_records()
     pipelines = curated + (osm_doc.get("lines") or [])
+    # Task 29: the same source-tagged merge idiom as pipelines just above,
+    # applied to military installations -- curated MILITARY_BASES beside
+    # whatever osm_infra.py's own Overpass sweep last found for the six
+    # comparable military=* kinds (see infrastructure.merge_military_bases).
+    # A registry read, not a fetch: osm_infra.py runs in the ingest process on
+    # its own daily clock (see its own module docstring), and this process
+    # already mirrors its published "osm_infra" state -- the same registry
+    # read /api/osm-infrastructure itself serves from. Reading it here, once
+    # a day at most (the Cache-Control below is unchanged), costs nothing.
+    osm_military = (registry.get("osm_infra").data if registry.has("osm_infra") else None) or []
+    military_bases = infrastructure.merge_military_bases(infrastructure.MILITARY_BASES, osm_military)
     payload = {
         **infrastructure.serialize(),
         "pipelines": pipelines,
@@ -356,6 +367,7 @@ async def infrastructure_list():
         # less here" with nothing saying it was capped. Carried straight
         # through, same as power_lines.py's own serialize() does for its half.
         "pipelines_truncated_regions": sorted(osm_doc.get("truncated_regions") or []),
+        "military_bases": military_bases,
     }
     return JSONResponse(payload, headers={"Cache-Control": "public, max-age=86400"})
 
@@ -1624,6 +1636,33 @@ async def airfield_activity_endpoint():
     if cached is None:
         cached = await storage.reference(airfield_activity.SNAPSHOT_NAME) or {}
         _AIRFIELD_ACTIVITY_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the escalation/airfield-activity caches
+# just above: one stored document written by the refine process (four times a
+# day, see config.NAVAL_PRESENCE_INTERVAL), read by a frontend on its own timer.
+_NAVAL_PRESENCE_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("naval_presence", _NAVAL_PRESENCE_CACHE)
+
+
+@app.get("/api/naval-presence")
+async def naval_presence_endpoint():
+    """Navy-classified AIS presence per conflict theatre and per curated port,
+    with a 7-day trend (backend/refine/naval_presence.py).
+
+    An empty object -- not an error -- before the refine process has written a
+    pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document exists,
+    a theatre with `trend_computable: false` is not silence: it is this map
+    saying its own AIS coverage moved too much across the window to trust a
+    difference, which is the one thing worse than staying quiet -- presenting
+    a coverage change as a naval one.
+    """
+    cached = _NAVAL_PRESENCE_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(naval_presence.REFERENCE_NAME) or {}
+        _NAVAL_PRESENCE_CACHE.set("all", cached)
     return JSONResponse(cached, headers={"Cache-Control": "no-store"})
 
 
