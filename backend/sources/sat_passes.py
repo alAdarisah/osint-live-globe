@@ -20,16 +20,24 @@ response rather than silently narrowed:
 
 * MAX_SATELLITES_FOR_PASSES bounds how many element sets get a real
   skyfield search. A group like "imaging" can hold several hundred objects,
-  and the honest fix would be per-satellite -- but a satellite whose ground
-  track can never reach the requested latitude at all (a hard fact of
-  orbital mechanics: inclination i bounds the sub-satellite point to
-  [-i, i], or [-(180-i), 180-i] for i > 90) is filtered out first, for free,
-  before the cap is even applied, since searching it always finds nothing.
-  Benchmarked against this module's own ISS fixture (a LEO orbit -- the
-  costliest case, since find_events samples more finely the faster the
-  orbit is): ~1.5ms per satellite for a 24-hour window, so the cap bounds a
-  single request to well under half a second of skyfield work even before
-  the latitude filter has thinned the pool.
+  almost all sun-synchronous or otherwise high-inclination -- live counts
+  behind the "imaging" toggle (resource 167, sarsat 83, spire 73, planet
+  123, ~446 total) mean the latitude reachability filter below keeps most
+  of them for a typical query point, so this cap binds routinely, not on a
+  rare oversized request. What survives it is not an arbitrary subset:
+  _rank_by_proximity orders the reachable pool by each satellite's current
+  distance to the query point (one cheap subpoint propagation, no root-
+  finding -- ~0.05ms measured, negligible next to find_events itself), so
+  the 200 kept are the 200 nearest right now, not "whichever satellites
+  happen to have the lowest NORAD id" -- a fixed, query-independent
+  ordering earlier review correctly flagged as always dropping the same
+  newer objects regardless of who was actually about to fly over.
+  find_events itself is measured (review's own benchmark, reproduced
+  against this module's ISS fixture over a full 24-hour window) at ~3.4ms
+  per satellite, not the ~1.5ms an earlier draft of this docstring claimed
+  -- so the cap bounds a single request to roughly 0.68s of skyfield work,
+  run off the event loop via asyncio.to_thread at the route (see
+  backend/app.py's satellite_passes), not on it.
 * MAX_PASS_HOURS bounds how far into the future a search runs, matching the
   brief's own "next passes ... within 24 hours" -- a caller asking for more
   is silently clamped, not rejected, the same "narrow, don't error" contract
@@ -41,7 +49,7 @@ import math
 
 from skyfield.api import EarthSatellite, load, wgs84
 
-from backend.sources.proximity import EARTH_RADIUS_KM
+from backend.sources.proximity import EARTH_RADIUS_KM, haversine_km
 
 # A pass search runs against whichever element sets the caller's `groups`
 # selected -- built once here rather than sharing backend/sources/
@@ -154,6 +162,43 @@ def _reachable_elements(elements: list[dict], lat: float) -> list[dict]:
     return out
 
 
+def _rank_by_proximity(elements: list[dict], lat: float, lon: float, at_time) -> list[dict]:
+    """`elements`, nearest-first, by each satellite's *current* (at
+    `at_time`) great-circle distance to (lat, lon).
+
+    This is what MAX_SATELLITES_FOR_PASSES actually caps: whichever
+    satellites are physically closest to the query point right now are the
+    ones most likely to have an imminent pass, which is a real answer to
+    "who is about to fly over" rather than a fixed ordering with no
+    relationship to the question at all (ascending NORAD id, an earlier
+    version of this function used, always kept the same older objects and
+    always dropped the same newer ones for a given `elements` list,
+    regardless of where or when the query was for).
+
+    One subpoint propagation per candidate -- no root-finding, unlike
+    find_events -- so this is cheap enough to run over the whole reachable
+    pool before the cap even applies (see this module's own docstring for
+    the measured cost). A satellite this fails to propagate (a malformed
+    element set) sorts last via `float("inf")`, rather than raising and
+    losing the rest of the ranking -- it will fail find_events for the same
+    reason later and be skipped there regardless.
+
+    Ties (identical distance, e.g. two satellites sharing an element set in
+    a test fixture) break on NORAD id, so the ordering -- and therefore
+    which ones survive the cap -- is reproducible for identical input,
+    never a hidden dependency on Python's dict/list iteration order.
+    """
+    def _distance(omm):
+        try:
+            sat = EarthSatellite.from_omm(_ts, omm)
+            geo = sat.at(at_time).subpoint()
+            return haversine_km(lat, lon, float(geo.latitude.degrees), float(geo.longitude.degrees))
+        except Exception:  # noqa: BLE001 - sorts last; find_events will skip it too
+            return float("inf")
+
+    return sorted(elements, key=lambda omm: (_distance(omm), omm.get("NORAD_CAT_ID") or 0))
+
+
 def compute_passes(
     elements: list[dict],
     lat: float,
@@ -186,13 +231,13 @@ def compute_passes(
     observer = wgs84.latlon(lat, lon)
 
     reachable = _reachable_elements(elements, lat)
-    # Deterministic order -- which satellites survive the cap must not
-    # depend on dict/network ordering from one poll to the next, or the
-    # same request could answer differently between two calls with
-    # identical inputs.
-    reachable.sort(key=lambda e: e.get("NORAD_CAT_ID") or 0)
-    satellites_capped = len(reachable) > MAX_SATELLITES_FOR_PASSES
-    considered = reachable[:MAX_SATELLITES_FOR_PASSES]
+    # Nearest-to-the-query-point-right-now first (see _rank_by_proximity's
+    # own docstring for why this, and not a fixed id ordering, is what the
+    # cap below should keep) -- deterministic for identical input either
+    # way, so the same request answers the same way twice.
+    ranked = _rank_by_proximity(reachable, lat, lon, t0)
+    satellites_capped = len(ranked) > MAX_SATELLITES_FOR_PASSES
+    considered = ranked[:MAX_SATELLITES_FOR_PASSES]
 
     passes = []
     partial_excluded = 0

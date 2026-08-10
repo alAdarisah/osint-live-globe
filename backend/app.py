@@ -1228,12 +1228,22 @@ async def satellite_passes(lat: float, lon: float, hours: float = sat_passes.MAX
     carries that element set's own `epoch` so the card can say how old the
     orbit behind the prediction is -- the same honesty point Task 25's card
     makes about the ground track and footprint.
+
+    compute_passes is CPU-bound (a real SGP4 pass search per satellite, see
+    that function's own docstring), and this app runs single-process,
+    single-event-loop (no `workers=`, see uvicorn.run below). Called
+    directly inside this `async def`, it would stall that one loop -- and
+    with it every other client's AIS/ADS-B polling -- for however long the
+    search itself takes, which review measured at ~0.68s for a full
+    200-satellite cap. `asyncio.to_thread` moves the computation off the
+    loop, the same fix admin_config_put above already applies to its own
+    (much smaller) blocking call.
     """
     if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
         raise HTTPException(status_code=400, detail="lat/lon out of range")
     wanted = {g.strip() for g in (groups or "").split(",") if g.strip()}
     elements = satellites_source.filter_elements_by_layer(registry.get("satellite_elements").data, wanted)
-    result = sat_passes.compute_passes(elements, lat, lon, hours)
+    result = await asyncio.to_thread(sat_passes.compute_passes, elements, lat, lon, hours)
     return JSONResponse(
         {"lat": lat, "lon": lon, "groups": sorted(wanted), **result},
         headers={"Cache-Control": "no-store"},

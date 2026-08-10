@@ -3978,17 +3978,27 @@ function relativePassTiming(minutes) {
 }
 
 /**
- * Task 25's overpass-prediction popup, for whichever country or water body
- * createMapController.js's refreshSatellitePasses is currently showing
- * this for (see that function's own note on why this is a separate,
- * place-anchored popup rather than part of any one satellite's own card).
+ * The body of Task 25's overpass-prediction content, shared by the two
+ * places it now appears: as a `satellitePasses` section inside the
+ * country/water PlaceInfoCard (see satellitePassesSectionHtml, wired
+ * through popups.js's countryCardSections/waterCardSections) and as a
+ * fold appended to a marker's own popup for a plain map click
+ * (satellitePassesPopupHtml, the brief's third case -- "a point" -- which
+ * has no sidebar card to fold into, so it rides the marker's existing
+ * popup instead of opening a second one; see createMapController.js's
+ * buildMarker). No `<h3>` here: the card supplies its own section title,
+ * and the popup variant adds its own header on top of this body instead
+ * of duplicating it in two different card systems that would then have to
+ * be kept in step by hand.
  *
- * `result` is {status: "loading"|"error"|"ready", data}, where `data` --
- * only present when ready -- is exactly what GET /api/satellites/passes
- * returns; see backend/sources/sat_passes.py's compute_passes for every
- * field read here. `label` is a short place name for the header ("France",
- * "the Baltic Sea"); undefined reads as "this location" rather than
- * showing nothing.
+ * `result` is {status: "gated"|"loading"|"error"|"ready", data}, where
+ * `data` -- only present when ready -- is exactly what
+ * GET /api/satellites/passes returns; see backend/sources/sat_passes.py's
+ * compute_passes for every field read here. "gated" is the fourth state,
+ * not three: the imaging layer being switched off is not a fetch failure
+ * and not "still loading" -- it is a plain, nameable reason there is
+ * nothing to show, the same three-state-plus-a-named-reason discipline
+ * Task 9's coverageStateFor already established for this card.
  *
  * Every pass is derived, and says so twice: once in the per-pass caption
  * (the age of *that* satellite's own element set -- each pass can be built
@@ -3996,18 +4006,19 @@ function relativePassTiming(minutes) {
  * caveat would hide which passes are the trustworthy ones) and once in the
  * closing paragraph, for the search as a whole.
  */
-export function satellitePassesCardHtml(result, label) {
-  const place = label ? esc(label) : "this location";
-  const header = `<h3>Satellite overpasses</h3><div class="meta">Next passes of enabled imaging satellites over ${place}</div>`;
-  if (result.status === "loading") return `${header}<div class="meta">Checking...</div>`;
-  if (result.status === "error") return `${header}<p class="meta">Could not reach the pass-prediction service.</p>`;
+function satellitePassesBodyHtml(result) {
+  if (!result || result.status === "gated") {
+    return '<p class="meta">The imaging satellites layer is switched off, so there is nothing to check overpasses against. Turn it on to see predictions here.</p>';
+  }
+  if (result.status === "loading") return '<div class="meta">Checking...</div>';
+  if (result.status === "error") return '<p class="meta">Could not reach the pass-prediction service.</p>';
 
   const data = result.data || {};
   const passes = data.passes || [];
   const minElevation = Number.isFinite(data.min_elevation_deg) ? data.min_elevation_deg : 10;
   const hours = Number.isFinite(data.hours) ? Math.round(data.hours) : 24;
   const coverage = data.satellites_capped
-    ? `<p class="meta">Checked the closest ${fmtNumber(data.satellites_considered)} of ${fmtNumber(data.satellites_reachable)} ` +
+    ? `<p class="meta">Checked the ${fmtNumber(data.satellites_considered)} closest (right now) of ${fmtNumber(data.satellites_reachable)} ` +
       `imaging satellites whose orbit can reach this latitude at all (of ${fmtNumber(data.satellites_total)} tracked) -- capped ` +
       "to bound the work one request does; see backend/sources/sat_passes.py's own note on the cap.</p>"
     : `<p class="meta">Checked all ${fmtNumber(data.satellites_reachable)} imaging satellites whose orbit can reach this ` +
@@ -4017,7 +4028,7 @@ export function satellitePassesCardHtml(result, label) {
 
   if (!passes.length) {
     return (
-      `${header}<div>No passes above ${minElevation}&deg; elevation in the next ${hours} hours.</div>${coverage}` +
+      `<div>No passes above ${minElevation}&deg; elevation in the next ${hours} hours.</div>${coverage}` +
       '<p class="meta">Derived: SGP4 propagation plus a horizon search over CelesTrak\'s public orbital elements, not an observation.</p>'
     );
   }
@@ -4033,10 +4044,36 @@ export function satellitePassesCardHtml(result, label) {
     })
     .join("");
   return (
-    `${header}${rows}${coverage}${truncatedNote}` +
+    `${rows}${coverage}${truncatedNote}` +
     '<p class="meta">Derived: SGP4 propagation plus a horizon search over CelesTrak\'s public orbital elements, not an ' +
     "observation. Each pass's own accuracy depends on how recent that satellite's element set is (shown per pass above).</p>"
   );
+}
+
+/** The `satellitePasses` section inside the country/water PlaceInfoCard
+ *  (see popups.js's countryCardSections/waterCardSections) -- just the
+ *  body, since the section's own `title` ("Satellite overpasses") is
+ *  supplied by the {id, title, html} entry those functions build. */
+export function satellitePassesSectionHtml(result) {
+  return satellitePassesBodyHtml(result);
+}
+
+/**
+ * The overpass fold appended to a marker's own popup -- the brief's third
+ * case, "a point", which (unlike a country or a water body) has no
+ * sidebar card for this to fold into (see createMapController.js's
+ * buildMarker, the only caller: it appends this to lazyDecorate's own
+ * `.detail`, rather than opening a second, competing popup). Carries its
+ * own header (unlike satellitePassesSectionHtml above, which does not)
+ * since it is being added onto an existing popup, not slotted into a
+ * {title, html} section entry that already supplies one. `label` is the
+ * clicked item's own name when it has one ("Rotterdam", a specific port);
+ * undefined reads as "this location" rather than showing nothing.
+ */
+export function satellitePassesPopupHtml(result, label) {
+  const place = label ? esc(label) : "this location";
+  const header = `<h3>Satellite overpasses</h3><div class="meta">Next passes of enabled imaging satellites over ${place}</div>`;
+  return header + satellitePassesBodyHtml(result);
 }
 
 // ---------- which kind of pin is this? ----------

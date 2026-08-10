@@ -1,6 +1,10 @@
 // Task 25: the satellite card's epoch-age honesty (never shown before this
 // task, and the brief is explicit that it matters), and the overpass
-// popup satellitePassesCardHtml builds from GET /api/satellites/passes.
+// content built from GET /api/satellites/passes -- satellitePassesSectionHtml
+// (the country/water PlaceInfoCard's own section, no header of its own) and
+// satellitePassesPopupHtml (the marker-click/"point" case, with a header),
+// both sharing one body builder. See review's Important 2/3 fix round for
+// why there are two variants instead of one shared popup.
 //
 // map/decorators.js pulls in map/leafletGlobal.js (reads `window.L` at
 // module scope) and map/svgIcons.js's buildDivIcon (calls L.divIcon), so
@@ -27,7 +31,7 @@ globalThis.window = {
   },
 };
 
-const { decorateSatellite, decorateSatElement, epochAgeHours, epochAgeLabel, satellitePassesCardHtml } =
+const { decorateSatellite, decorateSatElement, epochAgeHours, epochAgeLabel, satellitePassesSectionHtml, satellitePassesPopupHtml } =
   await import("../src/map/decorators.js");
 
 // --- epochAgeHours -----------------------------------------------------------
@@ -113,72 +117,91 @@ test("decorateSatElement's card states a ground track is drawn while the card is
   assert.doesNotMatch(withoutTrack.detail, /Ground track \(previous\/next 90 min\) drawn/);
 });
 
-// --- satellitePassesCardHtml ---------------------------------------------------
+// --- satellitePassesSectionHtml / satellitePassesPopupHtml ------------------
+//
+// Fix for review's Important 2: the country/water card now shows this as a
+// `satellitePasses` section (see popups.js), and a marker click ("a point",
+// the brief's third case) opens it as a standalone popup instead -- two
+// different headers over the same body, satellitePassesBodyHtml, which is
+// not exported directly but is exercised through both callers below.
 
-test("loading state says so, with the place name in the header", () => {
-  const html = satellitePassesCardHtml({ status: "loading" }, "France");
+test("the section variant has no h3 of its own -- the card supplies the section title", () => {
+  const html = satellitePassesSectionHtml({ status: "loading" });
+  assert.doesNotMatch(html, /<h3>/);
   assert.match(html, /Checking/);
+});
+
+test("the popup variant carries its own header with the place name", () => {
+  const html = satellitePassesPopupHtml({ status: "loading" }, "France");
+  assert.match(html, /<h3>Satellite overpasses<\/h3>/);
   assert.match(html, /France/);
+  assert.match(html, /Checking/);
+});
+
+test("gated (imaging layer switched off) says why, not nothing", () => {
+  const html = satellitePassesSectionHtml({ status: "gated" });
+  assert.match(html, /switched off/);
+  assert.doesNotMatch(html, /Checking/);
+});
+
+test("a missing result reads as gated rather than throwing", () => {
+  assert.doesNotThrow(() => satellitePassesSectionHtml(undefined));
+  assert.match(satellitePassesSectionHtml(undefined), /switched off/);
 });
 
 test("a fetch failure says the service could not be reached, not nothing", () => {
-  const html = satellitePassesCardHtml({ status: "error" }, "France");
+  const html = satellitePassesSectionHtml({ status: "error" });
   assert.match(html, /Could not reach/);
 });
 
 test("no passes states the search window and elevation floor, plus coverage", () => {
-  const html = satellitePassesCardHtml(
-    {
-      status: "ready",
-      data: {
-        passes: [], min_elevation_deg: 10, hours: 24,
-        satellites_total: 40, satellites_reachable: 12, satellites_considered: 12, satellites_capped: false,
-      },
+  const html = satellitePassesSectionHtml({
+    status: "ready",
+    data: {
+      passes: [], min_elevation_deg: 10, hours: 24,
+      satellites_total: 40, satellites_reachable: 12, satellites_considered: 12, satellites_capped: false,
     },
-    "the Baltic Sea"
-  );
+  });
   assert.match(html, /No passes above 10.{0,10}elevation in the next 24 hours/);
   assert.match(html, /Checked all 12/);
   assert.doesNotMatch(html, /capped/);
 });
 
 test("a capped search says so and states both counts", () => {
-  const html = satellitePassesCardHtml(
-    {
-      status: "ready",
-      data: {
-        passes: [], min_elevation_deg: 10, hours: 24,
-        satellites_total: 900, satellites_reachable: 500, satellites_considered: 200, satellites_capped: true,
-      },
+  const html = satellitePassesSectionHtml({
+    status: "ready",
+    data: {
+      passes: [], min_elevation_deg: 10, hours: 24,
+      satellites_total: 900, satellites_reachable: 500, satellites_considered: 200, satellites_capped: true,
     },
-    null
-  );
-  assert.match(html, /Checked the closest 200 of 500/);
-  assert.match(html, /this location/); // no label given
+  });
+  assert.match(html, /Checked the 200 closest \(right now\) of 500/);
+});
+
+test("no label given on the popup reads as \"this location\", not blank", () => {
+  const html = satellitePassesPopupHtml({ status: "ready", data: { passes: [], satellites_total: 0, satellites_reachable: 0 } }, null);
+  assert.match(html, /this location/);
 });
 
 test("a real pass lists the satellite, timing, elevation, duration and its own element-set age", () => {
-  const html = satellitePassesCardHtml(
-    {
-      status: "ready",
-      data: {
-        passes: [
-          {
-            norad_id: 25544, name: "ISS (ZARYA)",
-            rise: new Date(Date.now() + 10 * 60_000).toISOString(),
-            culminate: new Date(Date.now() + 12 * 60_000).toISOString(),
-            set: new Date(Date.now() + 14 * 60_000).toISOString(),
-            max_elevation_deg: 42.5, duration_s: 240,
-            epoch: new Date(Date.now() - 3 * 3_600_000).toISOString().replace("Z", ""),
-          },
-        ],
-        min_elevation_deg: 10, hours: 24,
-        satellites_total: 40, satellites_reachable: 12, satellites_considered: 12, satellites_capped: false,
-        passes_truncated: false,
-      },
+  const html = satellitePassesSectionHtml({
+    status: "ready",
+    data: {
+      passes: [
+        {
+          norad_id: 25544, name: "ISS (ZARYA)",
+          rise: new Date(Date.now() + 10 * 60_000).toISOString(),
+          culminate: new Date(Date.now() + 12 * 60_000).toISOString(),
+          set: new Date(Date.now() + 14 * 60_000).toISOString(),
+          max_elevation_deg: 42.5, duration_s: 240,
+          epoch: new Date(Date.now() - 3 * 3_600_000).toISOString().replace("Z", ""),
+        },
+      ],
+      min_elevation_deg: 10, hours: 24,
+      satellites_total: 40, satellites_reachable: 12, satellites_considered: 12, satellites_capped: false,
+      passes_truncated: false,
     },
-    "France"
-  );
+  });
   assert.match(html, /ISS \(ZARYA\)/);
   assert.match(html, /in 10 min/);
   assert.match(html, /up to 4[23]&deg;/); // rounds to 42 or 43
@@ -188,21 +211,18 @@ test("a real pass lists the satellite, timing, elevation, duration and its own e
 });
 
 test("a truncated pass list says more were found beyond what is shown", () => {
-  const html = satellitePassesCardHtml(
-    {
-      status: "ready",
-      data: {
-        passes: [
-          {
-            norad_id: 1, name: "A", rise: new Date().toISOString(), culminate: new Date().toISOString(),
-            set: new Date().toISOString(), max_elevation_deg: 20, duration_s: 100, epoch: null,
-          },
-        ],
-        min_elevation_deg: 10, hours: 24, satellites_total: 1, satellites_reachable: 1,
-        satellites_considered: 1, satellites_capped: false, passes_truncated: true,
-      },
+  const html = satellitePassesSectionHtml({
+    status: "ready",
+    data: {
+      passes: [
+        {
+          norad_id: 1, name: "A", rise: new Date().toISOString(), culminate: new Date().toISOString(),
+          set: new Date().toISOString(), max_elevation_deg: 20, duration_s: 100, epoch: null,
+        },
+      ],
+      min_elevation_deg: 10, hours: 24, satellites_total: 1, satellites_reachable: 1,
+      satellites_considered: 1, satellites_capped: false, passes_truncated: true,
     },
-    "France"
-  );
+  });
   assert.match(html, /More passes were found/);
 });

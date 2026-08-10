@@ -120,7 +120,7 @@ import {
   detailSize,
   applyCollapsedFallback,
   TOKEN_FOR,
-  satellitePassesCardHtml,
+  satellitePassesPopupHtml,
 } from "./decorators";
 import {
   setIconTheme, themedStyle, tokenZoom, tokenZoomMax, layerHasTokenZoom, layerHasTokenZoomMax, layerOpacity, stackZIndex, scaledSize, scaledWeight, layerScale,
@@ -721,6 +721,13 @@ export function createMapController(container, initial, callbacks) {
     // record); `districtSeries` is {ISO3: record[]}, this app's own slice of
     // the archive for whichever countries have been drilled into so far.
     districtCounts: new Map(), districtMonthLoading: false, districtSeries: {},
+    // Task 25's overpass prediction, keyed "country:<key>"/"water:<id>" --
+    // {status: "gated"|"loading"|"error"|"ready", data}, one entry per place
+    // a reader has actually selected (see loadSatellitePasses below).
+    // Country/water cards read their own key straight out of this bag the
+    // same way districtSeries above is read, through popups.js's
+    // countryCardSections/waterCardSections.
+    satellitePasses: {},
     // Earthquakes (USGS, ~5min) and volcanic activity (Smithsonian GVP, weekly)
     // in one array, each row carrying its own `kind` -- see hazards.py.
     hazards: [],
@@ -843,20 +850,22 @@ export function createMapController(container, initial, callbacks) {
   // itself is already open -- see selectAircraft's onPoints callback below,
   // which reuses loadRecordedTrack's existing /api/track/adsb fetch.
   let aircraftPopup = null;
-  // Task 25: the overpass-prediction popup for whichever country or water
-  // body is currently selected -- see refreshSatellitePasses below, called
-  // from setFocus (country) and selectWater (water). Independent of
-  // shipPopup/aircraftPopup/the satellite marker popups above: this is not
-  // a satellite's own card, it is a place's -- "which enabled imaging
-  // satellites pass over here in the next day". Leaflet's own autoClose
-  // means opening this closes any of the other popups above, and vice
-  // versa, matching this codebase's one-thing-selected-at-a-time norm.
-  let satellitePassesPopup = null;
-  // Guards the same out-of-order race loadVesselDetail/loadPortTraffic do:
-  // reselecting a different country/water body before an earlier
-  // /api/satellites/passes request resolves must not let that earlier
-  // response land after the later one and overwrite the popup with a
-  // different place's passes.
+  // Task 25's overpass prediction has two homes, per review's Important 2/3:
+  // country and water selections show it as a `satellitePasses` section
+  // inside their own PlaceInfoCard (raw.satellitePasses + loadSatellitePasses
+  // below feed popups.js's countryCardSections/waterCardSections, the same
+  // fetch-then-store-in-raw-then-refresh-the-open-card shape
+  // loadDistrictSeries already uses for the district trend). A marker click
+  // -- the brief's third case, "a point" -- has no sidebar card to fold
+  // into, so it is appended to the marker's own popup content instead (see
+  // buildMarker's pointOverpassHtml/loadPointSatellitePasses/
+  // pointSatellitePasses further down), not a second, competing popup.
+  //
+  // satellitePassesGuard guards the same out-of-order race loadVesselDetail/
+  // loadPortTraffic do below, for all three triggers at once: a later
+  // request for a *different* place/point landing before an earlier one
+  // resolves must not let that earlier response overwrite fresher data --
+  // see loadSatellitePasses and loadPointSatellitePasses, its two callers.
   const satellitePassesGuard = createGenerationGuard();
   // Keyed by mmsi/port_id, so a fetch that lands out of order (an ordinary
   // flaky-connection case, not a hypothetical one) never overwrites a
@@ -2158,69 +2167,106 @@ export function createMapController(container, initial, callbacks) {
   }
 
   /**
-   * Task 25's overpass prediction, for whichever country or water body is
-   * currently selected -- GET /api/satellites/passes?lat=&lon=&hours=24&
-   * groups=imaging (see backend/sources/sat_passes.py for the two work
-   * caps this applies and why). A separate, place-anchored L.popup
-   * (satellitePassesPopup, declared above) rather than a section folded
-   * into the country/water sidebar card: those cards (PlaceInfoCard.jsx,
-   * popups.js) are React-rendered from `raw` state this controller
-   * publishes, outside this task's touched files, so this stays a
-   * self-contained Leaflet overlay the same way the ship/aircraft/port
-   * popups above already are.
+   * Task 25's overpass prediction, for the country or water body `key`
+   * names -- GET /api/satellites/passes?lat=&lon=&hours=24&groups=imaging
+   * (see backend/sources/sat_passes.py for the two work caps this applies
+   * and why), written into raw.satellitePasses[key] and then re-rendered
+   * through whichever of the country/water cards is open, the same fetch-
+   * then-store-in-raw-then-refresh-the-open-card shape loadDistrictSeries
+   * already uses for the district trend fold (see that function's own
+   * comment). Both refresh calls below are unconditional and each guards
+   * itself (refreshFocusedCountryCard/refreshFocusedWaterCard are no-ops
+   * when nothing of that kind is open) -- simpler than this function
+   * having to know which of the two `key` belongs to.
+   *
+   * Refetched every call rather than cached forever: unlike a 24-month
+   * conflict archive, a pass prediction is time-sensitive -- the same
+   * place queried a minute later can have a different next pass -- so a
+   * cached "ready" answer served on reselection would go stale exactly
+   * the way Task 17's port-traffic fold already ruled out for its own
+   * fetch (see loadPortTraffic's own note).
    *
    * Scoped to the "imaging" layer specifically -- the brief's own words are
    * "enabled imaging satellites" -- and only fetched when that layer is
-   * actually switched on (satElementVisible.satImaging): a reader who has
-   * turned imaging satellites off has nothing this feature would tell them
-   * that they have asked not to see.
+   * actually switched on (satElementVisible.satImaging); otherwise the
+   * section says so ("gated", not silently blank or stuck loading) rather
+   * than hiding that there is a reason.
    *
-   * `key`/`label` identify the place ("country:FRA"/"France",
-   * "water:482"/a water body's title) so satellitePassesGuard can tell "the
-   * same place, refetching" from "a different place, superseding an
-   * in-flight request" -- the same out-of-order protection
-   * loadVesselDetail/loadPortTraffic give their own fetches above.
+   * `key` ("country:FRA", "water:482") is both the raw.satellitePasses key
+   * and what satellitePassesGuard tracks, so a later request for a
+   * *different* place landing before an earlier one resolves can never
+   * overwrite that place's fresher data with the earlier place's stale
+   * answer -- the same out-of-order protection loadVesselDetail/
+   * loadPortTraffic give their own fetches above.
    */
-  function closeSatellitePassesPopup() {
-    if (!satellitePassesPopup) return;
-    map.closePopup(satellitePassesPopup);
-    satellitePassesPopup = null;
-  }
-
-  function refreshSatellitePasses(lat, lon, key, label) {
+  function loadSatellitePasses(key, lat, lon) {
+    const publish = (entry) => {
+      raw.satellitePasses = { ...raw.satellitePasses, [key]: entry };
+      refreshFocusedCountryCard();
+      refreshFocusedWaterCard();
+    };
     if (!satElementVisible.satImaging || typeof lat !== "number" || typeof lon !== "number") {
-      closeSatellitePassesPopup();
+      publish({ status: "gated" });
       return;
     }
     const token = satellitePassesGuard.start(key);
-    const loadingHtml = satellitePassesCardHtml({ status: "loading" }, label);
-    if (satellitePassesPopup) {
-      satellitePassesPopup.setLatLng([lat, lon]).setContent(loadingHtml);
-    } else {
-      satellitePassesPopup = L.popup(popupOptions(320)).setLatLng([lat, lon]).setContent(loadingHtml).openOn(map);
-    }
+    publish({ status: "loading" });
     fetchJson(`/api/satellites/passes?lat=${lat}&lon=${lon}&hours=24&groups=imaging`)
       .then((data) => {
-        if (!satellitePassesGuard.isCurrent(key, token) || !satellitePassesPopup) return;
-        satellitePassesPopup.setContent(satellitePassesCardHtml({ status: "ready", data }, label));
+        if (!satellitePassesGuard.isCurrent(key, token)) return;
+        publish({ status: "ready", data });
       })
       .catch(() => {
-        if (!satellitePassesGuard.isCurrent(key, token) || !satellitePassesPopup) return;
-        satellitePassesPopup.setContent(satellitePassesCardHtml({ status: "error" }, label));
+        if (!satellitePassesGuard.isCurrent(key, token)) return;
+        publish({ status: "error" });
       });
+  }
+
+  /** Re-runs loadSatellitePasses for whichever country and/or water body is
+   *  currently open -- called when the imaging layer's own visibility
+   *  changes (see setLayerVisible's satImaging branch), so a card already
+   *  showing "gated" (or a stale "ready" from before the layer was turned
+   *  off) picks up the new state instead of sitting stale until the reader
+   *  reselects the same place. A no-op for whichever of the two is not
+   *  currently open, same as the publish() calls inside loadSatellitePasses
+   *  itself. */
+  function refreshSatellitePassesForOpenPlace() {
+    if (focus?.kind === "country") {
+      const bounds = boundsOfCountry(focus.key);
+      const [lat, lon] = bounds ? boundsCentroid(bounds) : [null, null];
+      loadSatellitePasses(`country:${focus.key}`, lat, lon);
+    }
+    if (selectedWaterId != null) {
+      const entry = waterEntryFor(selectedWaterId);
+      if (entry?.bbox) {
+        const [lat, lon] = boundsCentroid([entry.bbox.minLat, entry.bbox.minLon, entry.bbox.maxLat, entry.bbox.maxLon]);
+        loadSatellitePasses(`water:${selectedWaterId}`, lat, lon);
+      }
+    }
   }
 
   /** The centroid of a [south, west, north, east] bounds array -- an
    *  approximation of "over this place" a country or water body's own
    *  extent is generously bigger than, but the brief asks for a point to
    *  query passes for and a bounding box has no single better answer than
-   *  its own middle. Not corrected for a bbox that wraps the antimeridian
-   *  (west > east, see water.js/water bodies' own `antimeridian` flag) --
-   *  a rare handful of features, and a pass search centred a little off
-   *  for one of them is a much smaller error than the ones this whole
-   *  feature already states plainly (the epoch age on every pass shown). */
+   *  its own middle.
+   *
+   *  A wrapped bbox (west > east) names two ranges, not an inverted box --
+   *  west..180 and -180..east -- the same convention Task 4's water bodies
+   *  established (`antimeridian`/`west > east` in their own stored bbox).
+   *  Averaging west and east directly would land the centroid on the far
+   *  side of the planet from the sliver either range actually covers (west
+   *  170, east -170 averages to 0 -- the opposite side of the globe from
+   *  the 20-degree strip straddling the seam that bbox actually names).
+   *  Unwrapping east onto the same continuous line as west before
+   *  averaging, then wrapping the sum back into [-180, 180], gives the
+   *  true midpoint of the short arc through the seam instead. */
   function boundsCentroid([south, west, north, east]) {
-    return [(south + north) / 2, (west + east) / 2];
+    const lat = (south + north) / 2;
+    const unwrappedEast = east < west ? east + 360 : east;
+    let lon = (west + unwrappedEast) / 2;
+    if (lon > 180) lon -= 360;
+    return [lat, lon];
   }
 
   function setFocus(next) {
@@ -2236,17 +2282,17 @@ export function createMapController(container, initial, callbacks) {
     applyScene();
     renderAll();
     callbacks.onFocusChange?.(next);
-    // Task 25: only a country focus drives the overpass popup here -- water
-    // selection does not go through setFocus at all (see selectWater's own
-    // call to this same refresh) and a "layer" focus (a single clicked pin)
-    // is not one of the three places the brief names.
+    // Task 25: a country focus loads its card's overpass section here --
+    // water selection does not go through setFocus at all (see selectWater's
+    // own call to loadSatellitePasses) and a "layer" focus (a marker click,
+    // the brief's third case, "a point") has no sidebar card to load a
+    // section into at all -- see buildMarker's pointOverpassHtml/
+    // loadPointSatellitePasses, wired from its own popupopen handler
+    // instead, appended to the marker's own popup rather than a card.
     if (next?.kind === "country") {
       const bounds = boundsOfCountry(next.key);
       const [lat, lon] = bounds ? boundsCentroid(bounds) : [null, null];
-      const entry = countryIndex.find((c) => c.key === next.key);
-      refreshSatellitePasses(lat, lon, `country:${next.key}`, entry?.name);
-    } else {
-      closeSatellitePassesPopup();
+      loadSatellitePasses(`country:${next.key}`, lat, lon);
     }
   }
 
@@ -2348,6 +2394,13 @@ export function createMapController(container, initial, callbacks) {
         if (SAT_ELEMENT_ON_DEMAND_LAYERS.has(key)) fetchSatElements(key);
         renderSatElement(key); // catch up now rather than waiting for the next tick
       }
+      // Task 25: imaging is what the overpass section is scoped to (see
+      // loadSatellitePasses) -- flipping it on or off while a country/water
+      // card is already open has to update that section immediately
+      // ("gated" the moment it's switched off, a real fetch the moment it's
+      // switched back on) rather than leaving it stale until the reader
+      // reselects the same place.
+      if (key === "satImaging") refreshSatellitePassesForOpenPlace();
     }
 
     if (key === "gdelt") {
@@ -2980,6 +3033,92 @@ export function createMapController(container, initial, callbacks) {
     return icon;
   }
 
+  // Task 25's overpass prediction for "a point" -- the brief's third
+  // trigger, alongside country and water above. A marker click is this
+  // app's only notion of a reader picking one specific point outside those
+  // two (see buildMarker's own click handler below, the sole caller) --
+  // review's Important 3 named this after an earlier draft dismissed it on
+  // the grounds that a "layer" focus was not one of the three named cases,
+  // which read the brief's "point" too narrowly: whatever the *reason* the
+  // click set focus to "this layer", the click itself picked a specific
+  // lat/lon, and that is the point the brief means.
+  //
+  // Appended to the marker's own popup content (via lazyDecorate below)
+  // rather than opened as a second, independent L.popup: a marker already
+  // owns the one popup slot a click opens (bindPopup's native open-on-
+  // click), and a competing popup on the same click would immediately
+  // supersede -- Leaflet's autoClose default -- the item detail the reader
+  // actually clicked for, hiding it behind the overpass content instead of
+  // adding to it. Keyed by rounded lat/lon (0.01 degrees, ~1km) rather than
+  // per-marker, so two markers close enough to share a meaningful pass
+  // search share one fetch instead of issuing a near-duplicate for each.
+  const pointSatellitePasses = new Map();
+
+  function pointOverpassKey(lat, lon) {
+    return `${lat.toFixed(2)},${lon.toFixed(2)}`;
+  }
+
+  /** The overpass fold's HTML for one point, or "" when there is nothing to
+   *  say -- no coordinate, or the imaging layer is switched off (appending
+   *  a permanent "layer is off" notice to every point layer's popup on the
+   *  map, the common case since imaging defaults on but plenty of readers
+   *  will still have it off, would be clutter with nothing to act on; the
+   *  country/water card's own section says so instead, where a reader has
+   *  already opened a bigger card and a named reason is worth a line).
+   *  Uses the popup variant (its own header) rather than the section
+   *  variant this file also imports for country/water cards -- this is
+   *  being appended to an existing marker popup, not slotted into a
+   *  {title, html} section entry, so it needs a header of its own. `label`
+   *  is the item's own name when it has one, so the header reads "over
+   *  Rotterdam" rather than the less useful "over this location". */
+  function pointOverpassHtml(lat, lon, label) {
+    if (!satElementVisible.satImaging || typeof lat !== "number" || typeof lon !== "number") return "";
+    const entry = pointSatellitePasses.get(pointOverpassKey(lat, lon));
+    if (!entry) return ""; // not fetched yet -- the popupopen handler below starts it
+    return satellitePassesPopupHtml(entry, label);
+  }
+
+  /** Starts (once per rounded point, for the session) the same
+   *  GET /api/satellites/passes fetch loadSatellitePasses uses for
+   *  country/water, storing the answer in pointSatellitePasses instead of
+   *  raw.satellitePasses -- this is not card state React reads, only a
+   *  Leaflet popup's own content function, so it does not need `raw`'s
+   *  reactivity. `onUpdate` is always lazyDecorate's own popup.setContent
+   *  call (see buildMarker) -- passed in rather than assumed, so this stays
+   *  reusable regardless of which marker's popup happens to be open for
+   *  this point right now.
+   *
+   *  Unlike loadSatellitePasses (refetched on every country/water
+   *  selection, deliberately, since a prediction is time-sensitive), a
+   *  point's answer is cached for the rest of the session rather than
+   *  refetched on every popup reopen: a click layer can hold thousands of
+   *  markers, several of which can legitimately round to the same point,
+   *  and this is a secondary fold on an existing popup, not the primary
+   *  reason the reader opened it -- the same "session-lifetime, never
+   *  evicted" tradeoff this file already makes for portDetailCache and the
+   *  generation guards' own key maps (see Task 17's interface note on
+   *  that). A reader who wants a fresher answer for the same point can
+   *  reselect the country or water body it sits inside instead. */
+  function loadPointSatellitePasses(lat, lon, onUpdate) {
+    const roundedKey = pointOverpassKey(lat, lon);
+    if (pointSatellitePasses.has(roundedKey)) return; // already fetched this session, or in flight
+    pointSatellitePasses.set(roundedKey, { status: "loading" });
+    onUpdate();
+    const guardKey = `point:${roundedKey}`;
+    const token = satellitePassesGuard.start(guardKey);
+    fetchJson(`/api/satellites/passes?lat=${lat}&lon=${lon}&hours=24&groups=imaging`)
+      .then((data) => {
+        if (!satellitePassesGuard.isCurrent(guardKey, token)) return;
+        pointSatellitePasses.set(roundedKey, { status: "ready", data });
+        onUpdate();
+      })
+      .catch(() => {
+        if (!satellitePassesGuard.isCurrent(guardKey, token)) return;
+        pointSatellitePasses.set(roundedKey, { status: "error" });
+        onUpdate();
+      });
+  }
+
   function buildMarker(key, item, decorate, sizeOf, copy = 0) {
     const id = item[ID_FIELD[key]];
     const d = applyCollapsedFallback(decorate(item, decorateOptionsFor(key, item, id)), item);
@@ -2999,9 +3138,18 @@ export function createMapController(container, initial, callbacks) {
     // than captured, because the table behind it is refreshed on its own timer.
     const lazyOptions = () => ({ selectedIcao, selectedMmsi, ...decorateOptionsFor(key, marker._item, id) });
     // Through the same fallback as the icon above, or a collapsed head would
-    // draw a count badge and then open a popup describing only itself.
-    const lazyDecorate = () =>
-      applyCollapsedFallback(decorate(marker._item, lazyOptions()), marker._item);
+    // draw a count badge and then open a popup describing only itself. The
+    // overpass fold is appended here, at the one place every caller of
+    // lazyDecorate().detail already goes through (the popup binder below,
+    // and the ports popupopen handler further down) -- appending it at
+    // either call site alone would race the other's own re-render and
+    // sometimes lose the suffix, the same clobbering hazard selectAircraft's
+    // `refresh` closure guards against for its own two racing fetches.
+    const lazyDecorate = () => {
+      const base = applyCollapsedFallback(decorate(marker._item, lazyOptions()), marker._item);
+      const label = typeof marker._item.name === "string" ? marker._item.name : undefined;
+      return { ...base, detail: base.detail + pointOverpassHtml(marker._item.lat, marker._item.lon, label) };
+    };
     marker.bindPopup(() => lazyDecorate().detail, popupOptions(320));
     marker.bindTooltip(() => lazyDecorate().tooltip, {
       className: "map-tooltip",
@@ -3022,6 +3170,15 @@ export function createMapController(container, initial, callbacks) {
         });
       });
     }
+    // Task 25: every point layer's popup, not just ports -- the marker's
+    // own lat/lon is "the point" the overpass search runs against.
+    marker.on("popupopen", () => {
+      if (typeof marker._item.lat !== "number" || typeof marker._item.lon !== "number") return;
+      loadPointSatellitePasses(marker._item.lat, marker._item.lon, () => {
+        const popup = marker.getPopup();
+        if (popup?.isOpen()) popup.setContent(lazyDecorate().detail);
+      });
+    });
     return marker;
   }
 
@@ -6058,10 +6215,12 @@ export function createMapController(container, initial, callbacks) {
       focusedWaterLayer = null;
       reportWaterSelection();
       // Task 25: this path bypasses selectWater entirely (a sub-toggle
-      // dropped the feature out from under an open card), so the overpass
-      // popup has to be closed here too, or it would keep showing passes
-      // for a water body whose own card just vanished.
-      closeSatellitePassesPopup();
+      // dropped the feature out from under an open card), but needs no
+      // overpass cleanup of its own -- the card itself just closed via
+      // reportWaterSelection() above, so its satellitePasses section closed
+      // with it. The stale raw.satellitePasses entry for this id is
+      // harmless and left in place, the same "never evicted" tradeoff the
+      // per-entity fetch caches elsewhere in this file already make.
     } else if (selectedWaterId != null) {
       // The card is still open on a feature that is still in the synced
       // document, but syncWater just tore down and rebuilt every Leaflet layer
@@ -6241,14 +6400,15 @@ export function createMapController(container, initial, callbacks) {
     updateWaterHighlights();
     reportWaterSelection();
     // Task 25: water selection does not go through setFocus (see that
-    // function's own note), so the overpass popup is refreshed here
-    // instead, on the same "a water body was picked" event.
+    // function's own note), so its card's overpass section is loaded here
+    // instead, on the same "a water body was picked" event. Deselecting
+    // (id === null) needs no action of its own: waterEntryFor(null) is
+    // null, entry?.bbox is falsy, and the card itself already closed via
+    // reportWaterSelection() above -- there is nothing left to refresh.
     const entry = waterEntryFor(id);
     if (entry?.bbox) {
       const [lat, lon] = boundsCentroid([entry.bbox.minLat, entry.bbox.minLon, entry.bbox.maxLat, entry.bbox.maxLon]);
-      refreshSatellitePasses(lat, lon, `water:${id}`, entry.name);
-    } else {
-      closeSatellitePassesPopup();
+      loadSatellitePasses(`water:${id}`, lat, lon);
     }
   }
 

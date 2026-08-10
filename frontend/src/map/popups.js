@@ -9,6 +9,7 @@ import {
   classifyAircraft, classifyShip, classifyVesselTraffic, isSanctioned,
   AIS_COVERAGE_CAVEAT, EMPTY_WATER_HEADLINE,
   OSM_INFRA_STYLE, OSM_INFRA_ORDER, AIRFIELD_STYLE, AIRFIELD_ORDER, MILITARY_ROLE_STYLE,
+  satellitePassesSectionHtml,
 } from "./decorators";
 import { countryContainsPoint } from "./countryHitTest";
 import { CLASS_LABEL as WATER_CLASS_LABEL, WATER_SCALE_CAVEAT } from "./water";
@@ -1403,6 +1404,21 @@ function buildCoverage(bounds, raw) {
       look similar and are not the same claim -- this section exists so they are never read as one.</p>`;
 }
 
+/**
+ * Task 25's overpass section -- fed by createMapController.js's
+ * loadSatellitePasses, which writes raw.satellitePasses[key] and re-renders
+ * whichever of the country/water cards is open (the same fetch-then-store-
+ * in-raw-then-refresh-the-open-card shape loadDistrictSeries already uses
+ * for the district trend fold). Undefined (key was never selected, or its
+ * fetch has not started yet -- the two are indistinguishable and both mean
+ * "nothing to show yet") reads as still loading rather than empty, so the
+ * card never flashes "no overpasses" for a fraction of a second before the
+ * real fetch resolves.
+ */
+function buildSatellitePasses(raw, key) {
+  return satellitePassesSectionHtml(raw.satellitePasses?.[key] || { status: "loading" });
+}
+
 // Task 10: fifteen sections is too many to scan at once, so PlaceInfoCard's
 // optional `groups` prop folds them into three questions a reader actually
 // asks -- what is happening right now (Situation), what does this country
@@ -1415,7 +1431,7 @@ function buildCoverage(bounds, raw) {
 export const COUNTRY_CARD_GROUPS = [
   {
     id: "situation", title: "Situation",
-    sectionIds: ["conflict", "live", "connectivity", "events", "verified", "trend"],
+    sectionIds: ["conflict", "live", "satellitePasses", "connectivity", "events", "verified", "trend"],
   },
   {
     id: "country", title: "Country",
@@ -1433,6 +1449,14 @@ export const COUNTRY_CARD_GROUPS = [
 export function countryCardSections(props, raw, bounds) {
   const name = props.name || "Unknown";
   const wanted = normalizeCountryName(name);
+  // The same key createMapController.js's buildCountryIndex/countryKeyOfProps
+  // compute from a country's own GeoJSON properties -- restated here rather
+  // than imported (this side only ever has `props`, the same reason
+  // countryKeyOfProps' own comment gives), including the `null` fallback
+  // (a shape with neither an ISO code nor a name, which should not happen
+  // in practice) so the string this interpolates to matches
+  // `country:${next.key}` in setFocus exactly, even in that edge case.
+  const satelliteKey = `country:${props.iso_a2 && props.iso_a2 !== "-99" ? props.iso_a2 : props.name || null}`;
   const eventMatches = raw.events.filter((e) => normalizeCountryName(e.country) === wanted).slice(0, 3);
   const merged = mergedNewsIdsIn(raw);
   const gdeltMatches = raw.gdelt
@@ -1471,6 +1495,11 @@ export function countryCardSections(props, raw, bounds) {
     // a country was clicked to answer.
     { id: "conflict", title: "Conflict · last 72h", defaultOpen: true, html: buildConflictSummary(bounds, raw, escalationZone) },
     { id: "live", title: "Live picture · in/near country", html: buildLivePicture(bounds, raw) },
+    // Task 25: not gated on bounds -- unlike the folds above, this reads a
+    // lat/lon centroid createMapController.js computed itself (see
+    // loadSatellitePasses), so it has something to say even before this
+    // country's boundary layer has resolved a Leaflet bbox of its own.
+    { id: "satellitePasses", title: "Satellite overpasses", html: buildSatellitePasses(raw, satelliteKey) },
     // Joined on ISO2 rather than on the country name: IODA and Natural Earth
     // disagree about several names ("Cote D Ivoire" vs "Côte d'Ivoire") and a
     // name join silently drops exactly those.
@@ -1839,6 +1868,11 @@ export function waterCardSections(feature, raw, bounds) {
   const label = WATER_CLASS_LABEL[feature.class] || "Water";
   const sections = [
     { id: "profile", title: "Water body", defaultOpen: true, html: buildWaterProfile(feature, raw) },
+    // Task 25: `feature.id` is the same id createMapController.js's
+    // selectWater/loadSatellitePasses key raw.satellitePasses under
+    // ("water:<id>") -- see waterCardFor's own use of feature.id elsewhere
+    // for the same identity.
+    { id: "satellitePasses", title: "Satellite overpasses", html: buildSatellitePasses(raw, `water:${feature.id}`) },
     { id: "traffic", title: "Traffic now", html: buildWaterTraffic(feature, raw, bounds) },
     { id: "dark", title: "Dark activity", html: buildWaterDark(feature, raw, bounds) },
     { id: "chokepoint", title: "Chokepoint watch", html: buildWaterChokepoint(feature) },

@@ -3,9 +3,13 @@
 Three cases the brief calls out by name: a known satellite over a known
 point checked against a precomputed answer, the no-passes case, and the
 work cap. A fourth block exercises the /api/satellites/passes route itself
-(lat/lon validation, the groups filter, the response shape), the same
+(lat/lon validation, the groups filter, the response shape, and that it
+actually awaits asyncio.to_thread rather than blocking), the same
 "pure function first, then the thin route wrapper" split
-test_satellites.py already uses for satellite_elements.
+test_satellites.py already uses for satellite_elements. A fifth covers
+_rank_by_proximity directly -- the fix for review's first-round finding
+that the cap always kept the same ascending-NORAD-id subset regardless of
+where the query was.
 
 No live network anywhere here, per this repo's test discipline: the same
 ISS-shaped OMM fixture test_satellites.py uses (fixed epoch, so a re-run
@@ -165,6 +169,58 @@ def test_reachable_elements_keeps_a_record_with_no_inclination_rather_than_guess
     assert sat_passes._reachable_elements([dec], 89.0) == [dec]
 
 
+# --- _rank_by_proximity: the cap keeps the satellites nearest the query ----
+#
+# Fix for review's first-round Important 1: the cap used to sort by ascending
+# NORAD_CAT_ID, which has no relationship to the query at all and always
+# dropped the same newer objects. `near`/`far` below are the same ISS orbit
+# at two different points along it (MEAN_ANOMALY shifted 180 degrees) --
+# real, propagable elements, not a synthetic distance stand-in. Verified by
+# direct skyfield propagation while writing this test: at the fixture's own
+# epoch, `near`'s sub-satellite point is ~4,190km from Tokyo and `far`'s is
+# ~15,850km away.
+
+def _near_and_far_iss(near_id=1, far_id=2):
+    near = dict(_ISS_OMM, NORAD_CAT_ID=near_id)
+    far = dict(_ISS_OMM, NORAD_CAT_ID=far_id, MEAN_ANOMALY=(_ISS_OMM["MEAN_ANOMALY"] + 180) % 360)
+    return satellites._decorate_element({**near, "_group": "resource"}), \
+        satellites._decorate_element({**far, "_group": "resource"})
+
+
+def test_rank_by_proximity_puts_the_closer_satellite_first():
+    near, far = _near_and_far_iss()
+    ranked = sat_passes._rank_by_proximity([far, near], lat=35.7, lon=139.7, at_time=_epoch_time())
+    assert [e["NORAD_CAT_ID"] for e in ranked] == [1, 2]
+
+
+def test_rank_by_proximity_breaks_ties_on_norad_id_for_reproducibility():
+    dec = _decorated_iss()
+    a = dict(dec, NORAD_CAT_ID=9)
+    b = dict(dec, NORAD_CAT_ID=3)
+    ranked = sat_passes._rank_by_proximity([a, b], lat=35.7, lon=139.7, at_time=_epoch_time())
+    assert [e["NORAD_CAT_ID"] for e in ranked] == [3, 9]
+
+
+def test_rank_by_proximity_sorts_an_unpropagable_element_set_last_rather_than_raising():
+    near, _far = _near_and_far_iss()
+    broken = dict(near, NORAD_CAT_ID=99, MEAN_MOTION=None)  # cannot build a satrec from this
+    ranked = sat_passes._rank_by_proximity([broken, near], lat=35.7, lon=139.7, at_time=_epoch_time())
+    assert [e["NORAD_CAT_ID"] for e in ranked] == [1, 99]
+
+
+def test_the_cap_keeps_the_nearer_satellite_end_to_end(monkeypatch):
+    # The full compute_passes path: with the cap patched to 1, the query
+    # point's own pass search should only ever have looked at the satellite
+    # actually near it -- proving the ranking, not just its ordering, is
+    # what compute_passes acts on.
+    monkeypatch.setattr(sat_passes, "MAX_SATELLITES_FOR_PASSES", 1)
+    near, far = _near_and_far_iss()
+    result = sat_passes.compute_passes([far, near], lat=35.7, lon=139.7, hours=24, start_time=_epoch_time())
+    assert result["satellites_considered"] == 1
+    assert result["satellites_capped"] is True
+    assert all(p["norad_id"] == 1 for p in result["passes"])
+
+
 # --- the work cap -----------------------------------------------------------
 
 def test_the_satellite_cap_is_enforced_and_reported(monkeypatch):
@@ -228,6 +284,34 @@ def _seed_imaging_elements():
     state = registry.get("satellite_elements")
     state.data = [_decorated_iss()]
     return state
+
+
+def test_route_runs_compute_passes_off_the_calling_thread(monkeypatch):
+    # Fix for review's Critical finding: compute_passes is CPU-bound, this
+    # app runs single-process/single-event-loop, and calling it directly
+    # inside the route's `async def` would stall that loop -- every other
+    # client's polling included -- for as long as the search takes. The
+    # route now runs it through asyncio.to_thread; this proves that by
+    # recording which thread compute_passes actually executes on and
+    # asserting it is not the thread that called the route.
+    import threading
+
+    calling_thread = threading.current_thread()
+    seen = {}
+
+    def fake_compute_passes(elements, lat, lon, hours):
+        seen["thread"] = threading.current_thread()
+        return {
+            "passes": [], "min_elevation_deg": sat_passes.PASS_MIN_ELEVATION_DEG, "hours": hours,
+            "satellites_total": 0, "satellites_reachable": 0, "satellites_considered": 0,
+            "satellites_capped": False, "passes_truncated": False, "passes_partial_excluded": 0,
+        }
+
+    monkeypatch.setattr(sat_passes, "compute_passes", fake_compute_passes)
+    _seed_imaging_elements()
+    asyncio.run(app_mod.satellite_passes(lat=35.7, lon=139.7, hours=1, groups="imaging"))
+    assert "thread" in seen, "compute_passes was never called"
+    assert seen["thread"] is not calling_thread
 
 
 def test_route_rejects_out_of_range_lat_lon():
