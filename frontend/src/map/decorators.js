@@ -2403,9 +2403,13 @@ export function cableRouteColor() {
 
 // ---------- railway linework (backend/sources/railways.py) ----------
 //
-// Coarse basemap context under the OSM railway *points* (which ride the
-// osm-infrastructure layer). Natural Earth 1:10m, 2021, unnamed and static --
-// it will NOT sit exactly on the station pins, and the legend and popup say so.
+// Coarse basemap context under the OSM railway *points* (railwayPoints, which
+// rides this same "railways" layer as of Task 27 -- see LAYER_MANIFEST's own
+// note in scene.js for why they moved off the OSM infrastructure layer).
+// Natural Earth 1:10m, 2021, unnamed and static -- it will NOT sit exactly on
+// the station pins, and the legend and popup say so. Also, like the OSM
+// overlay layered over it, clipped to this map's eleven conflict theatres --
+// not a step wider -- see railways.py's own module docstring.
 // A muted grey and a hairline weight, deliberately subordinate to real data.
 // A colour-only token, like cable.route above: this is a polyline, not a pin.
 export const RAILWAY_ROUTE_COLOR = "#6f7d92";

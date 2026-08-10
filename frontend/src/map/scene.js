@@ -335,9 +335,12 @@ export const LAYER_MANIFEST = {
   },
   railways: {
     // Task 27 layered an attributed OpenStreetMap overlay on top of the
-    // Natural Earth fallback (backend/sources/railways.py's own merge), but
-    // the gate is unchanged: both halves are whole polylines, drawn ungated
-    // once active, MANUAL and off by default for the same reason as before --
+    // Natural Earth linework (backend/sources/railways.py's own merge) --
+    // both clipped to the same eleven conflict theatres, neither worldwide,
+    // whatever "fallback" language a comment elsewhere uses for the coarser
+    // of the two. The gate is unchanged: both halves are whole polylines,
+    // drawn ungated once active, MANUAL and off by default for the same
+    // reason as before --
     // this is basemap context a reader opts into, not something the resolver
     // should assert or a country focus should drag on. Fetched once at boot
     // as a whole document, same as cables, so FETCH_MANUAL keeps the poller

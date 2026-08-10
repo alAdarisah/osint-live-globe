@@ -64,9 +64,12 @@ MAX_PER_FEATURE = 300
 # can never make us ask a volunteer service for an unbounded result set.
 MAX_RAIL_PER_FEATURE = 25000
 
-# Task 27: mainline rail *geometry*, layered under railways.py's coarse Natural
-# Earth fallback so a reader who wants named lines, operators and gauges can
-# have them, without losing the global coverage OSM does not have.
+# Task 27: mainline rail *geometry*, layered under railways.py's coarse
+# Natural Earth linework so a reader who wants named lines, operators and
+# gauges can have them, without this map losing what it already drew before
+# this task -- see railways.py's own module docstring for why "layered
+# under a global fallback" is not an accurate way to say that: Natural Earth
+# is clipped to these same eleven theatre boxes too, not worldwide.
 #
 # Queried separately from every selector above, on its own Overpass request,
 # because it needs `out geom` -- every vertex of every way -- rather than

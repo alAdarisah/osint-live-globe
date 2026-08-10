@@ -6223,7 +6223,8 @@ export function createMapController(container, initial, callbacks) {
       (line.usage ? `<div class="meta">Usage: ${esc(line.usage)}</div>` : "") +
       (line.service ? `<div class="meta">Service: ${esc(line.service)}</div>` : "") +
       `<p class="meta">From <b>OpenStreetMap</b>, swept daily across this map's conflict theatres only -- ` +
-      "outside them, the muted Natural Earth linework is the only coverage this layer has.</p>" +
+      "the muted Natural Earth linework beside it is limited to the same eleven theatres, not a " +
+      "wider fallback; outside them this layer has nothing from either source.</p>" +
       `<div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass</div>`
     );
   }
@@ -6232,13 +6233,16 @@ export function createMapController(container, initial, callbacks) {
   // renderCables draws the cable routes: a polyline is already clipped by Leaflet
   // and a rail line only makes sense whole, so it is never bounds-filtered.
   //
-  // Task 27 layered an attributed OpenStreetMap overlay onto the Natural Earth
-  // fallback (see railways.py's own merge), and the honesty this layer carries
-  // now has two halves instead of one: a Natural Earth line still states that
-  // it is 1:10m basemap linework, static since 2021, unnamed, and that it will
-  // not sit exactly on the station points; an OSM line states its own name,
-  // operator, gauge and electrification, and that it only exists across the
-  // conflict theatres. `line.source` (stamped at collection -- see
+  // Task 27 layered an attributed OpenStreetMap overlay onto the Natural
+  // Earth linework (see railways.py's own merge), and the honesty this layer
+  // carries now has two halves instead of one -- **neither of them
+  // worldwide**: both are clipped to the same eleven conflict theatres (see
+  // railways.py's own module docstring), and no comment or popup here may
+  // imply otherwise, however coarser or "fallback"-ish Natural Earth reads
+  // by comparison. A Natural Earth line states that it is 1:10m basemap
+  // linework, static since 2021, unnamed, and that it will not sit exactly
+  // on the station points; an OSM line states its own name, operator, gauge
+  // and electrification. `line.source` (stamped at collection -- see
   // railways.ne_line_records and osm_infra.parse_rail_lines) is what every
   // per-line decision below reads to tell the two apart; nothing here guesses.
   //
@@ -6256,8 +6260,8 @@ export function createMapController(container, initial, callbacks) {
     const nePopupHtml =
       "<h3>Railway (basemap linework)</h3>" +
       `<p class="meta"><b>Coarse basemap linework, 2021.</b> ${esc(provenance)}. It is context, not ` +
-      "survey data, and will <b>not</b> line up exactly with the railway station points on the " +
-      "OpenStreetMap infrastructure layer.</p>" +
+      "survey data, and will <b>not</b> line up exactly with the OpenStreetMap railway station points " +
+      "drawn alongside it on this same layer.</p>" +
       '<div class="meta">Source: Natural Earth</div>';
     for (const line of lines) {
       const path = line?.path;
