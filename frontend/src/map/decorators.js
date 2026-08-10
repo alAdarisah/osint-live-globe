@@ -3168,16 +3168,123 @@ function icaoHexDetail(d) {
   return parts.join("");
 }
 
+// The display-limited half of this used to live here too; it is now
+// displayLimitedNote below, in the brief's own wording, with the programme
+// named rather than folded into one generic sentence.
 const AIRCRAFT_FLAG_NOTE = {
   emergency:
     "Reserved emergency transponder codes: 7500 unlawful interference, 7600 radio failure, 7700 general " +
     "emergency. Squawks are occasionally set by mistake and cleared moments later &mdash; this is what the " +
     "aircraft is broadcasting, not a confirmed incident.",
-  displayLimited:
-    "The operator has asked for this aircraft to be limited in public feeds, or it is flying under a " +
-    "rotating temporary address. airplanes.live publishes it anyway. That request is a fact about the " +
-    "registry entry and says nothing about the flight itself.",
 };
+
+// ---------- squawk decoding ----------
+//
+// The three internationally reserved emergency codes. Decoded here rather
+// than trusted solely from backend/sources/adsb.py's own emergency_squawk
+// field, which is only ever computed for a record built from airplanes.live
+// (see normalize_airplanes_live's _SQUAWK_PATHS) -- keeping the mapping here
+// too makes it directly testable and means the card does not depend on which
+// upstream happened to do the decoding.
+const EMERGENCY_SQUAWK_LABEL = {
+  "7500": "unlawful interference (hijack)",
+  "7600": "radio failure",
+  "7700": "general emergency",
+};
+
+/** What a squawk means, if it is one of the three reserved emergency codes --
+ *  null for every other code, which is the overwhelming majority and carries
+ *  no meaning on its own. */
+export function decodeSquawk(squawk) {
+  const code = squawk === null || squawk === undefined ? "" : String(squawk).trim();
+  return code ? EMERGENCY_SQUAWK_LABEL[code] || null : null;
+}
+
+// ---------- display-limited wording (LADD / PIA) ----------
+//
+// Named per backend/sources/adsb.py's _DISPLAY_LIMITED_PATHS, but in the
+// reader's words rather than the FAA's: the brief's own wording ("this
+// aircraft's operator has requested limited display") is what goes on the
+// card, with the programme itself named alongside it rather than folded into
+// one sentence -- LADD is a request not to be shown, PIA is a rotating
+// address, and calling both "requested limited display" while still naming
+// which one keeps the sentence honest without pretending they are the same
+// mechanism.
+const DISPLAY_LIMITED_PROGRAMME = {
+  ladd: "LADD, the FAA's Limited Aircraft Data Displayed programme",
+  pia: "PIA, a rotating Privacy ICAO Address",
+};
+
+/** The Flags-section line for a display-limited aircraft, or null. */
+export function displayLimitedNote(d) {
+  if (!d?.display_limited) return null;
+  const programme = DISPLAY_LIMITED_PROGRAMME[d.display_limited] || d.display_limited_note || d.display_limited;
+  return `This aircraft's operator has requested limited display, under ${programme}. airplanes.live ` +
+    "publishes it anyway; the request is a fact about the registry entry and says nothing about this flight.";
+}
+
+// ---------- vertical trend (client-recorded, this session only) ----------
+//
+// Neither feed's merged record carries a rate of climb or descent (see
+// backend/sources/adsb.py) -- the only honest source for "is this aircraft
+// climbing" is the altitude this tab has itself watched go by across polls,
+// the same "recorded since we started watching" idea map/trails.js already
+// uses for position. That makes this a *derived* value, never a measured
+// one, and the card says so rather than dressing it up as a transponder
+// field.
+//
+// Held as a small per-aircraft history inside this module rather than wired
+// through a second fetch of /api/track: that endpoint exists and Task 23
+// (flight legs) is the task that owns spending a fetch and a popup refresh on
+// it. This task only has to say what today's own polls already show, and
+// decorateAdsb already runs once per aircraft per poll for the tooltip.
+const VERTICAL_TREND_WINDOW = 6; // altitude fixes kept per aircraft
+const VERTICAL_TREND_MIN_INTERVAL_MS = 3000; // collapses a tooltip+detail double-call within one poll into one fix
+const VERTICAL_TREND_MAX_TRACKED = 3000; // bounds memory against aircraft turnover over a long session
+// A real climb or descent moves altitude hundreds of feet a minute; readsb's
+// barometric altitude is quantised to 25 ft and jitters well under 100 ft
+// fix-to-fix at a steady cruise. 60 m (~200 ft) clears that noise floor with
+// room to spare while still catching a genuine trend within a handful of
+// polls -- the brief leaves the window and threshold unfixed, and this is the
+// value chosen; there was nothing upstream to derive it from.
+const VERTICAL_TREND_THRESHOLD_M = 60;
+
+const altitudeHistory = new Map(); // icao24 -> [{altitude, t}], oldest first
+
+function recordAltitude(icao24, altitude) {
+  if (!icao24 || !Number.isFinite(altitude)) return;
+  const now = Date.now();
+  let history = altitudeHistory.get(icao24);
+  if (!history) {
+    if (altitudeHistory.size >= VERTICAL_TREND_MAX_TRACKED) {
+      altitudeHistory.delete(altitudeHistory.keys().next().value); // longest-tracked aircraft, evicted first
+    }
+    history = [];
+    altitudeHistory.set(icao24, history);
+  }
+  const last = history[history.length - 1];
+  if (last && now - last.t < VERTICAL_TREND_MIN_INTERVAL_MS) return;
+  history.push({ altitude, t: now });
+  if (history.length > VERTICAL_TREND_WINDOW) history.shift();
+}
+
+/**
+ * "climbing" | "descending" | "level" | null (not enough recorded track yet).
+ *
+ * Pure -- takes the track directly rather than reading module state, so it
+ * is testable with a synthetic array. `track` is oldest-first, the same
+ * order /api/track/{kind}/{id} returns points in (see backend/app.py's
+ * TRACK_FIELDS).
+ */
+export function verticalTrend(track) {
+  const points = (Array.isArray(track) ? track : []).filter((p) => Number.isFinite(p?.altitude));
+  if (points.length < 2) return null;
+  const delta = points[points.length - 1].altitude - points[0].altitude;
+  if (Math.abs(delta) < VERTICAL_TREND_THRESHOLD_M) return "level";
+  return delta > 0 ? "climbing" : "descending";
+}
+
+const VERTICAL_TREND_LABEL = { climbing: "Climbing", descending: "Descending", level: "Level" };
 
 export function decorateAdsb(d, { selectedIcao } = {}) {
   const type = classifyAircraft(d);
@@ -3195,43 +3302,89 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
   // the squawk is a code the aircraft is transmitting, the decoded status is a
   // separate transponder field only newer units send. Naming both, when both
   // are present, is the difference between "it says 7700" and "we inferred".
+  // decodeSquawk runs regardless of whether the backend already computed
+  // emergency_squawk, so a squawk read off a feed that never populates that
+  // field still gets named for what it is.
+  const squawkEmergencyLabel = d.emergency_squawk || decodeSquawk(d.squawk);
   const emergencyLine = [
-    d.emergency_squawk ? `squawk ${esc(d.squawk)} &mdash; ${esc(d.emergency_squawk)}` : null,
+    squawkEmergencyLabel ? `squawk ${esc(d.squawk)} &mdash; ${esc(squawkEmergencyLabel)}` : null,
     d.emergency ? `transponder reports ${esc(d.emergency)}` : null,
   ].filter(Boolean).join("; ");
   const airfield = d.nearest_airfield;
+  const displayLimitedText = displayLimitedNote(d);
+
+  // Recorded as a side effect of decorating -- see the vertical-trend note
+  // above for why this lives here rather than behind a second fetch.
+  recordAltitude(d.icao24, d.altitude);
+  const altitudeTrack = altitudeHistory.get(d.icao24);
+  const trend = d.on_ground ? null : verticalTrend(altitudeTrack);
+
   const tooltip = `<b>${esc(d.callsign || d.icao24)}</b>${aircraftLine ? ` &middot; ${esc(aircraftLine)}` : ` &middot; ${esc(label)}`}` +
     `${emergencyLine ? `<br/><span class="aircraft-emergency">${emergencyLine}</span>` : ""}` +
     `<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h` +
     lastPingTooltip(d.updated);
+
   const detail = `
     <h3>${esc(d.callsign || d.icao24)}</h3>
-    ${emergencyLine ? `<div class="aircraft-emergency"><b>Emergency:</b> ${emergencyLine}</div>` : ""}
-    ${sanctionDetail(d)}
-    ${aircraftLine ? `<div class="meta">Aircraft: ${esc(aircraftLine)}</div>` : ""}
-    <div class="meta">Type: ${esc(label)} &middot; ${esc(d.origin_country || "")} &middot; ICAO24 ${esc(d.icao24)}</div>
-    ${icaoHexDetail(d)}
-    ${d.registration ? `<div>Registration: ${esc(d.registration)}</div>` : ""}
+    ${emergencyLine ? `<div class="aircraft-emergency"><b>Emergency:</b> ${emergencyLine}</div><p class="meta">${AIRCRAFT_FLAG_NOTE.emergency}</p>` : ""}
+
+    <div class="csection-h">Identity</div>
+    <div class="meta">ICAO24 ${esc(d.icao24)}${d.registration ? ` &middot; registration ${esc(d.registration)}` : ""}</div>
+    <div>${hasRealType
+      ? `Aircraft: ${esc(d.type_desc)}${d.type_code ? ` <span class="meta">(type code ${esc(d.type_code)})</span>` : ""}`
+      : (d.type_code
+          ? `Aircraft: <span class="meta">type code ${esc(d.type_code)}, no description on file</span>`
+          : '<span class="meta">Aircraft type: not on file</span>')}</div>
+    ${hasRealType
+      ? '<p class="meta">Aircraft type/description from airplanes.live reference data.</p>'
+      : ""}
     ${d.operator ? `<div>Operator: ${esc(d.operator)}</div>` : ""}
+    ${icaoHexDetail(d)}
+    <div>Classification: ${esc(label)}${roleLabel ? ` &middot; role: ${esc(roleLabel)}` : ""}</div>
+    ${type === "military"
+      ? `<p class="meta">${d.military === true
+          ? "Military status is a real flag from airplanes.live's own database (dbFlags), not a guess."
+          : "No confirmed military flag on this airframe &mdash; classified from its callsign prefix instead, which can be wrong in either direction."
+        }${roleLabel ? ` The role (${esc(roleLabel)}) is a best-effort read of the type description or callsign, not a confirmed mission type.` : ""}</p>`
+      : ""}
+
+    <div class="csection-h">Flight now</div>
+    <div>Callsign: ${d.callsign ? esc(d.callsign) : '<span class="meta">not broadcast</span>'}</div>
     <div>Altitude: ${esc(Math.round(d.altitude || 0))} m</div>
-    <div>Ground speed: ${esc(Math.round((d.velocity || 0) * 3.6))} km/h</div>
+    ${d.on_ground
+      ? ""
+      : `<div>Vertical trend: ${trend
+          ? `<b>${esc(VERTICAL_TREND_LABEL[trend])}</b> <span class="meta">&mdash; derived from ${esc((altitudeTrack || []).length)} altitude fixes this tab has recorded since it started watching this aircraft; not the transponder's own rate, and it resets on reload.</span>`
+          : '<span class="meta">not enough recorded track yet</span>'
+        }</div>`}
+    <div>Ground speed: ${esc(Math.round((d.velocity || 0) * 3.6))} km/h &middot; Heading: ${
+      Number.isFinite(d.heading) ? `${esc(Math.round(d.heading))}&deg;` : "n/a"
+    }</div>
     <div>On ground: ${d.on_ground ? "yes" : "no"}</div>
     ${lastPingDetail(d.updated)}
-    ${d.squawk && !d.emergency_squawk ? `<div>Squawk: ${esc(d.squawk)}</div>` : ""}
-    ${d.display_limited ? `<div class="meta">Listed as: ${esc(d.display_limited_note || d.display_limited)}</div>` : ""}
+    <div>Squawk: ${d.squawk
+      ? `${esc(d.squawk)}${squawkEmergencyLabel ? ` &mdash; <b>${esc(squawkEmergencyLabel)}</b>` : ' <span class="meta">(no special meaning)</span>'}`
+      : '<span class="meta">not broadcast</span>'}</div>
+
+    <div class="csection-h">Flags</div>
+    ${sanctionDetail(d)}
+    ${displayLimitedText ? `<p class="meta">${displayLimitedText}</p>` : ""}
+    ${!isSanctioned(d) && !displayLimitedText && !emergencyLine ? '<p class="meta">No flags on this aircraft.</p>' : ""}
+
+    <div class="csection-h">Provenance</div>
     ${airfield
       ? `<div>Nearest airfield: ${esc(airfield.name)}${airfield.code ? ` (${esc(airfield.code)})` : ""} &middot; ${esc(airfield.km)} km` +
         `${airfield.military_name ? " &middot; military by name" : ""}</div>` +
-        '<p class="meta">Nearest airfield is our own proximity lookup against the OurAirports index, not a ' +
-        "filed origin or destination. Only shown below 10,000 ft or on the ground, where it means something.</p>"
+        '<p class="meta">Nearest airfield is our own proximity lookup against the OurAirports index &mdash; ' +
+        "<b>not a filed origin or destination</b>. ADS-B carries no flight plan, so this is proximity only; " +
+        "shown below 10,000 ft or on the ground, where distance means something.</p>"
       : ""}
-    ${hasRealType
-      ? '<p class="meta">Aircraft type/description from airplanes.live reference data.</p>'
-      : '<p class="meta">Aircraft type is a best-effort guess from callsign pattern and ADS-B category when no confirmed source flag is available.</p>'}
-    ${flag ? `<p class="meta">${AIRCRAFT_FLAG_NOTE[flag]}</p>` : ""}
-    <div class="meta">Source: OpenSky Network + airplanes.live (ADS-B)${
-      airfield ? " &middot; airfields: OurAirports" : ""
-    }</div>`;
+    <div class="meta">Source: ${esc(
+      Array.isArray(d.data_sources) && d.data_sources.length ? d.data_sources.join(" + ") : "OpenSky Network + airplanes.live"
+    )} (ADS-B) &mdash; position, altitude, speed and heading <i>measured</i> by the aircraft's own transponder;
+      identity fields (registration, operator, type) <i>reported</i> by airplanes.live's reference data, where it
+      has an entry; ICAO allocation country <i>derived</i> from the Mode-S address block; vertical trend
+      <i>derived</i> from altitude this tab has itself recorded${airfield ? "; airfields: OurAirports" : ""}</div>`;
   let cls = "aircraft-marker";
   if (type === "military") cls += " military-marker";
   if (flag) cls += ` aircraft-flagged aircraft-${flag === "emergency" ? "emergency" : "hidden"}`;
