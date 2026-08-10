@@ -3353,6 +3353,19 @@ html, body {
   font-size: calc(11.5px * var(--ui-text-scale));
 }
 .admin-layer-swatches { flex: none; display: flex; gap: 3px; }
+/* Task 31 review, Minor 2: a visible-without-opening-the-row cue for an
+   Inference product whose "Show" state is a no-op (InferenceSection.jsx's
+   own showIsNoOp) -- muted rather than alarmed, since nothing is broken,
+   only one of three states does not do anything for this particular row. */
+.admin-layer-badge {
+  flex: none;
+  font-size: calc(9px * var(--ui-text-scale));
+  color: var(--text-dim);
+  border: 1px solid rgba(var(--accent-rgb), 0.25);
+  border-radius: 3px;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
 .admin-swatch {
   width: 9px;
   height: 9px;

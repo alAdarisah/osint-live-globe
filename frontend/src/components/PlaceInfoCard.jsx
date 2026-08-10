@@ -27,7 +27,7 @@
 import { useAccordion } from "../hooks/useAccordion";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import { computeAnchorLayout } from "./placeInfoCardLayout";
-import { groupSections, applyCardSettings } from "./placeInfoCardGrouping";
+import { groupSections, applyCardSettings, reorderGroups } from "./placeInfoCardGrouping";
 
 // The accordion-id namespace a super-fold's own open/closed state is stored
 // under (see useAccordion.js) -- exported so a caller supplying `groups` can
@@ -159,6 +159,12 @@ export default function PlaceInfoCard({
     ? applyCardSettings(place.sections, cardType, cardSettings)
     : { sections: [], defaultOpen: {} };
   const effectiveDefaultOpen = { ...defaultOpen, ...cardDefaultOpen };
+  // The review fix for the Critical: a group's own internal order (Task 10's
+  // `groups`, e.g. COUNTRY_CARD_GROUPS) follows the same stored order the
+  // flat list above was just sorted by, not just its own fixed sectionIds --
+  // see reorderGroups' own docstring in placeInfoCardGrouping.js for why
+  // that was needed at all.
+  const adjustedGroups = reorderGroups(groups, cardType ? cardSettings?.order?.[cardType] : null);
   const { isOpen, setOpen } = useAccordion(effectiveDefaultOpen, accordionKey);
   const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel(panelId);
 
@@ -212,8 +218,8 @@ export default function PlaceInfoCard({
           <div className="country-info-summary">{summary.map(renderSummaryTile)}</div>
         )}
 
-        {groups && groups.length > 0
-          ? groupSections(adjustedSections, groups).map((item) => (
+        {adjustedGroups && adjustedGroups.length > 0
+          ? groupSections(adjustedSections, adjustedGroups).map((item) => (
               item.kind === "group" ? (
                 // Namespaced under GROUP_ACCORDION_PREFIX so this can never
                 // collide with a section id in the same accordionKey's stored

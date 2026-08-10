@@ -88,14 +88,16 @@ test("water", async (t) => {
       selectedFillOpacity: 0.6,
       outlineWeight: 2.5,
       hiddenClasses: ["ocean", "sea"],
-      showLabels: true,
     };
     const merged = mergeSettings(stored).water;
     assert.equal(merged.hoverFillOpacity, 0.5);
     assert.equal(merged.selectedFillOpacity, 0.6);
     assert.equal(merged.outlineWeight, 2.5);
     assert.deepEqual(merged.hiddenClasses.sort(), ["ocean", "sea"]);
-    assert.equal(merged.showLabels, true);
+  });
+
+  await t.test("no showLabels field exists -- water has no hover tooltip or label layer to gate", () => {
+    assert.equal("showLabels" in defaultSettings().water, false);
   });
 
   await t.test("opacity clamps to [0,1] rather than accepting anything", () => {
@@ -204,6 +206,21 @@ test("filters", async (t) => {
 // --- inference: the three-state switch's persistence --------------------
 
 test("inference mode", async (t) => {
+  await t.test("there are five products: two backed by a real layer, three that gate a card section", () => {
+    // Task 31 review, Minor 2: InferenceSection.jsx's showIsNoOp cue keys
+    // off `effect === "card"` -- this pins the count its own note claims
+    // ("Show is a silent no-op for three of the five products") so a future
+    // product added with the wrong `effect` (or the wrong total) cannot
+    // silently make that note wrong without a test noticing.
+    assert.equal(INFERENCE_PRODUCTS.length, 5);
+    assert.equal(INFERENCE_PRODUCTS.filter((p) => p.effect === "layer").length, 2);
+    assert.equal(INFERENCE_PRODUCTS.filter((p) => p.effect === "card").length, 3);
+    for (const product of INFERENCE_PRODUCTS) {
+      assert.ok(["layer", "card"].includes(product.effect), product.key);
+      if (product.effect === "layer") assert.ok(product.layerKey, `${product.key} needs a layerKey`);
+    }
+  });
+
   await t.test("every product defaults to 'labelled'", () => {
     const mode = defaultSettings().inference.mode;
     for (const product of INFERENCE_PRODUCTS) {

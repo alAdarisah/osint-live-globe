@@ -79,15 +79,11 @@ export function groupSections(sections, groups) {
  * untouched in that case, the same "optional prop, no-op when absent" rule
  * `groups`/`summary` already follow on that component.
  *
- * Reordering does not reach *inside* a super-fold: `sections` here is the
- * flat list PlaceInfoCard passes to groupSections, and that function's own
- * ordering inside a group comes from the group's fixed `sectionIds`, not
- * from the array's position -- so a stored order changes where an ungrouped
- * section falls (every section on the water/subdivision/district cards,
- * which use no groups at all, and country's own "meta" leftovers) but never
- * reorders what a group already claims. CardsSection.jsx says so in its own
- * note rather than promising a control that would not move what it looks
- * like it moves.
+ * Reordering the flat list here is only half the picture for a card that
+ * uses `groups` (Task 10's super-folds, e.g. COUNTRY_CARD_GROUPS): see
+ * reorderGroups below, which PlaceInfoCard.jsx calls on `groups` itself so a
+ * group's own internal order follows the same stored choice this function
+ * applies to the ungrouped remainder.
  */
 export function applyCardSettings(sections, cardType, cardSettings) {
   if (!cardType || !cardSettings) return { sections, defaultOpen: {} };
@@ -95,17 +91,52 @@ export function applyCardSettings(sections, cardType, cardSettings) {
   const visible = sections.filter((s) => !hidden.has(s.id));
 
   const order = cardSettings.order?.[cardType];
-  const ordered = Array.isArray(order) && order.length
-    ? [...visible].sort((a, b) => {
-        const ia = order.indexOf(a.id);
-        const ib = order.indexOf(b.id);
-        // A section this stored order never mentions (added since it was
-        // saved) sorts after everything the order does name -- the same
-        // "unknown id appended at the end" repair settings/cardSections.js's
-        // own orderedCardSections applies to the id list this acts on.
-        return (ia === -1 ? Infinity : ia) - (ib === -1 ? Infinity : ib);
-      })
-    : visible;
+  const ordered = Array.isArray(order) && order.length ? sortByOrder(visible, order, (s) => s.id) : visible;
 
   return { sections: ordered, defaultOpen: cardSettings.defaultOpen?.[cardType] || {} };
+}
+
+/**
+ * `items`, sorted by each one's position in `order` (via `keyFn`). An item
+ * `order` never mentions -- added since the order was saved, or (for
+ * reorderGroups below) an id a group does not claim -- sorts after
+ * everything `order` does name, the same "unknown id appended at the end"
+ * repair settings/cardSections.js's own orderedCardSections applies to the
+ * id list this acts on. Shared by applyCardSettings above and reorderGroups
+ * below so the two have exactly one comparator between them to agree on.
+ */
+function sortByOrder(items, order, keyFn = (x) => x) {
+  return [...items].sort((a, b) => {
+    const ia = order.indexOf(keyFn(a));
+    const ib = order.indexOf(keyFn(b));
+    return (ia === -1 ? Infinity : ia) - (ib === -1 ? Infinity : ib);
+  });
+}
+
+/**
+ * `groups`, with each group's own `sectionIds` re-sorted by `order`.
+ *
+ * The Task 31 review's Critical: groupSections above places a group's
+ * contents in that group's own fixed `sectionIds` sequence, never in
+ * `sections`' array position -- so a stored Cards-section order changed
+ * nothing for a card whose groups between them claim every section id. The
+ * country card is exactly that case (COUNTRY_CARD_GROUPS' situation/
+ * country/meta cover all seventeen of countryCardSections' own ids, see
+ * map/popups.js), which made every Order arrow on the one card type most
+ * likely to want reordering silently do nothing.
+ *
+ * This is what makes the arrows real for that card: PlaceInfoCard.jsx calls
+ * it on `groups` before handing them to groupSections, so a group's
+ * internal order follows the reader's own stored choice once one exists.
+ *
+ * Returns `groups` unchanged (the same reference, not a copy) when there is
+ * no stored order to apply -- an additive capability, not a behaviour
+ * change for a card nobody has touched a Cards admin control for. Ids a
+ * group does not claim are irrelevant to it and sort to the end of that
+ * group's own list, harmlessly, since groupSections only ever reads the ids
+ * it already knows to look for.
+ */
+export function reorderGroups(groups, order) {
+  if (!groups || !Array.isArray(order) || !order.length) return groups;
+  return groups.map((group) => ({ ...group, sectionIds: sortByOrder(group.sectionIds || [], order) }));
 }

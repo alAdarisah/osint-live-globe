@@ -6,20 +6,24 @@ raw AIS/ADS-B history into a laden/ballast verdict, a dark-ship contour, a
 port call or a flight leg. The brief that specified it assumed every one of
 these numbers already lived in backend/config.py as an env-overridable
 constant, "put there specifically so this task could expose them" -- true of
-exactly three of them (VESSEL_DRAUGHT_LADEN_RATIO/BALLAST_RATIO/MIN_SAMPLES).
-Every other threshold here is a plain module-level constant inside the refine
-job (or the source module) that actually applies it: backend/sources/
-dark_vessels.py's GAP_MIN_HOURS/GAP_MAX_HOURS/REACH_CROSS_TRACK_FRACTION,
-backend/refine/port_calls.py's DWELL_MAX_SPEED_KN/DWELL_MIN_SECONDS,
-backend/refine/port_call_thresholds.py's three radii (already a leaf module
-for the reason its own docstring gives -- both port_calls.py and this endpoint
-need the same three numbers without either becoming the other's dependency),
-backend/refine/lane_density.py's DECAY_FACTOR, backend/refine/flight_legs.py's
-COVERAGE_GAP_SECONDS, and backend/infrastructure.py's BASE_MATCH_RADIUS_KM.
-That is not a gap this module papers over by copying the numbers into a
-second table -- every value below is read straight off the constant that
-actually governs the job, so a threshold changed in its own module is a
-threshold changed here too, with nothing to keep in step by hand.
+exactly four of them: VESSEL_DRAUGHT_LADEN_RATIO/BALLAST_RATIO/MIN_SAMPLES,
+and LANE_DENSITY_INTERVAL (the job interval lane_density's own fields report
+alongside its decay factor below -- see that field's own note on why the two
+travel together). Every other threshold here is a plain module-level
+constant inside the refine job (or the source module) that actually applies
+it: backend/sources/dark_vessels.py's GAP_MIN_HOURS/GAP_MAX_HOURS/
+REACH_CROSS_TRACK_FRACTION, backend/refine/port_calls.py's
+DWELL_MAX_SPEED_KN/DWELL_MIN_SECONDS, backend/refine/port_call_thresholds.py's
+three radii (already a leaf module for the reason its own docstring gives --
+both port_calls.py and this endpoint need the same three numbers without
+either becoming the other's dependency), backend/refine/lane_density.py's own
+DECAY_FACTOR, backend/refine/flight_legs.py's COVERAGE_GAP_SECONDS, and
+backend/infrastructure.py's BASE_MATCH_RADIUS_KM. That is not a gap this
+module papers over by copying the numbers into a second table -- every value
+below is read straight off the constant that actually governs the job, so a
+threshold changed in its own module (or, for the four above, in the
+environment) is a threshold changed here too, with nothing to keep in step
+by hand.
 
 **Why this is read-only.** Admin Mode's settings are a frontend document PUT
 to /api/admin-config and read once by the browser (see backend/admin_config.py

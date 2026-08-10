@@ -1,16 +1,11 @@
 // Task 31: which sections a country/water/state/district card shows, in
 // what order, and whether each starts open -- see settings/cardSections.js
 // for the section tables this renders and components/placeInfoCardGrouping.js's
-// applyCardSettings for where a stored choice actually reaches the card.
-//
-// Reordering only ever moves a section within its card's own flat list. On
-// the country card, "situation"/"country" are super-folds whose internal
-// order comes from a fixed sectionIds list, not from this array's position
-// (see placeInfoCardGrouping.js's groupSections) -- so the arrows here
-// reorder the country card's own "meta" leftovers and every section on the
-// water/subdivision/district cards (none of which use groups at all), but
-// cannot reorder what a group already claims. Said once here rather than
-// promising a control that would not move what it looks like it moves.
+// applyCardSettings/reorderGroups for where a stored choice actually reaches
+// the card, both the flat list and (since the Task 31 review's Critical) a
+// grouped card's own super-folds -- the country card's situation/country/
+// meta groups between them claim all seventeen of its ids, so without
+// reorderGroups every arrow on that card type would have moved nothing.
 import { PanelGroup } from "../../controlPanel/Collapsible";
 import { CheckField } from "../fields";
 import { CARD_TYPES, CARD_SECTIONS, orderedCardSections } from "../../../settings/cardSections";

@@ -498,22 +498,27 @@ export function defaultSettings() {
         weather: { ...DEFAULT_TILE_DIAL },
       },
     },
-    // Task 31's Water section -- fill/outline weight, which marine classes
-    // draw, and whether a hover shows the body's name. Colours are not
-    // repeated here: water.fill/water.outline/water.selected already live in
-    // icons.colors like every other palette token (see map/iconTheme.js's
-    // "water" PALETTE_GROUPS entry), and the Water section reuses that same
-    // action rather than opening a second place to store the same three
-    // hexes. hiddenClasses covers only the marine sub-kinds in
-    // map/water.js's MARINE_CLASSES -- lake/river already have their own
-    // independent control-drawer toggles (waterLakes/waterRivers) and are
-    // not repeated here for the same reason the colours are not.
+    // Task 31's Water section -- fill/outline weight and which marine
+    // classes draw. Colours are not repeated here: water.fill/water.outline/
+    // water.selected already live in icons.colors like every other palette
+    // token (see map/iconTheme.js's "water" PALETTE_GROUPS entry), and the
+    // Water section reuses that same action rather than opening a second
+    // place to store the same three hexes. hiddenClasses covers only the
+    // marine sub-kinds in map/water.js's MARINE_CLASSES -- lake/river
+    // already have their own independent control-drawer toggles
+    // (waterLakes/waterRivers) and are not repeated here for the same reason
+    // the colours are not.
+    //
+    // No `showLabels`: water carries no hover tooltip and no persistent
+    // label layer for a switch to gate (see WaterSection.jsx's own note on
+    // why "label visibility" was declined rather than shipped as a dial that
+    // moves nothing) -- an earlier revision of this task shipped one anyway,
+    // caught in review as dead schema, and removed.
     water: {
       hoverFillOpacity: 0.22,
       selectedFillOpacity: 0.32,
       outlineWeight: 1,
       hiddenClasses: [],
-      showLabels: false,
     },
     // Task 31's Filters section: saved combinations of the vessel/aircraft
     // filter bars (Task 18) and the conflict event filter, captured and
@@ -821,7 +826,6 @@ export function mergeSettings(stored) {
         ...new Set(stored.water.hiddenClasses.filter((c) => typeof c === "string" && known.has(c))),
       ];
     }
-    base.water.showLabels = stored.water.showLabels === true;
   }
 
   // Task 31's Filters section: saved vessel/aircraft/event filter presets.

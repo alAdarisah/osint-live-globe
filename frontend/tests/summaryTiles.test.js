@@ -28,7 +28,7 @@ registerHooks({
 globalThis.window = { L: { geoJSON: () => ({}) } };
 
 const { summaryTiles, countryCardSections, COUNTRY_CARD_GROUPS } = await import("../src/map/popups.js");
-const { groupSections } = await import("../src/components/placeInfoCardGrouping.js");
+const { groupSections, reorderGroups, applyCardSettings } = await import("../src/components/placeInfoCardGrouping.js");
 
 const baseProps = { name: "Testland", iso_a2: "TL", iso_a3: "TST", population: 1_000_000 };
 const bounds = { south: 0, west: 0, north: 10, east: 10 };
@@ -373,4 +373,78 @@ test("countryCardSections -- COUNTRY_CARD_GROUPS drops nothing when applied thro
     assert.deepEqual(new Set(renderedIds), new Set(withOrphan.map((s) => s.id)),
       "nothing about the real fifteen sections was disturbed by the sixteenth");
   });
+});
+
+// Task 31 review, Critical: COUNTRY_CARD_GROUPS' three groups (situation/
+// country/meta) between them claim every section id countryCardSections
+// produces (proved by the "drops nothing" test above), which means the flat-
+// list reordering applyCardSettings does on its own never had anything left
+// over to move on the country card -- every Cards-admin Order arrow on that
+// card type was inert. reorderGroups is the fix: it re-sorts each group's
+// own sectionIds by the same stored order, so PlaceInfoCard.jsx can apply it
+// to `groups` before groupSections ever sees them.
+test("reorderGroups -- the fix for the country card's inert Order arrows", async (t) => {
+  await t.test("with no stored order, returns the exact same groups reference", () => {
+    assert.equal(reorderGroups(COUNTRY_CARD_GROUPS, undefined), COUNTRY_CARD_GROUPS);
+    assert.equal(reorderGroups(COUNTRY_CARD_GROUPS, []), COUNTRY_CARD_GROUPS);
+    assert.equal(reorderGroups(COUNTRY_CARD_GROUPS, null), COUNTRY_CARD_GROUPS);
+  });
+
+  await t.test("undefined groups pass through untouched", () => {
+    assert.equal(reorderGroups(undefined, ["a", "b"]), undefined);
+  });
+
+  await t.test("a real order actually reorders a real group's sectionIds", () => {
+    const situation = COUNTRY_CARD_GROUPS.find((g) => g.id === "situation");
+    const reversed = [...situation.sectionIds].reverse();
+    const [reorderedSituation] = reorderGroups(COUNTRY_CARD_GROUPS, reversed).filter((g) => g.id === "situation");
+    assert.deepEqual(reorderedSituation.sectionIds, reversed);
+    // Group membership itself (which ids belong to "situation" at all) is
+    // untouched -- only their order within it moved.
+    assert.deepEqual(new Set(reorderedSituation.sectionIds), new Set(situation.sectionIds));
+  });
+
+  await t.test(
+    "end to end: a stored Cards order changes a real country card's rendered order inside a real super-fold",
+    () => {
+      // A deliberately minimal raw bag, same as the "drops nothing" test
+      // above -- which means most of "situation"'s seven ids (buildLivePicture,
+      // buildConnectivity etc.) produce empty html and are filtered out of
+      // `sections` entirely before groupSections ever sees them (see
+      // countryCardSections' own `sections.filter(s => s.html && s.html.trim())`).
+      // The reversal below is asserted on whichever subset survives that
+      // filter, rather than pinned to specific ids, so this does not become
+      // a second fixture nobody notices drifting from the real one.
+      const raw = emptyRaw({ events: [{ lat: 5, lon: 5, date: TODAY, fatalities: 1 }] });
+      const { sections, groups } = countryCardSections(baseProps, raw, bounds);
+
+      // Unreordered: "situation" renders in COUNTRY_CARD_GROUPS' own shipped
+      // sectionIds sequence.
+      const shipped = groupSections(sections, groups).find((item) => item.kind === "group" && item.id === "situation");
+      assert.ok(shipped.sections.length >= 2, "need at least two real sections in this group to prove a reorder");
+
+      // An admin reverses the whole group's order -- the same shape
+      // CardsSection.jsx's moveCardSection action would produce and store
+      // under settings.cards.order.country, one arrow-click at a time.
+      const situationIds = groups.find((g) => g.id === "situation").sectionIds;
+      const adminOrder = [...situationIds].reverse();
+
+      const { sections: orderedSections } = applyCardSettings(sections, "country", {
+        hidden: { country: [] },
+        order: { country: adminOrder },
+        defaultOpen: { country: {} },
+      });
+      const adjustedGroups = reorderGroups(groups, adminOrder);
+      const reordered = groupSections(orderedSections, adjustedGroups).find(
+        (item) => item.kind === "group" && item.id === "situation"
+      );
+      assert.deepEqual(
+        reordered.sections.map((s) => s.id),
+        [...shipped.sections].reverse().map((s) => s.id),
+        "the arrow actually moved something this time"
+      );
+      // Still every id, just reordered -- nothing got dropped or duplicated.
+      assert.deepEqual(new Set(reordered.sections.map((s) => s.id)), new Set(shipped.sections.map((s) => s.id)));
+    }
+  );
 });

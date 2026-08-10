@@ -16,13 +16,13 @@
 // "unclaimed id survives" rule to a card's super-fold groups).
 //
 // Country's own super-folds (COUNTRY_CARD_GROUPS, same module) are not
-// represented here: reordering only ever moves a section within its group's
-// own fixed sectionIds order, or among the sections no group claims (see
-// groupSections), so an admin-set order changes what a reader sees for the
-// water/subdivision/district cards (which use no groups) and for country's
-// own "meta" leftovers, but not the situation/country groups' internal
-// order -- CardsSection.jsx says so in its own note rather than promising a
-// control that would not move what it looks like it moves.
+// represented here -- an admin-set order still reaches inside them, via
+// reorderGroups in components/placeInfoCardGrouping.js, which
+// PlaceInfoCard.jsx applies to `groups` itself rather than leaving a
+// group's own fixed sectionIds order unreachable (the Task 31 review's
+// Critical: the country card's situation/country/meta groups between them
+// claim all seventeen of its ids, so without that fix an admin-set order
+// changed nothing for the one card type most likely to want reordering).
 export const CARD_TYPES = [
   { key: "country", label: "Country" },
   { key: "water", label: "Water body" },

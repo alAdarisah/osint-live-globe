@@ -59,8 +59,8 @@ export default function InferenceSection({ settings, actions, isOpen, onToggle }
         removes it (see this project's own rule: an inference is never presented as an observation).
         For a product backed by a real map layer, <b>Show</b> pins that layer on regardless of the
         resolver -- the same pinned-on state a control-drawer tick would set, reached here instead.
-        For a product with no layer of its own, Show labelled and Show render identically; only Hide
-        changes anything.
+        For a product with no layer of its own (marked <b>Show = Show labelled</b> below), Show and
+        Show labelled render identically; only Hide changes anything for those.
       </div>
 
       {INFERENCE_PRODUCTS.map((product) => (
@@ -82,10 +82,18 @@ function fieldsFor(doc, product) {
 }
 
 function InferenceProductBlock({ product, mode, onModeChange, fields, error }) {
+  const showIsNoOp = product.effect === "card";
   return (
     <details className="admin-layer-block">
       <summary className="admin-layer-summary">
         <span className="admin-layer-name">{product.label}</span>
+        {/* Task 31 review, Minor 2: a visible cue on the row itself, not
+            just a paragraph a reader has to open the block to find --
+            "Show" is a silent no-op for a card-effect product (see
+            showIsNoOp below), and the Critical this task also fixed was
+            exactly this class of problem: a control that moves nothing
+            with no cue on the control that it won't. */}
+        {showIsNoOp && <span className="admin-layer-badge">Show = Show labelled</span>}
       </summary>
       <div className="admin-layer-body">
         <div className="admin-tri-state" role="radiogroup" aria-label={`${product.label} visibility`}>
@@ -96,16 +104,27 @@ function InferenceProductBlock({ product, mode, onModeChange, fields, error }) {
               role="radio"
               aria-checked={mode === state}
               className={`admin-tri-state-btn${mode === state ? " selected" : ""}`}
+              title={
+                showIsNoOp && state === "show"
+                  ? "No layer of its own to pin on -- renders exactly like Show labelled."
+                  : undefined
+              }
               onClick={() => onModeChange(state)}
             >
               {STATE_LABEL[state]}
             </button>
           ))}
         </div>
-        {product.effect === "layer" && (
+        {product.effect === "layer" ? (
           <div className="admin-note">
             Backed by the <b>{product.layerKey}</b> layer -- Hide/Show here write the same
             pinned-off/pinned-on state the control drawer's own checkbox would.
+          </div>
+        ) : (
+          <div className="admin-note">
+            No map layer of its own -- Hide removes this card section entirely; <b>Show behaves
+            exactly like Show labelled</b> (its honesty caveat is unconditional either way, see this
+            section's own note above), so only Hide actually changes anything for this product.
           </div>
         )}
 
