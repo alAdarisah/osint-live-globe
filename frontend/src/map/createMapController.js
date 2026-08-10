@@ -230,15 +230,23 @@ const WAR_EVENT_COUNT_THRESHOLD = 8;
 // Only ever one selected ship and one selected aircraft, so this is a few
 // hundred short polylines at most -- far below what the FIRMS canvas layer
 // already draws.
-const SHIP_TRAIL_MAX_POINTS = 300;
-const AIRCRAFT_TRAIL_MAX_POINTS = 400;
+// `let`, not `const` -- Task 31's Performance admin section exposes every
+// name in this block (through setPerformanceOptions below) with these
+// numbers as its shipped defaults. A trail budget is read fresh on every
+// updateTrails call rather than baked into a timer, so reassigning the
+// binding here takes effect on the very next trail update, not the next
+// reload -- unlike SAT_ELEMENT_REDRAW_MS a little further down, which is
+// baked into a setInterval at construction and stays out of this dial for
+// exactly that reason.
+let SHIP_TRAIL_MAX_POINTS = 300;
+let AIRCRAFT_TRAIL_MAX_POINTS = 400;
 // Satellites poll every 10s (see useOsintData.js's POLL_CONFIG) -- 36 points
 // is a several-minute trailing arc, same "grows from app-open" cold start as
 // ship/aircraft trails.
-const SATELLITE_TRAIL_MAX_POINTS = 36;
+let SATELLITE_TRAIL_MAX_POINTS = 36;
 // Tankers poll on the same cadence as the rest of AIS -- same "several
 // polls back" length as ship trails, not satellites' longer arc.
-const TANKER_TRAIL_MAX_POINTS = 60;
+let TANKER_TRAIL_MAX_POINTS = 60;
 
 // Task 24: client-propagated satellite layers -- see map/satPropagate.js and
 // backend/sources/satellites.py's ELEMENT_LAYER_GROUPS/cadence_seconds. This
@@ -251,8 +259,11 @@ const TANKER_TRAIL_MAX_POINTS = 60;
 // SAT_ELEMENT_REDRAW_MS below is how often the *drawn* position is
 // recomputed by interpolating between the last two fixes, which is cheap
 // enough to do far more often than SGP4 itself.
-const SAT_ELEMENT_SMALL_CADENCE_MS = 10_000;
-const SAT_ELEMENT_LARGE_CADENCE_MS = 60_000;
+// `let` for the same reason the trail budgets above are: read fresh on every
+// tickSatElementLayer call, so Task 31's Performance dial takes effect on the
+// tab's very next tick rather than needing anything re-registered.
+let SAT_ELEMENT_SMALL_CADENCE_MS = 10_000;
+let SAT_ELEMENT_LARGE_CADENCE_MS = 60_000;
 const SAT_ELEMENT_LARGE_LAYERS = new Set(["satImaging", "satGeo", "satStarlink", "satOneweb"]);
 function satElementCadenceMs(layerKey) {
   return SAT_ELEMENT_LARGE_LAYERS.has(layerKey) ? SAT_ELEMENT_LARGE_CADENCE_MS : SAT_ELEMENT_SMALL_CADENCE_MS;
@@ -260,8 +271,55 @@ function satElementCadenceMs(layerKey) {
 // Redrawn (interpolated + repositioned/re-styled) this often, regardless of
 // cadence -- frequent enough to read as smooth motion, coarse enough that
 // even the several-thousand-object Starlink/OneWeb layers cost only a
-// handful of milliseconds per tick rather than a per-frame cost.
+// handful of milliseconds per tick rather than a per-frame cost. Baked into
+// a setInterval at construction (see the bottom of this file), so unlike the
+// two cadences above it is not part of Task 31's live dial -- changing it
+// would need the interval re-registered, not just the number reassigned.
 const SAT_ELEMENT_REDRAW_MS = 2000;
+
+// Task 31: the WebGL sprite cap and the two poll-scheduling dials, plus the
+// setter every one of them is read through. No prior constant existed for
+// any of these -- unlike the trail/cadence numbers above, there was no
+// per-bucket ceiling on how many ship/aircraft sprites draw and no way to
+// scale back or pause polling from Admin Mode -- so each defaults to
+// exactly the behaviour this map already has: `spriteCap: null` draws every
+// sprite a layer's own filters leave it (see capSprites below),
+// `pollIntervalMultiplier: 1` leaves useOsintData.js's intervals alone, and
+// `pausePollingWhenHidden: true` matches that hook's own unconditional
+// "backgrounded tab" skip, which existed before this task and is now a
+// dial rather than a fixed behaviour. Module-level for the same reason
+// map/cursor.js's setCursorOptions is: this controller is imperative and
+// constructed once, and these values are read at arbitrary later times (a
+// render pass, a poll tick), not at construction.
+let webglSpriteCap = null;
+
+export function setPerformanceOptions(patch = {}) {
+  if (Number.isFinite(patch.shipTrailPoints)) SHIP_TRAIL_MAX_POINTS = patch.shipTrailPoints;
+  if (Number.isFinite(patch.aircraftTrailPoints)) AIRCRAFT_TRAIL_MAX_POINTS = patch.aircraftTrailPoints;
+  if (Number.isFinite(patch.satelliteTrailPoints)) SATELLITE_TRAIL_MAX_POINTS = patch.satelliteTrailPoints;
+  if (Number.isFinite(patch.tankerTrailPoints)) TANKER_TRAIL_MAX_POINTS = patch.tankerTrailPoints;
+  if (Number.isFinite(patch.satSmallCadenceMs)) SAT_ELEMENT_SMALL_CADENCE_MS = patch.satSmallCadenceMs;
+  if (Number.isFinite(patch.satLargeCadenceMs)) SAT_ELEMENT_LARGE_CADENCE_MS = patch.satLargeCadenceMs;
+  // null (the shipped default) is a real, meaningful value here -- "no cap"
+  // -- so it has to be assignable, not just skipped the way the five
+  // Number.isFinite guards above skip anything that is not a real number.
+  if (patch.webglSpriteCap === null || Number.isFinite(patch.webglSpriteCap)) {
+    webglSpriteCap = patch.webglSpriteCap;
+  }
+}
+
+/** `items`, capped at webglSpriteCap if one is set -- otherwise unchanged.
+ *  Applied per bucket (civilian ships, tanker ships, navy ships, and the
+ *  three ADS-B buckets) rather than as one combined total across all six:
+ *  a shared running total would need real accounting across renderAisLayer
+ *  and renderAdsbLayer's independent passes for a global figure this dial
+ *  does not promise -- "cap this bucket" is the honest, simple claim it
+ *  actually makes. */
+function capSprites(items) {
+  return Number.isFinite(webglSpriteCap) && items.length > webglSpriteCap
+    ? items.slice(0, webglSpriteCap)
+    : items;
+}
 
 // Which CelesTrak groups (see backend/sources/satellites.py's
 // ELEMENT_LAYER_GROUPS) sit behind each control-panel toggle -- the same
@@ -4232,8 +4290,8 @@ export function createMapController(container, initial, callbacks) {
     totals.vesselFilterMatch = raw.ais.length;
 
     let civilianVisible = [];
-    const tankerVisible = [];
-    const navyVisible = [];
+    let tankerVisible = [];
+    let navyVisible = [];
     for (const item of filteredAis) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!inView(item.lat, item.lon)) continue;
@@ -4250,6 +4308,13 @@ export function createMapController(container, initial, callbacks) {
     // are what this layer is for and neither is dense enough to need it; a
     // sanctioned merchant hull is lifted clear of the cap for the same reason.
     civilianVisible = capByRank("aisCivilian", civilianVisible, nearestToCentreRank(isSanctioned));
+    // Task 31: the Performance section's WebGL sprite cap, on top of the
+    // band-scoped cap above -- a coarse global ceiling for a reader on
+    // weaker hardware, independent of whatever LAYER_MANIFEST's own per-band
+    // cap already thins each bucket to.
+    civilianVisible = capSprites(civilianVisible);
+    tankerVisible = capSprites(tankerVisible);
+    navyVisible = capSprites(navyVisible);
 
     // If the selected ship is no longer in the feed at all (out of AIS
     // range / stopped reporting), drop the selection so the highlight/trail
@@ -4424,6 +4489,9 @@ export function createMapController(container, initial, callbacks) {
     // lifted every emergency, display-limited and designated airframe out of
     // here, so nothing that needs keeping is left to a distance rank.
     civilianVisible = capByRank("adsbCivilian", civilianVisible, nearestToCentreRank());
+    // Task 31: same global ceiling renderAisLayer applies to its own
+    // anonymous bucket, on top of the band-scoped cap just above.
+    civilianVisible = capSprites(civilianVisible);
 
     // If the selected aircraft is no longer in the feed at all (out of
     // ADS-B range / stopped reporting), drop the selection so the

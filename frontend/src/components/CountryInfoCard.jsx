@@ -29,7 +29,7 @@ const DEFAULT_OPEN = {
 };
 const STORAGE_KEY = "osint-country-card-accordion";
 
-export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRecord }) {
+export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRecord, cardSettings }) {
   // `place` is recomputed every render rather than memoised: it is a cheap
   // object literal, and memoising it would need a dependency list that is
   // just `country` anyway, since that's the only thing it's built from.
@@ -59,6 +59,8 @@ export default function CountryInfoCard({ country, onClose, borderEdit, onOpenRe
       headerExtra={headerExtra}
       summary={country?.summary}
       groups={country?.groups}
+      cardType="country"
+      cardSettings={cardSettings}
     />
   );
 }

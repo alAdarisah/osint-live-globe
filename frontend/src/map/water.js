@@ -45,14 +45,30 @@ import { buildShapeIndex, countryContainsPoint } from "./countryHitTest";
 function waterStyle(feature) {
   const geomType = feature?.geometry?.type || "";
   const isLine = geomType === "LineString" || geomType === "MultiLineString";
+  // Task 31: a second class naming this feature's own `class` (ocean, sea,
+  // lake, river...) so the Water admin section's "which classes to draw"
+  // dial can hide one without a JS re-render -- style.css sets `display`
+  // per class from a `--water-hide-<class>` custom property, the same
+  // "className baked in once, everything a reader can see driven by CSS
+  // afterwards" split this file's own header note already explains for
+  // colour. water-class-other covers marine sub-kinds this map does not
+  // enumerate a dial for, same fallback CLASS_LABEL below uses.
+  const cls = (feature?.properties?.class || "other").toLowerCase();
   return {
-    className: "water-shape",
+    className: `water-shape water-class-${cls}`,
     weight: 1,
     fillOpacity: 0,
     opacity: isLine ? 0.55 : 0,
     interactive: false,
   };
 }
+
+// Every class this map's own dial offers a checkbox for -- lake and river
+// keep their existing, independent waterLakes/waterRivers toggles (they ride
+// the single `water` layer key rather than being fetched as part of it, see
+// TOGGLEABLE_LAYER_KEYS in settings/defaults.js) rather than joining this
+// list a second time under a different mechanism.
+export const MARINE_CLASSES = ["ocean", "sea", "gulf", "bay", "strait", "channel", "sound", "other"];
 
 export function createWaterLayer(map) {
   // Below countriesPane (350) so land outlines still win over a sea fill --

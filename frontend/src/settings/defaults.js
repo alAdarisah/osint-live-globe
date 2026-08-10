@@ -15,6 +15,11 @@ import { CURSOR_STYLES } from "../map/cursor";
 import { glyphChoicesFor } from "../map/iconTheme";
 import { sanitizeBorders } from "./borderOverrides";
 import { DEFAULT_TILE_DIAL, mergeTileDial } from "../map/tileTint";
+import { MARINE_CLASSES } from "../map/water";
+import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../utils/entityFilter";
+import { DEFAULT_EVENT_FILTER } from "../map/severity";
+import { mergeInferenceMode } from "./inferenceProducts";
+import { CARD_TYPES, CARD_SECTIONS } from "./cardSections";
 
 // Bumped only when a saved config could no longer be merged onto the defaults
 // safely. Every load runs through mergeSettings below, which takes the shipped
@@ -28,7 +33,14 @@ import { DEFAULT_TILE_DIAL, mergeTileDial } from "../map/tileTint";
 // shipped dials in place for it, the same "additive key, absence means
 // unset" rule every other field in this file already follows. The bump is a
 // record of the shape changing, not a sign a converter had to be written.
-export const SETTINGS_VERSION = 2;
+//
+// 3 (Task 31): added `water`, `filters`, `inference` and `cards`, plus
+// `performance` -- five wholly new top-level keys, every one additive for
+// the identical reason ui.tiles was: a config saved before this task has no
+// `stored.water` etc. at all, so mergeSettings' own isPlainObject guards
+// leave defaultSettings()' shipped values in place rather than needing a
+// converter. The bump is the same kind of record 2's own note describes.
+export const SETTINGS_VERSION = 3;
 
 /**
  * The layers whose appearance can be configured, in the order the admin panel
@@ -486,6 +498,78 @@ export function defaultSettings() {
         weather: { ...DEFAULT_TILE_DIAL },
       },
     },
+    // Task 31's Water section -- fill/outline weight, which marine classes
+    // draw, and whether a hover shows the body's name. Colours are not
+    // repeated here: water.fill/water.outline/water.selected already live in
+    // icons.colors like every other palette token (see map/iconTheme.js's
+    // "water" PALETTE_GROUPS entry), and the Water section reuses that same
+    // action rather than opening a second place to store the same three
+    // hexes. hiddenClasses covers only the marine sub-kinds in
+    // map/water.js's MARINE_CLASSES -- lake/river already have their own
+    // independent control-drawer toggles (waterLakes/waterRivers) and are
+    // not repeated here for the same reason the colours are not.
+    water: {
+      hoverFillOpacity: 0.22,
+      selectedFillOpacity: 0.32,
+      outlineWeight: 1,
+      hiddenClasses: [],
+      showLabels: false,
+    },
+    // Task 31's Filters section: saved combinations of the vessel/aircraft
+    // filter bars (Task 18) and the conflict event filter, captured and
+    // restored as one snapshot each -- see FiltersSection.jsx. Empty by
+    // default; the live filters themselves stay App.jsx's own React state,
+    // exactly as they always have (see DEFAULT_VESSEL_FILTER/
+    // DEFAULT_AIRCRAFT_FILTER/DEFAULT_EVENT_FILTER, the shape a saved
+    // preset's three sub-objects are validated against below), because a
+    // filter typed in is a session's own working state, not a standing
+    // configuration every reader of this deployment should open into.
+    filters: {
+      presets: [],
+    },
+    // Task 31's Inference section: the three-state switch (hide/labelled/
+    // show) per inferred product -- see settings/inferenceProducts.js for
+    // the full product table and what each state does.
+    inference: {
+      mode: mergeInferenceMode(null),
+    },
+    // Task 31's Cards section: which PlaceInfoCard-based sections show, in
+    // what order, and whether each starts open -- see settings/
+    // cardSections.js for the per-card-type section tables this indexes and
+    // components/placeInfoCardGrouping.js's applyCardSettings for how a
+    // stored choice reaches the card. Every sub-object is keyed by
+    // CARD_TYPES' own keys and sparse by default -- an empty `hidden` array,
+    // an empty `order` array (meaning "the shipped order") and an empty
+    // `defaultOpen` map (meaning "whatever that card's own wrapper already
+    // says") are all the same "nothing chosen yet" state layerWish uses
+    // elsewhere in this file.
+    cards: {
+      hidden: Object.fromEntries(CARD_TYPES.map((c) => [c.key, []])),
+      order: Object.fromEntries(CARD_TYPES.map((c) => [c.key, []])),
+      defaultOpen: Object.fromEntries(CARD_TYPES.map((c) => [c.key, {}])),
+    },
+    // Task 31's Performance section. Every value here shipped as a bare
+    // constant inside map/createMapController.js until this task -- see that
+    // file's own note by SHIP_TRAIL_MAX_POINTS and setPerformanceOptions for
+    // which five of these six move a `let` binding live, and which one
+    // (satRedrawMs is deliberately absent) is baked into a setInterval and
+    // cannot be. `pollIntervalMultiplier`/`pausePollingWhenHidden` reach
+    // useOsintData.js instead -- see App.jsx's own useOsintData call.
+    // `webglSpriteCap: null` is the one dial with no prior constant to carry
+    // forward (there was no cap at all before this task); null means exactly
+    // that -- no cap -- so a deployment that never opens this section draws
+    // precisely as it always has.
+    performance: {
+      shipTrailPoints: 300,
+      aircraftTrailPoints: 400,
+      satelliteTrailPoints: 36,
+      tankerTrailPoints: 60,
+      satSmallCadenceMs: 10_000,
+      satLargeCadenceMs: 60_000,
+      webglSpriteCap: null,
+      pollIntervalMultiplier: 1,
+      pausePollingWhenHidden: true,
+    },
     // { [sourceKey]: { edits: { [id]: {field: value, __hidden?: true} }, added: [record] } }
     data: Object.fromEntries(EDITABLE_SOURCES.map((s) => [s.key, { edits: {}, added: [] }])),
     // Redrawn national boundaries, sparse -- only the rings someone dragged.
@@ -506,6 +590,69 @@ function sameOrder(a, b) {
 function pickNumber(value, fallback, min, max) {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(Math.max(value, min), max);
+}
+
+// --- Task 31's Filters section: saved presets --------------------------
+//
+// A preset is a snapshot of the three filter shapes App.jsx already owns as
+// React state (vesselFilter/aircraftFilter/eventFilter -- see entityFilter.js
+// and map/severity.js for where each one's own shape and shipped default
+// come from). Sanitized field by field against those same defaults rather
+// than accepted as written, for the same reason every other stored value in
+// this file is: a hand-edited or imported file can carry anything.
+
+function sanitizeVesselFilterPatch(value) {
+  if (!isPlainObject(value)) return { ...DEFAULT_VESSEL_FILTER };
+  return {
+    text: typeof value.text === "string" ? value.text.slice(0, 200) : "",
+    sanctionedOnly: value.sanctionedOnly === true,
+    watchlistedOnly: value.watchlistedOnly === true,
+  };
+}
+
+function sanitizeAircraftFilterPatch(value) {
+  if (!isPlainObject(value)) return { ...DEFAULT_AIRCRAFT_FILTER };
+  return {
+    text: typeof value.text === "string" ? value.text.slice(0, 200) : "",
+    militaryOnly: value.militaryOnly === true,
+  };
+}
+
+function sanitizeEventFilterPatch(value) {
+  if (!isPlainObject(value)) return { ...DEFAULT_EVENT_FILTER };
+  return {
+    maxAgeDays: Number.isFinite(value.maxAgeDays) ? Math.min(Math.max(value.maxAgeDays, 0), 3650) : null,
+    minSeverity: pickNumber(value.minSeverity, 0, 0, 100),
+    showImprecise: value.showImprecise === true,
+    minConfidence: pickNumber(value.minConfidence, DEFAULT_EVENT_FILTER.minConfidence, 0, 1),
+  };
+}
+
+/**
+ * A stored `filters.presets` array, with every malformed entry dropped
+ * rather than repaired -- unlike layerStack or a card order, a preset with
+ * no name or no id is not a recognisable thing to repair into, it is just
+ * not a preset.
+ */
+function sanitizeFilterPresets(stored) {
+  if (!Array.isArray(stored)) return [];
+  const out = [];
+  const seenIds = new Set();
+  for (const entry of stored) {
+    if (!isPlainObject(entry)) continue;
+    if (typeof entry.id !== "string" || !entry.id || seenIds.has(entry.id)) continue;
+    if (typeof entry.name !== "string" || !entry.name.trim()) continue;
+    seenIds.add(entry.id);
+    out.push({
+      id: entry.id,
+      name: entry.name.trim().slice(0, 80),
+      createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now(),
+      vesselFilter: sanitizeVesselFilterPatch(entry.vesselFilter),
+      aircraftFilter: sanitizeAircraftFilterPatch(entry.aircraftFilter),
+      eventFilter: sanitizeEventFilterPatch(entry.eventFilter),
+    });
+  }
+  return out;
 }
 
 /**
@@ -658,6 +805,91 @@ export function mergeSettings(stored) {
       base.ui.tiles.imagery = mergeTileDial(stored.ui.tiles.imagery);
       base.ui.tiles.weather = mergeTileDial(stored.ui.tiles.weather);
     }
+  }
+
+  // Task 31's Water section. A config saved before this key existed has no
+  // `stored.water` at all, so every field below is left exactly as
+  // defaultSettings() shipped it -- the same additive contract ui.tiles
+  // above follows.
+  if (isPlainObject(stored.water)) {
+    base.water.hoverFillOpacity = pickNumber(stored.water.hoverFillOpacity, 0.22, 0, 1);
+    base.water.selectedFillOpacity = pickNumber(stored.water.selectedFillOpacity, 0.32, 0, 1);
+    base.water.outlineWeight = pickNumber(stored.water.outlineWeight, 1, 0.2, 6);
+    if (Array.isArray(stored.water.hiddenClasses)) {
+      const known = new Set(MARINE_CLASSES);
+      base.water.hiddenClasses = [
+        ...new Set(stored.water.hiddenClasses.filter((c) => typeof c === "string" && known.has(c))),
+      ];
+    }
+    base.water.showLabels = stored.water.showLabels === true;
+  }
+
+  // Task 31's Filters section: saved vessel/aircraft/event filter presets.
+  if (isPlainObject(stored.filters)) {
+    base.filters.presets = sanitizeFilterPresets(stored.filters.presets);
+  }
+
+  // Task 31's Inference section. mergeInferenceMode already returns the
+  // full shipped default for anything missing or unrecognised, so there is
+  // nothing else to guard here -- see that function's own docstring.
+  base.inference.mode = mergeInferenceMode(isPlainObject(stored.inference) ? stored.inference.mode : null);
+
+  // Task 31's Cards section.
+  if (isPlainObject(stored.cards)) {
+    for (const { key } of CARD_TYPES) {
+      const known = new Set((CARD_SECTIONS[key] || []).map((s) => s.id));
+      const hidden = stored.cards.hidden?.[key];
+      if (Array.isArray(hidden)) {
+        base.cards.hidden[key] = [...new Set(hidden.filter((id) => typeof id === "string" && known.has(id)))];
+      }
+      // Not filtered against `known` here the way hidden/defaultOpen are --
+      // orderedCardSections (settings/cardSections.js) already drops an
+      // unknown id and appends whatever it left out, the identical repair
+      // layerStack's own merge block above performs at read time rather
+      // than at store time. Non-string entries are dropped either way, since
+      // nothing downstream could match one to a section id.
+      const order = stored.cards.order?.[key];
+      if (Array.isArray(order)) {
+        base.cards.order[key] = order.filter((id) => typeof id === "string");
+      }
+      const defaultOpen = stored.cards.defaultOpen?.[key];
+      if (isPlainObject(defaultOpen)) {
+        const cleaned = {};
+        for (const [id, value] of Object.entries(defaultOpen)) {
+          if (known.has(id) && typeof value === "boolean") cleaned[id] = value;
+        }
+        base.cards.defaultOpen[key] = cleaned;
+      }
+    }
+  }
+
+  // Task 31's Performance section. Ranges are generous rather than tight --
+  // these are performance dials for a reader tuning their own machine, not
+  // safety rails against a value that could break rendering, so the guard
+  // here is "a real, sane number", not "the exact range the UI slider
+  // offers".
+  if (isPlainObject(stored.performance)) {
+    const p = stored.performance;
+    base.performance.shipTrailPoints = Math.round(pickNumber(p.shipTrailPoints, 300, 20, 2000));
+    base.performance.aircraftTrailPoints = Math.round(pickNumber(p.aircraftTrailPoints, 400, 20, 2000));
+    base.performance.satelliteTrailPoints = Math.round(pickNumber(p.satelliteTrailPoints, 36, 5, 500));
+    base.performance.tankerTrailPoints = Math.round(pickNumber(p.tankerTrailPoints, 60, 10, 1000));
+    base.performance.satSmallCadenceMs = Math.round(pickNumber(p.satSmallCadenceMs, 10_000, 1000, 300_000));
+    base.performance.satLargeCadenceMs = Math.round(pickNumber(p.satLargeCadenceMs, 60_000, 1000, 600_000));
+    // null (no cap, the shipped default) is a real, meaningful value here,
+    // not a malformed one -- so unlike every pickNumber field above, this
+    // has to distinguish "absent/invalid" from "explicitly no cap".
+    base.performance.webglSpriteCap = Number.isFinite(p.webglSpriteCap)
+      ? Math.round(pickNumber(p.webglSpriteCap, null, 50, 20_000))
+      : null;
+    base.performance.pollIntervalMultiplier = pickNumber(p.pollIntervalMultiplier, 1, 0.25, 10);
+    // Default-on, so anything but an explicit `false` leaves it on -- the
+    // same rule ui.showLeaderLines uses above, and for the same reason: this
+    // is the behaviour every deployment already has, so a missing key in an
+    // older configuration (there is no older configuration with this key at
+    // all yet, but the same rule holds for a hand-edited file that simply
+    // omits it) must not switch it off.
+    base.performance.pausePollingWhenHidden = p.pausePollingWhenHidden !== false;
   }
 
   // Repaired rather than validated: an order that has lost a layer is worse than

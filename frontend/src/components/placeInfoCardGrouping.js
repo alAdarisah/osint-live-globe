@@ -61,3 +61,51 @@ export function groupSections(sections, groups) {
 
   return items;
 }
+
+/**
+ * Task 31's Cards admin section, applied to one card's real (already
+ * data-filtered) section list.
+ *
+ * Returns the sections to actually render, in the stored order, plus a
+ * defaultOpen patch to merge over the card's own shipped DEFAULT_OPEN.
+ * Pulled out here rather than inlined in PlaceInfoCard.jsx for the same
+ * reason groupSections above is: a pure function of plain data that
+ * placeInfoCard.test.js can exercise under `node --test`, which cannot
+ * import JSX at all.
+ *
+ * `cardSettings` is `settings.cards` (see settings/defaults.js) or
+ * undefined -- PlaceInfoCard.jsx's callers that predate this task pass
+ * neither `cardType` nor `cardSettings`, and this returns `sections`
+ * untouched in that case, the same "optional prop, no-op when absent" rule
+ * `groups`/`summary` already follow on that component.
+ *
+ * Reordering does not reach *inside* a super-fold: `sections` here is the
+ * flat list PlaceInfoCard passes to groupSections, and that function's own
+ * ordering inside a group comes from the group's fixed `sectionIds`, not
+ * from the array's position -- so a stored order changes where an ungrouped
+ * section falls (every section on the water/subdivision/district cards,
+ * which use no groups at all, and country's own "meta" leftovers) but never
+ * reorders what a group already claims. CardsSection.jsx says so in its own
+ * note rather than promising a control that would not move what it looks
+ * like it moves.
+ */
+export function applyCardSettings(sections, cardType, cardSettings) {
+  if (!cardType || !cardSettings) return { sections, defaultOpen: {} };
+  const hidden = new Set(cardSettings.hidden?.[cardType] || []);
+  const visible = sections.filter((s) => !hidden.has(s.id));
+
+  const order = cardSettings.order?.[cardType];
+  const ordered = Array.isArray(order) && order.length
+    ? [...visible].sort((a, b) => {
+        const ia = order.indexOf(a.id);
+        const ib = order.indexOf(b.id);
+        // A section this stored order never mentions (added since it was
+        // saved) sorts after everything the order does name -- the same
+        // "unknown id appended at the end" repair settings/cardSections.js's
+        // own orderedCardSections applies to the id list this acts on.
+        return (ia === -1 ? Infinity : ia) - (ib === -1 ? Infinity : ib);
+      })
+    : visible;
+
+  return { sections: ordered, defaultOpen: cardSettings.defaultOpen?.[cardType] || {} };
+}

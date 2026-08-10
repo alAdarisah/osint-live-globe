@@ -265,8 +265,23 @@ const POLL_CONFIG = [
  * @param focus       what the reader has clicked, or null. A focused country is
  *   a request for that country's whole picture, so map/scene.js lifts the fetch
  *   gate on its feeds however far out the camera happens to be.
+ * @param pollIntervalMultiplier  Task 31's Performance section: every
+ *   source's intervalMs (and every intervalByBand entry) is multiplied by
+ *   this before being handed to setTimeout, in registerPoller's own
+ *   intervalNow(). Defaults to 1 -- the shipped behaviour, unscaled --
+ *   because App.jsx does not always have settings.performance ready on the
+ *   very first render (see useAppSettings.js's own load sequence) and a
+ *   multiplier of `undefined * intervalMs` would schedule every source at
+ *   NaN.
+ * @param pausePollingWhenHidden  Task 31's Performance section, gating what
+ *   was an unconditional `document.hidden` skip inside every poller's own
+ *   tick() before this task. Defaults to true, matching that prior
+ *   behaviour exactly, for the same "settings not ready yet" reason above.
  */
-export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoomOverrides, focus = null, mapBounds = null }) {
+export function useOsintData({
+  onData, flyToRegion, transform, zoom = null, zoomOverrides, focus = null, mapBounds = null,
+  pollIntervalMultiplier = 1, pausePollingWhenHidden = true,
+}) {
   const [regions, setRegions] = useState({});
   const [currentRegionKey, setCurrentRegionKey] = useState(null); // null == world/unscoped
   const [currentRegionLabel, setCurrentRegionLabel] = useState("World");
@@ -336,6 +351,13 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
   // resolver lifts the fetch gate on its feeds however far out the camera is.
   const focusRef = useRef(focus);
   focusRef.current = focus;
+
+  // Task 31's Performance section, read inside tick() for the same reason:
+  // registered once, has to see whatever Admin Mode most recently set.
+  const pollIntervalMultiplierRef = useRef(pollIntervalMultiplier);
+  pollIntervalMultiplierRef.current = pollIntervalMultiplier;
+  const pausePollingWhenHiddenRef = useRef(pausePollingWhenHidden);
+  pausePollingWhenHiddenRef.current = pausePollingWhenHidden;
 
   /**
    * The zoom a source starts fetching at: null for "always", Infinity for
@@ -513,8 +535,13 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
       // what makes the cadence follow the camera: a source whose table names
       // the band the reader has just left is at most one interval behind, and
       // the band-change effect below closes even that gap on the way in.
+      // Task 31's Performance section: every interval this returns is scaled
+      // by the reader's own multiplier before being handed to setTimeout, so
+      // a reader on a metered connection can slow every source down at once
+      // without hunting through this file's own per-source table.
       const intervalNow = () =>
-        (intervalByBand && intervalByBand[bandFor(zoomRef.current ?? 3)]) || intervalMs;
+        ((intervalByBand && intervalByBand[bandFor(zoomRef.current ?? 3)]) || intervalMs)
+        * (pollIntervalMultiplierRef.current || 1);
       // Two flags, because they answer two different questions. `bootReported`
       // is whether the boot screen has been told anything about this source at
       // all, and a deferral counts. `firstFetchDone` is whether a real network
@@ -561,14 +588,19 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
             return;
           }
         }
-        if (document.hidden && firstFetchDone) {
+        if (document.hidden && firstFetchDone && pausePollingWhenHiddenRef.current) {
           // Nobody's looking at a backgrounded tab -- skip the network
           // round-trip and just re-check next interval. The visibilitychange
           // listener below calls refetchAllNow() the instant the tab comes
           // back, so this never shows stale data, just skips fetching while
           // it can't be seen. The very first load always goes through even
           // if the tab happens to start backgrounded, so the boot screen
-          // can't hang waiting for data that never arrives.
+          // can't hang waiting for data that never arrives. Task 31 turned
+          // this from an unconditional skip into a dial (Performance
+          // section's "pause polling when the tab is hidden"), default on --
+          // switching it off is for a reader who wants a background tab kept
+          // current (a second monitor, an always-on dashboard) at the cost
+          // of the network traffic this guard exists to save.
           timer = setTimeout(tick, intervalNow());
           return;
         }

@@ -166,6 +166,12 @@ export default function App() {
     // rather than the zoom, because the same zoom over the Pacific and over
     // Ukraine are different questions.
     mapBounds: mapApi.mapBounds,
+    // Task 31's Performance section -- see useOsintData.js's own intervalNow
+    // for where the multiplier is applied and its "backgrounded tab" branch
+    // for where pausePollingWhenHidden replaces what used to be an
+    // unconditional skip.
+    pollIntervalMultiplier: settings.performance.pollIntervalMultiplier,
+    pausePollingWhenHidden: settings.performance.pausePollingWhenHidden,
   });
   regionAutoResetRef.current = dataApi.resetRegionToWorld;
 
@@ -743,18 +749,21 @@ export default function App() {
         onClose={mapApi.closeCountryCard}
         borderEdit={borderEditProps}
         onOpenRecord={openRecordDetail}
+        cardSettings={settings.cards}
       />
 
       <WaterInfoCard
         water={mapApi.selectedWater}
         onClose={mapApi.closeWaterCard}
         onOpenRecord={openRecordDetail}
+        cardSettings={settings.cards}
       />
 
       <SubdivisionInfoCard
         subdivision={mapApi.selectedSubdivision}
         onClose={mapApi.closeSubdivisionCard}
         onOpenRecord={openRecordDetail}
+        cardSettings={settings.cards}
       />
 
       <DistrictInfoCard
@@ -762,6 +771,7 @@ export default function App() {
         onClose={mapApi.closeDistrictCard}
         onOpenRecord={openRecordDetail}
         onMonthChange={mapApi.setDistrictMonth}
+        cardSettings={settings.cards}
       />
 
       <EventDetailCard detail={recordDetail} onClose={() => setRecordDetail(null)} />
@@ -796,6 +806,12 @@ export default function App() {
           recordsFor={mapApi.recordsFor}
           staleBorders={staleBorders}
           onClose={toggleAdminMode}
+          eventFilter={eventFilter}
+          onEventFilterChange={onEventFilterChange}
+          vesselFilter={vesselFilter}
+          onVesselFilterChange={onVesselFilterChange}
+          aircraftFilter={aircraftFilter}
+          onAircraftFilterChange={onAircraftFilterChange}
         />
       )}
     </>

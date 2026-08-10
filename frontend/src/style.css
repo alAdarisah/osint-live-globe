@@ -1151,21 +1151,43 @@ html, body {
    so its colour has to live here rather than be baked into the JS style the
    way it once was -- an operator's colour change reaches an already-drawn
    river immediately, not on the next sync. */
+/* Task 31's Water admin section: outline weight and the two fill-opacity
+   dials, threaded through as custom properties the same way the colours
+   just above are -- see hooks/useAppSettings.js for where --water-weight/
+   --water-hover-fill-opacity/--water-selected-fill-opacity are kept in step
+   with settings.water. Defaults match this rule's own shipped numbers (1,
+   0.22, 0.32) so an unconfigured deployment draws exactly as it always has. */
 .water-shape {
   stroke: var(--water-outline);
+  stroke-width: var(--water-weight, 1);
 }
 .water-shape.water-hovered {
   fill: var(--water-fill);
-  fill-opacity: 0.22;
+  fill-opacity: var(--water-hover-fill-opacity, 0.22);
   stroke-opacity: 1;
-  stroke-width: 2;
+  stroke-width: calc(var(--water-weight, 1) + 1);
 }
 .water-shape.water-selected {
   fill: var(--water-selected-fill);
-  fill-opacity: 0.32;
+  fill-opacity: var(--water-selected-fill-opacity, 0.32);
   stroke-opacity: 1;
-  stroke-width: 1.8;
+  stroke-width: calc(var(--water-weight, 1) + 0.8);
 }
+/* Task 31's "which classes to draw" dial. Each --water-hide-<class> is set
+   to "none" only for a class the reader has switched off (see
+   hooks/useAppSettings.js); every other class' property is simply never
+   written, so `display` falls through to its own default (unset, i.e.
+   drawn) rather than needing an explicit "block" for every class this map
+   ships. See map/water.js's waterStyle for the className each ring carries
+   and MARINE_CLASSES for the full list a checkbox exists for. */
+.water-class-ocean { display: var(--water-hide-ocean); }
+.water-class-sea { display: var(--water-hide-sea); }
+.water-class-gulf { display: var(--water-hide-gulf); }
+.water-class-bay { display: var(--water-hide-bay); }
+.water-class-strait { display: var(--water-hide-strait); }
+.water-class-channel { display: var(--water-hide-channel); }
+.water-class-sound { display: var(--water-hide-sound); }
+.water-class-other { display: var(--water-hide-other); }
 
 /* Districts of the one selected state (see the drill-down in
    createMapController.js). Dashed and dimmer than the state lines above them:
@@ -3382,6 +3404,118 @@ html, body {
    six names ("High contrast", "Soft light"'s neighbours) do not fit one line
    at panel width. */
 .admin-preset-row { flex-wrap: wrap; }
+
+/* Task 31's Filters section: one saved vessel/aircraft/event-filter preset
+   per row -- named `.admin-filter-preset-*` rather than reusing
+   `.admin-preset-row` above, which is a different thing (Task 30's tile-tint
+   preset *buttons*, not a list of saved rows). */
+.admin-filter-preset-list {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+}
+.admin-filter-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+.admin-filter-preset-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--ui-text-scale));
+}
+
+/* Task 31's Inference section: the hide/labelled/show tri-state, as a strip
+   of three buttons rather than a <select> -- three named, permanent states
+   read better as three always-visible labels than as one collapsed value a
+   reader has to open to see the other two. */
+.admin-tri-state {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0 8px;
+}
+.admin-tri-state-btn {
+  flex: 1 1 0;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: calc(10.5px * var(--ui-text-scale));
+  cursor: pointer;
+}
+.admin-tri-state-btn:hover { color: var(--text-bright); border-color: var(--accent); }
+.admin-tri-state-btn.selected {
+  color: var(--text-bright);
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.18);
+}
+
+/* Task 31's Inference section: the read-only threshold table under each
+   product's tri-state -- a plain two-column key/value list, deliberately
+   inert-looking (no hover state, no border) since nothing in it is a
+   control. */
+.admin-threshold-table {
+  width: 100%;
+  margin: 4px 0 8px;
+  border-collapse: collapse;
+  font-size: calc(10.5px * var(--ui-text-scale));
+}
+.admin-threshold-table td {
+  padding: 2px 4px;
+  color: var(--text-dim);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+}
+.admin-threshold-table td:first-child { color: var(--text-secondary); }
+.admin-threshold-table td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Task 31's Cards section: one row per section, with its own shown/order/
+   default-open controls -- the same three-dial-per-row shape LayerBlock's
+   body uses for a layer, in table form since a card section has no colour
+   swatch to give the row its own visual weight the way a layer's does. */
+.admin-cards-table {
+  width: 100%;
+  margin: 4px 0;
+  border-collapse: collapse;
+  font-size: calc(10.5px * var(--ui-text-scale));
+}
+.admin-cards-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 400;
+  padding: 2px 4px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.14);
+}
+.admin-cards-table td {
+  padding: 2px 4px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+  vertical-align: middle;
+}
+.admin-cards-order-cell {
+  display: flex;
+  gap: 2px;
+}
+.admin-cards-order-cell button {
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font: inherit;
+  cursor: pointer;
+}
+.admin-cards-order-cell button:hover { color: var(--text-bright); border-color: var(--accent); }
+.admin-cards-order-cell button:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* --- data editor --- */
 .admin-record-list {

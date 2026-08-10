@@ -11,7 +11,7 @@ import PlaceInfoCard from "./PlaceInfoCard";
 const DEFAULT_OPEN = { profile: true, conflict: true };
 const STORAGE_KEY = "osint-subdivision-card-accordion";
 
-export default function SubdivisionInfoCard({ subdivision, onClose, onOpenRecord }) {
+export default function SubdivisionInfoCard({ subdivision, onClose, onOpenRecord, cardSettings }) {
   // Recomputed every render rather than memoised, same reasoning
   // CountryInfoCard/WaterInfoCard give for their own `place`: a cheap object
   // literal whose only dependency is `subdivision` itself.
@@ -27,6 +27,8 @@ export default function SubdivisionInfoCard({ subdivision, onClose, onOpenRecord
       accordionKey={STORAGE_KEY}
       defaultOpen={DEFAULT_OPEN}
       panelId="subdivisionInfoCard"
+      cardType="subdivision"
+      cardSettings={cardSettings}
     />
   );
 }

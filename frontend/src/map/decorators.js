@@ -17,6 +17,7 @@ import {
 } from "./severity";
 import { paletteColor, paletteGlyph, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
 import { footprintRadiusKm } from "./groundTrack";
+import { inferenceHidden } from "./inferenceVisibility";
 
 // --- level of detail -------------------------------------------------------
 //
@@ -1623,6 +1624,10 @@ function fmtDwell(arrivedAt, departedAt) {
  * requires verbatim: AIS never carries cargo, so everything below it is a
  * guess with its working shown, not a fact. */
 function cargoSection(vesselDetail) {
+  // Task 31: the Inference section's "Cargo class & laden/ballast draught"
+  // switch, set to "hide". "labelled"/"show" fall through unchanged -- see
+  // inferenceVisibility.js's own note on why only "hide" is ever checked.
+  if (inferenceHidden("cargoProfile")) return "";
   const head = '<div class="csection-h">Cargo (inferred)</div>' +
     '<p class="meta">AIS does not broadcast cargo. What follows is inferred from vessel class, ' +
     "draught and port calls &mdash; never a manifest.</p>";
@@ -1683,6 +1688,8 @@ function vesselPortCallRow(row, radii) {
  * rather than making a reader spot it as the one row in the table with no
  * departure time. */
 function portCallsSection(vesselDetail) {
+  // Task 31: the Inference section's "Port calls" switch, set to "hide".
+  if (inferenceHidden("portCalls")) return "";
   const head = '<div class="csection-h">Port calls</div>';
   if (!vesselDetail || vesselDetail.status === "loading") {
     return `${head}<p class="meta">Loading&hellip;</p>`;
@@ -3749,6 +3756,8 @@ function flightLegRow(leg) {
  * ago the rest of the card already flags is exactly the overclaim that
  * promise rules out. */
 function routeSection(flightDetail, updated) {
+  // Task 31: the Inference section's "Flight legs" switch, set to "hide".
+  if (inferenceHidden("flightLegs")) return "";
   const head = '<div class="csection-h">Route</div>' +
     '<p class="meta">ADS-B broadcasts no flight plan. Origin and destination below are inferred from ' +
     "where this airframe was seen leaving or returning to the ground (or crossing 1,500 ft near a known " +

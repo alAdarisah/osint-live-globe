@@ -13,9 +13,20 @@
 //            its zoom gate, and the colour of every kind of pin in it. Grouped
 //            by layer rather than split across two sections, because split is
 //            how the same dial ended up offered twice (see LayerDialsSection)
+//   Water    fill opacity, outline weight, which marine classes draw, and
+//            the highlight colours (see WaterSection.jsx)
 //   Tiles    filter + colour tint for the raster basemap/imagery/weather panes
 //            (see BasemapSection.jsx and map/tileTint.js)
+//   Filters  the vessel/aircraft filter bars and the conflict event filter,
+//            plus saved filter presets (see FiltersSection.jsx)
+//   Inference  the three-state switch per inferred product, and the
+//            read-only thresholds behind each one (see InferenceSection.jsx)
 //   Data     the records themselves (see DataEditor.jsx)
+//   Cards    which sections a country/water/state/district card shows, in
+//            what order, and whether each starts open (see CardsSection.jsx)
+//   Performance  WebGL sprite cap, satellite propagation cadence, poll
+//            interval multiplier, pause-when-hidden, trail point budgets
+//            (see PerformanceSection.jsx)
 //   Display  panel opacity, accent, text size, motion, leader lines
 //   Config   export / import / reset, and the panel layout
 //
@@ -31,9 +42,14 @@ import { SyncBadge } from "./sections/shared";
 import IconsSection, { SEARCH_TERMS as ICONS_TERMS } from "./sections/IconsSection";
 import StackSection, { SEARCH_TERMS as STACK_TERMS } from "./sections/StackSection";
 import LayerDialsSection, { SEARCH_TERMS as LAYERS_TERMS } from "./sections/LayerDialsSection";
+import WaterSection, { SEARCH_TERMS as WATER_TERMS } from "./sections/WaterSection";
 import CityZonesSection, { SEARCH_TERMS as ZONES_TERMS } from "./sections/CityZonesSection";
 import BasemapSection, { SEARCH_TERMS as TILES_TERMS } from "./sections/BasemapSection";
+import FiltersSection, { SEARCH_TERMS as FILTERS_TERMS } from "./sections/FiltersSection";
+import InferenceSection, { SEARCH_TERMS as INFERENCE_TERMS } from "./sections/InferenceSection";
 import DataSection, { SEARCH_TERMS as DATA_TERMS } from "./sections/DataSection";
+import CardsSection, { SEARCH_TERMS as CARDS_TERMS } from "./sections/CardsSection";
+import PerformanceSection, { SEARCH_TERMS as PERFORMANCE_TERMS } from "./sections/PerformanceSection";
 import BordersSection, { SEARCH_TERMS as BORDERS_TERMS } from "./sections/BordersSection";
 import InterfaceSection, { SEARCH_TERMS as UI_TERMS } from "./sections/InterfaceSection";
 import ConfigSection, { SEARCH_TERMS as CONFIG_TERMS } from "./sections/ConfigSection";
@@ -50,15 +66,24 @@ const SECTIONS = [
   { Component: IconsSection, terms: ICONS_TERMS },
   { Component: StackSection, terms: STACK_TERMS },
   { Component: LayerDialsSection, terms: LAYERS_TERMS },
+  { Component: WaterSection, terms: WATER_TERMS },
   { Component: CityZonesSection, terms: ZONES_TERMS },
   { Component: BasemapSection, terms: TILES_TERMS },
+  { Component: FiltersSection, terms: FILTERS_TERMS },
+  { Component: InferenceSection, terms: INFERENCE_TERMS },
   { Component: DataSection, terms: DATA_TERMS },
+  { Component: CardsSection, terms: CARDS_TERMS },
+  { Component: PerformanceSection, terms: PERFORMANCE_TERMS },
   { Component: BordersSection, terms: BORDERS_TERMS },
   { Component: InterfaceSection, terms: UI_TERMS },
   { Component: ConfigSection, terms: CONFIG_TERMS },
 ];
 
-export default function AdminPanel({ settings, actions, recordsFor, sync, staleBorders, onClose }) {
+export default function AdminPanel({
+  settings, actions, recordsFor, sync, staleBorders, onClose,
+  eventFilter, onEventFilterChange, vesselFilter, onVesselFilterChange,
+  aircraftFilter, onAircraftFilterChange,
+}) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN, STORAGE_KEY);
   const [query, setQuery] = useState("");
   // Resizable, and off on mobile where the panel is a full-width overlay whose
@@ -104,6 +129,12 @@ export default function AdminPanel({ settings, actions, recordsFor, sync, staleB
               staleBorders={staleBorders}
               isOpen={isOpen}
               onToggle={setOpen}
+              eventFilter={eventFilter}
+              onEventFilterChange={onEventFilterChange}
+              vesselFilter={vesselFilter}
+              onVesselFilterChange={onVesselFilterChange}
+              aircraftFilter={aircraftFilter}
+              onAircraftFilterChange={onAircraftFilterChange}
             />
           )
         )}

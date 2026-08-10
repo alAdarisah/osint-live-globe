@@ -16,8 +16,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import (
-    admin_config, cachestore, config, escalation, history, infrastructure, ingest, metrics, mirror,
-    refine, regions, replay, storage,
+    admin_config, cachestore, config, escalation, history, infrastructure, ingest, inference_config, metrics,
+    mirror, refine, regions, replay, storage,
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
@@ -235,6 +235,51 @@ async def metrics_endpoint():
     return Response(content=metrics.render(), media_type=metrics.CONTENT_TYPE)
 
 
+# The refine jobs whose output is a table rather than a registry-mirrored
+# layer -- every Job in backend/refine/__init__.py with publishes=() -- so
+# unlike every polled source, registry.health() has never had anything to say
+# about them. Task 31 gives the four Task 15/16/19/23 built (port calls,
+# vessel profiles, lane density, flight legs) a row here, by name, matching
+# the brief's own list; escalation/airfield_activity/naval_presence have the
+# identical gap and are left for whichever task actually asks for them.
+_DERIVED_JOB_HEALTH_NAMES = {"port_calls", "vessel_profiles", "lane_density", "flight_legs"}
+
+
+async def _derived_job_health() -> dict:
+    """Health rows for the derived-job names in _DERIVED_JOB_HEALTH_NAMES,
+    shaped exactly like registry.health()'s own rows so SourceStatusSection's
+    generic renderer (frontend/src/components/controlPanel/SourceStatusSection.jsx,
+    which keys off "item_count" in info) picks them up without any change of
+    its own.
+
+    Read the same way mirror.py reads every *mirrored* source's verdict --
+    storage.source_health_latest() plus mirror.health_verdict() -- so a
+    stalled refine job goes red exactly like a stalled ingest source does,
+    rather than reading as a layer nobody ever wired a light up for.
+    `expected_every` comes from the job table itself (refine.all_jobs()),
+    not restated, so this cannot drift from the interval the job actually
+    runs on.
+    """
+    now = time.time()
+    jobs = {job.health_name: job for job in refine.all_jobs() if job.health_name in _DERIVED_JOB_HEALTH_NAMES}
+    out = {}
+    for name, job in jobs.items():
+        newest, newest_ok = await storage.source_health_latest(name)
+        last_success, last_error = mirror.health_verdict(
+            newest, newest_ok, job.expected_every(), now, "the refine service"
+        )
+        out[name] = {
+            "name": name,
+            "key_configured": True,
+            "item_count": (newest_ok or {}).get("item_count") or 0,
+            "version": 0,
+            "last_success": last_success,
+            "seconds_since_success": round(now - last_success) if last_success else None,
+            "last_error": last_error,
+        }
+    return out
+
+
 @app.get("/api/health")
 async def health():
     """Per-source status, plus whatever the cache worker is currently reporting.
@@ -245,7 +290,26 @@ async def health():
     stopped producing. Read from the alerts table rather than recomputed here,
     so the API and the worker cannot disagree about what is wrong.
     """
-    return {**registry.health(), "alerts": await storage.active_alerts()}
+    return {
+        **registry.health(),
+        **(await _derived_job_health()),
+        "alerts": await storage.active_alerts(),
+    }
+
+
+@app.get("/api/inference-config")
+async def inference_config_get():
+    """The thresholds behind this map's inferred products, read-only.
+
+    See backend/inference_config.py's module docstring for why read-only: the
+    refine jobs that actually apply these numbers are a separate long-running
+    process with no channel for Admin Mode's frontend-only settings PUT to
+    reach it. Static for the process lifetime (every value is a module-level
+    constant, read once at import), so this is cached the same way
+    /api/regions is -- no version/ETag machinery, just tell the browser to
+    hold on to it.
+    """
+    return JSONResponse(inference_config.describe(), headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.get("/api/admin-config")

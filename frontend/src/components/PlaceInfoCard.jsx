@@ -27,7 +27,7 @@
 import { useAccordion } from "../hooks/useAccordion";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import { computeAnchorLayout } from "./placeInfoCardLayout";
-import { groupSections } from "./placeInfoCardGrouping";
+import { groupSections, applyCardSettings } from "./placeInfoCardGrouping";
 
 // The accordion-id namespace a super-fold's own open/closed state is stored
 // under (see useAccordion.js) -- exported so a caller supplying `groups` can
@@ -126,6 +126,14 @@ function recordClickHandler(onOpenRecord) {
  *   same rule again: without it this component renders every section flat,
  *   exactly as it always has -- see groupSections in placeInfoCardGrouping.js
  *   for what happens to a section id no group claims.
+ * @param {string} [props.cardType]  which entry of settings/cardSections.js's
+ *   CARD_SECTIONS this is ("country"/"water"/"subdivision"/"district") --
+ *   paired with `cardSettings` below, see applyCardSettings in
+ *   placeInfoCardGrouping.js. Optional, same "no-op when absent" rule: a
+ *   caller supplying neither renders exactly as it always has.
+ * @param {object} [props.cardSettings]  settings.cards (Task 31's Cards
+ *   admin section) -- which sections this card type hides, their order, and
+ *   a per-section defaultOpen override.
  */
 export default function PlaceInfoCard({
   place,
@@ -138,8 +146,20 @@ export default function PlaceInfoCard({
   panelId = "countryInfoCard",
   summary,
   groups,
+  cardType,
+  cardSettings,
 }) {
-  const { isOpen, setOpen } = useAccordion(defaultOpen, accordionKey);
+  // Task 31: a stored hide/reorder/default-fold choice, applied to this
+  // card's real (already data-filtered) sections before anything else below
+  // reads `place.sections` -- groupSections, the fold list, and the
+  // accordion's own defaultOpen all have to agree on the same, already-
+  // adjusted list, which is why this runs once here rather than being
+  // threaded into each of those three separately.
+  const { sections: adjustedSections, defaultOpen: cardDefaultOpen } = place
+    ? applyCardSettings(place.sections, cardType, cardSettings)
+    : { sections: [], defaultOpen: {} };
+  const effectiveDefaultOpen = { ...defaultOpen, ...cardDefaultOpen };
+  const { isOpen, setOpen } = useAccordion(effectiveDefaultOpen, accordionKey);
   const { panelRef, style: dragStyle, moved, handleProps } = useDraggablePanel(panelId);
 
   if (!place) return null;
@@ -193,7 +213,7 @@ export default function PlaceInfoCard({
         )}
 
         {groups && groups.length > 0
-          ? groupSections(place.sections, groups).map((item) => (
+          ? groupSections(adjustedSections, groups).map((item) => (
               item.kind === "group" ? (
                 // Namespaced under GROUP_ACCORDION_PREFIX so this can never
                 // collide with a section id in the same accordionKey's stored
@@ -213,7 +233,7 @@ export default function PlaceInfoCard({
                 renderSectionFold(item.section, isOpen, setOpen)
               )
             ))
-          : place.sections.map((section) => renderSectionFold(section, isOpen, setOpen))}
+          : adjustedSections.map((section) => renderSectionFold(section, isOpen, setOpen))}
       </div>
 
       {footer}

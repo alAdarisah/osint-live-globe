@@ -17,7 +17,7 @@ import PlaceInfoCard from "./PlaceInfoCard";
 const DEFAULT_OPEN = { profile: true, conflict: true };
 const STORAGE_KEY = "osint-district-card-accordion";
 
-export default function DistrictInfoCard({ district, onClose, onOpenRecord, onMonthChange }) {
+export default function DistrictInfoCard({ district, onClose, onOpenRecord, onMonthChange, cardSettings }) {
   const place = district
     ? { id: district.pcode, title: district.name, subtitle: null, point: district.point, sections: district.sections }
     : null;
@@ -50,6 +50,8 @@ export default function DistrictInfoCard({ district, onClose, onOpenRecord, onMo
       defaultOpen={DEFAULT_OPEN}
       headerExtra={headerExtra}
       panelId="districtInfoCard"
+      cardType="district"
+      cardSettings={cardSettings}
     />
   );
 }

@@ -193,7 +193,12 @@ test("mergeTileDial", async (t) => {
 
 test("defaults.js wires the migration in, not just the shape", async (t) => {
   await t.test("the settings version was bumped for this key", () => {
-    assert.equal(SETTINGS_VERSION, 2);
+    // >= rather than ===: Task 30 bumped this to 2 for ui.tiles, and a later
+    // task (31, water/filters/inference/cards/performance) bumped it again
+    // for its own shape change -- see settings/defaults.js's own
+    // SETTINGS_VERSION history. This test's job is only to confirm 2's own
+    // bump happened and was never reverted, not to pin the current value.
+    assert.ok(SETTINGS_VERSION >= 2);
   });
 
   await t.test("defaultSettings() ships every dial inert", () => {

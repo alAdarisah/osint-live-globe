@@ -13,7 +13,7 @@ import PlaceInfoCard from "./PlaceInfoCard";
 const DEFAULT_OPEN = { profile: true };
 const STORAGE_KEY = "osint-water-card-accordion";
 
-export default function WaterInfoCard({ water, onClose, onOpenRecord }) {
+export default function WaterInfoCard({ water, onClose, onOpenRecord, cardSettings }) {
   // Recomputed every render rather than memoised, same reasoning
   // CountryInfoCard gives for its own `place`: a cheap object literal whose
   // only dependency is `water` itself.
@@ -29,6 +29,8 @@ export default function WaterInfoCard({ water, onClose, onOpenRecord }) {
       accordionKey={STORAGE_KEY}
       defaultOpen={DEFAULT_OPEN}
       panelId="waterInfoCard"
+      cardType="water"
+      cardSettings={cardSettings}
     />
   );
 }

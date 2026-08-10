@@ -1,13 +1,15 @@
 // What more than one admin section needs, or will as this panel grows.
 //
-// Split out of AdminPanel.jsx alongside the section files themselves: a later
-// task in this plan adds five more sections (Water, Filters, Inference, Cards,
-// Performance) and a dozen new layer rows, and most of that growth touches
-// these exact tables -- a new layer gets an entry in STACK_LABEL if its stack
-// key differs from its settings key, and possibly in ADOPTED_BY or
-// EXTRA_TOKENS_UNDER if it recolours or rides another layer's pin types.
-// Keeping them here, rather than inline in whichever section happens to read
-// them first, is what lets that task extend a table instead of hunting for it.
+// Split out of AdminPanel.jsx alongside the section files themselves. Task 31
+// went on to add five more sections (Water, Filters, Inference, Cards,
+// Performance, see sections/WaterSection.jsx and its four siblings) on top of
+// every layer row the tasks between Task 3 and Task 30 registered -- most of
+// that growth touched these exact tables, since a new layer gets an entry in
+// STACK_LABEL if its stack key differs from its settings key, and possibly in
+// ADOPTED_BY or EXTRA_TOKENS_UNDER if it recolours or rides another layer's
+// pin types. Keeping them here, rather than inline in whichever section
+// happens to read them first, is what let that growth extend a table instead
+// of hunting for it -- and is why a future layer should keep doing the same.
 import { PALETTE_GROUPS, DEFAULT_COLORS, TOKEN_LAYER, tokenHasSize } from "../../../map/iconTheme";
 import { SETTINGS_LAYERS } from "../../../settings/defaults";
 import { IconField } from "../fields";
