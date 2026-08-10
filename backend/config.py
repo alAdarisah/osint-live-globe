@@ -14,6 +14,11 @@ ACLED_EMAIL = os.getenv("ACLED_EMAIL", "").strip()
 ACLED_PASSWORD = os.getenv("ACLED_PASSWORD", "").strip()
 OWM_API_KEY = os.getenv("OWM_API_KEY", "").strip()
 GFW_API_TOKEN = os.getenv("GFW_API_TOKEN", "").strip()
+# Marinesia (see backend/sources/marinesia.py) -- the ships layer's second
+# supplier, after aisstream went dark for days in August 2026 and there was
+# nothing to fall back to. Their free "Trial" key is self-service and allows
+# 5 requests a minute, which the sweep below paces itself under.
+MARINESIA_API_KEY = os.getenv("MARINESIA_API_KEY", "").strip()
 
 # Fintraffic / Digitraffic (Finland) collectors -- see backend/sources/
 # digitraffic_*.py. The API is keyless but asks every caller to name itself in a
@@ -108,6 +113,10 @@ ADSB_STALE_AFTER = int(os.getenv("ADSB_STALE_AFTER", "1800"))
 # back to ENTITY_STALE_AFTER_DEFAULT.
 ENTITY_STALE_AFTER = {
     "ais": AIS_STALE_AFTER,
+    # Polled every 5 minutes rather than streamed, so a hull legitimately goes
+    # several sweeps without a fresh fix. Wider than "ais" for that reason, and
+    # still short enough that nothing on the layer is an hour old.
+    "marinesia": int(os.getenv("MARINESIA_STALE_AFTER", "3600")),
     "adsb": ADSB_STALE_AFTER,
     "satellites": 3600,
     "gdelt": 86400,
@@ -411,6 +420,16 @@ WATCHED_WATERS = _parse_bboxes(os.getenv("WATCHED_WATERS", _DEFAULT_WATCHED_WATE
 # dead feed can be asked. Watch /api/health's item_count on the first day back.
 _DEFAULT_AIS_BBOXES = "-90,-180,90,180"
 AIS_BBOXES = _parse_bboxes(os.getenv("AIS_BBOXES", _DEFAULT_AIS_BBOXES))
+
+# Which boxes the Marinesia sweep asks for. The watched theatres rather than
+# AIS_BBOXES' whole planet, and this one is not a free choice: that API is a
+# request per box against a 5-per-minute budget, so the box list is the request
+# count. Eight is a sweep of roughly 100 seconds; the planet as one box is
+# untested and their response is undocumented in size.
+MARINESIA_BBOXES = _parse_bboxes(os.getenv("MARINESIA_BBOXES", "")) or WATCHED_WATERS
+# Minutes, not seconds: a sweep already takes ~100s of paced requests, and the
+# free tier's budget is the binding constraint rather than the data's freshness.
+MARINESIA_POLL_INTERVAL = int(os.getenv("MARINESIA_POLL_INTERVAL", "300"))
 
 # airplanes.live has no world/bbox endpoint, only point+radius (max 250nm) --
 # these regional centers stand in for global coverage. As "lat,lon,radius_nm"
