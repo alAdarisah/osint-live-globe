@@ -9,6 +9,7 @@ import {
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
   RAILWAY_OSM_STYLE, RAILWAY_LIVE_STYLE,
   WATER_STYLE, SHIPPING_LANE_STYLE, LANE_DENSITY_STYLE, SAT_ELEMENT_LAYERS,
+  POWER_PLANT_FUEL_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
@@ -126,7 +127,8 @@ const GROUP_LAYERS = {
   // it is a place layer, and the aircraft that need it already get their
   // nearest field named inside their own popup.
   ground: [
-    "infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "railLive", "shippingLanes",
+    "infra", "osmInfra", "powerPlants", "airports", "ports", "dams", "deflock",
+    "railways", "railLive", "powerLines", "shippingLanes",
     "water", "cables", "firms", "jamming", "laneDensity",
   ],
   // Its own group rather than a ninth row under traffic: a regulator's ruling
@@ -163,6 +165,9 @@ const LAYER_LABEL = {
   // Task 27: railwayPoints carries the same LOCAL cap osmInfra's own points
   // did before the move (see LAYER_MANIFEST), so it needs a name here too.
   railwayPoints: "Railway points (OSM)",
+  // Task 28: powerPlants carries the same LOCAL cap osmInfra's own points do
+  // (see LAYER_MANIFEST), so it needs a name here too.
+  powerPlants: "Power plants (OSM)",
 };
 
 // Task 27: railwayPoints has no checkbox of its own -- it mirrors "railways"'
@@ -869,7 +874,10 @@ export default function LayersSection({
             wish={layerWish?.osmInfra}
             onToggle={onToggleLayer}
           />
-          <LayerIcon svg={SVG.powerPlant} color={OSM_INFRA_STYLE.power_plant.color} token={OSM_INFRA_STYLE.power_plant.token} />
+          {/* Task 28: power plants moved to their own layer below, so this
+              row's icon no longer borrows their glyph -- military areas are
+              this layer's single largest remaining class. */}
+          <LayerIcon svg={OSM_INFRA_STYLE.military_area.svg} color={OSM_INFRA_STYLE.military_area.color} token={OSM_INFRA_STYLE.military_area.token} />
           {" "}Infrastructure (OpenStreetMap)
           <span className="count">{counts.osmInfra} ({counts.osmInfraTotal})</span>
         </label>
@@ -880,14 +888,22 @@ export default function LayersSection({
             <span className="count">{counts.osmMilitary} ({counts.osmMilitaryTotal})</span>
           </div>
           <div className="subticker-row">
-            <LayerIcon svg={OSM_INFRA_STYLE.power_plant.svg} color={OSM_INFRA_STYLE.power_plant.color} token={OSM_INFRA_STYLE.power_plant.token} />
-            Power plants
-            <span className="count">{counts.osmPower} ({counts.osmPowerTotal})</span>
+            <LayerIcon svg={OSM_INFRA_STYLE.power_substation.svg} color={OSM_INFRA_STYLE.power_substation.color} token={OSM_INFRA_STYLE.power_substation.token} />
+            Substations
+            <span className="count">{counts.osmSubstation} ({counts.osmSubstationTotal})</span>
           </div>
           <div className="subticker-row">
             <LayerIcon svg={OSM_INFRA_STYLE.border_control.svg} color={OSM_INFRA_STYLE.border_control.color} token={OSM_INFRA_STYLE.border_control.token} />
             Border crossings
             <span className="count">{counts.osmBorder} ({counts.osmBorderTotal})</span>
+          </div>
+          {/* Task 28: refineries/storage tanks/wellheads, one bucket -- see
+              buildEnergyInfrastructure in popups.js for where they are
+              presented beside the curated refineries/terminals count. */}
+          <div className="subticker-row">
+            <LayerIcon svg={OSM_INFRA_STYLE.refinery.svg} color={OSM_INFRA_STYLE.refinery.color} token={OSM_INFRA_STYLE.refinery.token} />
+            Refineries, storage &amp; wells
+            <span className="count">{counts.osmEnergyOther} ({counts.osmEnergyOtherTotal})</span>
           </div>
         </div>
         <div id="osmInfraZoomNote" className={`sublegend${zoomNotes.osmInfra ? " visible" : ""}`}>
@@ -918,6 +934,62 @@ export default function LayersSection({
           <div className="sublegend">
             <b>Railway stations, halts, yards and border crossings moved to the Railways layer below</b>,
             next to the linework they sit on, rather than staying scattered in this one.
+          </div>
+          <div className="sublegend">
+            <b>Power plants moved to their own layer below</b>, glyphed and sized by fuel and
+            capacity where OpenStreetMap tags them, rather than sharing one shared power-plant pin here.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="powerPlants">
+          <LayerCheck
+            layerKey="powerPlants"
+            on={layerVisibility.powerPlants}
+            wish={layerWish?.powerPlants}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SVG.powerPlant} color={POWER_PLANT_FUEL_STYLE.other.color} token={POWER_PLANT_FUEL_STYLE.other.token} />
+          {" "}Power plants (OpenStreetMap)
+          <span className="count">{counts.powerPlants} ({counts.powerPlantsTotal})</span>
+        </label>
+        <div id="powerPlantsZoomNote" className={`sublegend${zoomNotes.powerPlants ? " visible" : ""}`}>
+          Zoom in to show power plants
+        </div>
+        <LayerDetails id="det-powerPlants" open={isOpen("det-powerPlants")} onToggle={setOpen}>
+          <div className="sublegend">
+            Split out of the OpenStreetMap infrastructure sweep above, same crowd-sourced provenance and
+            the same daily, eleven-theatre-only sweep. Glyph and colour follow the plant's tagged fuel
+            (nuclear/coal/gas/hydro/wind/solar/biomass, or &ldquo;other&rdquo; where OSM tags none); size
+            follows its tagged output where OpenStreetMap has one &mdash; most plants do not, and the
+            country card&apos;s Energy infrastructure section states what fraction does before summing
+            anything.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="powerLines">
+          <LayerCheck
+            layerKey="powerLines"
+            on={layerVisibility.powerLines}
+            wish={layerWish?.powerLines}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SVG.railway} color="#e8b64f" token="grid.line" />
+          {" "}Transmission lines (OpenStreetMap)
+          <span className="count">{counts.powerLines} ({counts.powerLinesTotal})</span>
+        </label>
+        <div
+          id="powerLinesCappedNote"
+          className={`sublegend${(zoomNotes.powerLinesTruncated || []).length ? " visible" : ""}`}
+        >
+          OSM power-line coverage hit its per-sweep limit in: {(zoomNotes.powerLinesTruncated || []).join(", ")}
+          {" "}&mdash; showing a partial grid there, not the whole thing OSM has.
+        </div>
+        <LayerDetails id="det-powerLines" open={isOpen("det-powerLines")} onToggle={setOpen}>
+          <div className="sublegend">
+            Transmission-line geometry from the same daily OpenStreetMap sweep, swept only across this
+            map&apos;s eleven conflict theatres, not worldwide &mdash; pan away from them and this layer
+            has nothing to draw. Voltage, cable count and operator are shown in each line&apos;s popup
+            where OSM tags them.
           </div>
         </LayerDetails>
 

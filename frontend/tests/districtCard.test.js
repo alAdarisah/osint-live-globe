@@ -112,9 +112,13 @@ test("subdivisionCardSections -- polygon clipping against a hand-built state", a
     const raw = {
       ...emptyRaw(),
       osmInfra: [
+        { lat: 3, lon: 3, kind: "border_control" },
+      ],
+      // Task 28: power plants live in their own array now, split off
+      // osmInfra the same way railwayPoints already was (Task 27).
+      powerPlants: [
         { lat: 1, lon: 1, kind: "power_plant", output_mw: 50 },
         { lat: 90, lon: 90, kind: "power_plant", output_mw: 999 }, // outside
-        { lat: 3, lon: 3, kind: "border_control" },
       ],
       // Task 27: railway_* kinds live in their own array now.
       railwayPoints: [{ lat: 2, lon: 2, kind: "railway_station" }],

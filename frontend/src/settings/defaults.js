@@ -63,6 +63,10 @@ export const SETTINGS_LAYERS = [
   { key: "cables", label: "Submarine cables" },
   { key: "launches", label: "Orbital launches" },
   { key: "osmInfra", label: "Infrastructure (OpenStreetMap)" },
+  // Task 28: its own row -- power plants have an independent toggle (unlike
+  // railwayPoints, which mirrors "railways"), so they need their own
+  // zoom-gate/colour dials the same as any other layer.
+  { key: "powerPlants", label: "Power plants (OpenStreetMap)" },
   { key: "gfwGaps", label: "AIS disabling (GFW)" },
   { key: "gfwDetections", label: "Satellite vessel detections (GFW)" },
   { key: "czib", label: "Airspace warnings (EASA CZIB)" },
@@ -76,6 +80,7 @@ export const SETTINGS_LAYERS = [
   // has no independent toggle, but railLive does have one and needs its own
   // zoom-gate/colour dials the same as any other layer.
   { key: "railLive", label: "Live trains (Digitraffic, Finland)" },
+  { key: "powerLines", label: "Transmission lines (OpenStreetMap)" },
   { key: "water", label: "Water bodies (Natural Earth)" },
   { key: "firms", label: "Fires / thermal anomalies (FIRMS)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },

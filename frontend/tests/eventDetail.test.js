@@ -167,8 +167,10 @@ test("formatMovedFrom: no original coordinate means the point was never moved", 
 
 const RAW = {
   dams: [{ name: "Near Dam", lat: 50.46, lon: 30.53 }, { name: "Far Dam", lat: 10, lon: 10 }],
+  // Task 28: power plants live in their own array now, split off osmInfra
+  // the same way railwayPoints already was (Task 27).
+  powerPlants: [{ name: "Kyiv Power Plant", kind: "power_plant", lat: 50.44, lon: 30.51 }],
   osmInfra: [
-    { name: "Kyiv Power Plant", kind: "power_plant", lat: 50.44, lon: 30.51 },
     { name: "Some Airfield (OSM)", kind: "military_airfield", lat: 50.45, lon: 30.52 },
   ],
   cableLandings: [{ name: "A Landing", lat: 60, lon: 60 }],
@@ -189,7 +191,7 @@ test("nearbyInfrastructure: only sites inside the radius are returned, nearest f
   }
 });
 
-test("nearbyInfrastructure: only power_plant osmInfra rows count, not every kind", () => {
+test("nearbyInfrastructure: military_airfield (an osmInfra kind) is not one of the Nearby categories", () => {
   const items = nearbyInfrastructure(50.45, 30.52, 5000, RAW);
   assert.ok(!items.some((i) => i.name === "Some Airfield (OSM)"),
     "military_airfield is an osmInfra kind, not the airfield category, and must not leak in");

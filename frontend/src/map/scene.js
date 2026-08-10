@@ -367,6 +367,36 @@ export const LAYER_MANIFEST = {
     collapse: { mode: "proximity", maxZoom: 11 },
     disposition: MANUAL,
   },
+  // Task 28: power plants, pulled out of the generic OSM infrastructure layer
+  // (see osmInfra below) and given their own checkbox -- unlike railwayPoints
+  // above, which mirrors "railways"' visibility, this has no natural parent
+  // toggle to ride: nothing else on the map already carries a "the whole
+  // power picture" checkbox for it to join. Gate and cap copied from
+  // osmInfra's own entry unchanged (same reasoning railwayPoints' own note
+  // gives): this task did not ask to redraw when a crowd-sourced power plant
+  // point is worth showing, only to give it a home of its own to be shown in.
+  powerPlants: {
+    draw: { band: "LOCAL", z: 9 },
+    fetch: "LOCAL",
+    cap: { LOCAL: 800 },
+    collapse: { mode: "proximity", maxZoom: 11 },
+    disposition: CORROBORATING,
+  },
+  // Task 28: transmission-line geometry (backend/sources/power_lines.py,
+  // itself a re-serve of osm_infra.py's own Overpass sweep) -- "render
+  // through the same polyline path as railways" per the brief, and that is
+  // exactly the treatment this gets: a whole document, fetched once at boot
+  // (see useOsintData.js) rather than polled, drawn ungated once the layer is
+  // switched on since a line is only legible whole, MANUAL and off by
+  // default for the same reason railways is -- this is basemap-adjacent
+  // context a reader opts into, not something the resolver should assert.
+  // Swept only inside this map's eleven conflict theatres, same as every
+  // other osm_infra.py product; nothing here claims otherwise.
+  powerLines: {
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
   // Task 27: Digitraffic's live Finnish train positions
   // (backend/sources/digitraffic_rail.py, GET /api/rail-live) -- a genuine
   // sub-layer of the same rail group rather than a sub-ticker, because a

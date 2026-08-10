@@ -259,6 +259,27 @@ export const SVG = {
     '<path fill="currentColor" d="M12.9 8.4 9 14.2h2.4L10.9 19l4.1-6.2h-2.6Z"/>',
   borderCrossing: '<path fill="none" stroke="currentColor" stroke-width="1.8" d="M6 3.4v17.2M18 3.4v17.2"/>' +
     '<path fill="currentColor" d="M6 8.2h12v3.2H6Z"/>',
+  // ---- power plant fuel glyphs (Task 28, backend/sources/osm_infra.py's
+  // own fuel normalisation) ----
+  //
+  // Nuclear reuses SVG.nuclear and hydro reuses SVG.dam below -- both are
+  // already exactly the right claim ("a reactor", "a barrier holding back
+  // water") for a plant of that fuel, and wind reuses SVG.wind, drawn
+  // originally for the weather-arrow legend but an unclaimed, already-correct
+  // silhouette for a turbine. Solar and the combustion family (coal/gas/
+  // biomass) get one new glyph each below -- three fuels sharing one flame
+  // glyph, distinguished by colour rather than by shape, the same economy the
+  // four railway node kinds already share one glyph under (see OSM_INFRA_STYLE
+  // in decorators.js).
+  solarPanel: '<circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<g stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
+    '<line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/>' +
+    '<line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/>' +
+    '<line x1="4.9" y1="4.9" x2="7" y2="7"/><line x1="17" y1="17" x2="19.1" y2="19.1"/>' +
+    '<line x1="4.9" y1="19.1" x2="7" y2="17"/><line x1="17" y1="7" x2="19.1" y2="4.9"/></g>',
+  flame: '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" ' +
+    'd="M12 2.6c-2.6 3.6-4.6 5.6-4.6 9a4.6 4.6 0 0 0 9.2 0c0-1.8-.9-2.8-1.8-3.7 ' +
+    'c0 1.8-.9 2.7-1.8 2.7c-.9 0-1.4-.9-1.4-1.8c0-1.8 1.4-3.2.4-6.2Z"/>',
   // ---- orbital launches (backend/sources/launches.py) ----
   //
   // A rocket on the pad rather than in flight: the pin marks a place on the
@@ -739,6 +760,25 @@ export const GLYPH_CHOICES = Object.freeze({
   "infra.fab": ["fab", "powerPlant", "refinery", "nuclear"],
   "infra.pipeline": ["pipeline", "refinery", "lng", "powerPlant"],
   "osm.power": ["powerPlant", "nuclear", "refinery", "fab", "dam"],
+  // Task 28: the four new osm_infra.py point classes riding the generic OSM
+  // infrastructure layer -- same crowd-sourced family as osm.power above.
+  "osm.power_substation": ["powerPlant", "borderCrossing", "recordMark"],
+  "osm.refinery": ["refinery", "powerPlant", "fab"],
+  "osm.storage_tank": ["desalination", "lng", "powerPlant"],
+  "osm.oil_well": ["refinery", "powerPlant", "recordMark"],
+  // Task 28: power plants, glyph-by-fuel (see osm_infra.py's own
+  // _fuel_category). nuclear/hydro/wind reuse an already-correct existing
+  // glyph (see SVG.nuclear/SVG.dam/SVG.wind's own notes); coal/gas/biomass
+  // share the new flame glyph, distinguished by colour, the same economy the
+  // railway node kinds already share one glyph under.
+  "powerPlant.nuclear": ["nuclear", "powerPlant", "radarBase"],
+  "powerPlant.coal": ["flame", "powerPlant", "refinery"],
+  "powerPlant.gas": ["flame", "powerPlant", "refinery"],
+  "powerPlant.hydro": ["dam", "powerPlant", "raindrop"],
+  "powerPlant.wind": ["wind", "powerPlant"],
+  "powerPlant.solar": ["solarPanel", "powerPlant"],
+  "powerPlant.biomass": ["flame", "powerPlant", "raindrop"],
+  "powerPlant.other": ["powerPlant", "recordMark"],
   // Had exactly one entry, so the picker was suppressed entirely (see
   // GlyphPicker, which needs two shapes before it draws anything) -- a pin type
   // with a shape control that never appeared.

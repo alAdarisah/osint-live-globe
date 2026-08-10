@@ -106,8 +106,9 @@ export function formatMovedFrom(record) {
 }
 
 // Which raw feed backs each Nearby category, and the human label for it.
-// power_plant is a *kind* inside raw.osmInfra rather than its own feed --
-// same field buildEnergyInfrastructure (map/popups.js) already filters on.
+// Task 28: power_plant used to be a *kind* inside raw.osmInfra; it is now
+// its own feed, raw.powerPlants (see createMapController.js's applyData
+// split, the same move Task 27 made for the four railway kinds).
 const NEARBY_LABEL = {
   dam: "Dam / reservoir",
   power_plant: "Power plant",
@@ -132,7 +133,7 @@ export function nearbyInfrastructure(lat, lon, radiusMetres, raw = {}) {
   const radiusKm = radiusMetres / 1000;
   const categories = [
     ["dam", raw.dams],
-    ["power_plant", (raw.osmInfra || []).filter((d) => d && d.kind === "power_plant")],
+    ["power_plant", raw.powerPlants],
     ["cable_landing", raw.cableLandings],
     ["airfield", raw.airports],
     ["port", raw.ports],

@@ -343,6 +343,12 @@ export function createEntityClusterGroups(map) {
     // OpenStreetMap-derived infrastructure, off by default and kept strictly
     // apart from the curated infra layer (see backend/sources/osm_infra.py).
     osmInfra: L.layerGroup(),
+    // Task 28: power plants, split out of osmInfra above at render time (same
+    // mechanism Task 27 used for railwayPoints -- see createMapController.js's
+    // applyData) and given a checkbox of their own rather than mirroring
+    // another layer's, since nothing else on the map already carries a "the
+    // whole power picture" toggle for them to ride.
+    powerPlants: L.layerGroup(),
     // One pin per country IODA currently reports offline, at that country's
     // representative interior point. Added here, i.e. on by default, because
     // the country tint it replaced was unconditional too -- a national blackout
@@ -554,6 +560,15 @@ export function createCablesGroup() {
 // treatment as the cable routes above. Not added to the map here: off by default
 // (see its MANUAL disposition in map/scene.js).
 export function createRailwaysGroup() {
+  return L.layerGroup();
+}
+
+// Task 28: transmission-line geometry (backend/sources/power_lines.py) --
+// "render through the same polyline path as railways" per the brief, and
+// this factory is that path's own precedent, copied rather than reinvented.
+// Not added to the map here: off by default (see its MANUAL disposition in
+// map/scene.js).
+export function createPowerLinesGroup() {
   return L.layerGroup();
 }
 

@@ -42,7 +42,7 @@ function emptyRaw(overrides = {}) {
     events: [], gdelt: [], officials: [], conflictStats: {}, escalation: [],
     adsb: [], ais: [], jamming: [], firms: [], infra: [], conflictDistricts: [],
     humanitarian: {}, outages: {}, energyFlows: {}, foodTrade: {},
-    osmInfra: [], dams: [], airports: [], ports: [], cableLandings: [],
+    osmInfra: [], powerPlants: [], dams: [], airports: [], ports: [], cableLandings: [],
     fetchCoverage: {},
     ...overrides,
   };
@@ -130,8 +130,10 @@ test("bucketAirportsByType / bucketPortsBySize -- size-class bucketing", async (
 
 test("countryCardSections -- energy infrastructure: the mandatory OSM tagged-fraction caveat", async (t) => {
   await t.test("plants with a mix of tagged/untagged state the fraction and never call the sum a national total", () => {
+    // Task 28: power plants moved off raw.osmInfra onto their own
+    // raw.powerPlants array (see createMapController.js's applyData split).
     const raw = emptyRaw({
-      osmInfra: [
+      powerPlants: [
         { id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", output_mw: 800, source_tag: "gas" },
         { id: "osm:way/2", kind: "power_plant", lat: 5, lon: 5, name: "Plant B", source_tag: "hydro" },
         { id: "osm:way/3", kind: "power_plant", lat: 5, lon: 5, name: "Plant C", source_tag: "hydro" },
@@ -150,7 +152,7 @@ test("countryCardSections -- energy infrastructure: the mandatory OSM tagged-fra
 
   await t.test("every plant in view untagged: no capacity figure is printed at all", () => {
     const raw = emptyRaw({
-      osmInfra: [
+      powerPlants: [
         { id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", source_tag: "gas" },
         { id: "osm:way/2", kind: "power_plant", lat: 5, lon: 5, name: "Plant B", source_tag: "solar" },
       ],
@@ -178,7 +180,7 @@ test("countryCardSections -- energy infrastructure: the mandatory OSM tagged-fra
           },
         },
       },
-      osmInfra: [{ id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", output_mw: 10 }],
+      powerPlants: [{ id: "osm:way/1", kind: "power_plant", lat: 5, lon: 5, name: "Plant A", output_mw: 10 }],
     });
     const { sections } = countryCardSections(baseProps, raw, bounds);
     const power = sections.find((s) => s.id === "power");
@@ -191,6 +193,85 @@ test("countryCardSections -- energy infrastructure: the mandatory OSM tagged-fra
     assert.match(power.html, /Net position, 2 intervals \(GW, measured\)/, "the net_series sparkline still renders");
     assert.match(power.html, /Coverage reported: from 2026-08-06T00:00:00\+00:00 at 15-minute intervals/, "the coverage line still renders");
     assert.doesNotMatch(power.html, /Plant A|power plants \(OSM\)/, "the new infrastructure content stays out of 'power'");
+  });
+});
+
+test("countryCardSections -- energy infrastructure: Task 28 additions (substations, refineries/terminals/storage)", async (t) => {
+  await t.test("substations are counted from the generic OSM infrastructure layer", () => {
+    const raw = emptyRaw({
+      osmInfra: [
+        { id: "osm:way/1", kind: "power_substation", lat: 5, lon: 5, name: "Sub A" },
+        // Outside the bbox: must not be counted.
+        { id: "osm:way/2", kind: "power_substation", lat: 50, lon: 50, name: "Sub B" },
+      ],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const energy = sections.find((s) => s.id === "energy");
+    assert.ok(energy, "a substation alone is enough to earn the section");
+    assert.match(energy.html, /substations \(OSM\)[\s\S]*1/);
+  });
+
+  await t.test("curated and OSM refineries/terminals/storage are counted and listed separately, never summed", () => {
+    const raw = emptyRaw({
+      infra: [{ id: "curated_1", type: "refinery", lat: 5, lon: 5, name: "Curated Refinery" }],
+      osmInfra: [
+        { id: "osm:way/1", kind: "refinery", lat: 5, lon: 5, name: "OSM Refinery" },
+        { id: "osm:way/2", kind: "storage_tank", lat: 5, lon: 5, name: "Tank A" },
+      ],
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const energy = sections.find((s) => s.id === "energy");
+    assert.ok(energy);
+    assert.match(energy.html, /Refineries, terminals/);
+    assert.match(energy.html, /Curated Refinery/);
+    assert.match(energy.html, /1 curated/);
+    assert.match(energy.html, /2 from OpenStreetMap/);
+    assert.match(energy.html, /kept apart rather than summed/);
+  });
+
+  await t.test("a curated port that is not energy-related (no refinery/lng_terminal/port type match) is excluded", () => {
+    const raw = emptyRaw({ infra: [{ id: "x", type: "fab", lat: 5, lon: 5, name: "Some Fab" }] });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    assert.equal(sections.find((s) => s.id === "energy"), undefined);
+  });
+});
+
+test("countryCardSections -- grid stress (Task 28): net exchange and outage score together", async (t) => {
+  await t.test("both signals present: shown side by side, never combined into one number", () => {
+    const raw = emptyRaw({
+      energyFlows: {
+        TL: {
+          country_code: "TL",
+          physical: {
+            net: 0.4, unit: "GW", resolution: "PT15M", interval_minutes: 15,
+            net_series: [{ t: "a", net: 0.1 }, { t: "b", net: 0.4 }],
+          },
+        },
+      },
+      outages: { TL: { country_code: "TL", score: 42, window_start: 0, window_end: 3600, signals: {} } },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const gridStress = sections.find((s) => s.id === "gridStress");
+    assert.ok(gridStress, "both an exchange figure and an outage score are present");
+    assert.match(gridStress.html, /\+0\.40 GW/);
+    assert.match(gridStress.html, /42/);
+    assert.match(gridStress.html, /IODA outage score/);
+    assert.match(gridStress.html, /never combined|not a causal claim/);
+  });
+
+  await t.test("neither signal present: the section is dropped", () => {
+    const { sections } = countryCardSections(baseProps, emptyRaw(), bounds);
+    assert.equal(sections.find((s) => s.id === "gridStress"), undefined);
+  });
+
+  await t.test("only the outage score: the exchange side says so rather than staying silent", () => {
+    const raw = emptyRaw({
+      outages: { TL: { country_code: "TL", score: 10, window_start: 0, window_end: 3600, signals: {} } },
+    });
+    const { sections } = countryCardSections(baseProps, raw, bounds);
+    const gridStress = sections.find((s) => s.id === "gridStress");
+    assert.ok(gridStress);
+    assert.match(gridStress.html, /No cross-border electricity data published/);
   });
 });
 

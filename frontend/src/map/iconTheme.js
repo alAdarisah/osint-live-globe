@@ -144,6 +144,39 @@ export const PALETTE_GROUPS = [
       { id: "osm.military_area", label: "Military area (OpenStreetMap)", value: "#ff8c3a" },
       { id: "osm.power", label: "Power plant (OpenStreetMap)", value: "#9be15d" },
       { id: "osm.border", label: "Border crossing (OpenStreetMap)", value: "#c9b6ff" },
+      // Task 28: power plants moved off this generic token onto their own
+      // eight fuel-specific ones below (powerPlant.*) -- osm.power stays,
+      // unused by that layer now, because it is still the token
+      // decorateOsmInfra's own generic table (OSM_INFRA_STYLE) ships as a
+      // fallback should a plant ever land back in that table.
+      //
+      // Four more OpenStreetMap point classes, siblings of osm.power/
+      // osm.border above -- same crowd-sourced provenance, kept off the
+      // curated infrastructure colours entirely (infra.refinery etc.) so a
+      // reader can never mistake a mapper's contribution for a hand-checked
+      // coordinate by its colour alone.
+      { id: "osm.power_substation", label: "Substation (OpenStreetMap)", value: "#c9b6ff" },
+      { id: "osm.refinery", label: "Refinery (OpenStreetMap)", value: "#ff9500" },
+      { id: "osm.storage_tank", label: "Storage tank (OpenStreetMap)", value: "#ffb347" },
+      { id: "osm.oil_well", label: "Oil/gas well (OpenStreetMap)", value: "#c17a4a" },
+      // Task 28: power plants, glyph and colour by fuel (see osm_infra.py's
+      // own _fuel_category) -- eight rows rather than one shared "power
+      // plant" colour, the same reasoning the four railway node kinds were
+      // split into their own rows for: a nuclear plant and a wind farm are
+      // different enough claims that "show gas plants only, hide the rest"
+      // needs to be sayable, and one shared token made that unsayable.
+      { id: "powerPlant.nuclear", label: "Power plant, nuclear (OpenStreetMap)", value: "#ffd60a" },
+      { id: "powerPlant.coal", label: "Power plant, coal (OpenStreetMap)", value: "#6b6f76" },
+      { id: "powerPlant.gas", label: "Power plant, gas (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "powerPlant.hydro", label: "Power plant, hydro (OpenStreetMap)", value: "#4a9fd8" },
+      { id: "powerPlant.wind", label: "Power plant, wind (OpenStreetMap)", value: "#7ee0c9" },
+      { id: "powerPlant.solar", label: "Power plant, solar (OpenStreetMap)", value: "#ffe066" },
+      { id: "powerPlant.biomass", label: "Power plant, biomass/waste (OpenStreetMap)", value: "#9be15d" },
+      { id: "powerPlant.other", label: "Power plant, other/unspecified fuel (OpenStreetMap)", value: "#8aa0ad" },
+      // Transmission-line geometry (Task 28, backend/sources/power_lines.py).
+      // Colour-only, the same treatment railway.line gets just below -- a
+      // polyline, not a pin.
+      { id: "grid.line", label: "Transmission line (OpenStreetMap)", value: "#e8b64f" },
       // EASA airspace bulletins, coloured by status rather than by severity.
       // Their `severity` is two-valued -- 70 when live, 0 when withdrawn -- so
       // putting it on the shared severity ramp would paint every live advisory
@@ -281,6 +314,9 @@ const COLOUR_ONLY_TOKENS = new Set([
   // is deliberately absent: it is a genuine marker (a live train position) and
   // earns the size dial the other three have no shape to apply to.
   "railway.electrified", "railway.nonElectrified", "railway.narrowGauge",
+  // Task 28: the transmission-line layer's own colour-only token, same
+  // reasoning as railway.line just above -- a polyline, not a pin.
+  "grid.line",
   "lanes.route", "lanes.density", "reach.contour",
   "choropleth.low", "choropleth.mid", "choropleth.high",
   "water.fill", "water.outline", "water.selected",
@@ -372,6 +408,28 @@ export const TOKEN_LAYER = Object.freeze({
   "osm.military_area": "osmInfra",
   "osm.power": "osmInfra",
   "osm.border": "osmInfra",
+  // Task 28: the four new osm_infra.py point classes, riding osmInfra's own
+  // zoom gate exactly like military_area/border above.
+  "osm.power_substation": "osmInfra",
+  "osm.refinery": "osmInfra",
+  "osm.storage_tank": "osmInfra",
+  "osm.oil_well": "osmInfra",
+  // Task 28: power plants moved off osmInfra onto their own layer -- these
+  // eight fuel tokens are checked against powerPlants' own zoom gate, not
+  // osmInfra's, the same reason the four railway_* tokens moved to
+  // "railwayPoints" when that split happened (Task 27).
+  "powerPlant.nuclear": "powerPlants",
+  "powerPlant.coal": "powerPlants",
+  "powerPlant.gas": "powerPlants",
+  "powerPlant.hydro": "powerPlants",
+  "powerPlant.wind": "powerPlants",
+  "powerPlant.solar": "powerPlants",
+  "powerPlant.biomass": "powerPlants",
+  "powerPlant.other": "powerPlants",
+  // grid.line is deliberately absent here, the same as railway.line/
+  // cable.route/lanes.route/lanes.density above: it colours a polyline, not
+  // a pin with a zoom of its own, so there is no gate for it to sit under
+  // (see this table's own docstring).
   // Task 27: moved from "osmInfra" to "railwayPoints" -- these four kinds now
   // ride the Railways layer's own toggle rather than OSM infrastructure's
   // (see LAYER_MANIFEST's note in scene.js), so their own per-pin zoom gate
@@ -432,11 +490,19 @@ export const PIN_STACK = [
   // each is computed. satImaging/satGeo/satStarlink/satOneweb are not here:
   // they draw on the WebGL entity canvas instead (see STACK_ALIAS below).
   "satNavigation", "satWeather", "satScience", "launches",
-  "cities", "infra", "osmInfra", "deflock", "airports", "ports", "dams",
+  "cities", "infra", "osmInfra",
+  // Task 28: a genuine independent toggle, placed beside osmInfra (the layer
+  // it was pulled off of) rather than mirroring anything -- see its own note
+  // in map/scene.js on why it has no natural parent toggle to ride.
+  "powerPlants",
+  "deflock", "airports", "ports", "dams",
   // Task 27: railLive gets its own position -- a genuine independent toggle,
   // unlike railwayPoints just below it, which has none (see STACK_ALIAS).
   "railLive",
-  "railways", "cables", "shippingLanes", "outagePoints", "outageRegionPoints",
+  "railways",
+  // Task 28: beside railways, the layer whose rendering technique it copies.
+  "powerLines",
+  "cables", "shippingLanes", "outagePoints", "outageRegionPoints",
 ];
 export const WASH_STACK = ["vehicles", "jamming", "firms", "laneDensity"];
 

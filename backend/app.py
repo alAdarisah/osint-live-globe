@@ -81,6 +81,12 @@ _SOURCE_MODULES = (
     # more logical.
     "icao_blocks", "maritime_watchlists",
     "cables", "railways", "dams", "ports", "czib", "outages", "launches", "energy_flows",
+    # Task 28: a plain Postgres re-serve of osm_infra.py's own "power_lines_osm"
+    # document (that sweep runs in the ingest process, on its own daily clock --
+    # see power_lines.py's own module docstring, same reasoning railways.py's
+    # OSM half already gives). No network fetch of its own, so it costs nothing
+    # to poll from the backend process instead.
+    "power_lines",
     # 99.78% United States, and there is no US theatre -- so this layer is
     # visible only on the unfiltered World view, by design. See
     # backend/sources/deflock.py.
@@ -302,10 +308,46 @@ async def regions_list():
     return JSONResponse(regions.serialize(), headers={"Cache-Control": "public, max-age=3600"})
 
 
+async def _curated_pipeline_records() -> list[dict]:
+    """backend/infrastructure.py's PIPELINE_ROUTES, wrapped with the one field
+    that matters once OSM pipelines ride the same array: which of the two
+    claims a route is. `path`, not `coords`, so the frontend's renderPipelines
+    reads one field name for both halves rather than branching on source.
+
+    Task 28: kept a plain synchronous list -> wrapper rather than folded into
+    infrastructure.serialize() itself, so that function's own "static for the
+    process lifetime" promise (see infrastructure.py's module docstring)
+    stays true of the `sites`/`lanes` halves it still serves unmerged.
+    """
+    return [
+        {
+            "source": "curated",
+            "path": route["coords"],
+            "name": route.get("name"),
+            "note": route.get("note"),
+            "region_key": None,  # curated routes are not theatre-scoped the way an OSM sweep is
+        }
+        for route in infrastructure.PIPELINE_ROUTES
+    ]
+
+
 @app.get("/api/infrastructure")
 async def infrastructure_list():
-    # Static for the process lifetime, same as /api/regions above.
-    return JSONResponse(infrastructure.serialize(), headers={"Cache-Control": "public, max-age=86400"})
+    # `sites`/`lanes` are static for the process lifetime, same as
+    # /api/regions above. `pipelines` is not, as of Task 28: it now folds in
+    # whatever osm_infra.py's own Overpass sweep last found (a plain Postgres
+    # read here, not a fetch -- see backend/sources/osm_infra.py's own
+    # "pipelines_osm" document) alongside the curated PIPELINE_ROUTES, which
+    # stay exactly as they were, provenance intact, as the fallback outside
+    # (and inside) the eleven theatres OSM is limited to. Cache-Control is
+    # unchanged at a day: the OSM sweep behind it moves at most once a day,
+    # so this was already the honest ceiling for how fresh a cached copy
+    # could be.
+    osm_doc = (await storage.reference("pipelines_osm")) or {}
+    curated = await _curated_pipeline_records()
+    pipelines = curated + (osm_doc.get("lines") or [])
+    payload = {**infrastructure.serialize(), "pipelines": pipelines}
+    return JSONResponse(payload, headers={"Cache-Control": "public, max-age=86400"})
 
 
 # Filtered payloads, keyed by (source, version, region, bbox).
@@ -795,6 +837,15 @@ async def railways_endpoint(request: Request):
     # client splits, not a set of points to clip. The station/yard/border POINTS
     # are a different thing entirely and ride /api/osm-infrastructure.
     return _cached_source_response(request, "railways", None, lambda data, _bounds: data, max_age=86400)
+
+
+@app.get("/api/power-lines")
+async def power_lines_endpoint(request: Request):
+    # Transmission-line geometry, theatre-clipped and served whole (see
+    # backend/sources/power_lines.py) -- same shape and hard cache as
+    # /api/railways, and for the same reason: a line is one object the client
+    # splits into a polyline, not a set of points to clip to a region.
+    return _cached_source_response(request, "power_lines", None, lambda data, _bounds: data, max_age=86400)
 
 
 @app.get("/api/deflock")

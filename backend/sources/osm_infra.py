@@ -17,6 +17,18 @@ The sweep is one region at a time with a long pause between, and partial results
 are published as they arrive -- a full pass takes on the order of twenty minutes
 and there is no reason to hold back the first ten regions while the eleventh
 runs.
+
+Task 28 adds four more point classes (substations, refineries, storage tanks,
+oil/gas wells) to the same point query above, and one more per-region
+geometry pass, riding beside the rail-line one Task 27 added: a single
+combined `out geom` request per region carrying both power lines
+(power=line|cable) and pipelines (man_made=pipeline), each its own named set
+so a cap on one can never starve the other -- the same reason the point
+sweep's classes are each bound to their own set. Deliberately ONE more
+request per region rather than two: Task 27 already roughly doubled a full
+pass's running time by adding the rail-line request, and asking Overpass for
+a second and third geometry pass on top of that, serially, in the same loop,
+would have stacked that cost again. See build_grid_lines_query's own note.
 """
 
 import asyncio
@@ -116,6 +128,33 @@ MAX_RAIL_LINE_WAYS = 6000  # a cap on *ways*, not vertices -- see the note above
 # Bridges and tunnels are deliberately absent: they are secondary tags on rail
 # *ways* (15,181 bridge + 2,384 tunnel segments in Russia/Ukraine alone), and
 # forcing 40-metre culverts through `out center` would swamp the stations 3:1.
+#
+# Task 28 adds four more point classes, all discrete whole facilities rather
+# than fragments of a larger area (the same distinction MAX_PER_FEATURE's own
+# note draws between landuse=military and military=airfield above), so none
+# of them carries a `["name"]` filter:
+#
+# `power=substation` -- a transformer yard is one feature, named or not.
+#
+# `industrial=refinery` -- there are few enough of these per theatre that
+# MAX_PER_FEATURE's noise concern does not apply; it exists mainly so a
+# refinery too small or new for backend/infrastructure.py's curated list
+# still shows up somewhere, with OpenStreetMap's own caveat attached.
+#
+# `man_made=storage_tank` and `man_made=petroleum_well` do NOT get
+# MAX_PER_FEATURE's 300: a single storage terminal or oil field can carry
+# thousands of individual tanks or wellheads, each a real, distinct feature --
+# thinning that at the collector would be exactly the "cap that deletes the
+# layer" MAX_RAIL_PER_FEATURE's own note already rejected for rail stations.
+# MAX_INFRA_POINT_PER_FEATURE is a large explicit ceiling for the same reason
+# MAX_RAIL_PER_FEATURE is one (one pathological theatre must never ask a
+# volunteer service for an unbounded result set), not a measured figure --
+# no live Overpass probe has been run against Ras Tanura or a Gulf oil field
+# to see how close to it a real sweep comes. Watch the ingest logs (see
+# _capped_kinds below) after the first few real sweeps and raise or split this
+# if it turns out to be too small.
+MAX_INFRA_POINT_PER_FEATURE = 4000
+
 _FEATURES = (
     ('nwr["military"="airfield"]', "military_airfield", MAX_PER_FEATURE),
     ('nwr["landuse"="military"]["name"]', "military_area", MAX_PER_FEATURE),
@@ -126,6 +165,11 @@ _FEATURES = (
     ('nwr["railway"="yard"]', "railway_yard", MAX_RAIL_PER_FEATURE),
     # Node-only: a border marker is a point on the track, never an area.
     ('node["railway"="border"]', "railway_border", MAX_RAIL_PER_FEATURE),
+    ('nwr["power"="substation"]', "power_substation", MAX_PER_FEATURE),
+    ('nwr["industrial"="refinery"]', "refinery", MAX_PER_FEATURE),
+    ('nwr["man_made"="storage_tank"]', "storage_tank", MAX_INFRA_POINT_PER_FEATURE),
+    # Node-only: a wellhead is a point, never mapped as an area.
+    ('node["man_made"="petroleum_well"]', "oil_well", MAX_INFRA_POINT_PER_FEATURE),
 )
 
 _RAILWAY_KINDS = {
@@ -134,6 +178,63 @@ _RAILWAY_KINDS = {
     "yard": "railway_yard",
     "border": "railway_border",
 }
+
+# plant:source / generator:source is OSM's own free-text fuel field -- rich
+# ("gas;oil", "hydro", "waste") rather than a closed set, so this is a
+# keyword match against a short, ordered list rather than a dict lookup.
+# Order matters where a compound value could match more than one keyword
+# (there is no such case among these eight today, but a future OSM value
+# like "biomass;coal" would take whichever keyword is checked first).
+# "waste" is folded into "biomass" -- waste-to-energy generation is grouped
+# with biomass in most public reporting this map's readers already know
+# (EIA, IEA), and OSM has no separate `waste` category of its own to place it
+# in instead. Anything else -- oil, geothermal, diesel, tidal, and no tag at
+# all -- reports "other" rather than a guess: the brief's own list of eight is
+# a floor on what gets a distinct glyph, not a closed set of what a plant may
+# burn.
+_FUEL_KEYWORDS = (
+    ("nuclear", "nuclear"),
+    ("coal", "coal"),
+    ("gas", "gas"),
+    ("hydro", "hydro"),
+    ("wind", "wind"),
+    ("solar", "solar"),
+    ("biomass", "biomass"),
+    ("waste", "biomass"),
+)
+
+
+def _fuel_category(source_tag: str | None) -> str:
+    """OSM's freehand plant:source/generator:source -> one of the map's own
+    eight fuel buckets, tested directly since the frontend's glyph picker
+    trusts this field rather than re-parsing the raw tag itself."""
+    if not source_tag:
+        return "other"
+    text = source_tag.strip().lower()
+    for keyword, category in _FUEL_KEYWORDS:
+        if keyword in text:
+            return category
+    return "other"
+
+
+def _commissioning_year(value: str | None) -> int | None:
+    """OSM's start_date is freehand ("1986", "1986-05", "circa 1970") -- this
+    reads only a confident four-digit year prefix and leaves the rest, the
+    same "drop rather than guess" rule _megawatts below applies to output_mw.
+    """
+    if not value:
+        return None
+    text = value.strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        year = int(text[:4])
+        # A sanity floor/ceiling, not a claim about when generation began --
+        # OSM's own date range for this tag runs from real 19th-century hydro
+        # plants to "under construction" placeholders a few years out; this
+        # only catches a stray non-year numeral (a voltage, an id) that
+        # happened to start with four digits.
+        if 1850 <= year <= 2100:
+            return year
+    return None
 
 
 def build_query(bounds: tuple[float, float, float, float]) -> str:
@@ -174,6 +275,14 @@ def _kind_of(tags: dict) -> str | None:
     railway = tags.get("railway")
     if railway in _RAILWAY_KINDS:
         return _RAILWAY_KINDS[railway]
+    if tags.get("power") == "substation":
+        return "power_substation"
+    if tags.get("industrial") == "refinery":
+        return "refinery"
+    if tags.get("man_made") == "storage_tank":
+        return "storage_tank"
+    if tags.get("man_made") == "petroleum_well":
+        return "oil_well"
     return None
 
 
@@ -186,6 +295,10 @@ _KIND_FALLBACK_NAME = {
     "railway_halt": "Railway halt",
     "railway_yard": "Railway yard",
     "railway_border": "Railway border crossing",
+    "power_substation": "Substation",
+    "refinery": "Refinery",
+    "storage_tank": "Storage tank",
+    "oil_well": "Oil/gas well",
 }
 
 
@@ -244,6 +357,12 @@ def parse_overpass(payload: dict, region_key: str) -> list[dict]:
             # power=plant carries its own detail worth keeping; the rest do not.
             "source_tag": tags.get("plant:source") or tags.get("generator:source"),
             "output_mw": _megawatts(tags.get("plant:output:electricity")),
+            # Task 28: only meaningful for power_plant, but computed for every
+            # kind rather than branched on it -- _fuel_category("other" for a
+            # missing tag) and _commissioning_year(None -> None) are both total
+            # functions, so there is no dead-record case to special-case around.
+            "fuel": _fuel_category(tags.get("plant:source") or tags.get("generator:source")),
+            "commissioning_year": _commissioning_year(tags.get("start_date")),
             "region_key": region_key,
         })
     return out
@@ -348,22 +467,31 @@ def parse_rail_lines(payload: dict, region_key: str) -> list[dict]:
     return out
 
 
-def _rail_lines_truncated(payload: dict) -> bool:
-    """Whether this response looks like it hit MAX_RAIL_LINE_WAYS rather than
-    genuinely running out of matching ways.
+def _ways_truncated(payload: dict, cap: int) -> bool:
+    """Whether a single-class `out geom` response looks like it hit `cap`
+    rather than genuinely running out of matching ways.
 
     Overpass's `out ... N;` silently stops at N with no truncation marker of
     its own -- a capped response and a complete one that happens to have
     fewer ways than the cap are otherwise indistinguishable. Comparing the
     raw element count against the cap is the only signal available, and it is
-    a heuristic rather than a certainty: a theatre with *exactly*
-    MAX_RAIL_LINE_WAYS ways would be flagged as capped when it is not. That
-    false positive is the safe side to be wrong on -- the alternative
-    (treating >= the cap as "probably complete") is the one that lets a
-    genuinely truncated Russia/Ukraine sweep look identical to a full one,
-    which is the exact failure this exists to catch.
+    a heuristic rather than a certainty: a theatre with *exactly* `cap` ways
+    would be flagged as capped when it is not. That false positive is the
+    safe side to be wrong on -- the alternative (treating >= the cap as
+    "probably complete") is the one that lets a genuinely truncated
+    Russia/Ukraine sweep look identical to a full one, which is the exact
+    failure this exists to catch.
+
+    Task 27 introduced this check for the rail-line pass alone; Task 28
+    reuses it rather than writing a second version for power lines and
+    pipelines -- see _rail_lines_truncated and _grid_lines_truncated below,
+    both now thin wrappers over this.
     """
-    return len((payload or {}).get("elements") or []) >= MAX_RAIL_LINE_WAYS
+    return len((payload or {}).get("elements") or []) >= cap
+
+
+def _rail_lines_truncated(payload: dict) -> bool:
+    return _ways_truncated(payload, MAX_RAIL_LINE_WAYS)
 
 
 async def _fetch_rail_lines(client: httpx.AsyncClient, key: str, bounds) -> tuple[list[dict], bool]:
@@ -403,6 +531,194 @@ def serialize_rail_lines(lines: list[dict], truncated_regions: list[str] | None 
     return {
         "attribution": "OpenStreetMap contributors",
         "provenance": "OpenStreetMap Overpass, railway=rail|light_rail|narrow_gauge, swept daily across the conflict theatres",
+        "lines": lines,
+        "truncated_regions": sorted(truncated_regions or []),
+    }
+
+
+# Task 28: transmission lines and pipelines, in one combined per-region
+# `out geom` request rather than two separate ones -- see the module
+# docstring's own note on why. Each class is bound to its own named set with
+# its own `out geom tags N`, the same per-class-cap discipline build_query
+# uses for the point sweep, so a dense pipeline network can never crowd out
+# the power grid in the same box or the reverse.
+MAX_POWER_LINE_WAYS = 6000  # same order of magnitude and the same unmeasured judgment call as MAX_RAIL_LINE_WAYS
+MAX_PIPELINE_WAYS = 6000
+GRID_LINE_TIMEOUT = QUERY_TIMEOUT  # the same ceiling the point and rail-line sweeps already lean on
+
+_GRID_LINE_FEATURES = (
+    # power=cable is the same physical thing as power=line, laid underground
+    # or subsea instead of strung on towers -- one selector for both, the way
+    # railway.py's own "rail|light_rail|narrow_gauge" alternation reads.
+    ('way["power"~"^(line|cable)$"]', "power"),
+    ('way["man_made"="pipeline"]', "pipeline"),
+)
+
+
+def build_grid_lines_query(bounds: tuple[float, float, float, float]) -> str:
+    """Overpass QL for one region's transmission-line and pipeline geometry,
+    in a single request -- see MAX_POWER_LINE_WAYS's own note on why this is
+    one query with two named sets rather than two separate requests."""
+    south, west, north, east = bounds
+    bbox = f"({south},{west},{north},{east})"
+    caps = {"power": MAX_POWER_LINE_WAYS, "pipeline": MAX_PIPELINE_WAYS}
+    sets = [f".g{i}" for i in range(len(_GRID_LINE_FEATURES))]
+    selectors = "\n".join(
+        f"{selector}{bbox}->{setname};"
+        for setname, (selector, _cls) in zip(sets, _GRID_LINE_FEATURES)
+    )
+    outputs = "\n".join(
+        f"{setname} out geom tags {caps[cls]};"
+        for setname, (_selector, cls) in zip(sets, _GRID_LINE_FEATURES)
+    )
+    return f"[out:json][timeout:{GRID_LINE_TIMEOUT}];\n{selectors}\n{outputs}"
+
+
+def _grid_line_class(tags: dict) -> str | None:
+    if tags.get("power") in ("line", "cable"):
+        return "power"
+    if tags.get("man_made") == "pipeline":
+        return "pipeline"
+    return None
+
+
+def _parse_line_way(element: dict) -> tuple[str, list[list[float]], dict] | None:
+    """The shared shape every `out geom` way parse needs: an id, a [lat, lon]
+    path with at least two usable vertices, and the raw tags -- factored out
+    so parse_grid_lines does not repeat parse_rail_lines' own vertex-reading
+    loop for two more classes."""
+    if element.get("type") != "way":
+        return None
+    path = [
+        [pt["lat"], pt["lon"]]
+        for pt in (element.get("geometry") or [])
+        if isinstance(pt, dict)
+        and isinstance(pt.get("lat"), (int, float))
+        and isinstance(pt.get("lon"), (int, float))
+    ]
+    if len(path) < 2:
+        return None
+    way_id = element.get("id")
+    if way_id is None:
+        return None
+    return f"osm:way/{way_id}", path, (element.get("tags") or {})
+
+
+def parse_grid_lines(payload: dict, region_key: str) -> tuple[list[dict], list[dict]]:
+    """One combined Overpass response -> (power lines, pipelines), each an
+    attributed [lat, lon] line record. Split by tag rather than by which
+    named set an element rode back on -- Overpass's `out` does not label an
+    element with the set that produced it, only the union of everything asked
+    for, so the tags themselves are the only way to tell the two apart.
+    """
+    power_lines: list[dict] = []
+    pipelines: list[dict] = []
+    for element in (payload or {}).get("elements") or []:
+        parsed = _parse_line_way(element)
+        if parsed is None:
+            continue
+        way_id, path, tags = parsed
+        cls = _grid_line_class(tags)
+        if cls == "power":
+            power_lines.append({
+                "id": way_id,
+                "source": "osm",
+                "path": path,
+                "name": tags.get("name") or tags.get("name:en"),
+                "operator": tags.get("operator"),
+                "voltage": tags.get("voltage"),
+                "cables": tags.get("cables"),
+                "frequency": tags.get("frequency"),
+                "region_key": region_key,
+            })
+        elif cls == "pipeline":
+            pipelines.append({
+                "id": way_id,
+                "source": "osm",
+                "path": path,
+                "name": tags.get("name") or tags.get("name:en"),
+                "operator": tags.get("operator"),
+                "substance": tags.get("substance"),
+                "diameter": tags.get("diameter"),
+                "region_key": region_key,
+            })
+    return power_lines, pipelines
+
+
+def _grid_lines_truncated(payload: dict) -> set[str]:
+    """Which of "power"/"pipeline" looks capped in this region's combined
+    response -- see _ways_truncated's own note on the mechanism this reuses.
+    Per-class rather than per-response, because the two classes share one
+    query but not one cap: a dense pipeline network hitting MAX_PIPELINE_WAYS
+    says nothing about whether the power grid in the same box did too.
+    """
+    counts: dict[str, int] = {}
+    for element in (payload or {}).get("elements") or []:
+        if element.get("type") != "way":
+            continue
+        cls = _grid_line_class(element.get("tags") or {})
+        if cls:
+            counts[cls] = counts.get(cls, 0) + 1
+    caps = {"power": MAX_POWER_LINE_WAYS, "pipeline": MAX_PIPELINE_WAYS}
+    return {cls for cls, cap in caps.items() if counts.get(cls, 0) >= cap}
+
+
+async def _fetch_grid_lines(
+    client: httpx.AsyncClient, key: str, bounds
+) -> tuple[list[dict], list[dict], set[str]]:
+    """(power lines, pipelines, which of the two classes looks capped) for one region."""
+    resp = await client.post(OVERPASS_URL, content=build_grid_lines_query(bounds).encode("utf-8"))
+    if resp.status_code in (429, 504):
+        raise RuntimeError(f"Overpass busy ({resp.status_code}) for grid lines in {key}")
+    resp.raise_for_status()
+    payload = resp.json()
+    power_lines, pipelines = parse_grid_lines(payload, key)
+    return power_lines, pipelines, _grid_lines_truncated(payload)
+
+
+def flatten_power_lines(by_region: dict[str, list[dict]]) -> list[dict]:
+    """Same overlap-dedup as flatten_rail_lines, for the power-line half."""
+    seen: dict[str, dict] = {}
+    for lines in by_region.values():
+        for line in lines:
+            seen.setdefault(line["id"], line)
+    return list(seen.values())
+
+
+def flatten_pipelines(by_region: dict[str, list[dict]]) -> list[dict]:
+    """Same overlap-dedup as flatten_rail_lines, for the pipeline half."""
+    seen: dict[str, dict] = {}
+    for lines in by_region.values():
+        for line in lines:
+            seen.setdefault(line["id"], line)
+    return list(seen.values())
+
+
+def serialize_power_lines(lines: list[dict], truncated_regions: list[str] | None = None) -> dict:
+    """The stored document power_lines.py reads back and republishes as-is --
+    there is no Natural-Earth-style fallback to merge with for the grid, so
+    this document is served close to verbatim rather than merged like
+    railways.py's own serialize()."""
+    return {
+        "attribution": "OpenStreetMap contributors",
+        "provenance": (
+            "OpenStreetMap Overpass, power=line|cable, swept daily across this map's eleven "
+            "conflict theatres, not worldwide."
+        ),
+        "lines": lines,
+        "truncated_regions": sorted(truncated_regions or []),
+    }
+
+
+def serialize_pipelines(lines: list[dict], truncated_regions: list[str] | None = None) -> dict:
+    """The stored document backend/infrastructure.py's endpoint merges with
+    the curated PIPELINE_ROUTES fallback."""
+    return {
+        "attribution": "OpenStreetMap contributors",
+        "provenance": (
+            "OpenStreetMap Overpass, man_made=pipeline, swept daily across this map's eleven "
+            "conflict theatres, not worldwide -- outside them only the curated schematic routes apply."
+        ),
         "lines": lines,
         "truncated_regions": sorted(truncated_regions or []),
     }
@@ -491,6 +807,27 @@ async def _warm_rail_lines() -> tuple[dict[str, list[dict]], set[str]]:
     return by_region, truncated
 
 
+async def _warm_grid_lines(reference_name: str) -> tuple[dict[str, list[dict]], set[str]]:
+    """Same warm-before-first-sweep seeding as _warm_rail_lines, generalised
+    to whichever of "power_lines_osm"/"pipelines_osm" the caller names --
+    both documents have the identical {lines, truncated_regions} shape (see
+    serialize_power_lines/serialize_pipelines), so one function reads either.
+    """
+    stored = (await storage.reference(reference_name)) or {}
+    lines = stored.get("lines") or []
+    truncated = set(stored.get("truncated_regions") or [])
+    if not lines:
+        return {}, truncated
+    by_region: dict[str, list[dict]] = {}
+    for line in lines:
+        by_region.setdefault(line.get("region_key") or "", []).append(line)
+    log.info(
+        "OSM grid lines (%s): warmed %d stored ways across %d theatres while the sweep runs",
+        reference_name, len(lines), len(by_region),
+    )
+    return by_region, truncated
+
+
 async def sweep_forever():
     """Overpass sweeps, for the life of the ingest process.
 
@@ -515,13 +852,22 @@ async def sweep_forever():
     # stored document so a reader sees a stated reason a dense theatre's
     # network looks thinner than it is, rather than a silent partial view.
     rail_lines_truncated: set[str] = set()
+    # Task 28: the combined power-line/pipeline pass, warmed the same way and
+    # for the same reason as the rail-line pass above.
+    power_lines_by_region: dict[str, list[dict]] = {}
+    power_lines_truncated: set[str] = set()
+    pipelines_by_region: dict[str, list[dict]] = {}
+    pipelines_truncated: set[str] = set()
     if await storage.wait_for_warm_pool():
         by_region = await _warm(state)
         rail_lines_by_region, rail_lines_truncated = await _warm_rail_lines()
+        power_lines_by_region, power_lines_truncated = await _warm_grid_lines("power_lines_osm")
+        pipelines_by_region, pipelines_truncated = await _warm_grid_lines("pipelines_osm")
     consecutive_failures = 0
     while True:
         swept = 0
         rail_lines_swept = 0
+        grid_lines_swept = 0
         started = time.time()
         try:
             async with httpx.AsyncClient(
@@ -581,6 +927,47 @@ async def sweep_forever():
                             flatten_rail_lines(rail_lines_by_region), sorted(rail_lines_truncated)
                         ),
                     )
+
+                    # Task 28: the combined power-line/pipeline pass for the
+                    # same region, right after the rail-line one -- one more
+                    # Overpass request per theatre, not two, per the module
+                    # docstring's note on why the two classes share a query.
+                    # Its own try/except for the identical reason the rail-line
+                    # block's has one: a stall here must cost this region only
+                    # its grid lines, never its points or its rail lines, and
+                    # must not stop the sweep moving to the next theatre.
+                    try:
+                        power_lines, pipeline_lines, capped = await _fetch_grid_lines(client, key, bounds)
+                        power_lines_by_region[key] = power_lines
+                        pipelines_by_region[key] = pipeline_lines
+                        if "power" in capped:
+                            power_lines_truncated.add(key)
+                        else:
+                            power_lines_truncated.discard(key)
+                        if "pipeline" in capped:
+                            pipelines_truncated.add(key)
+                        else:
+                            pipelines_truncated.discard(key)
+                        grid_lines_swept += 1
+                    except Exception as exc:  # noqa: BLE001 - one theatre's grid lines are not the sweep
+                        log.warning("OSM grid lines fetch failed for %s: %s", key, exc)
+                        continue
+                    # Published per region, same as the rail-line document --
+                    # power_lines.py and backend/infrastructure.py's endpoint
+                    # (two different, unrelated readers) each pick up their own
+                    # document on their own clock, in a different process.
+                    await storage.record_reference(
+                        "power_lines_osm",
+                        serialize_power_lines(
+                            flatten_power_lines(power_lines_by_region), sorted(power_lines_truncated)
+                        ),
+                    )
+                    await storage.record_reference(
+                        "pipelines_osm",
+                        serialize_pipelines(
+                            flatten_pipelines(pipelines_by_region), sorted(pipelines_truncated)
+                        ),
+                    )
             if swept:
                 log.info(
                     "OSM infrastructure: %d sites across %d/%d theatres in %ds",
@@ -608,6 +995,22 @@ async def sweep_forever():
                 )
             else:
                 log.warning("OSM rail lines: no theatre returned any this pass")
+            # Same additive treatment as the rail-line block above, and the
+            # same reason: a hard theatre's grid-line pass timing out must not
+            # turn a healthy point sweep red. power_lines.py's own "power_lines"
+            # health row and backend/infrastructure.py's served pipeline count
+            # are where a systemic failure here would actually become visible.
+            if grid_lines_swept:
+                log.info(
+                    "OSM grid lines: %d power lines, %d pipelines across %d/%d theatres in %ds%s",
+                    len(flatten_power_lines(power_lines_by_region)),
+                    len(flatten_pipelines(pipelines_by_region)),
+                    grid_lines_swept, len(_regions_to_sweep()), round(time.time() - started),
+                    f" -- capped: power {sorted(power_lines_truncated)}, pipeline {sorted(pipelines_truncated)}"
+                    if (power_lines_truncated or pipelines_truncated) else "",
+                )
+            else:
+                log.warning("OSM grid lines: no theatre returned any this pass")
         except Exception as exc:  # noqa: BLE001 - keep the poller alive
             state.last_error = str(exc)
             log.warning("OSM infrastructure sweep failed: %s", exc)

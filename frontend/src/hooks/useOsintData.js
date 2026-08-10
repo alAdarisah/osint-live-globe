@@ -706,6 +706,16 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
       })
       .catch((err) => console.warn("Failed to load railway linework:", err));
 
+    // Transmission-line geometry (Task 28, backend/sources/power_lines.py) --
+    // same treatment as railways just above: a whole document, hard-cached
+    // for a day, fetched once at boot rather than polled.
+    fetchJson("/api/power-lines")
+      .then((data) => {
+        if (cancelled) return;
+        onDataRef.current("powerLines", data || { lines: [] });
+      })
+      .catch((err) => console.warn("Failed to load transmission lines:", err));
+
     // Seas, gulfs, bays and straits -- marine only (see backend/sources/
     // water_bodies.py and backend/app.py's water_endpoint for why lakes and
     // rivers are not fetched here). Boot-fetched once like railways above,

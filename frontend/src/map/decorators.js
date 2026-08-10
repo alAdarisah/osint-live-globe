@@ -1827,8 +1827,23 @@ export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
 export const OSM_INFRA_STYLE = {
   military_airfield: { svg: SVG.airfieldMilitary, color: "#ff8c3a", size: 16, label: "Military airfield", token: "osm.military_airfield" },
   military_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 14, label: "Military area", token: "osm.military_area" },
+  // power_plant is listed here for _kind_of/_fallback_name's own completeness
+  // (a power-plant record can still pass through this generic table, e.g. in
+  // an older cached payload), but it is drawn nowhere: Task 28 pulled it onto
+  // its own layer (see decoratePowerPlant below), and createMapController.js's
+  // applyData never lets a power_plant kind reach raw.osmInfra any more.
   power_plant: { svg: SVG.powerPlant, color: "#9be15d", size: 14, label: "Power plant", token: "osm.power" },
   border_control: { svg: SVG.borderCrossing, color: "#c9b6ff", size: 13, label: "Border crossing", token: "osm.border" },
+  // Task 28: four more OpenStreetMap point classes, siblings of power_plant/
+  // border_control above -- refineries/terminals/storage "merged with the
+  // curated INFRA_SITES" per the brief means presented beside them in the
+  // country card (see buildEnergyInfrastructure in popups.js), never blended
+  // into the curated infra layer's own data -- see this module's own note on
+  // decorateInfra vs decorateOsmInfra for why that promise matters.
+  power_substation: { svg: SVG.powerPlant, color: "#c9b6ff", size: 12, label: "Substation", token: "osm.power_substation" },
+  refinery: { svg: SVG.refinery, color: "#ff9500", size: 14, label: "Refinery", token: "osm.refinery" },
+  storage_tank: { svg: SVG.desalination, color: "#ffb347", size: 11, label: "Storage tank", token: "osm.storage_tank" },
+  oil_well: { svg: SVG.refinery, color: "#c17a4a", size: 10, label: "Oil/gas well", token: "osm.oil_well" },
   // Railway nodes the osm_infra sweep now also carries (see osm_infra.py's
   // _RAILWAY_KINDS). One shared *glyph*, because four near-identical station
   // shapes would be a distinction nobody can read at 12px -- but a token each,
@@ -1843,6 +1858,7 @@ const OSM_INFRA_FALLBACK = OSM_INFRA_STYLE.military_area;
 export const OSM_INFRA_ORDER = [
   "military_airfield", "military_area", "power_plant", "border_control",
   "railway_station", "railway_halt", "railway_yard", "railway_border",
+  "power_substation", "refinery", "storage_tank", "oil_well",
 ];
 
 // `layerKey` picks which layer's admin opacity/theme dial applies (see
@@ -1915,6 +1931,78 @@ export function decorateOsmInfra(d, { offset, layerKey = "osmInfra" } = {}) {
       <a href="https://www.openstreetmap.org/${esc(d.osm_type)}/${esc(d.osm_id)}" target="_blank" rel="noopener noreferrer">view the raw feature</a></div>`;
   return {
     icon: icon(style, style.color, style.size, 0, "osm-infra-marker", 0.75 * layerOpacity(layerKey), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- power plants, riding their own layer (Task 28) ------------------
+//
+// Pulled off OSM infrastructure at render time (see createMapController.js's
+// applyData, the same split Task 27 used for railwayPoints) and given their
+// own table rather than reusing OSM_INFRA_STYLE.power_plant's one shared
+// glyph: the brief asks for a glyph *and* a size that both track something
+// about the plant itself (its fuel, its output), which a single shared style
+// object cannot express eight ways.
+//
+// Keyed by the backend's own normalised `fuel` field (osm_infra.py's
+// _fuel_category), not by the raw `source_tag` -- the backend already did
+// the keyword matching once, and re-parsing "gas;oil" here would be a second,
+// possibly disagreeing copy of that logic.
+export const POWER_PLANT_FUEL_STYLE = {
+  nuclear: { svg: SVG.nuclear, color: "#ffd60a", label: "Nuclear", token: "powerPlant.nuclear" },
+  coal: { svg: SVG.flame, color: "#6b6f76", label: "Coal", token: "powerPlant.coal" },
+  gas: { svg: SVG.flame, color: "#ff8c3a", label: "Gas", token: "powerPlant.gas" },
+  hydro: { svg: SVG.dam, color: "#4a9fd8", label: "Hydro", token: "powerPlant.hydro" },
+  wind: { svg: SVG.wind, color: "#7ee0c9", label: "Wind", token: "powerPlant.wind" },
+  solar: { svg: SVG.solarPanel, color: "#ffe066", label: "Solar", token: "powerPlant.solar" },
+  biomass: { svg: SVG.flame, color: "#9be15d", label: "Biomass/waste", token: "powerPlant.biomass" },
+  other: { svg: SVG.powerPlant, color: "#8aa0ad", label: "Other/unspecified fuel", token: "powerPlant.other" },
+};
+
+const POWER_PLANT_BASE_SIZE = 13;
+// Three size steps rather than a continuous scale off output_mw -- the same
+// "size means something coarse and legible, not a precise ruler" choice most
+// of this map's magnitude-sized glyphs already make. A plant with no
+// output_mw at all (the majority -- see summarizePowerPlants' own tagged
+// fraction in popups.js) draws at the base size rather than the smallest
+// one: absence of a capacity figure is not evidence of a small plant.
+function powerPlantSizeStep(outputMw) {
+  if (!Number.isFinite(outputMw)) return 0;
+  if (outputMw >= 1000) return 2; // gigawatt-class
+  if (outputMw >= 100) return 1;
+  return 0;
+}
+
+export function powerPlantIconSize(d) {
+  return POWER_PLANT_BASE_SIZE + powerPlantSizeStep(d?.output_mw) * 3;
+}
+
+function powerPlantStyle(d) {
+  const base = POWER_PLANT_FUEL_STYLE[d?.fuel] || POWER_PLANT_FUEL_STYLE.other;
+  return themedStyle({ ...base, size: powerPlantIconSize(d) }, "powerPlants");
+}
+
+export function decoratePowerPlant(d, { offset } = {}) {
+  const style = powerPlantStyle(d);
+  const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)} power plant &middot; OpenStreetMap`;
+  const detail = `
+    <h3>${esc(d.name)}</h3>
+    <div class="meta">${esc(style.label)}${d.operator ? ` &middot; ${esc(d.operator)}` : ""}</div>
+    ${Number.isFinite(d.output_mw) ? `<div>Capacity: <b>${esc(Math.round(d.output_mw))} MW</b></div>`
+      : '<div class="meta">No generation capacity tagged in OpenStreetMap for this plant.</div>'}
+    ${d.commissioning_year ? `<div>Commissioned: ${esc(d.commissioning_year)}</div>` : ""}
+    ${d.source_tag ? `<div class="meta">Raw OSM fuel tag: ${esc(d.source_tag)}</div>` : ""}
+    ${!d.named ? '<p class="meta">Unnamed in OpenStreetMap &mdash; the label above is its type, not its name.</p>' : ""}
+    <p class="meta">From <b>OpenStreetMap</b>, contributed by its mappers and not checked by hand.
+      Fuel and capacity are only as complete as OpenStreetMap's own tagging -- see the country
+      card's Energy infrastructure section for what fraction of plants in view actually carry a
+      capacity figure, and why a sum over only those must never be read as this country's
+      generation capacity.</p>
+    <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass &middot;
+      <a href="https://www.openstreetmap.org/${esc(d.osm_type)}/${esc(d.osm_id)}" target="_blank" rel="noopener noreferrer">view the raw feature</a></div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "power-plant-marker", 0.8 * layerOpacity("powerPlants"), "", offset),
     tooltip,
     detail,
   };
@@ -2213,14 +2301,20 @@ export function decorateDam(d, { offset, twin } = {}) {
         "itself, not a river-network snap.</p>"}
     ${d.quality
       ? `<p class="meta">The publisher grades its own record <b>${esc(d.quality)}</b>${
-          poor ? " &mdash; the bottom of its own five-point scale." : "."
-        }</p>`
+          d.quality_rank ? ` (${esc(d.quality_rank)} of 5, 1 best)` : ""
+        }${poor ? " &mdash; the bottom of its own five-point scale." : "."}</p>`
       : ""}
     ${osmTwinBlock(twin, { what: "barrier" })}
     <div class="meta">Source: ${esc(d.publisher || "Global Dam Watch")} &mdash; a curated dataset${
       d.license ? `, ${esc(d.license)}` : ""
     }.${d.orig_src ? ` Absorbed from ${esc(d.orig_src)}.` : ""}${
-      d.grand_id ? ` GRanD ${esc(d.grand_id)}.` : ""
+      d.grand_id ? ` Cross-referenced in GRanD as #${esc(d.grand_id)}.` : ""
+    }${
+      // HydroLAKES' own reservoir-polygon id -- a link to a lake this barrier
+      // impounds, not a claim this app has fetched that polygon (see
+      // dams.py's own note: the reservoir shapefile is deliberately not
+      // parsed here).
+      d.hylak_id ? ` Reservoir cross-referenced in HydroLAKES as #${esc(d.hylak_id)}.` : ""
     }${d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Record</a>.` : ""}${
       d.attribution ? `<br/>${esc(d.attribution)}` : ""
     }</div>`;
@@ -2399,6 +2493,17 @@ export const CABLE_PLANNED_STYLE = {
 
 export function cableRouteColor() {
   return paletteColor("cable.route", CABLE_ROUTE_COLOR);
+}
+
+// Task 28: transmission-line colour -- one token, not one per voltage tier.
+// The brief asks for the line to render "through the same polyline path as
+// railways", not for a voltage-coloured grid map, so this stays as simple as
+// cableRouteColor above; voltage/operator/cables are still stated in the
+// line's own popup for a reader who wants them.
+export const GRID_LINE_COLOR = "#e8b64f";
+
+export function gridLineColor() {
+  return paletteColor("grid.line", GRID_LINE_COLOR);
 }
 
 // ---------- railway linework (backend/sources/railways.py) ----------
@@ -3920,8 +4025,27 @@ export const INFRA_STYLE = {
 // unrelated things.
 export const PIPELINE_ROUTE_COLOR = "#ffb347";
 
-export function pipelineRouteColor() {
-  return paletteColor("infra.pipeline", PIPELINE_ROUTE_COLOR);
+// Task 28: OpenStreetMap's `substance` tag, colour by substance -- fixed
+// rather than a themeable palette token, unlike almost everything else on
+// this map: the brief's ask here is "tell a gas line from an oil line at a
+// glance", not "let an operator recolour a substance", and eight more
+// PALETTE_GROUPS rows for a distinction only ever drawn on an OSM-sourced
+// route (the curated schematic below carries no substance at all) felt like
+// more admin-panel surface than the ask. A substance this map has not seen
+// falls back to the curated route's own colour, so an unfamiliar OSM tag
+// reads as "pipeline", the honest default, rather than as an invented hue.
+const PIPELINE_SUBSTANCE_COLOR = {
+  oil: "#c17a4a",
+  gas: "#5cc4f2",
+  water: "#4fd1ff",
+  sewage: "#8fa876",
+  chemicals: "#c9b6ff",
+};
+
+export function pipelineRouteColor(substance) {
+  const base = paletteColor("infra.pipeline", PIPELINE_ROUTE_COLOR);
+  if (!substance) return base;
+  return PIPELINE_SUBSTANCE_COLOR[substance.toLowerCase()] || base;
 }
 
 // Military bases share the "infra" data shape/toggle but pick their icon

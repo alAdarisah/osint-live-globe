@@ -44,6 +44,7 @@ import {
   createCitiesGroup,
   createInfraGroup,
   createPipelinesGroup,
+  createPowerLinesGroup,
   createSatelliteGroup,
   createTrailLayers,
   createWindFlowLayer,
@@ -92,6 +93,7 @@ import {
   decorateCableLanding,
   cableLandingIconSize,
   cableRouteColor,
+  gridLineColor,
   railwayLineColor,
   railwayLineBaseWeight,
   railwayLineDash,
@@ -110,6 +112,8 @@ import {
   launchIconSize,
   decorateOsmInfra,
   osmInfraIconSize,
+  decoratePowerPlant,
+  powerPlantIconSize,
   decorateOutage,
   outageIconSize,
   decorateOutageRegion,
@@ -313,6 +317,10 @@ const ID_FIELD = {
   // is not a stable identity). railStations' id is the station's own short
   // code (see digitraffic_rail.parse_station).
   railwayPoints: "id", railLive: "id", railStations: "id",
+  // Task 28: powerPlants reuses osm_infra's own prefixed "osm:type/id" ids,
+  // the same reason railwayPoints does just above -- it reads the same raw
+  // items, split into their own array (see applyData's own note).
+  powerPlants: "id",
   // One pin per country, so the country code *is* the identity -- a country
   // whose score changes between polls has to update its existing marker rather
   // than be torn down and rebuilt under a new key.
@@ -332,6 +340,7 @@ const DECORATORS = {
   czib: decorateCzib, floods: decorateFlood, ports: decoratePort, dams: decorateDam,
   deflock: decorateDeflock,
   railwayPoints: decorateRailwayPoint, railLive: decorateRailLive, railStations: decorateRailStation,
+  powerPlants: decoratePowerPlant,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
@@ -346,6 +355,7 @@ const ICON_SIZE_FOR_GLYPH = {
   czib: czibIconSize, floods: floodIconSize, ports: portIconSize, dams: damIconSize,
   deflock: deflockIconSize,
   railwayPoints: railwayPointIconSize, railLive: railLiveIconSize, railStations: railStationIconSize,
+  powerPlants: powerPlantIconSize,
 };
 // The same sizes with the current level of detail applied, which is what the
 // placement pass has to reserve: a dot needs a dot's worth of room, and routing
@@ -637,6 +647,14 @@ export function createMapController(container, initial, callbacks) {
   // see LAYER_MANIFEST's own note on why the stations have no toggle of
   // their own.
   const railLiveLayer = L.layerGroup([groups.railLive, groups.railStations]);
+  // Task 28: transmission-line geometry, "the same polyline path as
+  // railways" per the brief -- same treatment as railwaysGroup just above,
+  // right down to being off by default (MANUAL, see map/scene.js). No point
+  // sub-layer wraps it the way railwayPoints wraps railwaysGroup: substations
+  // ride the generic osmInfra layer instead (see decorators.js's
+  // OSM_INFRA_STYLE), there being no natural "one toggle for the whole grid"
+  // pairing the way stations-on-their-own-lines has for rail.
+  const powerLinesGroup = createPowerLinesGroup();
   // Task 20b: the ten named corridors. Same treatment as railwaysGroup above
   // -- off by default (MANUAL, see map/scene.js), toggled on from the panel.
   const shippingLanesGroup = createShippingLanesGroup();
@@ -832,6 +850,11 @@ export function createMapController(container, initial, callbacks) {
     // needs to mean anything -- Finland sits outside every conflict
     // theatre, so railwayPoints above can never cover it.
     railwayPoints: [], railLive: [], railStations: [],
+    // Task 28: power plants, split out of osmInfra at render time (same
+    // mechanism as railwayPoints above -- see applyData's own note), and the
+    // transmission-line document power_lines.py serves, a whole-document set
+    // of lines on the same footing as `railways` above.
+    powerPlants: [], powerLines: { lines: [] },
     // Task 20b's corridors (a plain array, like pipelines) and Task 20a's
     // AIS density grid (a whole document -- {note, cells} -- like railways
     // above, so the popup/legend can state the endpoint's own `note` rather
@@ -874,6 +897,7 @@ export function createMapController(container, initial, callbacks) {
     czib: new Map(), floods: new Map(), ports: new Map(), dams: new Map(),
     deflock: new Map(),
     railwayPoints: new Map(), railLive: new Map(), railStations: new Map(),
+    powerPlants: new Map(),
   };
   // Keyed by event id, same as markersByKey.events, so a circle and its pin
   // are added and dropped by the same diff against the same visible set.
@@ -1522,8 +1546,10 @@ export function createMapController(container, initial, callbacks) {
       raw.dams || [],
       // Only the hydro ones. A gas plant that happens to be near a dam is a
       // different structure, and absorbing it would be a factual claim the data
-      // does not make.
-      osm.filter((d) => d.kind === "power_plant" && d.source_tag === "hydro"),
+      // does not make. Task 28: power plants moved off raw.osmInfra onto their
+      // own raw.powerPlants (see applyData's own note) -- this has to read
+      // that array now, or every hydro plant would stop matching silently.
+      (raw.powerPlants || []).filter((d) => d.source_tag === "hydro"),
       { radiusKm: DAM_MATCH_KM, primaryId: (d) => d.id, secondaryId: (d) => d.id },
     );
     const absorbed = new Map();
@@ -1561,11 +1587,26 @@ export function createMapController(container, initial, callbacks) {
     return typeof item.kind === "string" && item.kind.startsWith("railway_");
   }
 
+  // Task 28: the same rendering split as isRailwayPointItem above, for the
+  // power_plant kind -- applyData reads this to pull plants off raw.osmInfra
+  // onto their own raw.powerPlants array (see its own note there and in
+  // map/scene.js's powerPlants entry on why they get a layer of their own
+  // rather than mirroring another one).
+  function isPowerPlantItem(item) {
+    return item.kind === "power_plant";
+  }
+
   const LAYER_ITEM_FILTER = {
     events: (item) => passesEventFilter(item, eventFilter, ageNow()),
     gdelt: passesNewsFilter,
     officials: passesOfficialsFilter,
     osmInfra: passesOsmInfraFilter,
+    // Task 28: a hydro plant absorbed into a dam's own pin (see
+    // rebuildOsmTwins' dams twin index, now built from raw.powerPlants) must
+    // be suppressed on *this* layer too, or the exact duplicate pin the twin
+    // mechanism exists to prevent reappears the moment power plants got a
+    // layer of their own.
+    powerPlants: passesOsmInfraFilter,
   };
 
   /**
@@ -2400,6 +2441,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "cables") return cablesLayer; // wraps cablesGroup + the landing-point markers
     if (key === "railways") return railwaysLayer; // wraps railwaysGroup (lines) + railwayPoints (stations)
     if (key === "railLive") return railLiveLayer; // wraps groups.railLive (trains) + groups.railStations
+    if (key === "powerLines") return powerLinesGroup;
     if (key === "shippingLanes") return shippingLanesGroup;
     if (key === "water") return waterLayer;
     if (key === "windArrows") return windFlowLayer;
@@ -3010,7 +3052,7 @@ export function createMapController(container, initial, callbacks) {
   // on every moveend is exactly the cost these layers were written to avoid by
   // drawing once. Keyed per layer rather than shared, because each is also
   // redrawn on its own when its data arrives (see applyData).
-  const worldCopyKeys = { cables: null, pipelines: null, railways: null, shippingLanes: null };
+  const worldCopyKeys = { cables: null, pipelines: null, railways: null, powerLines: null, shippingLanes: null };
 
   /**
    * Redraw the whole-world layers when, and only when, the visible copies change.
@@ -3024,6 +3066,7 @@ export function createMapController(container, initial, callbacks) {
     if (worldCopyKeys.cables !== key) renderCables();
     if (worldCopyKeys.pipelines !== key) renderPipelines();
     if (worldCopyKeys.railways !== key) renderRailways();
+    if (worldCopyKeys.powerLines !== key) renderPowerLines();
     if (worldCopyKeys.shippingLanes !== key) renderShippingLanes();
   }
 
@@ -3317,12 +3360,16 @@ export function createMapController(container, initial, callbacks) {
     aisSanctioned: 0, adsbSanctioned: 0,
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
-    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
+    osmInfra: 0, osmMilitary: 0, osmSubstation: 0, osmBorder: 0, osmEnergyOther: 0,
     // Task 27: osmRailway's old lumped count is now this layer's own natural
     // count/total (railwayPoints is a real render key, not a sub-ticker of
     // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
     // railStations (fix, post-review) is the Finnish station gazetteer.
     railwayPoints: 0, railLive: 0, railStations: 0,
+    // Task 28: powerPlants is a real render key (split out of osmInfra, same
+    // treatment as railwayPoints above); powerLines is a whole-document line
+    // count, same treatment as railways below.
+    powerPlants: 0, powerLines: 0,
     outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
@@ -3356,12 +3403,13 @@ export function createMapController(container, initial, callbacks) {
     aisSanctioned: 0, adsbSanctioned: 0,
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
-    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0,
+    osmInfra: 0, osmMilitary: 0, osmSubstation: 0, osmBorder: 0, osmEnergyOther: 0,
     // Task 27: osmRailway's old lumped count is now this layer's own natural
     // count/total (railwayPoints is a real render key, not a sub-ticker of
     // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
     // railStations (fix, post-review) is the Finnish station gazetteer.
     railwayPoints: 0, railLive: 0, railStations: 0,
+    powerPlants: 0, powerLines: 0,
     outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
@@ -3388,7 +3436,7 @@ export function createMapController(container, initial, callbacks) {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
     gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
-    deflock: false, laneDensity: false, railwayPoints: false,
+    deflock: false, laneDensity: false, railwayPoints: false, powerPlants: false,
     // Task 24's three on-by-default, THEATRE-gated groups -- see
     // SAT_ELEMENT_ZOOM_NOTE_KEYS. The four off-by-default groups are
     // ungated and never report a note.
@@ -3434,19 +3482,30 @@ export function createMapController(container, initial, callbacks) {
       of: (item) => (item.kind === "sts_pair" ? "darkSts" : "darkGaps"),
     },
     osmInfra: {
-      keys: ["osmMilitary", "osmPower", "osmBorder"],
+      // Task 28: power_plant moved off this layer entirely (see applyData's
+      // own split, the same treatment railwayPoints already got in Task 27),
+      // so "osmPower" is retired -- it would only ever read zero now, which
+      // is worse than not having the row. power_substation/refinery/
+      // storage_tank/oil_well are new here and get their own buckets rather
+      // than falling into the old military catch-all, which used to be
+      // correct only because military/power/border were the only non-rail
+      // kinds this layer carried.
+      keys: ["osmMilitary", "osmSubstation", "osmBorder", "osmEnergyOther"],
       of: (item) => {
-        if (item.kind === "power_plant") return "osmPower";
+        if (item.kind === "military_airfield" || item.kind === "military_area") return "osmMilitary";
+        if (item.kind === "power_substation") return "osmSubstation";
         if (item.kind === "border_control") return "osmBorder";
+        if (item.kind === "refinery" || item.kind === "storage_tank" || item.kind === "oil_well") {
+          return "osmEnergyOther";
+        }
         // Task 27: the four railway kinds moved to their own layer
         // (railwayPoints, with its own natural count) rather than a
         // sub-ticker here -- LAYER_ITEM_FILTER.osmInfra already excludes
         // them from this layer's *visible* set, and rolling them into
-        // nothing here (rather than into osmMilitary) keeps this layer's
-        // own *total* honest too: the totals loop below reads raw items
-        // unfiltered, and a railway station is not a military site.
-        if (typeof item.kind === "string" && item.kind.startsWith("railway_")) return null;
-        return "osmMilitary"; // airfields and areas roll up together
+        // nothing here keeps this layer's own *total* honest too: the
+        // totals loop below reads raw items unfiltered, and a railway
+        // station is not a military site.
+        return null;
       },
     },
     launches: {
@@ -6116,9 +6175,12 @@ export function createMapController(container, initial, callbacks) {
     settlePlacement();
   }
 
-  // Pipeline routes (backend/infrastructure.py's PIPELINE_ROUTES) -- a small
-  // static set fetched once (see useOsintData.js), so this just draws every
-  // route once rather than diff-syncing per-viewport like the point layers.
+  // Pipeline routes -- backend/infrastructure.py's curated PIPELINE_ROUTES,
+  // plus (Task 28) real OSM pipeline geometry, merged server-side by
+  // app.py's infrastructure_list into one `raw.pipelines` array, each entry
+  // stamped `source: "curated" | "osm"`. Fetched once (see useOsintData.js),
+  // so this just draws every route once rather than diff-syncing
+  // per-viewport like the point layers.
   //
   // Drawn on every copy of the world in view, same as the cables below: a route
   // is a line across the globe, not a point, so it has to repeat where the
@@ -6128,21 +6190,39 @@ export function createMapController(container, initial, callbacks) {
     const offsets = worldCopies();
     worldCopyKeys.pipelines = offsets.join(",");
     for (const route of raw.pipelines) {
+      const path = route.path;
+      if (!Array.isArray(path) || path.length < 2) continue;
+      const isOsm = route.source === "osm";
+      const label = route.name ? esc(route.name) : "Pipeline";
+      const popupHtml = isOsm
+        ? `<h3>${label}</h3>` +
+          (route.substance ? `<div>Substance: ${esc(route.substance)}</div>` : "") +
+          (route.operator ? `<div>Operator: ${esc(route.operator)}</div>` : "") +
+          (route.diameter ? `<div class="meta">Diameter: ${esc(route.diameter)} mm</div>` : "") +
+          '<p class="meta">Real geometry from <b>OpenStreetMap</b>, swept daily across this map\'s ' +
+          "eleven conflict theatres only. Outside them, only the curated schematic routes apply.</p>" +
+          '<div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass</div>'
+        : `<h3>${label}</h3><p>${esc(route.note || "")}</p>` +
+          '<p class="meta">A hand-drawn schematic route (backend/infrastructure.py), not surveyed ' +
+          "geometry -- the fallback everywhere OpenStreetMap has not mapped this pipeline.</p>";
       for (const offset of offsets) {
-        const line = L.polyline(shiftPathLon(route.coords, offset), {
-          color: pipelineRouteColor(),
+        const line = L.polyline(shiftPathLon(path, offset), {
+          // Task 28: coloured by substance for the OSM half; the curated
+          // schematic (no substance tag) keeps the single infra.pipeline
+          // colour it has always drawn in.
+          color: pipelineRouteColor(route.substance),
           // Pipelines are drawn as part of the infrastructure layer and share its
           // dials, the same way the pipeline node's colour token is shared -- a
           // node and the line it sits on must not drift apart.
-          weight: scaledWeight(2, "infra"),
-          opacity: 0.65 * layerOpacity("infra"),
-          dashArray: "6 6",
+          weight: scaledWeight(isOsm ? 2.4 : 2, "infra"),
+          opacity: (isOsm ? 0.8 : 0.65) * layerOpacity("infra"),
+          dashArray: isOsm ? null : "6 6",
         });
         // Bound on every copy, not just the primary one. A reader who can see a
         // line can click it; a copy that looks identical but does nothing on
         // click reads as a broken map rather than as a decoration.
-        line.bindTooltip(esc(route.name), { className: "map-tooltip", direction: "top" });
-        line.bindPopup(`<h3>${esc(route.name)}</h3><p>${esc(route.note || "")}</p>`, popupOptions(280));
+        line.bindTooltip(label, { className: "map-tooltip", direction: "top" });
+        line.bindPopup(popupHtml, popupOptions(280));
         pipelinesGroup.addLayer(line);
       }
     }
@@ -6302,6 +6382,51 @@ export function createMapController(container, initial, callbacks) {
     // are real, just partial, and this is what stops that partial view
     // reading as a complete one.
     zoomNotes.railwaysTruncated = Array.isArray(doc.truncated_regions) ? doc.truncated_regions : [];
+    scheduleReports({ counts: true, notes: true });
+  }
+
+  // Task 28: transmission-line geometry, "the same polyline path as
+  // railways" per the brief -- a near-copy of renderRailways just above,
+  // simpler because there is only one source here (OSM), not two to tell
+  // apart per line.
+  function renderPowerLines() {
+    powerLinesGroup.clearLayers();
+    const offsets = worldCopies();
+    worldCopyKeys.powerLines = offsets.join(",");
+    const doc = raw.powerLines || {};
+    const lines = Array.isArray(doc.lines) ? doc.lines : [];
+    const color = gridLineColor();
+    for (const line of lines) {
+      const path = line?.path;
+      if (!Array.isArray(path) || path.length < 2) continue;
+      const label = line.name ? esc(line.name) : "Transmission line";
+      const popupHtml =
+        `<h3>${label}</h3>` +
+        (line.voltage ? `<div>Voltage: ${esc(line.voltage)} V</div>` : "") +
+        (line.cables ? `<div class="meta">Cables: ${esc(line.cables)}</div>` : "") +
+        (line.operator ? `<div>Operator: ${esc(line.operator)}</div>` : "") +
+        '<p class="meta">From <b>OpenStreetMap</b>, swept daily across this map\'s eleven conflict ' +
+        "theatres only, not worldwide -- outside them this layer has nothing to show.</p>" +
+        '<div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass</div>';
+      for (const offset of offsets) {
+        const poly = L.polyline(shiftPathLon(path, offset), {
+          color,
+          weight: scaledWeight(2, "powerLines"),
+          opacity: 0.75 * layerOpacity("powerLines"),
+        });
+        poly.bindTooltip(label, { className: "map-tooltip", direction: "top", sticky: true });
+        poly.bindPopup(popupHtml, popupOptions(280));
+        powerLinesGroup.addLayer(poly);
+      }
+    }
+    // Per line in the document, not per drawn line, same reason the cable and
+    // railway counts are.
+    counts.powerLines = lines.length;
+    totals.powerLines = lines.length;
+    // Same "a cap that truncates silently is a defect" treatment railways'
+    // own truncated-region note gets -- read straight from the document since
+    // only the backend knows the raw, pre-parse Overpass element count.
+    zoomNotes.powerLinesTruncated = Array.isArray(doc.truncated_regions) ? doc.truncated_regions : [];
     scheduleReports({ counts: true, notes: true });
   }
 
@@ -6726,6 +6851,9 @@ export function createMapController(container, initial, callbacks) {
     // sweep, just split -- see applyData's own note), so it needs the same
     // pan/zoom catch-up.
     renderMarkerLayer("railwayPoints");
+    // Task 28: bounds-filtered the same way and for the same reason --
+    // reads the same raw sweep as osmInfra/railwayPoints above, just split.
+    renderMarkerLayer("powerPlants");
     // Live and ungated, but still bounds-filtered like every other marker
     // layer here -- without this it would render once and sit empty
     // wherever the map panned to since the last poll, the same reasoning
@@ -7227,8 +7355,15 @@ export function createMapController(container, initial, callbacks) {
       // raw.osmInfra expecting infrastructure, not stations.
       if (key === "osmInfra") {
         const items = Array.isArray(data) ? data : [];
-        raw.osmInfra = items.filter((item) => !isRailwayPointItem(item));
+        // Task 28: power plants get the identical treatment railwayPoints
+        // already does -- split out at landing time, not filtered at render
+        // time, for the same reason applyData's own comment above gives:
+        // every generic consumer (counts, totals, the country card, the data
+        // editor) then reads raw.osmInfra expecting infrastructure, not
+        // plants, with no further changes required of any of them.
+        raw.osmInfra = items.filter((item) => !isRailwayPointItem(item) && !isPowerPlantItem(item));
         raw.railwayPoints = items.filter(isRailwayPointItem);
+        raw.powerPlants = items.filter(isPowerPlantItem);
       } else {
         raw[key] = data;
       }
@@ -7254,10 +7389,13 @@ export function createMapController(container, initial, callbacks) {
           if (layer !== key) renderMarkerLayer(layer);
         }
       }
-      // railwayPoints has just been rebuilt above; redraw it whenever a fresh
-      // OSM sweep lands, the same "whichever lands gets redrawn" rule the
-      // twin-rebuild block just above already follows.
-      if (key === "osmInfra") renderMarkerLayer("railwayPoints");
+      // railwayPoints/powerPlants have just been rebuilt above; redraw both
+      // whenever a fresh OSM sweep lands, the same "whichever lands gets
+      // redrawn" rule the twin-rebuild block just above already follows.
+      if (key === "osmInfra") {
+        renderMarkerLayer("railwayPoints");
+        renderMarkerLayer("powerPlants");
+      }
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();
       else if (key === "cities") {
@@ -7272,6 +7410,7 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "pipelines") renderPipelines();
     else if (key === "cables") renderCables();
     else if (key === "railways") renderRailways();
+    else if (key === "powerLines") renderPowerLines();
     else if (key === "shippingLanes") renderShippingLanes();
     else if (key === "water") renderWater();
     // Served as a country-keyed dict (read as-is by the country card), drawn

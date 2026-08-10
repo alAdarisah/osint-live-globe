@@ -1145,6 +1145,17 @@ INFRA_SITES: list[dict] = [
 # Major oil/gas pipeline routes -- rendered as lines rather than points.
 # `coords` are approximate waypoints along the real route, not surveyed
 # geometry; `region_keys` mirrors INFRA_SITES (empty == not zone-specific).
+#
+# Task 28: this list is untouched by that task and stays exactly what it has
+# always been -- a hand-maintained schematic. What changed is what rides
+# beside it: app.py's /api/infrastructure now folds in real pipeline
+# *geometry* OpenStreetMap's Overpass sweep finds inside this map's eleven
+# conflict theatres (backend/sources/osm_infra.py's "pipelines_osm" document,
+# man_made=pipeline, with substance/operator/diameter where OSM has them),
+# each entry stamped `source: "curated"` or `"osm"` so a reader can always
+# tell which claim they are looking at. Outside those theatres, and for any
+# route OSM has not mapped, this list is what a reader gets -- the fallback
+# the merge is built to fall back to, provenance intact.
 PIPELINE_ROUTES: list[dict] = [
     {
         "id": "trans_alaska",

@@ -787,6 +787,71 @@ function buildEnergy(props, raw) {
       }</div>`;
 }
 
+// --- grid stress (Task 28): net exchange + outage score, side by side -----
+//
+// Not a rebuild of buildEnergy above -- that section already states the
+// interconnector picture in full, sparkline included. This one exists to put
+// two independently-collected signals in the same fold so a reader can see
+// them move together (or not) without holding two folds open at once: the
+// physical net position Energy-Charts/ENTSO-E measures, and the internet-
+// disruption score IODA derives. Neither is evidence for the other, and the
+// text says so in as many words -- a coincidence is worth noticing, not a
+// causal claim this app makes on a reader's behalf.
+function buildGridStress(props, raw) {
+  const record = energyRecordFor(props, raw);
+  const physical = record && record.physical;
+  const outage = outageFor(props, raw);
+  if (!physical && !outage) return "";
+
+  const unit = (physical && physical.unit) || "GW";
+  const netNow = physical && physical.net != null ? physical.net : null;
+  const regionSummary = outage ? regionMatchSummary(outage.country_code, raw) : null;
+
+  // A 24h window off the publisher's own reported cadence rather than a
+  // hard-coded "96 points" -- physical exchange is usually 15-minute steps,
+  // but interval_minutes is the publisher's own stated resolution (see
+  // buildEnergy's own coverageLine) and this reads it rather than assuming.
+  const intervalMin = Number.isFinite(physical && physical.interval_minutes) ? physical.interval_minutes : 15;
+  const pointsIn24h = Math.max(2, Math.round((24 * 60) / intervalMin));
+  const spark = physical && physical.net_series && physical.net_series.length >= 2
+    ? buildSparkline(physical.net_series, {
+        count: pointsIn24h,
+        readValue: (pt) => pt.net,
+        headingOf: (recent) => `Net position, last ~24h (${recent.length} interval${recent.length === 1 ? "" : "s"}, ${esc(unit)}, measured)`,
+        captionOf: (recent, max) => {
+          const last = recent[recent.length - 1];
+          if (!last) return "";
+          const val = `${last.net > 0 ? "+" : ""}${Number(last.net).toFixed(2)} ${unit}`;
+          return `${last.t || "latest"}: ${val} &middot; peak ${max.toFixed(2)} ${unit}`;
+        },
+      })
+    : "";
+
+  return `
+    <div class="cstats">
+      ${netNow != null
+        ? `<div class="cstat hot"><span class="cstat-v">${netNow > 0 ? "+" : ""}${Number(netNow).toFixed(2)} ${esc(unit)}</span>net exchange, measured</div>`
+        : ""}
+      ${outage
+        ? `<div class="cstat"><span class="cstat-v">${fmtNumber(Math.round(outage.score))}</span>IODA outage score</div>`
+        : ""}
+    </div>
+    ${spark}
+    ${regionSummary
+      ? `<div class="meta">Sub-national: ${regionSummary.matched} of ${regionSummary.total} IODA-scored
+          region(s) here matched to a state/province boundary (see its own card).</div>`
+      : ""}
+    ${!physical ? '<p class="meta">No cross-border electricity data published for this country -- the score above stands alone.</p>' : ""}
+    ${!outage ? '<p class="meta">No internet-disruption score currently reported for this country -- the exchange figure above stands alone.</p>' : ""}
+    <p class="meta"><b>Two independent measurements on two different clocks, placed side by side, not
+      combined.</b> Cross-border flow is metered every ${esc(intervalMin)} minutes by grid operators; the
+      outage score is IODA's own composite over its own reporting window. Neither is derived from the
+      other, and a coincidence between a swing in one and a spike in the other is exactly that &mdash; a
+      coincidence worth noticing, not a causal claim this app makes for you.</p>
+    <div class="meta">Source: Energy-Charts (Fraunhofer ISE) republishing ENTSO-E, <i>measured</i> &middot;
+      IODA (Georgia Tech), <i>derived</i> composite score.</div>`;
+}
+
 // --- food balance sheets and the price index (food_trade.py) ------------
 //
 // Three independent bodies estimate every number here and this card never
@@ -961,11 +1026,25 @@ export function summarizePowerPlants(plants) {
   };
 }
 
+// Task 28: which curated backend/infrastructure.py site types count as
+// "refineries & terminals" for this section -- deliberately narrower than
+// every type INFRA_STYLE draws (desalination and fabs are their own subject,
+// not energy generation/storage/transport).
+const CURATED_ENERGY_INFRA_TYPES = new Set(["refinery", "lng_terminal", "port"]);
+const OSM_ENERGY_INFRA_KINDS = new Set(["refinery", "storage_tank", "oil_well"]);
+
 function buildEnergyInfrastructure(bounds, raw) {
-  const plants = itemsInBounds(raw.osmInfra, bounds, (d) => d.kind === "power_plant");
+  // Task 28: power plants moved off raw.osmInfra onto their own raw.powerPlants
+  // array (see createMapController.js's applyData) -- reading the old
+  // osmInfra-filtered-by-kind path here would silently report zero forever.
+  const plants = itemsInBounds(raw.powerPlants, bounds);
+  const substations = itemsInBounds(raw.osmInfra, bounds, (d) => d.kind === "power_substation");
   const dams = itemsInBounds(raw.dams, bounds);
   const landings = itemsInBounds(raw.cableLandings, bounds);
-  if (!plants.length && !dams.length && !landings.length) return "";
+  const curatedEnergySites = itemsInBounds(raw.infra, bounds, (d) => CURATED_ENERGY_INFRA_TYPES.has(d.type));
+  const osmEnergySites = itemsInBounds(raw.osmInfra, bounds, (d) => OSM_ENERGY_INFRA_KINDS.has(d.kind));
+  if (!plants.length && !dams.length && !landings.length
+    && !curatedEnergySites.length && !osmEnergySites.length && !substations.length) return "";
 
   const summary = summarizePowerPlants(plants);
   const shownSources = summary.bySource.slice(0, ENERGY_SOURCE_CAP);
@@ -975,9 +1054,12 @@ function buildEnergyInfrastructure(bounds, raw) {
   const damCapacity = dams.filter((d) => Number.isFinite(d.capacity_mcm));
   const damCapacityMcm = damCapacity.reduce((sum, d) => sum + d.capacity_mcm, 0);
 
+  const osmEnergyByKind = tallyBy(osmEnergySites, (d) => d.kind);
+
   return `
     <div class="cstats">
       ${statRow("", "power plants (OSM)", summary.count)}
+      ${statRow("", "substations (OSM)", substations.length)}
       ${statRow("", "dams", dams.length)}
       ${statRow("", "cable landings", landings.length)}
     </div>
@@ -1010,10 +1092,25 @@ function buildEnergyInfrastructure(bounds, raw) {
           <code>power_mw</code> -- and the two figures above are never summed against each other. Do not add
           them together yourself; the same station may be counted in both.</p>`
       : ""}
+    ${(curatedEnergySites.length || osmEnergySites.length) ? `
+    <div class="csection-h">Refineries, terminals &amp; storage</div>
+    <p class="meta">Two independent claims about the same kind of site, kept apart rather than summed:
+      this app's own curated, hand-checked list, and what OpenStreetMap's mappers have separately
+      surveyed.</p>
+    ${curatedEnergySites.length
+      ? `<div class="meta">${curatedEnergySites.length} curated:</div>${infraListRows(curatedEnergySites, null, (d) => d.name)}`
+      : '<div class="meta">None on this app\'s curated list here.</div>'}
+    ${osmEnergySites.length
+      ? `<div class="meta">${osmEnergySites.length} from OpenStreetMap: ${["refinery", "storage_tank", "oil_well"]
+          .filter((k) => osmEnergyByKind.counts[k])
+          .map((k) => `${esc(OSM_INFRA_STYLE[k].label.toLowerCase())} (${osmEnergyByKind.counts[k]})`).join(", ")}</div>`
+      : '<div class="meta">None from the OpenStreetMap sweep here.</div>'}
+    ` : ""}
     <p class="meta">${OSM_SWEEP_CAVEAT} ${DAM_SWEEP_CAVEAT}</p>
     <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass, <i>reported</i> by its
       mappers and not checked by hand &middot; Global Dam Watch v1.0 (CC BY 4.0), <i>reported</i> by the
-      dataset's own contributing surveys &middot; TeleGeography submarine cable landings.</div>`;
+      dataset's own contributing surveys &middot; TeleGeography submarine cable landings &middot; this app's
+      curated critical-infrastructure list, <i>reported</i>, hand-checked coordinates.</div>`;
 }
 
 // ---------- military & security ----------
@@ -1221,7 +1318,12 @@ const COVERAGE_FEEDS = [
   { key: "firms", label: "Fire detections (NASA FIRMS / HMS)", provenance: "measured", whenMs: firmsRecordMs },
   { key: "jamming", label: "GPS jamming cells (gpsjam.org)", provenance: "derived", whenMs: () => null },
   { key: "infra", label: "Curated critical infrastructure", provenance: "reported", whenMs: () => null },
-  { key: "osmInfra", label: "OpenStreetMap infrastructure sweep", provenance: "reported", whenMs: () => null },
+  // Task 28: powerPlants is deliberately NOT its own row here -- it is a
+  // client-side split of this same osmInfra fetch (see createMapController.js's
+  // applyData), not an independent poll, so it has no fetchCoverage entry of
+  // its own to read. A separate row would read "never fetched" forever, which
+  // is exactly the false-negative this section exists to prevent.
+  { key: "osmInfra", label: "OpenStreetMap infrastructure sweep (incl. power plants)", provenance: "reported", whenMs: () => null },
   { key: "dams", label: "Global Dam Watch", provenance: "reported", whenMs: () => null },
   { key: "airports", label: "OurAirports gazetteer", provenance: "reported", whenMs: () => null },
   { key: "ports", label: "NGA World Port Index", provenance: "reported", whenMs: () => null },
@@ -1518,7 +1620,7 @@ export const COUNTRY_CARD_GROUPS = [
   },
   {
     id: "country", title: "Country",
-    sectionIds: ["profile", "humanitarian", "power", "energy", "transport", "military", "food"],
+    sectionIds: ["profile", "humanitarian", "power", "energy", "gridStress", "transport", "military", "food"],
   },
   // "sanctions" is not a section id this card produces -- Task 9 folded
   // sanctioned hulls/tails into "military" rather than giving them their own
@@ -1598,6 +1700,10 @@ export function countryCardSections(props, raw, bounds) {
     // border) so it is its own fold rather than a second heading stacked
     // inside that one. See buildEnergyInfrastructure's own note.
     { id: "energy", title: "Energy infrastructure", html: buildEnergyInfrastructure(bounds, raw) },
+    // Task 28: net cross-border exchange and the IODA outage score, side by
+    // side -- see buildGridStress's own note on why this is not a rebuild of
+    // "power" above.
+    { id: "gridStress", title: "Grid stress", html: buildGridStress(props, raw) },
     { id: "military", title: "Military & security", html: buildMilitary(bounds, raw, props) },
     { id: "transport", title: "Transport", html: buildTransport(bounds, raw) },
     { id: "food", title: "Food balance & prices", html: buildFoodTrade(props, raw) },
@@ -2212,7 +2318,10 @@ function buildAdminLive(entry, raw, bounds) {
  *  fold, not two. */
 function buildAdminInfrastructure(entry, raw, bounds) {
   const inside = (items, predicate) => itemsInFeature(items, entry, bounds, predicate);
-  const plants = inside(raw.osmInfra, (d) => d.kind === "power_plant");
+  // Task 28: power plants moved off raw.osmInfra onto their own
+  // raw.powerPlants (see createMapController.js's applyData split) -- reading
+  // the old osmInfra-filtered-by-kind path here would silently report zero.
+  const plants = inside(raw.powerPlants);
   const dams = inside(raw.dams);
   const airports = inside(raw.airports);
   const ports = inside(raw.ports);
