@@ -59,9 +59,16 @@ test("nextHighlightedIndex", async (t) => {
 });
 
 test("placeResultTitle", async (t) => {
-  await t.test("names the place with its country and admin-1 code", () => {
+  await t.test("prefers the resolved admin-1 name when the backend sent one", () => {
     assert.equal(
-      placeResultTitle({ name: "Kyiv", country_code: "UA", admin1: "30" }),
+      placeResultTitle({ name: "Kyiv", country_code: "UA", admin1: "30", admin1_name: "Kyiv City" }),
+      "Kyiv, Kyiv City (UA)"
+    );
+  });
+
+  await t.test("falls back to the bare admin-1 code when there is no resolved name", () => {
+    assert.equal(
+      placeResultTitle({ name: "Kyiv", country_code: "UA", admin1: "30", admin1_name: null }),
       "Kyiv (UA-30)"
     );
   });
@@ -72,6 +79,13 @@ test("placeResultTitle", async (t) => {
 
   await t.test("degrades to the bare name when there is no country code either", () => {
     assert.equal(placeResultTitle({ name: "Somewhere", country_code: "", admin1: "" }), "Somewhere");
+  });
+
+  await t.test("an admin-1 name with no country code omits the parenthesised code", () => {
+    assert.equal(
+      placeResultTitle({ name: "Somewhere", country_code: "", admin1: "", admin1_name: "Some Region" }),
+      "Somewhere, Some Region"
+    );
   });
 });
 

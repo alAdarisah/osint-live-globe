@@ -41,18 +41,22 @@ export function nextHighlightedIndex(current, length, direction) {
 }
 
 /**
- * "Name (CC-ADMIN1)" -- e.g. "Kyiv (UA-30)". admin1 is GeoNames' own code,
- * not a looked-up division name (the frontend has no admin1-name index to
- * resolve it against -- see the Task 34 report), but a code still disambig-
- * uates: two identically-named places in the same country almost never share
- * one, and combined with country_code this is already enough to tell two
- * Springfields or two Tripolis apart, which is the honesty bar the brief sets.
+ * "Name, Admin1 (CC)" -- e.g. "Kyiv, Kyiv City (UA)" -- when the backend
+ * resolved the admin-1 name (gazetteer.py's own ADM1 rows, see
+ * app.py's places_endpoint), which is the common case once
+ * admin1CodesASCII.txt has loaded. Falls back to "Name (CC-ADMIN1)" (the
+ * bare GeoNames code, e.g. "Kyiv (UA-30)") when it hasn't -- a code still
+ * disambiguates two identically-named places in the same country, just less
+ * legibly than a name a reader recognises.
  */
 export function placeResultTitle(result) {
   const cc = result?.country_code || "";
   const admin1 = result?.admin1 || "";
+  const admin1Name = result?.admin1_name || "";
+  const name = result?.name ?? "";
+  if (admin1Name) return cc ? `${name}, ${admin1Name} (${cc})` : `${name}, ${admin1Name}`;
   const code = admin1 ? `${cc}-${admin1}` : cc;
-  return code ? `${result?.name ?? ""} (${code})` : (result?.name ?? "");
+  return code ? `${name} (${code})` : name;
 }
 
 /**

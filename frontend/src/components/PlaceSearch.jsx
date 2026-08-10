@@ -42,7 +42,14 @@ export default function PlaceSearch({ onLocate }) {
   const [totalMatches, setTotalMatches] = useState(0);
   const [open, setOpen] = useState(false);
   const [highlighted, setHighlighted] = useState(-1);
-  const [status, setStatus] = useState("idle"); // idle | loading | ready | error
+  // idle | loading | ready | notready | error. "notready" is distinct from
+  // "ready" with zero results -- see the useEffect below and the Task 34
+  // review: the backend's own index is warmed from Postgres asynchronously
+  // and is not necessarily populated yet when this box first becomes
+  // interactive, and telling a reader a real capital "does not match"
+  // during that window is the found-nothing-versus-did-not-look mistake
+  // this project holds the line against everywhere else.
+  const [status, setStatus] = useState("idle");
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -60,7 +67,11 @@ export default function PlaceSearch({ onLocate }) {
           if (!searchGuard.isCurrent(SEARCH_KEY, token)) return; // a later keystroke has already superseded this
           setResults(data.results || []);
           setTotalMatches(data.total_matches || 0);
-          setStatus("ready");
+          // data.ready is false only while the backend's gazetteer index has
+          // not loaded any data at all yet (see app.py's places_endpoint) --
+          // once it has, even a genuinely empty result set comes back as
+          // "ready".
+          setStatus(data.ready === false ? "notready" : "ready");
           setHighlighted(-1);
         })
         .catch(() => {
@@ -140,6 +151,11 @@ export default function PlaceSearch({ onLocate }) {
         <ul className="place-search-results" id="place-search-listbox" role="listbox">
           {status === "loading" && <li className="place-search-status">Searching…</li>}
           {status === "error" && <li className="place-search-status">Search failed. Try again.</li>}
+          {status === "notready" && (
+            <li className="place-search-status">
+              Still loading the place index — try again in a moment.
+            </li>
+          )}
           {status === "ready" && results.length === 0 && (
             <li className="place-search-status">No places match &ldquo;{trimmedQuery}&rdquo;.</li>
           )}

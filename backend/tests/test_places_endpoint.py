@@ -29,9 +29,11 @@ def _body(response):
     return json.loads(response.body)
 
 
-def _index(*rows: str) -> gz.Gazetteer:
+def _index(*rows: str, admin1: str = "", admin2: str = "") -> gz.Gazetteer:
     places, alternates = gz.parse_cities("\n".join(rows))
-    return gz.build_index(places, alternates, [], [])
+    return gz.build_index(
+        places, alternates, gz.parse_admin_codes(admin1, "ADM1"), gz.parse_admin_codes(admin2, "ADM2")
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +61,7 @@ def test_empty_query_returns_no_results_not_an_error():
     body = _search(q="")
     assert body["results"] == []
     assert body["total_matches"] == 0
+    assert body["ready"] is True  # the index is loaded; there's simply nothing to search yet
 
 
 def test_a_query_below_the_minimum_length_also_returns_nothing():
@@ -95,6 +98,10 @@ def test_a_matching_query_returns_the_disambiguating_fields():
     assert hit["lat"] == pytest.approx(50.45466)
     assert hit["lon"] == pytest.approx(30.5238)
     assert hit["is_alternate"] is False
+    # No admin1CodesASCII.txt was loaded into this index, so the name can't
+    # resolve -- None, not a guess or an empty string.
+    assert hit["admin1_name"] is None
+    assert body["ready"] is True
 
 
 # --- ranking ------------------------------------------------------------------
@@ -216,3 +223,78 @@ def test_no_matches_is_an_empty_list_not_an_error():
     body = _search(q="nonexistentplacename")
     assert body["results"] == []
     assert body["total_matches"] == 0
+    # A loaded index that genuinely found nothing is still "ready" -- the
+    # distinction below is specifically about an index with *no data at all*.
+    assert body["ready"] is True
+
+
+# --- readiness (cold start) --------------------------------------------------
+#
+# gazetteer.py's index is rebuilt from Postgres on a 24h cycle and warmed
+# from it at boot, but that warm/fetch runs fire-and-forget rather than
+# being awaited before the server starts accepting requests, and gazetteer
+# is not in BOOT_SOURCES -- so /api/places can be asked a real question
+# before the index it searches has any data. Found by review: the endpoint
+# used to answer that identically to "genuinely no matches", which tells a
+# reader searching a real capital in the first seconds after boot that it
+# does not exist.
+
+
+def test_an_unloaded_index_says_not_ready_rather_than_no_match():
+    # The autouse installed_gazetteer fixture leaves current() as the empty
+    # Gazetteer([]) the module starts cold with -- nothing installed here on
+    # purpose, to stand in for the window before the first rehydrate/fetch.
+    body = _search(q="kyiv")
+    assert body["ready"] is False
+    assert body["results"] == []
+    assert body["total_matches"] == 0
+
+
+def test_a_too_short_query_against_an_unloaded_index_still_reports_readiness():
+    # The query-length gate and the readiness signal are independent checks
+    # -- a reader mid-keystroke on a cold index should see "not ready" the
+    # instant the query is long enough to mean something, not just once it
+    # also matches a place.
+    body = _search(q="k")
+    assert body["ready"] is False
+
+
+def test_readiness_flips_true_the_moment_the_index_is_installed():
+    body_before = _search(q="kyiv")
+    assert body_before["ready"] is False
+    gz.install(_index(geonames_row(name="Kyiv", asciiname="Kyiv")))
+    body_after = _search(q="kyiv")
+    assert body_after["ready"] is True
+    assert len(body_after["results"]) == 1
+
+
+# --- admin1 name resolution --------------------------------------------------
+#
+# The raw admin1 code ("30") disambiguates but doesn't read as a name a
+# reader recognises. gazetteer.py's own ADM1 rows (built from
+# admin1CodesASCII.txt, the same table resolve()'s division-level lookups
+# already use) carry that name, so /api/places resolves it when the table has
+# been loaded rather than showing the bare code unconditionally.
+
+_KYIV_ADMIN1_FILE = "UA.30\tKyiv City\tKyiv City\t703447\n"
+
+
+def test_admin1_name_resolves_when_the_code_table_is_loaded():
+    gz.install(_index(
+        geonames_row(geonameid="703448", name="Kyiv", asciiname="Kyiv",
+                     country_code="UA", admin1="30"),
+        admin1=_KYIV_ADMIN1_FILE,
+    ))
+    body = _search(q="kyiv")
+    hit = body["results"][0]
+    assert hit["admin1_name"] == "Kyiv City"
+    # Additive, not a replacement -- the raw code is still there for a caller
+    # that wants it (or that got None back because the table wasn't loaded).
+    assert hit["admin1"] == "30"
+
+
+def test_admin1_name_is_none_without_the_code_table():
+    gz.install(_index(geonames_row(geonameid="703448", name="Kyiv", asciiname="Kyiv",
+                                    country_code="UA", admin1="30")))
+    body = _search(q="kyiv")
+    assert body["results"][0]["admin1_name"] is None

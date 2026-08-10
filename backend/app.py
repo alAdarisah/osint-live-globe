@@ -1704,13 +1704,34 @@ async def places_endpoint(q: str = "", limit: int = PLACE_SEARCH_LIMIT):
     and `total_matches` says how many places matched before truncation -- so a
     capped list reads as "20 of 214 matches", never silently as if those were
     the only 20 places on Earth called that.
+
+    `ready` distinguishes "the index has data and genuinely found nothing"
+    from "the index has no data yet" -- gazetteer.py's index is rebuilt from
+    Postgres on every 24h refresh and warmed from it at boot, but that
+    rehydrate/fetch runs fire-and-forget rather than being awaited before the
+    server starts accepting requests (see gazetteer.py's start()), and
+    gazetteer is not in BOOT_SOURCES either -- so this box is interactive
+    before the index is necessarily populated. Without `ready`, a reader
+    searching a real capital in the first seconds after boot would be told
+    that place does not exist -- the found-nothing-versus-did-not-look
+    distinction this project holds everywhere else, missed here on a Task 34
+    review pass and fixed in the same round.
     """
     query = q.strip()
+    ready = len(gazetteer.current()) > 0
     if len(gazetteer.normalize(query)) < MIN_PLACE_QUERY_LENGTH:
         # Not an error: an empty or still-being-typed query is the normal
         # resting state of a search box, exactly like gazetteer.resolve("")
         # returning no candidates rather than raising.
-        return JSONResponse({"query": query, "limit": PLACE_SEARCH_LIMIT, "total_matches": 0, "results": []})
+        return JSONResponse({
+            "query": query, "limit": PLACE_SEARCH_LIMIT, "total_matches": 0, "results": [], "ready": ready,
+        })
+    if not ready:
+        # Nothing to search yet -- report that plainly rather than let an
+        # empty index be indistinguishable from a genuine zero-match answer.
+        return JSONResponse({
+            "query": query, "limit": PLACE_SEARCH_LIMIT, "total_matches": 0, "results": [], "ready": False,
+        })
 
     capped_limit = max(1, min(limit, PLACE_SEARCH_LIMIT))
     hits, total_matches = gazetteer.search(query, limit=capped_limit)
@@ -1722,6 +1743,12 @@ async def places_endpoint(q: str = "", limit: int = PLACE_SEARCH_LIMIT):
             "is_alternate": hit.is_alternate,
             "country_code": hit.place.country_code,
             "admin1": hit.place.admin1,
+            # The ADM1 division's own name ("Kyiv City") when gazetteer.py
+            # loaded admin1CodesASCII.txt, so a result reads as a place a
+            # reader recognises rather than GeoNames' bare admin1 code; None
+            # when it isn't loaded (frontend falls back to the code itself --
+            # see placeResultTitle in placeSearchFormat.js).
+            "admin1_name": gazetteer.admin1_name(hit.place.country_code, hit.place.admin1),
             "population": hit.place.population,
             "feature_class": hit.place.feature_class,
             "feature_code": hit.place.feature_code,
@@ -1731,7 +1758,7 @@ async def places_endpoint(q: str = "", limit: int = PLACE_SEARCH_LIMIT):
         for hit in hits
     ]
     return JSONResponse({
-        "query": query, "limit": capped_limit, "total_matches": total_matches, "results": results,
+        "query": query, "limit": capped_limit, "total_matches": total_matches, "results": results, "ready": True,
     })
 
 

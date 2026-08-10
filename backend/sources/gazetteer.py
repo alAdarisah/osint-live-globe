@@ -297,7 +297,7 @@ class Gazetteer:
     can build a three-row gazetteer without touching the network.
     """
 
-    __slots__ = ("_places", "_by_name", "_by_id")
+    __slots__ = ("_places", "_by_name", "_by_id", "_admin1_names")
 
     def __init__(self, places: list[Place], alternates: dict[int, list[str]] | None = None):
         self._places: list[Place] = places
@@ -309,6 +309,19 @@ class Gazetteer:
         for geonameid, names in (alternates or {}).items():
             for alt in names:
                 self._add_name(geonameid, alt, primary=False)
+        # (country_code, admin1 code) -> the ADM1 division's own name
+        # ("Kyiv City", "Zaporizhia Oblast'"), so a caller holding a place's
+        # raw admin1 *code* (all any populated-place row carries -- see
+        # parse_cities) can show the name a reader actually recognises
+        # instead. The ADM1 division rows this reads from are already in
+        # `places` -- build_index's _locate_divisions adds them -- so this is
+        # one more dict built from a list already being walked above, not a
+        # second load. Empty wherever admin1CodesASCII.txt wasn't loaded
+        # (e.g. every hand-built test index), which admin1_name() below
+        # reports as None rather than guessing.
+        self._admin1_names: dict[tuple[str, str], str] = {
+            (p.country_code, p.admin1): p.name for p in places if p.feature_code == "ADM1"
+        }
 
     def _add_name(self, geonameid: int, surface: str, primary: bool) -> None:
         key = normalize(surface)
@@ -349,6 +362,15 @@ class Gazetteer:
 
     def get(self, geonameid: int) -> Place | None:
         return self._by_id.get(geonameid)
+
+    def admin1_name(self, country_code: str, admin1: str) -> str | None:
+        """The human name for a (country_code, admin1 code) pair -- e.g.
+        ("UA", "30") -> "Kyiv City" -- or None if this gazetteer has no ADM1
+        row for it. Task 34's /api/places uses this so a search result shows
+        an admin-1 name instead of GeoNames' bare code."""
+        if not country_code or not admin1:
+            return None
+        return self._admin1_names.get((country_code, admin1))
 
     def resolve(
         self,
@@ -527,6 +549,11 @@ def resolve(
 def search(query: str, limit: int = 20) -> tuple[list[SearchHit], int]:
     """Module-level convenience over the live index, for /api/places."""
     return _index.search(query, limit=limit)
+
+
+def admin1_name(country_code: str, admin1: str) -> str | None:
+    """Module-level convenience over the live index, for /api/places."""
+    return _index.admin1_name(country_code, admin1)
 
 
 # --- parsing ---------------------------------------------------------------
