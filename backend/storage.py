@@ -252,6 +252,16 @@ CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts (resolved_at, last_seen D
 --
 -- by_class counts transits per vessel class (cargo, tanker, fishing, ...) so
 -- the layer can be filtered without a join back to entity_history.
+--
+-- transits is a count of distinct hulls *within one sweep*, added onto the
+-- running total on every later sweep that finds the same cell occupied
+-- (see _combine_lane_cell below) -- so a hull that sits in one cell for a
+-- month adds to this column on every sweep that finds it still there, the
+-- same as a cell that sees that many different hulls pass through once
+-- each. Nothing here deduplicates a loiterer against itself across sweeps
+-- (see backend/refine/lane_density.py's module docstring for why not, and
+-- what a fix would need), which is why GET /api/lanes exposes this column
+-- as `sightings`, not `transits` -- see backend/app.py's lanes_endpoint.
 CREATE TABLE IF NOT EXISTS lane_cells (
   cell_key    TEXT PRIMARY KEY,
   lat         DOUBLE PRECISION NOT NULL,

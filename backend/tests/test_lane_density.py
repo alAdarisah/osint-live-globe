@@ -13,6 +13,7 @@ import math
 import pytest
 
 from backend import config
+from backend import storage as real_storage
 from backend.refine import lane_density
 
 
@@ -162,8 +163,21 @@ class _FakeStorage:
         self.calls = []
         self.lane_batches = []
         self.write_ok = write_ok
+        # A tiny stand-in for the real lane_cells table, merged with the real
+        # storage._combine_lane_cell -- not a second, hand-rolled copy of that
+        # accumulation logic -- so a test asserting on cross-pass behaviour
+        # (see test_a_stationary_hull_accumulates_a_sighting_on_every_pass
+        # below) is exercising the actual merge rule, not a fake's guess at it.
+        self.cells: dict[str, dict] = {}
+        self.decay_calls = 0
+        self.health: list[tuple] = []
+        # Set by a test to make entity_history_since raise instead of
+        # returning -- see test_decay_runs_even_when_the_ingest_pass_raises.
+        self.raise_on_history = False
 
     async def entity_history_since(self, kind, after_id, limit):
+        if self.raise_on_history:
+            raise RuntimeError("boom")
         self.calls.append(after_id)
         return [r for r in self.history if r["id"] > after_id][:limit]
 
@@ -175,7 +189,19 @@ class _FakeStorage:
 
     async def upsert_lane_cells(self, rows):
         self.lane_batches.append(rows)
-        return self.write_ok
+        if not self.write_ok:
+            return False
+        for row in rows:
+            key = row["cell_key"]
+            self.cells[key] = real_storage._combine_lane_cell(self.cells.get(key), row)
+        return True
+
+    async def decay_lane_cells(self, factor, floor):
+        self.decay_calls += 1
+        return 0
+
+    async def record_source_health(self, source, item_count, ok, error=None):
+        self.health.append((source, item_count, ok, error))
 
 
 def test_the_cursor_advances_and_a_second_pass_does_not_reprocess(monkeypatch):
@@ -229,3 +255,71 @@ def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     assert retry["ok"] is True
     assert fake.calls == [0, 0]  # both passes started from the same cursor
     assert fake.docs["lane_density_cursor"] == {"last_id": 1}
+
+
+# --- Task 19 review: transits accumulates sightings, not distinct hulls -----
+
+
+def test_a_stationary_hull_accumulates_a_sighting_on_every_pass_it_is_seen(monkeypatch):
+    """Task 19 review, Important: `transits` is a true distinct-MMSI count
+    *within one pass* (see compute_cells), but storage.upsert_lane_cells adds
+    that per-pass count onto the running total every time the job finds the
+    same hull still sitting in the same cell -- so a hull that never moves
+    keeps adding to the very same column a genuine, different ship passing
+    through would. This is what "sightings" (see backend/app.py's
+    lanes_endpoint, which renames the field for exactly this reason) has to
+    mean: how many times a hull was seen, not how many distinct hulls ever
+    called here.
+    """
+    mmsi = "111"
+    fake = _FakeStorage([pos(1, 0.0, 10.0, 10.0, mmsi, course=90.0)])
+    monkeypatch.setattr(lane_density, "storage", fake)
+
+    _run(lane_density.run_once())
+    (key,) = fake.cells.keys()
+    assert fake.cells[key]["transits"] == 1
+
+    # A second pass, later, finds the same hull still sitting in the same
+    # cell -- not a different ship, the same one that never left.
+    fake.history.append(pos(2, 3600.0, 10.0, 10.0, mmsi, course=90.0))
+    _run(lane_density.run_once())
+    assert fake.cells[key]["transits"] == 2  # accumulated, not deduplicated
+
+    fake.history.append(pos(3, 7200.0, 10.0, 10.0, mmsi, course=90.0))
+    _run(lane_density.run_once())
+    assert fake.cells[key]["transits"] == 3
+
+
+# --- Task 19 review: decay must survive an exception, not just ok=False -----
+
+
+def test_decay_runs_after_a_normal_pass(monkeypatch):
+    fake = _FakeStorage([pos(1, 0.0, 10.0, 10.0, "111", course=90.0)])
+    monkeypatch.setattr(lane_density, "storage", fake)
+    _run(lane_density._tick())
+    assert fake.decay_calls == 1
+
+
+def test_decay_runs_after_a_failed_write(monkeypatch):
+    fake = _FakeStorage([pos(1, 0.0, 10.0, 10.0, "111", course=90.0)], write_ok=False)
+    monkeypatch.setattr(lane_density, "storage", fake)
+    _run(lane_density._tick())
+    assert fake.decay_calls == 1
+
+
+def test_decay_runs_even_when_the_ingest_pass_raises_outright(monkeypatch):
+    """Task 19 review, Minor 1: the previous version only ran decay on the
+    two paths inside run_once's own try block, so an exception raised before
+    reaching decay_lane_cells (entity_history_since, reference and
+    upsert_lane_cells can all raise) silently skipped a tick's worth of
+    aging -- a small drift, but one the module docstring's "runs every tick"
+    claim did not actually make true. _tick's `finally` is what this test
+    holds to that claim."""
+    fake = _FakeStorage([pos(1, 0.0, 10.0, 10.0, "111", course=90.0)])
+    fake.raise_on_history = True
+    monkeypatch.setattr(lane_density, "storage", fake)
+
+    _run(lane_density._tick())  # must not raise past _tick itself
+
+    assert fake.decay_calls == 1
+    assert fake.docs == {}  # nothing durable happened on the failed pass

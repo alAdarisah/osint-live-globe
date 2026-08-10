@@ -15,6 +15,22 @@ so one pass needs nothing from the last one beyond the cursor itself --
 storage.upsert_lane_cells is what carries a cell's history forward, by
 summing this pass's small delta into the row already on disk.
 
+**What `transits` actually accumulates to, honestly.** Within one pass it is
+a true distinct-hull count, per the brief. Across passes it is not: a hull
+that sits in the same cell for a month is present in that cell's distinct-MMSI
+set on every pass that finds it there, so storage.upsert_lane_cells adds 1 to
+`transits` on every one of those passes -- about 720 over 30 days at the
+default hourly cadence, the same number a strait that saw 720 different ships
+pass through once each would produce. Deduplicating that would need a second
+persisted state document (which cell each hull was last seen in, so a
+loiterer counts once and only a genuine re-entry counts again) -- a real
+option, not built here because it is more machinery than the brief asked for
+and a straightforward thing to add later without touching the schema. Instead
+this is named for what it is: GET /api/lanes exposes the field as
+`sightings`, not `transits` (see backend/app.py's lanes_endpoint), and
+test_lane_density.py pins the behaviour with a hull sitting still across
+several passes.
+
 **The grid, not the lanes.** A cell with traffic in it is a fact: this map's
 own AIS coverage placed a ship there. A cell with *no* traffic in it is not
 the absence of a lane -- it is the absence of an observation, which could
@@ -39,12 +55,13 @@ averaging bearings across the 0/360 seam gives nonsense. A course of exactly
 0.1deg units), not a genuine due-north reading, and is dropped rather than
 folded into the vector -- see _course_deg.
 
-**Decay.** decay_lane_cells ages every cell down on every tick, whether or
-not this tick's own ingest write succeeded (see derive_forever) -- decay
-represents wall-clock time passing at LANE_DENSITY_INTERVAL, not "time since
-the grid last definitely changed". DECAY_FACTOR is derived from that same
-interval so a cell's contribution halves in about 30 days regardless of what
-cadence is configured; see the constant's own comment for the arithmetic.
+**Decay.** decay_lane_cells ages every cell down on every tick, whatever
+happened to that tick's own ingest pass -- a failed write, or an outright
+exception (see _tick) -- because decay represents wall-clock time passing at
+LANE_DENSITY_INTERVAL, not "time since the grid last definitely changed".
+DECAY_FACTOR is derived from that same interval so a cell's contribution
+halves in about 30 days regardless of what cadence is configured; see the
+constant's own comment for the arithmetic.
 """
 
 import asyncio
@@ -92,7 +109,9 @@ DECAY_FACTOR = 0.5 ** (1.0 / _TICKS_PER_HALF_LIFE)
 NOTE = (
     "Grid of AIS positions this map has actually recorded, not a map of "
     "shipping lanes. An empty cell means no ship was observed there by this "
-    "map's own AIS coverage -- never that no traffic exists."
+    "map's own AIS coverage -- never that no traffic exists. Each cell's "
+    "sightings count is how many times a hull was seen there, not how many "
+    "distinct ships -- a vessel that stays put keeps adding to it."
 )
 
 
@@ -234,43 +253,61 @@ async def run_once() -> dict:
     return {"read": len(rows), "cells": len(cells), "ok": True}
 
 
+async def _tick() -> None:
+    """One pass: read/write, then decay, then report health.
+
+    Split out from derive_forever so this ordering can be exercised directly
+    by a test without unrolling an infinite loop -- see
+    backend/tests/test_lane_density.py.
+
+    Decay lives in a `finally`, not after run_once's own happy path (Task 19
+    review, Minor 1): entity_history_since/reference/upsert_lane_cells can all
+    raise before run_once ever gets to return, and a decay that only ran on
+    the paths that didn't raise would quietly skip a tick every time the
+    database hiccupped -- a small drift on its own, but one that makes the
+    "halves in about 30 days" claim a little less true every time it happens.
+    Unconditional costs nothing: storage.decay_lane_cells already fails safely
+    (logs and returns 0) if the database itself is the problem.
+    """
+    summary = None
+    try:
+        summary = await run_once()
+    except Exception as exc:  # noqa: BLE001 - keep the loop alive
+        log.warning("Lane density derivation failed: %s", exc)
+        await storage.record_source_health(HEALTH_NAME, None, False, str(exc))
+    finally:
+        deleted = await storage.decay_lane_cells(DECAY_FACTOR, DECAY_FLOOR)
+
+    if summary is None:
+        return
+    if summary["ok"]:
+        log.info(
+            "Lane density: read %d AIS movement rows, %d cell(s) touched, "
+            "%d cell(s) decayed below the floor and dropped",
+            summary["read"], summary["cells"], deleted,
+        )
+        await storage.record_source_health(HEALTH_NAME, summary["cells"], True)
+    else:
+        log.warning(
+            "Lane density: read %d AIS movement rows but the write "
+            "failed -- the cursor was not advanced, so the same batch "
+            "is retried next pass",
+            summary["read"],
+        )
+        await storage.record_source_health(
+            HEALTH_NAME, None, False,
+            "upsert_lane_cells failed to write this batch; the cursor "
+            "was held back and the same rows will be retried next pass",
+        )
+
+
 async def derive_forever():
     """The lane-density derivation, for the life of the refine process.
 
     A plain interval, like port_calls'/vessel_profile's own: nothing about a
-    traffic grid is made more correct by retrying faster after a failure.
-
-    Decay runs every tick regardless of whether this tick's ingest write
-    succeeded -- see DECAY_FACTOR's derivation, which assumes one decay per
-    LANE_DENSITY_INTERVAL of wall-clock time, not one per successfully
-    written batch. storage.decay_lane_cells already fails safely (logs and
-    returns 0) on its own account, so skipping it here on an ingest failure
-    would only stretch the advertised half-life without buying anything back.
+    traffic grid is made more correct by retrying faster after a failure. See
+    _tick for what happens on any one pass.
     """
     while True:
-        try:
-            summary = await run_once()
-            deleted = await storage.decay_lane_cells(DECAY_FACTOR, DECAY_FLOOR)
-            if summary["ok"]:
-                log.info(
-                    "Lane density: read %d AIS movement rows, %d cell(s) touched, "
-                    "%d cell(s) decayed below the floor and dropped",
-                    summary["read"], summary["cells"], deleted,
-                )
-                await storage.record_source_health(HEALTH_NAME, summary["cells"], True)
-            else:
-                log.warning(
-                    "Lane density: read %d AIS movement rows but the write "
-                    "failed -- the cursor was not advanced, so the same batch "
-                    "is retried next pass",
-                    summary["read"],
-                )
-                await storage.record_source_health(
-                    HEALTH_NAME, None, False,
-                    "upsert_lane_cells failed to write this batch; the cursor "
-                    "was held back and the same rows will be retried next pass",
-                )
-        except Exception as exc:  # noqa: BLE001 - keep the loop alive
-            log.warning("Lane density derivation failed: %s", exc)
-            await storage.record_source_health(HEALTH_NAME, None, False, str(exc))
+        await _tick()
         await asyncio.sleep(config.LANE_DENSITY_INTERVAL)

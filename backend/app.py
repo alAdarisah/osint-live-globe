@@ -1072,6 +1072,14 @@ async def lanes_endpoint(bbox: str | None = None, min_transits: int = 1):
     so there is nothing here for _cached_source_response's per-source version
     counter to usefully key off -- the same reasoning /api/replay's per-request
     `at` already gets.
+
+    `min_transits` keeps storage.lane_cells's own parameter name -- it filters
+    the stored `transits` column -- but each returned cell renames that same
+    number to `sightings` (Task 19 review): a hull sitting in one cell for a
+    month adds to it on every sweep that finds the hull still there, the same
+    as a cell that saw that many different hulls pass through once each, so
+    "transits" would claim a precision -- distinct ships -- this number does
+    not have. See the column's own comment on lane_cells in backend/storage.py.
     """
     bounds = regions.parse_bbox(bbox)
     cells = await storage.lane_cells(bounds, min_transits=max(1, min_transits))
@@ -1079,7 +1087,11 @@ async def lanes_endpoint(bbox: str | None = None, min_transits: int = 1):
         {
             "note": lane_density.NOTE,
             "cells": [
-                {**cell, "course_deg": _lane_course_deg(cell["mean_sin"], cell["mean_cos"])}
+                {
+                    **{k: v for k, v in cell.items() if k != "transits"},
+                    "sightings": cell["transits"],
+                    "course_deg": _lane_course_deg(cell["mean_sin"], cell["mean_cos"]),
+                }
                 for cell in cells
             ],
         },
