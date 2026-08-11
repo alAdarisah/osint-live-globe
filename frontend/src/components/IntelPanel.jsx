@@ -38,6 +38,8 @@ import {
   WINDOW_OPTIONS, DEFAULT_WINDOW_HOURS, GROUP_BY_OPTIONS, UNKNOWN_GROUP,
   makeIntelScope, groupItems, intelPanelIsEmpty, windowMaxAgeDays,
   selectEscalationZones, selectEventItems, selectNewsItems, selectOfficialsItems,
+  escalationMiniBarTitle, eventReliabilityTooltip,
+  escalationEmptyMessage, eventsEmptyMessage, newsEmptyMessage, officialsEmptyMessage,
 } from "./intelPanelLogic";
 
 // Run once, at module scope rather than inside the component -- see
@@ -100,7 +102,7 @@ function EscalationMiniBar({ zone }) {
   return (
     <div
       className="escalation-minibar"
-      title={`${zone.current} events in the last 24h vs a ${zone.baseline_per_day}/day baseline over the trailing 7 days (baseline shown flat -- no day-by-day history behind this yet)`}
+      title={escalationMiniBarTitle(zone)}
     >
       {bars.map((v, i) => (
         <span
@@ -171,7 +173,7 @@ function EventRow({ event, onLocate }) {
           <span
             className="notable-chip reliability-chip"
             style={{ background: reliabilityColor(trustBand) }}
-            title={`Reliability ${Number.isFinite(event.reliability) ? event.reliability : trustBand.min}/100 — who is behind this report, and how many independent sources`}
+            title={eventReliabilityTooltip(event, trustBand)}
           >
             {trustBand.label}
           </span>
@@ -574,11 +576,7 @@ export default function IntelPanel({
                   {escalationZones.map((z) => <EscalationRow key={z.region} zone={z} onLocate={onLocate} />)}
                 </>
               ) : (
-                <div className="notable-empty">
-                  {scope.deliberate
-                    ? `No zone inside ${scope.label} is currently running above its own baseline.`
-                    : "No region is currently running above its own 7-day baseline."}
-                </div>
+                <div className="notable-empty">{escalationEmptyMessage(scope)}</div>
               )
             )}
 
@@ -586,11 +584,7 @@ export default function IntelPanel({
               eventItems.length ? (
                 <TabList items={eventItems} groupBy={groupBy} tabKind="events" Row={EventRow} rowKey={(e) => e.id} onLocate={onLocate} />
               ) : (
-                <div className="notable-empty">
-                  {scope.deliberate
-                    ? `No recorded conflict activity in ${scope.label} in the current window. Widen the window, or clear the scope to see the world board.`
-                    : "Nothing clears the significance bar right now. Narrow the scope to a place to see its own worst few regardless."}
-                </div>
+                <div className="notable-empty">{eventsEmptyMessage(scope)}</div>
               )
             )}
 
@@ -598,9 +592,7 @@ export default function IntelPanel({
               newsItems.length ? (
                 <TabList items={newsItems} groupBy={groupBy} tabKind="news" Row={NewsRow} rowKey={(i) => i.source_url || i.event_id} onLocate={onLocate} />
               ) : (
-                <div className="notable-empty">
-                  {scope.deliberate ? `No recent headlines for ${scope.label}.` : "No recent headlines for this area."}
-                </div>
+                <div className="notable-empty">{newsEmptyMessage(scope)}</div>
               )
             )}
 
@@ -608,9 +600,7 @@ export default function IntelPanel({
               officialsItems.length ? (
                 <TabList items={officialsItems} groupBy={groupBy} tabKind="officials" Row={OfficialsRow} rowKey={(i) => i.id || `${i.published_at}|${i.lat}|${i.lon}`} onLocate={onLocate} />
               ) : (
-                <div className="notable-empty">
-                  {scope.deliberate ? `No diplomatic activity recorded for ${scope.label}.` : "No diplomatic activity in the current window."}
-                </div>
+                <div className="notable-empty">{officialsEmptyMessage(scope)}</div>
               )
             )}
           </div>

@@ -42,7 +42,7 @@ import { useEffect, useRef, useState } from "react";
 import { aircraftEmergencyLine, AIRCRAFT_FLAG_NOTE } from "../map/decorators.js";
 import {
   trackEmergencySquawks, dismissAlert, pruneDismissed, visibleAlerts, formatSquawkDuration,
-  alertLabel, squawkAnnouncement,
+  alertLabel, squawkAnnouncement, dismissAlertLabel,
 } from "./squawkAlertsLogic.js";
 
 // Independent of any network poll cadence -- this only needs to be frequent
@@ -86,7 +86,7 @@ function AlertRow({ entry, nowMs, onSelect, onDismiss }) {
           // a sibling header a screen reader may never visit while tabbing
           // through controls -- see the review note this file's own module
           // comment carries forward.
-          aria-label={`Dismiss the emergency squawk alert for ${label} — squawks are occasionally set by mistake, not a confirmed incident`}
+          aria-label={dismissAlertLabel(label)}
           onClick={(e) => {
             e.stopPropagation();
             onDismiss(entry.icao24, entry.signature);

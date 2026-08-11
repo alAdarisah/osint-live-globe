@@ -413,3 +413,63 @@ export function selectOfficialsItems(officialsRaw, { scope, windowHours }) {
   filtered.sort((a, b) => (b.published_at || 0) - (a.published_at || 0));
   return filtered.slice(0, OFFICIALS_MAX_ITEMS);
 }
+
+// ---------- user-visible strings ----------
+//
+// This project's frontend suite cannot import JSX at all, so any sentence
+// composed inline in IntelPanel.jsx would be untested by construction --
+// three earlier tasks were sent back for exactly that. Every sentence the
+// panel shows a reader lives here instead, as a plain function of the data
+// it depends on, so frontend/tests/intelPanel.test.js can assert on the
+// words rather than trusting the template was typed correctly.
+
+/** EscalationMiniBar's own `title=` -- the hover-only counterpart to the
+ *  persistent "Bars: hatched = ..." caption printed once above the whole
+ *  Escalation list (see IntelPanel.jsx's own note on why neither is enough
+ *  alone: a phone reader never gets a hover, and the caption alone leaves
+ *  each individual zone's real numbers unstated). */
+export function escalationMiniBarTitle(zone) {
+  return `${zone.current} events in the last 24h vs a ${zone.baseline_per_day}/day baseline over the trailing 7 days (baseline shown flat -- no day-by-day history behind this yet)`;
+}
+
+/** EventRow's reliability chip tooltip -- the score shown falls back to the
+ *  band's own floor (`trustBand.min`) for a record whose `reliability` field
+ *  is itself missing, the same fallback EventRow used inline before this was
+ *  pulled out; see reliabilityBand's own guard in map/severity.js for why a
+ *  record can carry a band with no numeric score at all. */
+export function eventReliabilityTooltip(event, trustBand) {
+  const score = Number.isFinite(event.reliability) ? event.reliability : trustBand.min;
+  return `Reliability ${score}/100 — who is behind this report, and how many independent sources`;
+}
+
+/** Escalation tab, empty state. A deliberate scope (a reader's direct
+ *  question) names the place it found nothing in; World says so in its own
+ *  unscoped words instead of substituting "World" for `scope.label`, which
+ *  would read like a place name rather than the absence of one. */
+export function escalationEmptyMessage(scope) {
+  return scope.deliberate
+    ? `No zone inside ${scope.label} is currently running above its own baseline.`
+    : "No region is currently running above its own 7-day baseline.";
+}
+
+/** Events tab, empty state -- points a deliberate-scope reader at the two
+ *  controls that could be hiding a real answer (the window and the scope
+ *  itself), and tells a World-scope reader the significance floor, not the
+ *  data, is why the board is quiet. */
+export function eventsEmptyMessage(scope) {
+  return scope.deliberate
+    ? `No recorded conflict activity in ${scope.label} in the current window. Widen the window, or clear the scope to see the world board.`
+    : "Nothing clears the significance bar right now. Narrow the scope to a place to see its own worst few regardless.";
+}
+
+/** News tab, empty state. */
+export function newsEmptyMessage(scope) {
+  return scope.deliberate ? `No recent headlines for ${scope.label}.` : "No recent headlines for this area.";
+}
+
+/** Officials tab, empty state. */
+export function officialsEmptyMessage(scope) {
+  return scope.deliberate
+    ? `No diplomatic activity recorded for ${scope.label}.`
+    : "No diplomatic activity in the current window.";
+}

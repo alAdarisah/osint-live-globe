@@ -19,10 +19,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import LocateIcon from "./icons/LocateIcon";
 import { fetchJson } from "../api";
-import { fmtNumber } from "../utils/format";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import {
-  CHOKEPOINT_SORT_KEYS, boxCenter, chokepointRows, hasChokepointDocument, sortChokepoints, todayEntry, trendBars,
+  CHOKEPOINT_SORT_KEYS, boxCenter, chokepointRows, hasChokepointDocument, hullCountLine, sortChokepoints, todayEntry, trendBars,
 } from "./chokepointPanelLogic";
 import { REFINE_PANEL_STATUS, REFINE_PANEL_STATUS_BADGE, REFINE_PANEL_STATUS_TEXT, classifyRefinePanelStatus } from "./refinePanelStatus";
 
@@ -36,8 +35,6 @@ const CLASS_LABEL = {
   tanker: "Tanker", cargo: "Cargo", fishing: "Fishing", passenger: "Passenger",
   tug: "Tug", naval: "Naval", other: "Other",
 };
-
-const STATUS_WORD = { counted: "counted", partial: "still counting", missing: "not observed" };
 
 // Bar colours by day status -- deliberately three different treatments, not
 // three shades of the same one, so "still counting" and "no data" cannot be
@@ -76,7 +73,6 @@ function ChokepointRow({ box, onLocate }) {
   const today = todayEntry(box);
   const center = boxCenter(box.bounds);
   const canLocate = !!center;
-  const statusWord = STATUS_WORD[today.status] || today.status;
   const classEntries = today.by_class ? Object.entries(today.by_class).filter(([, n]) => n > 0) : [];
 
   return (
@@ -94,9 +90,7 @@ function ChokepointRow({ box, onLocate }) {
         )}
       </div>
       <div className="notable-item-meta">
-        {today.total == null
-          ? "Not observed yet today"
-          : `${fmtNumber(today.total)} distinct hull${today.total === 1 ? "" : "s"} today (${statusWord})`}
+        {hullCountLine(today)}
         {classEntries.length
           ? ` · ${classEntries
               .sort((a, b) => b[1] - a[1])
