@@ -71,9 +71,11 @@ const BOOT_SOURCES = [
 // backend/config.py) -- polling their large payloads every 60s bought
 // nothing but redundant fetch/parse work, since the underlying data was
 // still the same one most of the time. 3 minutes still feels current.
-// Exported so scene.test.js can check "is every polled reference-only feed
-// also ungated" against the real list rather than a copy of it -- the pairing
-// navalPresence fell through for two tasks running.
+// Exported so referenceOnlyFeeds.test.js can check "is every polled
+// reference-only feed also ungated" against the real list rather than a copy of
+// it -- the pairing navalPresence fell through for two tasks running. (Not
+// scene.test.js: importing this React module there would break that suite's own
+// promise to stay free of React and the DOM.)
 export const POLL_CONFIG = [
   { key: "events", url: "/api/events", intervalMs: 60000 }, // GDELT-driven (event_fusion.py), same cadence as gdelt below
   { key: "firms", url: "/api/fires", intervalMs: 180000 },
