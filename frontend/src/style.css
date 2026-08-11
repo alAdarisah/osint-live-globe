@@ -4035,6 +4035,22 @@ html, body {
 }
 .country-chip-remove { padding: 3px 7px 3px 3px; font-size: 12px; line-height: 1; }
 .country-chip-name:hover, .country-chip-remove:hover { color: var(--text-bright); }
+/* Accented rather than the same neutral chrome as Clear -- this is the one
+   button on the bar that opens something rather than discarding something,
+   and it reads that way at a glance. */
+.country-selection-compare {
+  flex: none;
+  border: 1px solid rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent);
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 600;
+  font-size: calc(10px * var(--ui-text-scale));
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.country-selection-compare:hover { background: rgba(var(--accent-rgb), 0.24); }
 .country-selection-clear {
   flex: none;
   border: 1px solid var(--panel-border);
@@ -4397,6 +4413,168 @@ html, body {
    same override rather than food-estimates' right/nowrap defaults. */
 .flight-legs-table th,
 .flight-legs-table td { text-align: left; white-space: normal; }
+
+/* --- Task 40: country comparison table ---------------------------------
+   Deliberately not a fourth #countryInfoCard-style anchored 320px column --
+   CountryCompareView.jsx's own header note explains why: three of those side
+   by side cannot hold an aligned numeric column at all. This is a centred
+   modal instead, the one shape in this stylesheet built for "stop what you
+   are doing and read this table", which is exactly what comparing two or
+   three countries' figures is. */
+.compare-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+#countryCompare {
+  width: min(94vw, 880px);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  animation: popup-in 0.16s ease;
+}
+.compare-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+.compare-title {
+  flex: 1 1 auto;
+  font-size: calc(11px * var(--ui-text-scale));
+  letter-spacing: 1.2px;
+  color: var(--text-bright);
+  text-transform: uppercase;
+}
+.compare-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.compare-close:hover { color: var(--text-bright); }
+.compare-body {
+  overflow-y: auto;
+  padding: 10px 14px 16px;
+}
+.compare-need-more { color: var(--text-secondary); }
+/* The standing coverage caveat (COMPARE_COVERAGE_CAVEAT, countryCompareLogic.js)
+   -- always visible, never a tooltip, per this task's own brief: a reader
+   comparing two aligned numbers has no other way to tell "these countries
+   differ" from "this map knows more about one of them". Boxed rather than a
+   plain .meta line so it cannot be mistaken for one more table footnote. */
+.compare-caveat {
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: rgba(var(--accent-rgb), 0.06);
+  color: var(--text-secondary);
+}
+.compare-truncation {
+  margin: 0 0 10px;
+  color: #ff9500;
+}
+.compare-table-scroll { overflow-x: auto; }
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: calc(11.5px * var(--ui-text-scale));
+}
+.compare-table th,
+.compare-table td { padding: 6px 10px; border-bottom: 1px solid var(--panel-border); }
+.compare-table thead th {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: calc(10px * var(--ui-text-scale));
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Metric names stay put while the reader scrolls the country columns
+   sideways on a narrow viewport -- the one column every row needs to keep
+   meaning without it. */
+.compare-row-label {
+  text-align: left;
+  min-width: 190px;
+  position: sticky;
+  left: 0;
+  background: var(--panel-bg);
+}
+.compare-table thead th.compare-row-label { position: sticky; left: 0; z-index: 1; }
+.compare-row-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-bright);
+  font-size: calc(11.5px * var(--ui-text-scale));
+}
+.compare-row-differs-mark {
+  color: var(--accent);
+  font-weight: 700;
+}
+.compare-row-meta {
+  color: var(--text-dim);
+  font-size: calc(9.5px * var(--ui-text-scale));
+  margin-top: 1px;
+}
+.compare-col-country { min-width: 130px; }
+.compare-country-link {
+  border: none;
+  background: transparent;
+  color: var(--text-bright);
+  font: inherit;
+  font-size: calc(11px * var(--ui-text-scale));
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.compare-country-link:hover { color: var(--accent); }
+.compare-cell { text-align: center; white-space: nowrap; }
+.compare-cell-v {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* The row-wide tint that marks "these figures differ" -- applied to every
+   cell in the row equally, never to just the higher or lower one, so it
+   cannot be read as pointing at a "winner". See CompareRow's own note. */
+tr.compare-row-differs td,
+tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
+/* Three empty states, three different treatments -- so "not covered", "not
+   checked yet" and "does not apply" can never be mistaken for shades of the
+   same dash, the identical discipline the country card's own coverage table
+   follows (see buildCoverage's own note in map/popups.js). */
+.compare-cell-dash {
+  color: var(--text-dim);
+  font-size: calc(10px * var(--ui-text-scale));
+  cursor: help;
+}
+.compare-cell-not-loaded .compare-cell-dash { color: #ff9500; }
+.compare-cell-not-applicable .compare-cell-dash { font-style: italic; opacity: 0.7; }
+
+@media (max-width: 720px) {
+  .compare-backdrop { padding: 0; }
+  #countryCompare { width: 100%; height: 100%; max-height: none; border-radius: 0; }
+  .compare-row-label { min-width: 140px; }
+  .compare-col-country { min-width: 96px; }
+}
 
 /* --- text size -------------------------------------------------------
    Admin Mode's text scale, applied to the HUD's own type.

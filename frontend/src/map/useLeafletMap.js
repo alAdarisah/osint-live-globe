@@ -196,6 +196,16 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     []
   );
 
+  // Task 40: an on-demand pull, not mirrored state -- see
+  // countryCompareRows in createMapController.js for why the comparison view
+  // re-calls this itself rather than the controller pushing updates the way
+  // onCountrySelect does for the single-country card. `null` before the map
+  // is ready, same as recordDetail's own "nothing to show yet" contract.
+  const countryCompareRows = useCallback(
+    (keys) => controllerRef.current?.countryCompareRows(keys) ?? null,
+    []
+  );
+
   // Task 33: SquawkAlertStrip's "click to fly and select". Returns false when
   // the airframe is no longer in the feed (a rare race: it dropped out
   // between the strip's last render and the click), which is a no-op rather
@@ -359,7 +369,7 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     selectedWater, closeWaterCard,
     selectedSubdivision, closeSubdivisionCard, selectedDistrict, closeDistrictCard, setDistrictMonth,
     layerState, setSceneBypass, invalidateSize, focus,
-    applyData, flyToRegion, flyTo, setCamera, getCamera, selectCountryByKey, selectWaterById,
+    applyData, flyToRegion, flyTo, setCamera, getCamera, selectCountryByKey, selectWaterById, countryCompareRows,
     setLayerVisible, setInfraFilter, setEventFilter,
     setVesselFilter, setAircraftFilter, setAgeReference,
     emergencySquawks, selectAircraftByIcao,

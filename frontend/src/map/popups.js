@@ -251,7 +251,18 @@ const RECENT_WINDOW_MS = 72 * 3600 * 1000;
 // this bbox" could quietly disagree about the cutoff or the bounds check,
 // which is exactly the kind of drift the strip and its own fold must never
 // show.
-function recentConflictStats(bounds, raw) {
+//
+// Exported for countryCompareLogic.js (Task 40): the comparison table's
+// events/fatalities rows read this exact function rather than re-deriving
+// "recent conflict activity in a bbox" a third way, for the identical reason
+// summaryTiles already reuses it -- two independently-written counts of the
+// same thing are exactly the kind of drift this project has had to close
+// before. Note that this silently reads as all-zero when `bounds` is null
+// (every record fails the `!bounds` check below) -- fine for its two existing
+// callers, which never invoke it without bounds, but a caller that can be
+// handed a null bounds (countryCompareLogic's cells can) must check for that
+// itself before calling in, not trust a zero coming back out of this.
+export function recentConflictStats(bounds, raw) {
   const cutoff = Date.now() - RECENT_WINDOW_MS;
   let count = 0;
   let fatalities = 0;

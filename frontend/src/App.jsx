@@ -44,6 +44,7 @@ import SubdivisionInfoCard from "./components/SubdivisionInfoCard";
 import DistrictInfoCard from "./components/DistrictInfoCard";
 import EventDetailCard from "./components/EventDetailCard";
 import CountrySelectionBar from "./components/CountrySelectionBar";
+import CountryCompareView from "./components/CountryCompareView";
 import BorderEditBar from "./components/BorderEditBar";
 import AdminPanel from "./components/admin/AdminPanel";
 import UrlStateNotice from "./components/UrlStateNotice";
@@ -809,6 +810,20 @@ export default function App() {
     replayApi.isReplaying, replayApi.replayAt, recordDetail,
   ]);
 
+  // Task 40: opened by CountrySelectionBar's own Compare button, closed by its
+  // own close button/backdrop click, or -- automatically -- once the
+  // selection it was comparing empties entirely (Clear, or removing the last
+  // chip one at a time), since a comparison of nothing has nothing left to
+  // show. Dropping to exactly one selected country is deliberately not an
+  // auto-close: CountryCompareView's own "select at least one more" message
+  // covers that case in place, so a reader who removed one of three still
+  // sees the view they had open rather than having it vanish out from under
+  // them mid-read.
+  const [compareOpen, setCompareOpen] = useState(false);
+  useEffect(() => {
+    if (compareOpen && mapApi.countrySelection.length === 0) setCompareOpen(false);
+  }, [compareOpen, mapApi.countrySelection.length]);
+
   return (
     <>
       <LoadingScreen sources={dataApi.bootSources} />
@@ -1076,7 +1091,22 @@ export default function App() {
         onFocus={mapApi.focusCountry}
         onRemove={mapApi.deselectCountry}
         onClear={mapApi.clearCountrySelection}
+        onCompare={() => setCompareOpen(true)}
       />
+
+      {/* Task 40: a wide, centred modal rather than another anchored card --
+          see CountryCompareView.jsx's own header note. Mounted only while
+          open, same as every other overlay here, so its 30s refresh interval
+          (see that component) is not ticking in the background for a reader
+          who has never opened it. */}
+      {compareOpen && (
+        <CountryCompareView
+          selection={mapApi.countrySelection}
+          getRows={mapApi.countryCompareRows}
+          onClose={() => setCompareOpen(false)}
+          onFocusCountry={mapApi.focusCountry}
+        />
+      )}
 
       {/* The only place any of this is editable, and it exists only while Admin
           Mode is on -- see AdminPanel.jsx on why that is the whole guard. */}

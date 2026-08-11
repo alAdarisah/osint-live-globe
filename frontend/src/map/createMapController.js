@@ -169,6 +169,10 @@ import {
   countryCardSections, waterCardSections, subdivisionCardSections, districtCardSections,
   cityPopupHtml, normalizeCountryName,
 } from "./popups";
+// Task 40: the comparison table's own pure module -- see its own header note
+// on why it does not reuse countryCardSections' HTML output (statRow drops a
+// real zero, which a comparison table must never do).
+import { buildCountryComparison } from "../components/countryCompareLogic";
 import { buildEventDetailHtml } from "./eventDetail";
 import { buildChoropleth } from "./choropleth";
 import {
@@ -7724,6 +7728,38 @@ export function createMapController(container, initial, callbacks) {
       if (!waterEntryFor(id)) return false;
       selectWater(id);
       return true;
+    },
+
+    /**
+     * Task 40's comparison table, for up to three of `keys` (countryIndex
+     * keys, e.g. countrySelection's own `.key`), built fresh against current
+     * `raw` on every call.
+     *
+     * A pull, not a push, unlike the single-country card's own
+     * refreshFocusedCountryCard: the comparison view has no standing
+     * subscription to feed updates, so a caller that wants it current
+     * re-calls this (CountryCompareView.jsx does, on an interval while the
+     * view is open) rather than this controller maintaining a second live
+     * subscription channel for a surface a reader may never open. Bounds
+     * come from the hit-test index's own bbox (entry.bbox), not a Leaflet
+     * layer's rendered bounds the way countryCardFor's `layer.getBounds()`
+     * does -- the index has one for every selected country regardless of
+     * whether its shape is currently on screen, which a comparison of
+     * countries the reader has since panned away from needs.
+     */
+    countryCompareRows(keys) {
+      const entries = (keys || [])
+        .map((key) => countryEntryFor(key))
+        .filter(Boolean)
+        .map((entry) => ({
+          key: entry.key,
+          name: entry.name,
+          props: entry.props,
+          bounds: entry.bbox
+            ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
+            : null,
+        }));
+      return buildCountryComparison(entries, raw);
     },
 
     // Task 33: the alert strip's own "click to fly and select" -- reuses the
