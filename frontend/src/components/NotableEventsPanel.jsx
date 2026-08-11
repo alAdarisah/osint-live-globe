@@ -12,6 +12,7 @@ import {
   severityBand, severityColor, isImprecise, passesEventFilter, DEFAULT_EVENT_FILTER,
 } from "../map/severity";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
+import CountUp from "./CountUp";
 
 const MAX_ITEMS = 6;
 // A country view has one country's worth of events to draw on, so it can
@@ -171,7 +172,9 @@ export default function NotableEventsPanel({
         {/* Names the filter in the header, so a short list reads as "scoped to
             Sudan" rather than "the world went quiet". */}
         {scoped && <span className="notable-scope" title={countryScope.label}>{countryScope.label}</span>}
-        <span className="notable-count">{zones.length ? `${zones.length}↑ ${items.length}` : items.length}</span>
+        <span className="notable-count">
+          {zones.length ? <>{zones.length}&#8593; <CountUp value={items.length} /></> : <CountUp value={items.length} />}
+        </span>
         <span className="notable-caret" aria-hidden="true">&#9662;</span>
       </div>
       <div className="notable-list">
