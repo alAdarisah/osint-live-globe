@@ -33,7 +33,7 @@ globalThis.window = { L: { geoJSON: () => ({}) } };
 
 const {
   buildCountryComparison, buildComparisonRow, selectCompareCountries,
-  truncationNote, needMoreCountriesNote, CELL_STATUS, COMPARE_METRICS,
+  truncationNote, needMoreCountriesNote, labelFor, CELL_STATUS, COMPARE_METRICS,
   COMPARE_COVERAGE_CAVEAT, MIN_COMPARE_COUNTRIES, MAX_COMPARE_COUNTRIES,
 } = await import("../src/components/countryCompareLogic.js");
 
@@ -282,6 +282,71 @@ test("needMoreCountriesNote reads differently at zero/one than the generic 'sele
 test("COMPARE_COVERAGE_CAVEAT exists and says coverage, not the countries, is what's being compared", () => {
   assert.ok(COMPARE_COVERAGE_CAVEAT.length > 40);
   assert.match(COMPARE_COVERAGE_CAVEAT, /not the countries themselves|not a ranking|does not know/i);
+});
+
+// Task 40 review (Important 2): the reader most likely to be misled is not
+// the one looking at a blank cell (visibly different from a number) -- it is
+// the one looking at two *populated* cells and reading the gap between them
+// as a real-world fact when it may just be uneven sensor coverage. The
+// original caveat covered only the missing-cell case; this pins that the
+// extended wording actually names the two-real-values case too.
+test("COMPARE_COVERAGE_CAVEAT also warns that two populated cells are not automatically safe to compare", () => {
+  assert.match(COMPARE_COVERAGE_CAVEAT, /filled-in cells|populated cells/i);
+  assert.match(COMPARE_COVERAGE_CAVEAT, /sensor|coverage is uneven|coverage is not uniform/i);
+});
+
+// --- labelFor: the short word an empty cell actually shows ---------------
+//
+// Task 40 review (Important 1): this used to be a JS object literal inside
+// CountryCompareView.jsx, which `node --test` cannot import at all -- so the
+// tooltip (`cell.reason`) was tested and the word a reader actually reads in
+// the cell was not. Pinned here now that it lives in the pure module.
+
+test("labelFor: each non-value status has its own short word", () => {
+  assert.equal(labelFor(CELL_STATUS.NOT_COLLECTED), "not covered");
+  assert.equal(labelFor(CELL_STATUS.NOT_LOADED), "not checked yet");
+  assert.equal(labelFor(CELL_STATUS.NOT_APPLICABLE), "n/a");
+});
+
+test("labelFor: an unrecognised status (or VALUE, which the view never routes here) falls back to an em dash", () => {
+  assert.equal(labelFor(CELL_STATUS.VALUE), "—");
+  assert.equal(labelFor("not-a-real-status"), "—");
+  assert.equal(labelFor(undefined), "—");
+});
+
+test("labelFor's four words are all distinct from each other -- no two empty states read the same", () => {
+  const words = [CELL_STATUS.NOT_COLLECTED, CELL_STATUS.NOT_LOADED, CELL_STATUS.NOT_APPLICABLE].map(labelFor);
+  assert.equal(new Set(words).size, 3);
+});
+
+// --- per-row sensor-coverage caveat (militaryAircraft, navyVessels) ------
+//
+// Task 40 review (Important 2): both rows are bbox counts over this map's
+// own live receiver traffic, and receiver density is wildly uneven country
+// to country -- two VALUE cells here can differ mainly because one country
+// sits under denser ADS-B/AIS coverage, not because more is actually
+// happening there. Each of these two rows carries its own warning
+// (`row.caveat`) so CountryCompareView can render it next to the numbers
+// rather than leaving the table-wide banner as the only place it is said.
+
+test("militaryAircraft and navyVessels rows carry their own sensor-coverage caveat", () => {
+  const a = country({ props: { iso_a3: "TST" } });
+  const b = country({ key: "B", name: "Beeland" });
+  const { rows } = buildCountryComparison([a, b], emptyRaw());
+  const aircraft = rowById(rows, "militaryAircraft");
+  const navy = rowById(rows, "navyVessels");
+  assert.match(aircraft.caveat, /ADS-B/);
+  assert.match(navy.caveat, /AIS/);
+  assert.match(aircraft.caveat, /not uniform between countries/);
+  assert.match(navy.caveat, /not uniform between countries/);
+});
+
+test("every other row's caveat is null -- the warning is specific to the two sensor-coverage rows, not blanket", () => {
+  const a = country({ props: { iso_a3: "TST" } });
+  const b = country({ key: "B", name: "Beeland" });
+  const { rows } = buildCountryComparison([a, b], emptyRaw());
+  const withCaveat = rows.filter((r) => r.caveat).map((r) => r.id);
+  assert.deepEqual(new Set(withCaveat), new Set(["militaryAircraft", "navyVessels"]));
 });
 
 // --- buildComparisonRow direct, for a single metric in isolation ---------

@@ -19,7 +19,7 @@
 // cannot import it at all -- see frontend/tests/countryCompare.test.js.
 import { useEffect, useState } from "react";
 import {
-  CELL_STATUS, COMPARE_COVERAGE_CAVEAT, MIN_COMPARE_COUNTRIES, needMoreCountriesNote, truncationNote,
+  CELL_STATUS, COMPARE_COVERAGE_CAVEAT, MIN_COMPARE_COUNTRIES, labelFor, needMoreCountriesNote, truncationNote,
 } from "./countryCompareLogic";
 
 // Recomputed on an interval rather than pushed by the controller (see
@@ -28,12 +28,6 @@ import {
 // short enough that a poll landing while the view is open shows up without
 // having to close and reopen it.
 const REFRESH_INTERVAL_MS = 30000;
-
-const STATUS_LABEL = {
-  [CELL_STATUS.NOT_COLLECTED]: "not covered",
-  [CELL_STATUS.NOT_LOADED]: "not checked yet",
-  [CELL_STATUS.NOT_APPLICABLE]: "n/a",
-};
 
 function CompareCell({ cell }) {
   if (cell.status === CELL_STATUS.VALUE) {
@@ -45,27 +39,39 @@ function CompareCell({ cell }) {
   }
   return (
     <td className={`compare-cell compare-cell-empty compare-cell-${cell.status}`} title={cell.reason}>
-      <span className="compare-cell-dash">{STATUS_LABEL[cell.status] || "—"}</span>
+      <span className="compare-cell-dash">{labelFor(cell.status)}</span>
     </td>
   );
 }
 
 function CompareRow({ row }) {
   return (
-    <tr className={row.differs ? "compare-row-differs" : ""}>
-      <th scope="row" className="compare-row-label">
-        <div className="compare-row-name">
-          {row.label}
-          {/* A neutral marker, not a colour and not a rank: it says these
-              cells are not the same number, nothing about which one is
-              "worse" -- see countryCompareLogic.js's own note on why
-              `differs` is a boolean and this view never sorts by it. */}
-          {row.differs && <span className="compare-row-differs-mark" title="These countries' figures differ">≠</span>}
-        </div>
-        <div className="compare-row-meta">{row.provenance} &middot; {row.source}</div>
-      </th>
-      {row.cells.map((cell, i) => <CompareCell key={i} cell={cell} />)}
-    </tr>
+    // A React fragment, not a single <tr>: a row that carries its own
+    // sensorCoverageCaveat (countryCompareLogic.js -- militaryAircraft and
+    // navyVessels, currently) gets a second, full-width <tr> right under it,
+    // so the warning sits next to the numbers it is about rather than living
+    // only in the table-wide banner above (Task 40 review, Important 2).
+    <>
+      <tr className={row.differs ? "compare-row-differs" : ""}>
+        <th scope="row" className="compare-row-label">
+          <div className="compare-row-name">
+            {row.label}
+            {/* A neutral marker, not a colour and not a rank: it says these
+                cells are not the same number, nothing about which one is
+                "worse" -- see countryCompareLogic.js's own note on why
+                `differs` is a boolean and this view never sorts by it. */}
+            {row.differs && <span className="compare-row-differs-mark" title="These countries' figures differ">≠</span>}
+          </div>
+          <div className="compare-row-meta">{row.provenance} &middot; {row.source}</div>
+        </th>
+        {row.cells.map((cell, i) => <CompareCell key={i} cell={cell} />)}
+      </tr>
+      {row.caveat && (
+        <tr className="compare-row-caveat-row">
+          <td className="compare-row-caveat" colSpan={row.cells.length + 1}>{row.caveat}</td>
+        </tr>
+      )}
+    </>
   );
 }
 

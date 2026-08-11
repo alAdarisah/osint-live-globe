@@ -4568,6 +4568,33 @@ tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
 }
 .compare-cell-not-loaded .compare-cell-dash { color: #ff9500; }
 .compare-cell-not-applicable .compare-cell-dash { font-style: italic; opacity: 0.7; }
+/* Task 40 review (Minor): not-collected used to fall back to the same plain
+   .compare-cell-dash treatment not-loaded/not-applicable were given their
+   own colour/style for, which left the one state a reader could only tell
+   apart by reading the word. #d8b9ff is not a new colour introduced for this
+   -- it is the same soft lavender AIRCRAFT_STYLE.commercial and the port/
+   joint-base infrastructure glyphs already use (map/decorators.js), reused
+   here rather than invented so it reads as "a real, if muted, part of this
+   app's palette" instead of a colour picked at random for one table. */
+.compare-cell-not-collected .compare-cell-dash {
+  color: #d8b9ff;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+/* Task 40 review (Important 2): the sensor-coverage caveat two metrics carry
+   (militaryAircraft, navyVessels -- see countryCompareLogic.js's
+   sensorCoverageCaveat), rendered as a full-width row directly under the
+   metric it warns about rather than left to the table-wide banner alone.
+   No top/bottom border of its own -- it reads as an extension of the row
+   above it, not a new row with its own numbers. */
+.compare-table td.compare-row-caveat {
+  text-align: left;
+  white-space: normal;
+  color: var(--text-dim);
+  font-size: calc(9.5px * var(--ui-text-scale));
+  font-style: italic;
+  padding-top: 0;
+}
 
 @media (max-width: 720px) {
   .compare-backdrop { padding: 0; }

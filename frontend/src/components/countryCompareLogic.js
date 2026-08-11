@@ -59,6 +59,27 @@ const STATUS_TEXT = {
   [CELL_STATUS.NOT_APPLICABLE]: "Does not apply to this country.",
 };
 
+// The short word an empty cell actually shows, as opposed to STATUS_TEXT's
+// full sentence (which lives in `reason` and reads as a hover tooltip).
+// Task 40 review (Important 1): this used to be a JS object literal sitting
+// in CountryCompareView.jsx, which is a JSX file the headless `node --test`
+// suite cannot import at all -- so the tooltip text was tested and the word a
+// reader actually reads in the cell was not, the exact gap Task 38 was sent
+// back for. Living here, it is reachable from countryCompare.test.js the
+// same way every other on-screen string in this module already is.
+const STATUS_LABEL = {
+  [CELL_STATUS.NOT_COLLECTED]: "not covered",
+  [CELL_STATUS.NOT_LOADED]: "not checked yet",
+  [CELL_STATUS.NOT_APPLICABLE]: "n/a",
+};
+
+/** The word an empty cell shows -- "—" (an em dash) for VALUE or any
+ *  status this table does not know, so a caller never has to guess a
+ *  fallback of its own. */
+export function labelFor(status) {
+  return STATUS_LABEL[status] || "—";
+}
+
 /** One table cell: a real value (possibly 0) or one of the three reasons
  *  there isn't one. `value` is the raw number (never a formatted string --
  *  see formatCellValue), null for every non-VALUE status. */
@@ -171,7 +192,28 @@ function refugeesCell(props, raw) {
  * aircraft are *inferred* from callsign/registry heuristics (also
  * buildMilitary's own words) rather than a confirmed flag. Each row carries
  * its own word rather than the table claiming one register for all eight.
+ *
+ * Task 40 review (Important 2): COMPARE_COVERAGE_CAVEAT below (and its
+ * NOT_LOADED/NOT_COLLECTED cells) only ever says what a *missing* cell means.
+ * militaryAircraft and navyVessels are a different hazard: both are bbox
+ * counts over this map's own live receiver traffic (ADS-B, AIS), and
+ * receiver density for both is wildly uneven country to country -- a
+ * terrestrial ADS-B receiver network is thin over open ocean and much of the
+ * global south, and AIS reception depends on how much of a coastline this
+ * map's own feed happens to hear from a mix of terrestrial and satellite
+ * receivers. Two countries can both land on CELL_STATUS.VALUE, both be
+ * genuinely "checked", and still differ mainly because one sits under denser
+ * receiver coverage than the other, not because more aircraft or hulls are
+ * actually there. `caveat` on a metric is exactly this: a sentence that runs
+ * next to *those* rows specifically (CountryCompareView renders it under the
+ * row, not only in the table-wide banner) so a reader is not left to notice
+ * the bias on their own -- see sensorCoverageCaveat below.
  */
+function sensorCoverageCaveat(sensor) {
+  return `Even when both sides show a real count, this map's own ${sensor} coverage is not uniform between `
+    + "countries -- a higher number here can reflect denser coverage rather than more actual activity.";
+}
+
 const METRICS = [
   {
     id: "population", label: "Population", unit: null, provenance: "reported", source: "World Bank",
@@ -196,11 +238,13 @@ const METRICS = [
   {
     id: "militaryAircraft", label: "Military aircraft in/near country", unit: "aircraft", provenance: "inferred",
     source: "ADS-B, classified by callsign/registry heuristics",
+    caveat: sensorCoverageCaveat("ADS-B receiver"),
     compute: (c, raw) => boundedCount("adsb", c.bounds, raw, (a) => classifyAircraft(a) === "military"),
   },
   {
     id: "navyVessels", label: "Navy vessels in/near country", unit: "vessels", provenance: "derived",
     source: "AIS, classified by broadcast ship-type code",
+    caveat: sensorCoverageCaveat("AIS reception"),
     compute: (c, raw) => boundedCount("ais", c.bounds, raw, (s) => classifyShip(s) === "navy"),
   },
   {
@@ -246,6 +290,12 @@ export function buildComparisonRow(metric, countries, raw) {
     unit: metric.unit,
     provenance: metric.provenance,
     source: metric.source,
+    // Task 40 review (Important 2): null for every metric but the two
+    // (militaryAircraft, navyVessels) sensorCoverageCaveat was written for --
+    // see the METRICS docstring above. Carried on the row rather than looked
+    // up separately by the view, so a row's own caveat can never drift from
+    // which metric it actually belongs to.
+    caveat: metric.caveat || null,
     cells: cells.map((c) => ({ ...c, formatted: formatCellValue(metric.id, c.value) })),
     comparable,
     differs,
@@ -314,8 +364,21 @@ export function needMoreCountriesNote(selectedCount) {
 // way to tell "these countries differ" from "this map knows more about one of
 // them" -- the exact confusion the brief names as the thing this view must
 // survive being asked.
+//
+// Task 40 review (Important 2): the original wording covered only the
+// missing-cell case ("a gap here can be a gap in this map's own sources").
+// The reader most likely to be misled is not that one -- a blank cell is
+// visibly different from a number -- it is the one looking at two *populated*
+// cells and reading the difference between them as a real-world fact. The
+// second sentence below is the general form of that warning; the specific,
+// worst-offending rows (militaryAircraft, navyVessels) also carry their own
+// sensorCoverageCaveat, rendered next to those rows themselves rather than
+// leaving this one banner to cover a warning that belongs beside the numbers
+// it is about.
 export const COMPARE_COVERAGE_CAVEAT =
   "This compares what this map has collected about each country, not the countries themselves. "
   + "A blank cell means this map does not know -- not that the true value is zero -- and coverage is not "
   + "the same for every country, so a gap here can be a gap in this map's own sources rather than a real "
-  + "difference between the countries.";
+  + "difference between the countries. Two filled-in cells are not automatically safe to compare either: "
+  + "rows built from this map's own live sensor coverage can differ mainly because that coverage is uneven, "
+  + "not because the underlying activity is -- those rows say so themselves, next to the numbers.";
