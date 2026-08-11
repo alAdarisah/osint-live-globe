@@ -78,6 +78,13 @@ DIGITRAFFIC_RAIL_STATIONS_INTERVAL = int(os.getenv("DIGITRAFFIC_RAIL_STATIONS_IN
 #     hourly poll re-reads it exactly as often as it moves.
 DIGITRAFFIC_WEATHERCAM_POLL_INTERVAL = int(os.getenv("DIGITRAFFIC_WEATHERCAM_POLL_INTERVAL", "3600"))
 
+# Natural Earth's seas/lakes/rivers (see backend/sources/water_bodies.py),
+# mirrored from the same nvkelso GeoJSON source as railways.py and
+# admin1_boundaries.py, on the same weekly cadence: the file is static between
+# Natural Earth releases, so a week is about being a good citizen of GitHub's
+# raw CDN rather than about freshness.
+WATER_POLL_INTERVAL = int(os.getenv("WATER_POLL_INTERVAL", str(7 * 86400)))
+
 # event_fusion.py doesn't fetch anything itself -- it re-derives from
 # acled.py's (ACLED + UCDP rows) and gdelt.py's already-fetched state.data,
 # so it has no interval of its own to configure, only how long its local
@@ -350,6 +357,222 @@ SOURCE_HEALTH_RETENTION_DAYS = int(os.getenv("SOURCE_HEALTH_RETENTION_DAYS", "14
 # replay range can't use anyway.
 HISTORY_RETENTION_SECONDS = int(os.getenv("HISTORY_RETENTION_SECONDS", str(3 * 24 * 3600)))
 
+# How long storage.py's vessel_port_calls rows are kept. Far longer than
+# HISTORY_RETENTION_SECONDS's 3 days on purpose: a port call is already the
+# compact, one-row-per-visit derivative of the raw movement log, so keeping
+# six months of them costs nothing like keeping six months of position
+# history would, and "how often does this hull call here" is only a question
+# a window that wide can answer.
+PORT_CALL_RETENTION_DAYS = int(os.getenv("PORT_CALL_RETENTION_DAYS", "180"))
+
+# How often backend/refine/port_calls.py reads the next slice of AIS history.
+# 15 minutes, the same cadence as dark_vessels: a dwell has to run for an hour
+# before it is even a candidate, so nothing about the detection needs a
+# tighter loop, and this is the interval a job that has fallen behind (a
+# restart, the very first run against pre-existing history) catches up at --
+# too tight would just mean more empty passes once it is caught up.
+PORT_CALL_INTERVAL = int(os.getenv("PORT_CALL_INTERVAL", "900"))
+
+# Same reasoning as PORT_CALL_RETENTION_DAYS, at half the window. Flight legs
+# are written far more often than port calls -- ADS-B tracks orders of
+# magnitude more aircraft movements than AIS tracks port-capable ships -- so
+# the same "cheap to keep" argument holds at a shorter retention before the
+# table's own row count becomes the thing worth pruning.
+FLIGHT_LEG_RETENTION_DAYS = int(os.getenv("FLIGHT_LEG_RETENTION_DAYS", "90"))
+
+# How often backend/refine/flight_legs.py reads the next slice of ADS-B
+# history. Same cadence, same reasoning, as PORT_CALL_INTERVAL: nothing about
+# an on_ground/altitude transition is more correctly detected by revisiting it
+# faster than the map's own aircraft positions refresh, and this is the pace a
+# job that has fallen behind catches up at.
+FLIGHT_LEG_INTERVAL = int(os.getenv("FLIGHT_LEG_INTERVAL", "900"))
+
+# How often backend/refine/vessel_profile.py reads the next slice of AIS
+# history. Slower than PORT_CALL_INTERVAL on purpose: a hull's laden/ballast
+# verdict is read off its own draught extremes over HISTORY_RETENTION_SECONDS
+# (3 days), so nothing about the inference is made more correct by revisiting
+# it every 15 minutes, and each pass also does one storage.port_calls_for()
+# lookup per hull touched that pass (see the module docstring) -- a slower
+# cadence keeps that fan-out proportional to genuinely new AIS traffic rather
+# than the same ships being re-queried four times an hour for no new evidence.
+VESSEL_PROFILE_INTERVAL = int(os.getenv("VESSEL_PROFILE_INTERVAL", "1800"))
+
+# How often backend/refine/lane_density.py both reads the next slice of AIS
+# history into the traffic grid and ages the whole grid down (see that
+# module's DECAY_FACTOR, derived from this same number). An hour: frequent
+# enough that a busy strait fills in within a session, coarse enough that the
+# decay math above stays a small correction each tick rather than something
+# that has to claw back a huge swing every pass.
+LANE_DENSITY_INTERVAL = int(os.getenv("LANE_DENSITY_INTERVAL", "3600"))
+
+# How often backend/refine/naval_presence.py recomputes navy-classified AIS
+# presence per theatre/port. The figure it produces is a same-day count
+# against a week-old one, so nothing about it is made more correct by
+# revisiting it faster than a few times a day -- four passes (six hours
+# apart) is enough that a reader who opens the map in the morning is never
+# looking at yesterday's number.
+NAVAL_PRESENCE_INTERVAL = int(os.getenv("NAVAL_PRESENCE_INTERVAL", str(6 * 3600)))
+
+# How often backend/refine/infra_risk.py recomputes which dams, power plants,
+# cable landings, airfields and ports have the most conflict events inside
+# their own uncertainty radius. The figure is a 30-day (WINDOW_DAYS) ranked
+# count, not a same-day one, so an hourly pass -- the same cadence
+# lane_density.py already uses for its own grid -- is frequent enough that a
+# newly-fused event's radius search shows up within the hour, without paying
+# for a full conflict_events window scan any faster than that.
+INFRA_RISK_INTERVAL = int(os.getenv("INFRA_RISK_INTERVAL", "3600"))
+
+# How often backend/refine/cable_outage.py both samples backend/sources/
+# outages.py's current IODA composite into its own bounded score history and
+# recomputes the outage/cable-landing correlation. Matched to outages.py's own
+# REFRESH_INTERVAL (15 minutes): that module's document only changes on that
+# cadence, so sampling faster would record the same reading twice, and
+# sampling slower would coarsen the history this job builds for itself (see
+# that module's docstring on why it has to keep one at all).
+CABLE_OUTAGE_INTERVAL = int(os.getenv("CABLE_OUTAGE_INTERVAL", "900"))
+
+# The laden/ballast thresholds themselves -- named constants rather than
+# numbers inline in backend/refine/vessel_profile.py because Task 33's admin
+# panel exposes them in an "Inference" section, where a reader can see exactly
+# what turned a draught reading into a verdict. A hull's current draught above
+# this fraction of its own observed maximum is called laden.
+VESSEL_DRAUGHT_LADEN_RATIO = float(os.getenv("VESSEL_DRAUGHT_LADEN_RATIO", "0.85"))
+# Below this fraction of the observed maximum is called ballast. The gap
+# between the two (55-85%) is deliberately wide and reports as `unknown`
+# rather than guessing which side of a load a partial cargo falls on.
+VESSEL_DRAUGHT_BALLAST_RATIO = float(os.getenv("VESSEL_DRAUGHT_BALLAST_RATIO", "0.55"))
+# Fewer distinct draught readings than this over the retained window and the
+# "observed maximum" is just whatever this hull happened to report once or
+# twice -- not a range worth dividing anything by. See laden_state's
+# `insufficient_samples` reason.
+VESSEL_DRAUGHT_MIN_SAMPLES = int(os.getenv("VESSEL_DRAUGHT_MIN_SAMPLES", "5"))
+
+# --- Task 39: jamming / ADS-B cross-check -----------------------------------
+#
+# backend/refine/jam_crosscheck.py flags a position delta between two
+# consecutive ADS-B fixes for the same airframe as "implausible" one of two
+# ways -- an implied ground speed above JAM_CROSSCHECK_MAX_SPEED_KMH, or a
+# displacement whose own bearing runs more than JAM_CROSSCHECK_MAX_HEADING_
+# DEVIATION_DEG away from the aircraft's own reported heading -- and only
+# ever calls it corroboration of GPS jamming when the anomalous fix itself
+# sits inside one of gpsjam.org's currently-reported worst-100 H3 cells (see
+# backend/sources/jamming.py). All four numbers below were read off this
+# map's own live entity_history (kind="adsb"), not remembered from an
+# airframe spec sheet -- see the module's own docstring for why: the ADS-B
+# payload's own "velocity" field cannot be used for grounding instead,
+# because backend/sources/adsb.py stores it in knots from airplanes.live but
+# in raw OpenSky units (m/s) from OpenSky, with no conversion between the
+# two -- a pre-existing mismatch this task does not fix, and not something
+# to build a hard threshold on top of.
+#
+# How long two consecutive fixes for the same airframe may be apart and still
+# be compared as one continuous reading, rather than a coverage gap this
+# module cannot draw any conclusion from (a dropped sample, a receiver
+# handoff, hours out of range). Same figure and the same reasoning as
+# backend/refine/flight_legs.py's COVERAGE_GAP_SECONDS: twice the slowest
+# cadence this map polls ADS-B at (ADSB_POLL_INTERVAL_ANON, 900s), which is
+# headroom for one missed poll without being anywhere close to wide enough to
+# fold a multi-hour blackout into "the previous reading".
+JAM_CROSSCHECK_MAX_GAP_SECONDS = int(os.getenv("JAM_CROSSCHECK_MAX_GAP_SECONDS", str(2 * ADSB_POLL_INTERVAL_ANON)))
+# Implied ground speed above which a position delta is called implausible,
+# measured directly against this map's own live database (2026-08-11):
+# consecutive-fix pairs for an airborne airframe, gap-bounded by
+# JAM_CROSSCHECK_MAX_GAP_SECONDS above, n=12,359,867. The distribution's
+# ordinary range tops out in the low thousands (p99=1082km/h, p99.9=1597,
+# p99.95=1858km/h) and then knees sharply upward (p99.97=2755, p99.99=8463) --
+# a heavy-tailed jump consistent with a second, different population (bad
+# fixes, receiver noise, occasional ICAO24 collisions) taking over from
+# "ordinary cruise plus an exceptional jet-stream tailwind" somewhere in that
+# gap. The fastest jet-stream-aided subsonic airliner groundspeeds on public
+# record sit around 1300-1400km/h; 2200km/h sits comfortably clear of that
+# real population, inside the knee (between the measured p99.95 and p99.97),
+# and well under Mach 2 (~2450km/h at altitude) -- a speed essentially no
+# ADS-B-tracked airframe sustains in the traffic this map actually covers.
+# At this threshold the live database flagged 4,739 of those 12.36M pairs
+# (0.038%), only 77 of them (1.6%) inside a cell gpsjam was reporting at the
+# time -- see the module docstring's own note on why that is expected, not a
+# defect in the threshold.
+JAM_CROSSCHECK_MAX_SPEED_KMH = float(os.getenv("JAM_CROSSCHECK_MAX_SPEED_KMH", "2200"))
+# How far an airframe must have moved between two consecutive fixes before
+# the *bearing* of that movement is trusted at all -- below this, ordinary
+# position jitter dominates. Measured against the same live database: binned
+# by displacement, the deviation between a pair's implied ground track and
+# the airframe's own reported heading is wildly noisy under 2km (28-39% of
+# pairs disagree by more than 90 degrees) and collapses sharply at or above
+# 5km (0.55% exceed 90 degrees; median deviation drops to 0.3 degrees) --
+# the point past which the measured population looks like real flight
+# dynamics (wind crab, ordinary turns) rather than fix-to-fix noise.
+JAM_CROSSCHECK_MIN_REVERSAL_KM = float(os.getenv("JAM_CROSSCHECK_MIN_REVERSAL_KM", "5.0"))
+# Above this, the deviation between a pair's implied ground track and the
+# airframe's own reported heading is called a reversal rather than a turn or
+# wind crab. Measured at the >=5km displacement floor above: p99 of the
+# deviation distribution is only 73.8 degrees, so 150 sits deep past the
+# genuine tail (0.13% of qualifying pairs exceed it) -- and 45,321 of those
+# pairs (Task 39's own live measurement) were spread across 20,412 distinct
+# airframes, not concentrated in a handful of broken transponders, which is
+# why this is a plausibility threshold rather than a denylist.
+JAM_CROSSCHECK_MAX_HEADING_DEVIATION_DEG = float(os.getenv("JAM_CROSSCHECK_MAX_HEADING_DEVIATION_DEG", "150"))
+# Fewer qualifying position-delta samples than this for one airframe, while
+# positioned inside a currently-tracked jam cell, and "no anomaly found" is
+# not yet a real "checked, clean" verdict -- see laden_state's own
+# `insufficient_samples` reason for the same shape of judgement, and
+# jamming.MIN_TRAFFIC (gpsjam's own floor for trusting a cell's ratio at all)
+# for the precedent of using a small integer rather than nothing.
+JAM_CROSSCHECK_MIN_SAMPLES = int(os.getenv("JAM_CROSSCHECK_MIN_SAMPLES", "2"))
+# How often backend/refine/jam_crosscheck.py reads the next slice of ADS-B
+# history. Matched to FLIGHT_LEG_INTERVAL: both walk the same entity_history
+# kind ("adsb") looking for a transition/anomaly that is more usefully caught
+# soon after it happens than left for a slower sweep, and this is the pace a
+# job that has fallen behind catches up at.
+JAM_CROSSCHECK_INTERVAL = int(os.getenv("JAM_CROSSCHECK_INTERVAL", "900"))
+# A true rolling window, not merely how long an idle aircraft's state entry
+# survives -- a sample or flag older than this is dropped from the count
+# outright (see jam_crosscheck.apply_batch's own pruning), so an airframe
+# that keeps transiting the same cell every day accumulates only what
+# happened in the trailing window, never an ever-growing total (Task 39
+# review, Important 1: the first cut only pruned on inactivity, which let
+# the count grow without bound for a recurring airframe). This is what "N
+# aircraft showed a position anomaly here" actually covers, and both the
+# jamming-cell popup and the aircraft card say so explicitly in the
+# rendered text, not just here. gpsjam's own feed is daily (see jamming.py's
+# own REFRESH_INTERVAL comment) and the brief's own suggested wording was
+# "in the last 24h" -- both line up with keeping a rolling day here, even
+# though this job's own read cadence (JAM_CROSSCHECK_INTERVAL above) is far
+# faster.
+JAM_CROSSCHECK_WINDOW_SECONDS = int(os.getenv("JAM_CROSSCHECK_WINDOW_SECONDS", str(24 * 3600)))
+# What fraction of a cell's own observed aircraft must be flagged before the
+# cell's own `status` reads "flagged" rather than "clean" -- Task 39 review,
+# Important 2. A bare count >= 1 would let a single noisy aircraft trip the
+# same word for a cell a hundred aircraft passed through as for a cell only
+# one ever did, backwards given the module's own measured rate (over 98% of
+# raw flags anywhere are unrelated to jamming, so a busier cell has
+# proportionally more chances to produce one by chance alone). Set to
+# jamming.py's own MIN_JAM_RATIO -- gpsjam's own "background noise vs real
+# interference" cutoff for a *cell's* good/bad ratio -- reused rather than
+# inventing a second, unrelated number for what is structurally the same
+# judgement call: below this fraction, a signal reads as noise. This never
+# hides `aircraft_flagged` itself, which is always the real, unrounded count
+# regardless of which word `status` carries -- see build_document.
+JAM_CROSSCHECK_MIN_FLAG_RATIO = float(os.getenv("JAM_CROSSCHECK_MIN_FLAG_RATIO", "0.25"))
+# Bounds each airframe's own samples/flags lists inside one cell's state, on
+# top of (not instead of) JAM_CROSSCHECK_WINDOW_SECONDS' own time-based
+# pruning -- Task 39 review, Important 2: the window alone only prunes by
+# *age*, so a single malformed or replayed entity_history stream for one
+# ICAO24 (a glitching transponder, a duplicated feed, or a catch-up pass
+# whose one BATCH_LIMIT read spans hours of real time for one especially
+# chatty airframe) could append far faster than the window ever ages
+# anything back out. Set comfortably above what a genuinely well-behaved
+# airframe could ever produce: at the fastest cadence this map polls ADS-B
+# (ADSB_POLL_INTERVAL_AUTH, 120s), a full JAM_CROSSCHECK_WINDOW_SECONDS
+# (24h) is 86400/120 = 720 samples -- 1000 leaves headroom above that
+# without the cap itself ever trimming an ordinary airframe's real history.
+# Worst case: one (aircraft, cell) pair holds at most 1000 sample
+# timestamps (~8 bytes each) plus 1000 flag dicts (~250 bytes each,
+# serialised) -- on the order of 250KB, not an unbounded document, even for
+# a single pathological airframe looping through one cell all day; see
+# jam_crosscheck.apply_batch's own append-time trim.
+JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT = int(os.getenv("JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT", "1000"))
+
 # The waters this map *claims* as watched, as "lat_min,lon_min,lat_max,lon_max"
 # boxes separated by ";". High-interest maritime chokepoints and conflict water.
 #
@@ -395,6 +618,35 @@ def _parse_bboxes(raw: str) -> list[tuple[float, float, float, float]]:
 
 
 WATCHED_WATERS = _parse_bboxes(os.getenv("WATCHED_WATERS", _DEFAULT_WATCHED_WATERS))
+
+# Human labels for the eight WATCHED_WATERS boxes above, in the same order --
+# the same eight names that used to live only as trailing comments on
+# _DEFAULT_WATCHED_WATERS and as a hand-kept mirror in frontend/src/map/
+# popups.js (WATCHED_WATERS there, for the Dark Vessels chokepoint fold).
+# Task 36 is the first thing that has to *say* a box's name from the backend
+# (the /api/chokepoints response, and the reference_snapshots document
+# behind it), so the names get a real home here rather than a second
+# hand-kept copy.
+#
+# Paired with WATCHED_WATERS by position, not by a dict keyed on the box
+# itself: the env var a deployment can override carries four numbers per
+# box and no name, so there is no label to read back out of it. A deployment
+# that overrides WATCHED_WATERS with a different box count desyncs this list
+# from what it is naming -- the same documented, accepted gap the frontend's
+# own mirror already carries (see its comment in popups.js), not a new one
+# this task introduces. zip() in every reader of this pair truncates to the
+# shorter of the two rather than raising, so a shortened override degrades to
+# "the trailing boxes go unnamed" rather than a startup crash.
+WATCHED_WATERS_LABELS = [
+    "Black Sea",
+    "Red Sea",
+    "Gulf of Aden / Bab-el-Mandeb approach",
+    "Strait of Hormuz / Persian Gulf",
+    "Taiwan Strait",
+    "South China Sea",
+    "Eastern Mediterranean",
+    "Suez Canal",
+]
 
 # What the AIS stream subscribes to, which is now the whole planet. Same format
 # as WATCHED_WATERS above and deliberately a separate setting: this one is about

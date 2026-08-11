@@ -15,6 +15,37 @@ import {
   resolveScene, fetchZoomFor, isScoped, sourceQueryFor, bboxSnapDegrees, bandFor,
 } from "../map/scene";
 
+/**
+ * The one order that keeps `raw.fetchCoverage` from ever describing a fetch
+ * that `raw[key]` doesn't reflect yet: record coverage first, publish the
+ * data second.
+ *
+ * `onData` (wired to the map controller's `applyData` in App.jsx) runs
+ * synchronously, and for a key in `COUNTRY_CARD_FEEDS` that synchronously
+ * rebuilds an open country card from `raw` -- which reads `raw.fetchCoverage`.
+ * Publishing data before recording coverage left a window, on exactly the
+ * refresh this mechanism exists for (a gated feed's first delivery while a
+ * card is open), where the card rendered fresh data next to a coverage line
+ * still reading "not loaded". Same class of false claim the coverage fix
+ * itself was written to prevent, reintroduced by call order -- see the Task 9
+ * review that caught it.
+ *
+ * Pulled out as its own pure function, with the two publishers passed in
+ * rather than closed over, specifically so this ordering can be asserted by
+ * a test: the hook it's called from is a real React effect with real timers,
+ * which this project's test setup (`node --test`, no jsdom/React harness)
+ * cannot exercise end to end, so the invariant is tested here instead, at the
+ * one seam that is plain JS.
+ *
+ * `dataPublishes` is a list rather than a single [key, data] pair because two
+ * of the three call sites (the cables and infrastructure one-shot fetches)
+ * split one response across two `raw` slots and one coverage record.
+ */
+export function publishFetchOutcome(recordCoverage, onData, coverageKey, coveragePatch, dataPublishes) {
+  recordCoverage(coverageKey, coveragePatch);
+  for (const [key, data] of dataPublishes) onData(key, data);
+}
+
 const BOOT_SOURCES = [
   { key: "countries", label: "Country boundaries" },
   { key: "cities", label: "City index" },
@@ -25,13 +56,27 @@ const BOOT_SOURCES = [
   { key: "adsb", label: "Aircraft tracking (ADS-B)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
   { key: "satellites", label: "Satellite tracking (CelesTrak)" },
+  // Task 24: the three client-propagated groups on by default (see
+  // map/scene.js) -- same footing as "satellites" above, the server-
+  // propagated pair. The other four groups are off by default and fetched
+  // on demand instead (see createMapController.js's setLayerVisible), so
+  // they never belong on this list -- nothing should make the boot screen
+  // wait on a layer nobody has asked to see yet.
+  { key: "satNavigation", label: "Satellite tracking: navigation (CelesTrak, browser-propagated)" },
+  { key: "satWeather", label: "Satellite tracking: weather (CelesTrak, browser-propagated)" },
+  { key: "satImaging", label: "Satellite tracking: Earth imaging (CelesTrak, browser-propagated)" },
 ];
 
 // ACLED/FIRMS refresh server-side every 30/15 minutes respectively (see
 // backend/config.py) -- polling their large payloads every 60s bought
 // nothing but redundant fetch/parse work, since the underlying data was
 // still the same one most of the time. 3 minutes still feels current.
-const POLL_CONFIG = [
+// Exported so referenceOnlyFeeds.test.js can check "is every polled
+// reference-only feed also ungated" against the real list rather than a copy of
+// it -- the pairing navalPresence fell through for two tasks running. (Not
+// scene.test.js: importing this React module there would break that suite's own
+// promise to stay free of React and the DOM.)
+export const POLL_CONFIG = [
   { key: "events", url: "/api/events", intervalMs: 60000 }, // GDELT-driven (event_fusion.py), same cadence as gdelt below
   { key: "firms", url: "/api/fires", intervalMs: 180000 },
   { key: "gdelt", url: "/api/news", intervalMs: 60000 },
@@ -75,6 +120,12 @@ const POLL_CONFIG = [
   // hole in a track can never be refilled.
   { key: "adsb", url: "/api/aircraft", intervalMs: 20000, intervalByBand: { WORLD: 60000, THEATRE: 60000 } },
   { key: "jamming", url: "/api/jamming", intervalMs: 30 * 60000 }, // gpsjam.org itself only updates once/day
+  // Task 20a: the AIS traffic grid (backend/refine/lane_density.py). The grid
+  // itself only moves once an hour (config.LANE_DENSITY_INTERVAL) and decays
+  // slowly on top of that, so a poll much faster than that would just re-serve
+  // the same cells -- five minutes is close enough to "current" for a heat wash
+  // that is honest about covering the last thirty days, not the last minute.
+  { key: "laneDensity", url: "/api/lanes", intervalMs: 5 * 60000 },
   // Earthquakes and volcanic activity. Paced to the faster of its two inputs:
   // USGS refreshes every ~5 minutes and a felt earthquake is the kind of thing
   // a reader expects to appear while they are watching. The volcano half of the
@@ -91,6 +142,10 @@ const POLL_CONFIG = [
   // Country-level internet outage scores (IODA). Recomputed server-side every
   // 15 minutes over a trailing 24h window -- see backend/sources/outages.py.
   { key: "outages", url: "/api/outages", intervalMs: 5 * 60000 },
+  // The same poll's sub-national pass -- IODA's region-level scores, matched
+  // to admin-1 boundaries by name server-side (Task 26). Same cadence as
+  // "outages" above, since it comes off the same backend poller.
+  { key: "outagesRegions", url: "/api/outages/regions", intervalMs: 5 * 60000 },
   // Orbital launches. The backend refetches every 30 minutes and no faster --
   // Launch Library rate-limits anonymous callers to roughly 15 requests an hour
   // (see backend/sources/launches.py).
@@ -109,6 +164,19 @@ const POLL_CONFIG = [
   // them back out.
   { key: "osmInfra", url: "/api/osm-infrastructure", intervalMs: 30 * 60000 },
   { key: "satellites", url: "/api/satellites", intervalMs: 10000 }, // position, not elements -- see backend/sources/satellites.py
+  // Task 24: element sets (not positions -- propagation happens client-side,
+  // see map/satPropagate.js) for the three groups on by default. The
+  // backend only refreshes these every six hours (elements barely change --
+  // see ELEMENTS_REFRESH_INTERVAL in backend/sources/satellites.py), so this
+  // interval is not about freshness in the way the 10s "satellites" row
+  // above is; it exists so a tab left open for a long session eventually
+  // notices a launch or a decay, the same reasoning airports'/osmInfra's own
+  // reference-data polls already use. Each lands in createMapController.js
+  // through applyData's "key in SAT_ELEMENT_CELESTRAK_GROUP" branch, which
+  // feeds the shared propagation tracker rather than a `raw[key]` array.
+  { key: "satNavigation", url: "/api/satellites/elements?groups=navigation", intervalMs: 30 * 60000 },
+  { key: "satWeather", url: "/api/satellites/elements?groups=weather", intervalMs: 30 * 60000 },
+  { key: "satImaging", url: "/api/satellites/elements?groups=imaging", intervalMs: 30 * 60000 },
   { key: "conflictStats", url: "/api/conflict-stats", intervalMs: 60 * 60000 }, // HDX file itself only changes weekly -- see backend/sources/hdx_conflict_stats.py
   // Server-side aggregate over a week of history (backend/escalation.py),
   // already cached for 120s there -- polling it faster would just re-serve
@@ -127,6 +195,26 @@ const POLL_CONFIG = [
   // the same document. Not zoom-gated despite attaching to a zoom-gated layer:
   // it is ~180 kB once, and the airfields toggle can be switched on at any time.
   { key: "airfieldActivity", url: "/api/airfield-activity", intervalMs: 30 * 60000 },
+  // Navy-classified AIS presence per theatre/port with a 7-day trend
+  // (backend/refine/naval_presence.py), recomputed there four times a day --
+  // same "poll no faster than the document actually changes" reasoning as
+  // escalation/airfieldActivity above.
+  { key: "navalPresence", url: "/api/naval-presence", intervalMs: 15 * 60000 },
+  // Distinct hulls this map has recorded crossing each watched chokepoint
+  // box, per day, with a 30-day trend (backend/refine/lane_density.py's
+  // chokepoint accounting, Task 36). Recomputed there on lane_density's own
+  // LANE_DENSITY_INTERVAL cadence (an hour by default) -- same "poll no
+  // faster than the document actually changes" reasoning as navalPresence
+  // just above, at a slightly less eager interval to match the slower
+  // underlying cadence.
+  { key: "chokepoints", url: "/api/chokepoints", intervalMs: 20 * 60000 },
+  // Task 39: which of gpsjam's current worst-hundred cells this map's own
+  // ADS-B history shows an aircraft position anomaly inside, read by
+  // renderJamming's own popup build and by the aircraft card's route
+  // section. Recomputed there on its own JAM_CROSSCHECK_INTERVAL cadence
+  // (15 minutes by default) -- same "poll no faster than the document
+  // actually changes" reasoning as navalPresence/chokepoints above.
+  { key: "jamCrosscheck", url: "/api/jam-crosscheck", intervalMs: 15 * 60000 },
   // Global Fishing Watch's AIS disabling events. Refetched server-side every six
   // hours, and the batch itself is five or more days behind, so the hourly poll
   // is only about a long-lived tab noticing a new batch. Most of these return
@@ -162,6 +250,22 @@ const POLL_CONFIG = [
   // humanitarian above.
   { key: "foodTrade", url: "/api/food-trade", intervalMs: 60 * 60000 },
   { key: "foodPriceIndex", url: "/api/food-price-index", intervalMs: 60 * 60000 },
+  // Task 27: Digitraffic's live Finnish train positions (~111 trains). The
+  // backend itself refreshes every 60s (config.DIGITRAFFIC_RAIL_POLL_INTERVAL)
+  // and answers If-None-Match, so polling somewhat faster than that costs
+  // round-trips rather than bytes -- the same trade adsb's own note above
+  // makes about its interval versus the server's refresh rate. Ungated
+  // (LAYER_MANIFEST's railLive has no draw gate), so this fetch is not either.
+  { key: "railLive", url: "/api/rail-live", intervalMs: 20000 },
+  // Task 27 fix (post-review): the Finnish station gazetteer railLive needs
+  // to mean anything -- Finland is outside every conflict theatre, so
+  // osm_infra's railwayPoints can never place a station there (see
+  // railStations' own note in map/scene.js). Static reference data, refetched
+  // server-side every six hours (config.DIGITRAFFIC_RAIL_STATIONS_INTERVAL)
+  // and hard-cached for one -- polled at the same hourly cadence ports/dams
+  // use for their own slow gazetteers, just so a long-lived tab notices a
+  // change; not about freshness the way railLive's 20s poll is.
+  { key: "railStations", url: "/api/rail-stations", intervalMs: 60 * 60000 },
 ];
 
 /**
@@ -181,8 +285,23 @@ const POLL_CONFIG = [
  * @param focus       what the reader has clicked, or null. A focused country is
  *   a request for that country's whole picture, so map/scene.js lifts the fetch
  *   gate on its feeds however far out the camera happens to be.
+ * @param pollIntervalMultiplier  Task 31's Performance section: every
+ *   source's intervalMs (and every intervalByBand entry) is multiplied by
+ *   this before being handed to setTimeout, in registerPoller's own
+ *   intervalNow(). Defaults to 1 -- the shipped behaviour, unscaled --
+ *   because App.jsx does not always have settings.performance ready on the
+ *   very first render (see useAppSettings.js's own load sequence) and a
+ *   multiplier of `undefined * intervalMs` would schedule every source at
+ *   NaN.
+ * @param pausePollingWhenHidden  Task 31's Performance section, gating what
+ *   was an unconditional `document.hidden` skip inside every poller's own
+ *   tick() before this task. Defaults to true, matching that prior
+ *   behaviour exactly, for the same "settings not ready yet" reason above.
  */
-export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoomOverrides, focus = null, mapBounds = null }) {
+export function useOsintData({
+  onData, flyToRegion, transform, zoom = null, zoomOverrides, focus = null, mapBounds = null,
+  pollIntervalMultiplier = 1, pausePollingWhenHidden = true,
+}) {
   const [regions, setRegions] = useState({});
   const [currentRegionKey, setCurrentRegionKey] = useState(null); // null == world/unscoped
   const [currentRegionLabel, setCurrentRegionLabel] = useState("World");
@@ -252,6 +371,13 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
   // resolver lifts the fetch gate on its feeds however far out the camera is.
   const focusRef = useRef(focus);
   focusRef.current = focus;
+
+  // Task 31's Performance section, read inside tick() for the same reason:
+  // registered once, has to see whatever Admin Mode most recently set.
+  const pollIntervalMultiplierRef = useRef(pollIntervalMultiplier);
+  pollIntervalMultiplierRef.current = pollIntervalMultiplier;
+  const pausePollingWhenHiddenRef = useRef(pausePollingWhenHidden);
+  pausePollingWhenHiddenRef.current = pausePollingWhenHidden;
 
   /**
    * The zoom a source starts fetching at: null for "always", Infinity for
@@ -349,6 +475,27 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
   const reapplyTransform = useCallback((keys) => reapplyTransformRef.current(keys), []);
 
   /**
+   * Per-feed fetch coverage, threaded into `raw.fetchCoverage` (via
+   * onData("fetchCoverage", ...)) so the country card's honesty section
+   * (buildCoverage, map/popups.js) can tell "checked this country's bbox and
+   * found nothing" apart from "never fetched" and from "fetched, but for a
+   * different area" -- three states a raw array's own emptiness cannot carry,
+   * since `raw[key]` starts as `[]` at construction (see createMapController.js)
+   * and never distinguishes "swept and empty" from "not swept yet".
+   *
+   * `status` is the most recent tick's outcome for `key` ("gated" | "fetched" |
+   * "error"); `fetchedAt`/`bbox` describe the data actually sitting in
+   * `raw[key]` right now and are only touched on a real success, so a gated or
+   * failed tick does not erase what an earlier successful one already proved.
+   * `bbox` is the "south,west,north,east" cell (see bboxCell above) that
+   * fetch was scoped to, or `null` for a source with no bbox restriction at
+   * all (isScoped(key) === false, or the computed cell was "essentially the
+   * whole world" -- both mean the same thing to a reader: nothing was clipped).
+   */
+  const fetchCoverageRef = useRef({});
+  const recordCoverageRef = useRef(() => {});
+
+  /**
    * What scope each source's held payload was fetched under.
    *
    * The URL a poller asks for is a function of more than the endpoint: the
@@ -390,14 +537,31 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
       );
     }
 
+    // Merges `patch` into this key's coverage record and republishes the whole
+    // map. A shallow copy each time -- not a mutation of the object already
+    // sitting in `raw.fetchCoverage` -- so nothing downstream that captured a
+    // reference to a previous snapshot sees it change under it.
+    recordCoverageRef.current = (key, patch) => {
+      fetchCoverageRef.current = {
+        ...fetchCoverageRef.current,
+        [key]: { ...fetchCoverageRef.current[key], ...patch },
+      };
+      onDataRef.current("fetchCoverage", fetchCoverageRef.current);
+    };
+
     function registerPoller(key, url, intervalMs, intervalByBand, onSuccess) {
       let timer = null;
       // Read at schedule time rather than closed over at registration, which is
       // what makes the cadence follow the camera: a source whose table names
       // the band the reader has just left is at most one interval behind, and
       // the band-change effect below closes even that gap on the way in.
+      // Task 31's Performance section: every interval this returns is scaled
+      // by the reader's own multiplier before being handed to setTimeout, so
+      // a reader on a metered connection can slow every source down at once
+      // without hunting through this file's own per-source table.
       const intervalNow = () =>
-        (intervalByBand && intervalByBand[bandFor(zoomRef.current ?? 3)]) || intervalMs;
+        ((intervalByBand && intervalByBand[bandFor(zoomRef.current ?? 3)]) || intervalMs)
+        * (pollIntervalMultiplierRef.current || 1);
       // Two flags, because they answer two different questions. `bootReported`
       // is whether the boot screen has been told anything about this source at
       // all, and a deferral counts. `firstFetchDone` is whether a real network
@@ -428,18 +592,35 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
               bootReported = true;
               markSourceDeferred(key);
             }
+            // Below its gate, this tick is not attempting a fetch at all --
+            // scene.js already knows that, so buildCoverage doesn't have to
+            // guess it from an empty array. fetchedAt/bbox are left alone: if
+            // an earlier fetch (before the reader zoomed back out, say)
+            // already covered some area, that fact is still true of what's
+            // sitting in raw[key] right now.
+            //
+            // No publishFetchOutcome ordering concern here: this branch never
+            // calls onDataRef.current at all (no fetch happened, nothing to
+            // publish), so there is no synchronous card rebuild for this
+            // write to race against.
+            recordCoverageRef.current(key, { status: "gated", scoped: isScoped(key) });
             timer = setTimeout(tick, intervalNow());
             return;
           }
         }
-        if (document.hidden && firstFetchDone) {
+        if (document.hidden && firstFetchDone && pausePollingWhenHiddenRef.current) {
           // Nobody's looking at a backgrounded tab -- skip the network
           // round-trip and just re-check next interval. The visibilitychange
           // listener below calls refetchAllNow() the instant the tab comes
           // back, so this never shows stale data, just skips fetching while
           // it can't be seen. The very first load always goes through even
           // if the tab happens to start backgrounded, so the boot screen
-          // can't hang waiting for data that never arrives.
+          // can't hang waiting for data that never arrives. Task 31 turned
+          // this from an unconditional skip into a dial (Performance
+          // section's "pause polling when the tab is hidden"), default on --
+          // switching it off is for a reader who wants a background tab kept
+          // current (a second monitor, an always-on dashboard) at the cost
+          // of the network traffic this guard exists to save.
           timer = setTimeout(tick, intervalNow());
           return;
         }
@@ -459,7 +640,19 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
           fetchedScopeRef.current[key] = signature;
           const data = transformRef.current ? transformRef.current(key, fetched) : fetched;
           onSuccess?.(data);
-          onDataRef.current(key, data);
+          // publishFetchOutcome records coverage before handing the data to
+          // onDataRef.current -- see its own docstring for why the order,
+          // not just the content, of these two writes matters.
+          publishFetchOutcome(recordCoverageRef.current, onDataRef.current, key, {
+            status: "fetched",
+            fetchedAt: Date.now(),
+            // The bbox this request actually carried -- null for an unscoped
+            // source (isScoped(key) === false) or for a scoped one whose
+            // computed cell was "essentially the whole world" (bboxCell's own
+            // guard), both of which mean nothing was clipped.
+            bbox: isScoped(key) ? bboxCellRef.current : null,
+            scoped: isScoped(key),
+          }, [[key, data]]);
           firstFetchDone = true;
           bootReported = true;
           // Unconditional: markSourceLoaded only touches rows still pending or
@@ -467,12 +660,23 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
           // and is a no-op on every poll after that.
           markSourceLoaded(key, true);
         } catch (err) {
+          // Pre-existing: unlike the success path above, this branch does not
+          // check `cancelled` before writing. Harmless today -- every write
+          // here is a ref mutation with no React state and no onDataRef.current
+          // call, so there is nothing for a cancelled effect to leave in a bad
+          // state -- but noted rather than fixed as a drive-by, since it is
+          // not part of what this pass was asked to change.
           console.warn(`Failed to fetch ${key}:`, err);
           firstFetchDone = true;
           if (!bootReported) {
             bootReported = true;
             markSourceLoaded(key, false);
           }
+          // fetchedAt/bbox untouched -- an error says nothing about the data
+          // already sitting in raw[key] from a previous success, if any.
+          // No publishFetchOutcome ordering concern here either: no fetch
+          // landed, so onDataRef.current is never called from this branch.
+          recordCoverageRef.current(key, { status: "error", scoped: isScoped(key) });
         } finally {
           if (!cancelled) timer = setTimeout(tick, intervalNow());
         }
@@ -533,8 +737,17 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
     fetchJson("/api/cables")
       .then((data) => {
         if (cancelled) return;
-        onDataRef.current("cables", data?.cables || []);
-        onDataRef.current("cableLandings", data?.landings || []);
+        // Whole-world, one-shot, never polled (fetch: FETCH_MANUAL in
+        // scene.js) -- so this is the only moment cableLandings' coverage
+        // ever changes from "not loaded" to "fetched". Not bbox-scoped, so
+        // once this lands it covers every country's card equally.
+        // publishFetchOutcome again, for the same reason as the generic
+        // poller above -- coverage recorded before either onData call.
+        publishFetchOutcome(
+          recordCoverageRef.current, onDataRef.current, "cableLandings",
+          { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false },
+          [["cables", data?.cables || []], ["cableLandings", data?.landings || []]]
+        );
       })
       .catch((err) => console.warn("Failed to load submarine cables:", err));
 
@@ -550,12 +763,67 @@ export function useOsintData({ onData, flyToRegion, transform, zoom = null, zoom
       })
       .catch((err) => console.warn("Failed to load railway linework:", err));
 
+    // Transmission-line geometry (Task 28, backend/sources/power_lines.py) --
+    // same treatment as railways just above: a whole document, hard-cached
+    // for a day, fetched once at boot rather than polled.
+    fetchJson("/api/power-lines")
+      .then((data) => {
+        if (cancelled) return;
+        onDataRef.current("powerLines", data || { lines: [] });
+      })
+      .catch((err) => console.warn("Failed to load transmission lines:", err));
+
+    // Seas, gulfs, bays and straits -- marine only (see backend/sources/
+    // water_bodies.py and backend/app.py's water_endpoint for why lakes and
+    // rivers are not fetched here). Boot-fetched once like railways above,
+    // not polled: the backend refreshes this weekly, which is not a cadence
+    // worth a client-side timer for. Lakes and rivers are fetched on demand,
+    // the first time their own control-panel sub-toggle is switched on -- see
+    // setLayerVisible in createMapController.js.
+    fetchJson("/api/water?kind=marine")
+      .then((data) => {
+        if (cancelled) return;
+        onDataRef.current("water", data || { type: "FeatureCollection", features: [] });
+      })
+      .catch((err) => console.warn("Failed to load water bodies:", err));
+
     fetchJson("/api/infrastructure")
       .then((data) => {
         if (cancelled) return;
         const isLegacyArray = Array.isArray(data);
-        onDataRef.current("infra", (isLegacyArray ? data : data.sites) || []);
-        onDataRef.current("pipelines", (isLegacyArray ? [] : data.pipelines) || []);
+        // Same reasoning as cableLandings above: a whole-world, one-shot,
+        // never-polled fetch (fetch: FETCH_ALWAYS but not in POLL_CONFIG --
+        // see this endpoint's own 24h Cache-Control note), so this is the one
+        // place its coverage record is ever written -- and again, before
+        // either onData call, not after.
+        publishFetchOutcome(
+          recordCoverageRef.current, onDataRef.current, "infra",
+          { status: "fetched", fetchedAt: Date.now(), bbox: null, scoped: false },
+          [
+            ["infra", (isLegacyArray ? data : data.sites) || []],
+            // Review fix (Task 28, Critical): landed *before* "pipelines" so
+            // raw.pipelinesTruncatedRegions is already set by the time that
+            // publish triggers renderPipelines() (publishFetchOutcome calls
+            // onData for each tuple in array order, synchronously) -- the
+            // truncated-region note otherwise reads stale for one tick.
+            // osm_infra.py computes this exactly like power_lines_osm's own
+            // truncated_regions; a missing/legacy response just means "not
+            // swept yet" or "older cached copy", not an error.
+            ["pipelinesTruncatedRegions", (isLegacyArray ? [] : data.pipelines_truncated_regions) || []],
+            ["pipelines", (isLegacyArray ? [] : data.pipelines) || []],
+            // Task 20b: the ten named corridors (backend/infrastructure.py's
+            // SHIPPING_LANES), riding the same one-shot payload as sites and
+            // pipelines -- a cached response from before this field existed
+            // is simply a document with no `lanes` key, same reasoning as
+            // the legacy-array guard above.
+            ["shippingLanes", (isLegacyArray ? [] : data.lanes) || []],
+            // Task 29: curated MILITARY_BASES beside osm_infra.py's own
+            // military=* sweep, source-tagged and pre-matched by the backend
+            // (infrastructure.merge_military_bases) -- same legacy-array
+            // guard as pipelines/lanes above.
+            ["militaryBases", (isLegacyArray ? [] : data.military_bases) || []],
+          ]
+        );
       })
       .catch((err) => console.warn("Failed to load infrastructure sites:", err));
 

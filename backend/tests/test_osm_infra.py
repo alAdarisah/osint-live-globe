@@ -57,9 +57,117 @@ def test_rail_points_get_a_far_higher_cap_than_the_noisy_area_classes():
     at the collector, which is the renderer's job to thin, not ours to drop."""
     assert osm_infra.MAX_RAIL_PER_FEATURE > osm_infra.MAX_PER_FEATURE
     query = osm_infra.build_query((0, 0, 1, 1))
-    # The four rail classes carry the rail cap; the four area classes do not.
+    # The four rail classes carry the rail cap; the fourteen MAX_PER_FEATURE
+    # classes (Task 28 added power_substation and refinery beside the original
+    # four; Task 29 added five military=* base classes plus radar_station/
+    # military_bunker/military_checkpoint for the air-defence layer) do not.
     assert query.count(f"out center tags {osm_infra.MAX_RAIL_PER_FEATURE};") == 4
-    assert query.count(f"out center tags {osm_infra.MAX_PER_FEATURE};") == 4
+    assert query.count(f"out center tags {osm_infra.MAX_PER_FEATURE};") == 14
+
+
+def test_dense_infra_point_classes_get_their_own_higher_cap():
+    """man_made=storage_tank and man_made=petroleum_well are discrete whole
+    features that can run to the thousands per theatre (a single oil field or
+    tank farm) -- the same "do not delete the layer at the collector" argument
+    the rail points above make, so they get their own cap rather than
+    MAX_PER_FEATURE's 300."""
+    assert osm_infra.MAX_INFRA_POINT_PER_FEATURE > osm_infra.MAX_PER_FEATURE
+    query = osm_infra.build_query((0, 0, 1, 1))
+    assert query.count(f"out center tags {osm_infra.MAX_INFRA_POINT_PER_FEATURE};") == 2
+
+
+def test_the_four_new_point_classes_carry_no_name_filter():
+    """A substation, a refinery, a storage tank and a wellhead are each a
+    discrete whole feature, not a fragment of a larger area -- the same reason
+    military=airfield and the rail classes above carry none."""
+    query = osm_infra.build_query((0, 0, 1, 1))
+    assert '"power"="substation"](' in query
+    assert '"industrial"="refinery"](' in query
+    assert '"man_made"="storage_tank"](' in query
+    assert '"man_made"="petroleum_well"](' in query
+    assert '"power"="substation"]["name"]' not in query
+    assert '"man_made"="petroleum_well"]["name"]' not in query
+
+
+def test_the_oil_well_selector_is_node_only():
+    """A wellhead is always mapped as a point, never an area."""
+    query = osm_infra.build_query((0, 0, 1, 1))
+    assert 'node["man_made"="petroleum_well"](' in query
+
+
+# --- Task 29: bases merge (five more military=* classes) --------------------
+
+
+def test_the_five_task_29_base_tags_map_to_their_own_kinds():
+    kinds = [
+        parse(element(tags={"military": "base"}))[0]["kind"],
+        parse(element(tags={"military": "naval_base"}))[0]["kind"],
+        parse(element(tags={"military": "training_area", "name": "x"}))[0]["kind"],
+        parse(element(tags={"military": "barracks"}))[0]["kind"],
+        parse(element(tags={"military": "danger_area", "name": "x"}))[0]["kind"],
+    ]
+    assert kinds == [
+        "military_base", "military_naval_base", "military_training_area",
+        "military_barracks", "military_danger_area",
+    ]
+
+
+def test_training_area_and_danger_area_require_a_name_but_base_and_barracks_do_not():
+    """The same fragment-vs-whole-feature distinction landuse=military and
+    military=airfield already draw one level up: training_area/danger_area are
+    area tags a firing range or a buffer strip carries as often as a whole
+    base, while base/naval_base/barracks are single discrete facilities."""
+    query = osm_infra.build_query((0, 0, 1, 1))
+    assert '"military"="training_area"]["name"]' in query
+    assert '"military"="danger_area"]["name"]' in query
+    assert '"military"="base"](' in query
+    assert '"military"="base"]["name"]' not in query
+    assert '"military"="naval_base"](' in query
+    assert '"military"="barracks"](' in query
+    assert '"military"="barracks"]["name"]' not in query
+
+
+# --- Task 29: air-defence/radar classes --------------------------------------
+
+
+def test_the_three_air_defence_tags_map_to_their_own_kinds():
+    kinds = [
+        parse(element(tags={"man_made": "radar_station"}))[0]["kind"],
+        parse(element(tags={"military": "bunker"}))[0]["kind"],
+        parse(element(tags={"military": "checkpoint", "name": "x"}))[0]["kind"],
+    ]
+    assert kinds == ["radar_station", "military_bunker", "military_checkpoint"]
+
+
+def test_checkpoint_requires_a_name_but_radar_and_bunker_do_not():
+    """An unnamed checkpoint is every unmapped gate post along a line of
+    control -- the same noise barrier=border_control's own name filter exists
+    to suppress -- while a radar station or a bunker is a discrete facility."""
+    query = osm_infra.build_query((0, 0, 1, 1))
+    assert '"military"="checkpoint"]["name"]' in query
+    assert '"man_made"="radar_station"](' in query
+    assert '"man_made"="radar_station"]["name"]' not in query
+    assert '"military"="bunker"](' in query
+    assert '"military"="bunker"]["name"]' not in query
+
+
+def test_the_eight_task_29_classes_get_a_type_fallback_label():
+    for tags, expected in [
+        ({"military": "base"}, "Military base"),
+        ({"military": "naval_base"}, "Naval base"),
+        ({"military": "training_area", "name": "x"}, "Military training area"),
+        ({"military": "barracks"}, "Barracks"),
+        ({"military": "danger_area", "name": "x"}, "Danger area"),
+        ({"man_made": "radar_station"}, "Radar station"),
+        ({"military": "bunker"}, "Bunker"),
+        ({"military": "checkpoint", "name": "x"}, "Military checkpoint"),
+    ]:
+        (site,) = parse(element(tags=tags))
+        if "name" not in tags:
+            assert site["name"] == expected
+            assert site["named"] is False
+        else:
+            assert site["named"] is True
 
 
 def test_the_noisy_selectors_require_a_name_and_the_sparse_ones_do_not():
@@ -123,6 +231,26 @@ def test_each_supported_tag_maps_to_its_own_kind():
         parse(element(tags={"barrier": "border_control"}))[0]["kind"],
     ]
     assert kinds == ["military_airfield", "military_area", "power_plant", "border_control"]
+
+
+def test_the_four_task_28_tags_map_to_their_own_kinds():
+    kinds = [
+        parse(element(tags={"power": "substation"}))[0]["kind"],
+        parse(element(tags={"industrial": "refinery"}))[0]["kind"],
+        parse(element(tags={"man_made": "storage_tank"}))[0]["kind"],
+        parse(element(osm_type="node", lat=1, lon=1, center=None,
+                      tags={"man_made": "petroleum_well"}))[0]["kind"],
+    ]
+    assert kinds == ["power_substation", "refinery", "storage_tank", "oil_well"]
+
+
+def test_an_unnamed_substation_or_well_still_gets_a_type_fallback_label():
+    (substation,) = parse(element(tags={"power": "substation"}))
+    assert substation["name"] == "Substation"
+    assert substation["named"] is False
+    (well,) = parse(element(osm_type="node", lat=1, lon=1, center=None,
+                             tags={"man_made": "petroleum_well"}))
+    assert well["name"] == "Oil/gas well"
 
 
 def test_rail_tags_map_to_their_own_per_record_kinds():
@@ -229,3 +357,378 @@ def test_an_unreadable_power_output_is_left_out_rather_than_guessed_at():
     """OSM writes this field freehand and most of the time it is unparseable."""
     for value in (None, "", "lots", "2x600 MW", "yes"):
         assert osm_infra._megawatts(value) is None
+
+
+# --- Task 28: fuel normalisation, commissioning year ------------------------
+
+
+def test_fuel_normalises_to_one_of_the_eight_named_buckets():
+    assert osm_infra._fuel_category("nuclear") == "nuclear"
+    assert osm_infra._fuel_category("coal") == "coal"
+    assert osm_infra._fuel_category("gas") == "gas"
+    assert osm_infra._fuel_category("hydro") == "hydro"
+    assert osm_infra._fuel_category("wind") == "wind"
+    assert osm_infra._fuel_category("solar") == "solar"
+    assert osm_infra._fuel_category("biomass") == "biomass"
+
+
+def test_waste_is_folded_into_biomass():
+    """OSM has no separate `waste` bucket of its own to place a waste-to-energy
+    plant in, and public reporting (EIA/IEA) groups it with biomass already."""
+    assert osm_infra._fuel_category("waste") == "biomass"
+
+
+def test_a_compound_source_matches_whichever_keyword_it_contains():
+    assert osm_infra._fuel_category("gas;oil") == "gas"
+
+
+def test_unmapped_and_missing_fuel_values_report_other_rather_than_guessing():
+    for value in (None, "", "oil", "geothermal", "diesel", "tidal"):
+        assert osm_infra._fuel_category(value) == "other"
+
+
+def test_commissioning_year_reads_a_confident_four_digit_prefix():
+    assert osm_infra._commissioning_year("1986") == 1986
+    assert osm_infra._commissioning_year("1986-05") == 1986
+    assert osm_infra._commissioning_year("1986-05-01") == 1986
+
+
+def test_commissioning_year_is_left_out_rather_than_guessed_at():
+    for value in (None, "", "circa 1970", "under construction", "99"):
+        assert osm_infra._commissioning_year(value) is None
+
+
+def test_commissioning_year_rejects_an_implausible_number():
+    """A guard against a stray non-year numeral (a voltage, an id) that
+    happens to start with four digits, not a claim about plant history."""
+    assert osm_infra._commissioning_year("1200 MW") is None  # not None by luck: 1200 is out of range
+    assert osm_infra._commissioning_year("30000") is None
+
+
+def test_power_plant_records_carry_fuel_and_commissioning_year():
+    (plant,) = parse(element(tags={
+        "power": "plant", "name": "x", "generator:source": "wind", "start_date": "2011",
+    }))
+    assert plant["fuel"] == "wind"
+    assert plant["commissioning_year"] == 2011
+
+
+def test_a_non_power_plant_record_still_carries_the_two_new_fields():
+    """Computed unconditionally rather than branched on kind (see
+    parse_overpass' own note) -- an airfield with neither tag simply reports
+    the two total-function defaults."""
+    (airfield,) = parse(element(tags={"military": "airfield"}))
+    assert airfield["fuel"] == "other"
+    assert airfield["commissioning_year"] is None
+
+
+# --- Task 28: combined power-line/pipeline geometry pass --------------------
+
+
+def line_way(way_id=1, geometry=None, tags=None):
+    return {
+        "type": "way",
+        "id": way_id,
+        "geometry": geometry if geometry is not None else [
+            {"lat": 50.45, "lon": 30.52}, {"lat": 50.5, "lon": 30.6},
+        ],
+        "tags": tags if tags is not None else {},
+    }
+
+
+def test_the_grid_lines_query_asks_for_geometry_and_carries_both_classes():
+    query = osm_infra.build_grid_lines_query((29.0, 34.0, 34.5, 37.0))
+    assert "(29.0,34.0,34.5,37.0)" in query
+    assert query.count("out geom tags") == 2
+    assert 'way["power"~"^(line|cable)$"]' in query
+    assert 'way["man_made"="pipeline"]' in query
+
+
+def test_power_lines_and_pipelines_are_split_by_tag_not_by_named_set():
+    payload = {"elements": [
+        line_way(1, tags={"power": "line", "voltage": "400000"}),
+        line_way(2, tags={"man_made": "pipeline", "substance": "gas"}),
+        line_way(3, tags={"power": "cable"}),
+    ]}
+    power_lines, pipelines = osm_infra.parse_grid_lines(payload, "russia_ukraine")
+    assert {p["id"] for p in power_lines} == {"osm:way/1", "osm:way/3"}
+    assert {p["id"] for p in pipelines} == {"osm:way/2"}
+
+
+def test_every_captured_power_line_tag_lands_on_the_record():
+    tags = {"power": "line", "name": "Line A", "operator": "Ukrenergo", "voltage": "330000", "cables": "3", "frequency": "50"}
+    power_lines, _pipelines = osm_infra.parse_grid_lines({"elements": [line_way(tags=tags)]}, "sudan")
+    (line,) = power_lines
+    assert line["name"] == "Line A"
+    assert line["operator"] == "Ukrenergo"
+    assert line["voltage"] == "330000"
+    assert line["cables"] == "3"
+    assert line["frequency"] == "50"
+    assert line["source"] == "osm"
+    assert line["region_key"] == "sudan"
+
+
+def test_every_captured_pipeline_tag_lands_on_the_record():
+    tags = {"name": "Line B", "operator": "Naftogaz", "substance": "gas", "diameter": "1200", "man_made": "pipeline"}
+    _power_lines, pipelines = osm_infra.parse_grid_lines({"elements": [line_way(tags=tags)]}, "sahel")
+    (pipeline,) = pipelines
+    assert pipeline["name"] == "Line B"
+    assert pipeline["operator"] == "Naftogaz"
+    assert pipeline["substance"] == "gas"
+    assert pipeline["diameter"] == "1200"
+    assert pipeline["source"] == "osm"
+    assert pipeline["region_key"] == "sahel"
+
+
+def test_a_grid_line_with_fewer_than_two_vertices_is_dropped():
+    payload = {"elements": [line_way(tags={"power": "line"}, geometry=[{"lat": 1, "lon": 1}])]}
+    power_lines, pipelines = osm_infra.parse_grid_lines(payload, "sudan")
+    assert power_lines == []
+    assert pipelines == []
+
+
+def test_an_empty_grid_lines_response_is_not_an_error():
+    power_lines, pipelines = osm_infra.parse_grid_lines({}, "sudan")
+    assert power_lines == []
+    assert pipelines == []
+    power_lines, pipelines = osm_infra.parse_grid_lines({"elements": []}, "sudan")
+    assert power_lines == []
+    assert pipelines == []
+
+
+def test_flattening_grid_lines_dedups_across_overlapping_theatres():
+    shared = {"id": "osm:way/1", "path": [[1, 1], [2, 2]], "region_key": "south_china_sea"}
+    flat = osm_infra.flatten_power_lines({
+        "south_china_sea": [shared],
+        "taiwan_strait": [{**shared, "region_key": "taiwan_strait"}],
+    })
+    assert len(flat) == 1
+    assert flat[0]["region_key"] == "south_china_sea"
+
+
+def test_serialize_power_lines_and_pipelines_state_their_own_provenance():
+    power_doc = osm_infra.serialize_power_lines([{"id": "osm:way/1", "path": [[1, 1], [2, 2]]}])
+    assert "power=line|cable" in power_doc["provenance"]
+    assert "not worldwide" in power_doc["provenance"]
+    pipeline_doc = osm_infra.serialize_pipelines([], truncated_regions=["sahel"])
+    assert "man_made=pipeline" in pipeline_doc["provenance"]
+    assert pipeline_doc["truncated_regions"] == ["sahel"]
+
+
+# --- Task 28: caps reuse the same truncation-detection mechanism Task 27 added --
+
+
+def test_the_grid_lines_cap_check_is_per_class_not_per_response(monkeypatch):
+    """A dense pipeline network hitting its own cap in one region says nothing
+    about whether the power grid in the same box did too -- each class must be
+    checked against its own cap independently."""
+    monkeypatch.setattr(osm_infra, "MAX_POWER_LINE_WAYS", 1)
+    monkeypatch.setattr(osm_infra, "MAX_PIPELINE_WAYS", 5)
+    payload = {"elements": [
+        line_way(1, tags={"power": "line"}),
+        line_way(2, tags={"man_made": "pipeline"}),
+    ]}
+    assert osm_infra._grid_lines_truncated(payload) == {"power"}
+
+
+def test_an_empty_grid_lines_response_is_never_flagged_truncated():
+    assert osm_infra._grid_lines_truncated({}) == set()
+    assert osm_infra._grid_lines_truncated({"elements": []}) == set()
+
+
+def test_rail_lines_truncation_still_delegates_to_the_shared_helper():
+    """Task 28 generalised _rail_lines_truncated into _ways_truncated -- this
+    pins that the public name and its behaviour are unchanged."""
+    assert osm_infra._ways_truncated({"elements": [{}] * 3}, 3) is True
+    assert osm_infra._ways_truncated({"elements": [{}] * 2}, 3) is False
+
+
+# --- Task 28 review (Important 2): the point sweep gets the same log-and-flag
+# treatment as the line caps, generalised across every _FEATURES class ------
+
+
+def test_capped_point_kinds_flags_a_class_at_its_own_cap():
+    # _FEATURES bakes its cap in at module import time from the *value* of
+    # MAX_INFRA_POINT_PER_FEATURE at that moment, not a live reference -- so,
+    # unlike _ways_truncated (which reads its cap as a plain function
+    # argument), this cannot be exercised by monkeypatching the constant.
+    # Real-sized payloads instead, the same way
+    # test_capped_point_kinds_covers_the_four_original_classes_too below does.
+    payload = {"elements": [element(tags={"man_made": "storage_tank"})] * osm_infra.MAX_INFRA_POINT_PER_FEATURE}
+    assert osm_infra._capped_point_kinds(payload) == {"storage_tank"}
+
+
+def test_capped_point_kinds_is_per_class_not_per_response():
+    """A dense storage-tank farm hitting its own cap says nothing about
+    whether a completely different class in the same box did too."""
+    payload = {
+        "elements": (
+            [element(tags={"man_made": "storage_tank"})] * osm_infra.MAX_INFRA_POINT_PER_FEATURE
+            + [element(tags={"power": "substation"})]
+        ),
+    }
+    assert osm_infra._capped_point_kinds(payload) == {"storage_tank"}
+
+
+def test_capped_point_kinds_covers_the_four_original_classes_too():
+    """Not just the two new dense ones -- every _FEATURES class is checked,
+    including the four that predate this task and never had this check
+    before (military_airfield/military_area/power_plant/border_control)."""
+    payload = {"elements": [element(tags={"military": "airfield"})] * osm_infra.MAX_PER_FEATURE}
+    assert osm_infra._capped_point_kinds(payload) == {"military_airfield"}
+
+
+def test_capped_point_kinds_is_empty_under_every_cap():
+    payload = {"elements": [element(tags={"military": "airfield"})]}
+    assert osm_infra._capped_point_kinds(payload) == set()
+
+
+def test_capped_point_kinds_is_never_flagged_on_an_empty_response():
+    assert osm_infra._capped_point_kinds({}) == set()
+    assert osm_infra._capped_point_kinds({"elements": []}) == set()
+
+
+def test_capped_point_kinds_ignores_an_element_matching_no_known_kind():
+    payload = {"elements": [element(tags={"amenity": "cafe"})]}
+    assert osm_infra._capped_point_kinds(payload) == set()
+
+
+# --- Task 27: mainline rail geometry ----------------------------------------
+
+
+def rail_way(way_id=1, geometry=None, tags=None):
+    return {
+        "type": "way",
+        "id": way_id,
+        "geometry": geometry if geometry is not None else [
+            {"lat": 50.45, "lon": 30.52}, {"lat": 50.5, "lon": 30.6},
+        ],
+        "tags": tags if tags is not None else {},
+    }
+
+
+def test_the_rail_line_query_asks_for_geometry_not_a_computed_centre():
+    """`out geom` is the whole point of a second query: a point sweep's `out
+    center` throws the vertices away, and a polyline needs every one of them."""
+    query = osm_infra.build_rail_line_query((29.0, 34.0, 34.5, 37.0))
+    assert "(29.0,34.0,34.5,37.0)" in query
+    assert "out geom tags" in query
+    assert "out center" not in query
+
+
+def test_the_rail_line_selector_is_the_running_lines_only():
+    """Sidings, yards, platforms and disused/proposed track carry the same
+    railway=* tag family and are exactly what made the *full* linework ~300 MB
+    per theatre (see railways.py's docstring) -- this selector excludes them."""
+    query = osm_infra.build_rail_line_query((0, 0, 1, 1))
+    assert 'way["railway"~"^(rail|light_rail|narrow_gauge)$"]' in query
+    assert "siding" not in query
+    assert "platform" not in query
+
+
+def test_a_way_with_fewer_than_two_vertices_is_not_a_line():
+    payload = {"elements": [rail_way(geometry=[{"lat": 1, "lon": 1}])]}
+    assert osm_infra.parse_rail_lines(payload, "sudan") == []
+
+
+def test_a_node_or_relation_in_the_response_is_ignored():
+    """The selector is way-only, but a defensive parse should not choke on
+    anything else Overpass might still hand back."""
+    payload = {"elements": [{"type": "node", "id": 1, "lat": 1, "lon": 1}]}
+    assert osm_infra.parse_rail_lines(payload, "sudan") == []
+
+
+def test_every_captured_tag_lands_on_the_record():
+    tags = {
+        "name": "Kyiv-Odesa Line", "operator": "Ukrzaliznytsia", "gauge": "1520",
+        "electrified": "contact_line", "usage": "main", "service": "main",
+        "railway": "rail",
+    }
+    (line,) = osm_infra.parse_rail_lines({"elements": [rail_way(tags=tags)]}, "ukraine")
+    assert line["name"] == "Kyiv-Odesa Line"
+    assert line["operator"] == "Ukrzaliznytsia"
+    assert line["gauge"] == "1520"
+    assert line["electrified"] == "contact_line"
+    assert line["usage"] == "main"
+    assert line["service"] == "main"
+    assert line["railway"] == "rail"
+
+
+def test_the_geometry_comes_out_as_leaflet_lat_lon_pairs():
+    (line,) = osm_infra.parse_rail_lines(
+        {"elements": [rail_way(geometry=[{"lat": 50.45, "lon": 30.52}, {"lat": 50.5, "lon": 30.6}])]},
+        "ukraine",
+    )
+    assert line["path"] == [[50.45, 30.52], [50.5, 30.6]]
+
+
+def test_every_line_is_tagged_source_osm_at_the_point_of_collection():
+    """railways.py merges this with Natural Earth and relies on that tag being
+    set here, not guessed back out of the shape of the data."""
+    (line,) = osm_infra.parse_rail_lines({"elements": [rail_way()]}, "ukraine")
+    assert line["source"] == "osm"
+
+
+def test_the_id_is_prefixed_so_it_cannot_collide_with_a_point_feature():
+    (line,) = osm_infra.parse_rail_lines({"elements": [rail_way(way_id=42)]}, "ukraine")
+    assert line["id"] == "osm:way/42"
+
+
+def test_the_region_the_sweep_found_the_way_in_travels_with_the_record():
+    (line,) = osm_infra.parse_rail_lines({"elements": [rail_way()]}, "sahel")
+    assert line["region_key"] == "sahel"
+
+
+def test_an_empty_rail_line_response_is_not_an_error():
+    assert osm_infra.parse_rail_lines({}, "sudan") == []
+    assert osm_infra.parse_rail_lines({"elements": []}, "sudan") == []
+
+
+def test_a_way_in_two_overlapping_theatres_is_only_listed_once():
+    shared = {"id": "osm:way/1", "path": [[1, 1], [2, 2]], "region_key": "south_china_sea"}
+    flat = osm_infra.flatten_rail_lines({
+        "south_china_sea": [shared, {"id": "osm:way/2", "path": [[3, 3], [4, 4]]}],
+        "taiwan_strait": [{**shared, "region_key": "taiwan_strait"}],
+    })
+    assert len(flat) == 2
+    assert next(l for l in flat if l["id"] == "osm:way/1")["region_key"] == "south_china_sea"
+
+
+def test_flattening_an_empty_rail_line_sweep_is_not_an_error():
+    assert osm_infra.flatten_rail_lines({}) == []
+    assert osm_infra.flatten_rail_lines({"sudan": []}) == []
+
+
+def test_the_rail_line_document_states_its_own_provenance():
+    doc = osm_infra.serialize_rail_lines([{"id": "osm:way/1", "source": "osm", "path": [[1, 1], [2, 2]]}])
+    assert doc["attribution"] == "OpenStreetMap contributors"
+    assert "railway=rail|light_rail|narrow_gauge" in doc["provenance"]
+    assert doc["lines"] == [{"id": "osm:way/1", "source": "osm", "path": [[1, 1], [2, 2]]}]
+    assert doc["truncated_regions"] == []
+
+
+# --- Task 27 fix (post-review): detecting a capped response -----------------
+
+
+def test_a_response_at_the_cap_is_flagged_truncated(monkeypatch):
+    monkeypatch.setattr(osm_infra, "MAX_RAIL_LINE_WAYS", 2)
+    payload = {"elements": [rail_way(1), rail_way(2)]}
+    assert osm_infra._rail_lines_truncated(payload) is True
+
+
+def test_a_response_under_the_cap_is_not_flagged(monkeypatch):
+    monkeypatch.setattr(osm_infra, "MAX_RAIL_LINE_WAYS", 5)
+    payload = {"elements": [rail_way(1), rail_way(2)]}
+    assert osm_infra._rail_lines_truncated(payload) is False
+
+
+def test_an_empty_response_is_never_flagged_truncated():
+    assert osm_infra._rail_lines_truncated({}) is False
+    assert osm_infra._rail_lines_truncated({"elements": []}) is False
+
+
+def test_truncated_regions_are_carried_in_the_stored_document():
+    doc = osm_infra.serialize_rail_lines([], truncated_regions=["russia_ukraine", "sahel"])
+    # Sorted, so two sweeps that found the same capped set in a different
+    # order never look like a change to a reader comparing two snapshots.
+    assert doc["truncated_regions"] == ["russia_ukraine", "sahel"]

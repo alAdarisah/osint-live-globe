@@ -1,6 +1,6 @@
 // Plain-object equivalents of the Leaflet LatLngBounds methods the app uses
-// outside the map controller (e.g. NewsBroadcastPanel filtering GDELT items
-// to the current view). Kept as plain {south,west,north,east} rather than
+// outside the map controller (e.g. IntelPanel's viewport scope filtering GDELT
+// items to the current view). Kept as plain {south,west,north,east} rather than
 // passing a live Leaflet LatLngBounds into React so components that only
 // need "am I roughly in view" don't have to import Leaflet at all.
 

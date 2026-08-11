@@ -72,6 +72,18 @@ def _parse_day(text: str) -> list[dict]:
                 "jam_ratio": jam_ratio,
                 "bad": bad,
                 "good": good,
+                # gpsjam's own H3 resolution-4 cell id, reported verbatim --
+                # not re-derived from (lat, lon) anywhere downstream. Task 39
+                # (aircraft/jamming cross-check) needs exact cell containment
+                # for an ADS-B position, not "nearest hex centroid within some
+                # radius", and the id is what h3.latlng_to_cell(aircraft_lat,
+                # aircraft_lon, 4) has to be compared against for that to mean
+                # anything. Added here rather than reconstructed later from
+                # the centroid this module already computes above, because a
+                # value this map actually received from the source is
+                # `reported`; a value rebuilt from a centroid is one more
+                # rounding step away from that.
+                "hex": row["hex"],
             }
         )
     points.sort(key=lambda p: p["jam_ratio"], reverse=True)

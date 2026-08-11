@@ -112,6 +112,17 @@ export const PALETTE_GROUPS = [
       { id: "infra.pipeline", label: "Pipeline node & routes", value: "#ffb347" },
       { id: "satellite.stations", label: "Space station", value: "#6fe3ff" },
       { id: "satellite.military", label: "Military satellite", value: "#ff4d4d" },
+      // Task 24: client-propagated groups (see map/decorators.js's
+      // SAT_ELEMENT_LAYERS and backend/sources/satellites.py's
+      // ELEMENT_LAYER_GROUPS). Colour is the only distinction between them --
+      // all seven share the one satellite glyph above.
+      { id: "satellite.navigation", label: "Navigation satellite", value: "#8ad1ff" },
+      { id: "satellite.weather", label: "Weather satellite", value: "#ffd166" },
+      { id: "satellite.imaging", label: "Earth-imaging satellite", value: "#9ee6a8" },
+      { id: "satellite.science", label: "Science satellite", value: "#c9b6ff" },
+      { id: "satellite.geo", label: "Geostationary satellite", value: "#ff9f6f" },
+      { id: "satellite.starlink", label: "Starlink satellite", value: "#7ee0c9" },
+      { id: "satellite.oneweb", label: "OneWeb satellite", value: "#6fe3ff" },
       // One row per runway layout, not one row for "civil". The three tiers
       // draw three different glyphs (see AIRFIELD_STYLE in decorators.js), and
       // under a single token the shape picker could only flatten them onto one
@@ -133,6 +144,57 @@ export const PALETTE_GROUPS = [
       { id: "osm.military_area", label: "Military area (OpenStreetMap)", value: "#ff8c3a" },
       { id: "osm.power", label: "Power plant (OpenStreetMap)", value: "#9be15d" },
       { id: "osm.border", label: "Border crossing (OpenStreetMap)", value: "#c9b6ff" },
+      // Task 28: power plants moved off this generic token onto their own
+      // eight fuel-specific ones below (powerPlant.*) -- osm.power stays,
+      // unused by that layer now, because it is still the token
+      // decorateOsmInfra's own generic table (OSM_INFRA_STYLE) ships as a
+      // fallback should a plant ever land back in that table.
+      //
+      // Four more OpenStreetMap point classes, siblings of osm.power/
+      // osm.border above -- same crowd-sourced provenance, kept off the
+      // curated infrastructure colours entirely (infra.refinery etc.) so a
+      // reader can never mistake a mapper's contribution for a hand-checked
+      // coordinate by its colour alone.
+      { id: "osm.power_substation", label: "Substation (OpenStreetMap)", value: "#c9b6ff" },
+      { id: "osm.refinery", label: "Refinery (OpenStreetMap)", value: "#ff9500" },
+      { id: "osm.storage_tank", label: "Storage tank (OpenStreetMap)", value: "#ffb347" },
+      { id: "osm.oil_well", label: "Oil/gas well (OpenStreetMap)", value: "#c17a4a" },
+      // Task 29: the five more OSM military=* base classes
+      // merge_military_bases pairs against the curated MILITARY_BASES list --
+      // the same orange osm.military_airfield/osm.military_area already wear,
+      // since these are the same "military installation" claim, just five
+      // more of OpenStreetMap's own tag values for it.
+      { id: "osm.military_base", label: "Military base (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_naval_base", label: "Naval base (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_training_area", label: "Military training area (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_barracks", label: "Barracks (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "osm.military_danger_area", label: "Danger area (OpenStreetMap)", value: "#ff8c3a" },
+      // Task 29: the three air-defence/radar classes, riding their own
+      // default-off layer (see LAYER_MANIFEST's airDefense entry in scene.js)
+      // rather than osmInfra -- a distinct red rather than the base orange, so
+      // a reader who has switched this layer on can tell a radar/bunker/
+      // checkpoint pin from an ordinary installation at a glance.
+      { id: "osm.radar_station", label: "Radar station (OpenStreetMap)", value: "#ff4d4d" },
+      { id: "osm.military_bunker", label: "Bunker (OpenStreetMap)", value: "#ff4d4d" },
+      { id: "osm.military_checkpoint", label: "Checkpoint (OpenStreetMap)", value: "#ff4d4d" },
+      // Task 28: power plants, glyph and colour by fuel (see osm_infra.py's
+      // own _fuel_category) -- eight rows rather than one shared "power
+      // plant" colour, the same reasoning the four railway node kinds were
+      // split into their own rows for: a nuclear plant and a wind farm are
+      // different enough claims that "show gas plants only, hide the rest"
+      // needs to be sayable, and one shared token made that unsayable.
+      { id: "powerPlant.nuclear", label: "Power plant, nuclear (OpenStreetMap)", value: "#ffd60a" },
+      { id: "powerPlant.coal", label: "Power plant, coal (OpenStreetMap)", value: "#6b6f76" },
+      { id: "powerPlant.gas", label: "Power plant, gas (OpenStreetMap)", value: "#ff8c3a" },
+      { id: "powerPlant.hydro", label: "Power plant, hydro (OpenStreetMap)", value: "#4a9fd8" },
+      { id: "powerPlant.wind", label: "Power plant, wind (OpenStreetMap)", value: "#7ee0c9" },
+      { id: "powerPlant.solar", label: "Power plant, solar (OpenStreetMap)", value: "#ffe066" },
+      { id: "powerPlant.biomass", label: "Power plant, biomass/waste (OpenStreetMap)", value: "#9be15d" },
+      { id: "powerPlant.other", label: "Power plant, other/unspecified fuel (OpenStreetMap)", value: "#8aa0ad" },
+      // Transmission-line geometry (Task 28, backend/sources/power_lines.py).
+      // Colour-only, the same treatment railway.line gets just below -- a
+      // polyline, not a pin.
+      { id: "grid.line", label: "Transmission line (OpenStreetMap)", value: "#e8b64f" },
       // EASA airspace bulletins, coloured by status rather than by severity.
       // Their `severity` is two-valued -- 70 when live, 0 when withdrawn -- so
       // putting it on the shared severity ramp would paint every live advisory
@@ -168,9 +230,50 @@ export const PALETTE_GROUPS = [
       // Coarse basemap rail *linework* (Natural Earth 1:10m, 2021). A muted grey,
       // and colour-only like cable.route below -- it is a polyline, not a pin.
       { id: "railway.line", label: "Railway line (Natural Earth, 2021)", value: "#6f7d92" },
+      // Task 27: the attributed OpenStreetMap overlay riding the same
+      // "railways" toggle as railway.line above. Colour-only, same reasoning
+      // -- a polyline, not a pin -- for all three: electrified/non-electrified
+      // is the one distinction the brief asked colour to carry (class --
+      // main/branch/narrow gauge -- is weight and dash instead, see
+      // decorators.js's railwayLineBaseWeight/railwayLineDash), and narrow
+      // gauge earns its own colour on top of its own dash because it is a
+      // physically different kind of track, not just a quieter branch line.
+      { id: "railway.electrified", label: "Railway line, electrified (OpenStreetMap)", value: "#e8b64f" },
+      {
+        id: "railway.nonElectrified",
+        label: "Railway line, not electrified / unknown (OpenStreetMap)",
+        value: "#8fa876",
+      },
+      { id: "railway.narrowGauge", label: "Railway line, narrow gauge (OpenStreetMap)", value: "#c17a4a" },
+      // Task 27: Digitraffic's live Finnish train positions. A pin, not a
+      // colour-only token -- see railway.electrified above for its line-only
+      // siblings -- and given a colour of its own (a vivid magenta, unclaimed
+      // elsewhere on this map) rather than reusing the muted OSM-point slate
+      // above: this is a live position, not reference geometry, and should
+      // not read as quiet crowd-sourced context the way a station pin does.
+      { id: "railway.live", label: "Live train (Digitraffic, Finland)", value: "#ff5fa8" },
+      // The ten named corridors (Task 20b) -- colour-only, same reasoning as
+      // railway.line just above: a polyline, not a pin. A muted cyan-teal,
+      // deliberately unlike the severity/traffic reds and yellows so a
+      // schematic route never reads as a live finding.
+      { id: "lanes.route", label: "Shipping corridor (schematic)", value: "#5fb8c9" },
+      // The AIS density wash (Task 20a) -- colour-only in the same sense the
+      // two heat layers above are: this token colours the legend swatch and
+      // the wash's near-invisible click targets, not a marker. A cool blue so
+      // it never reads as either FIRMS' orange or jamming's purple, the two
+      // washes it shares a stack with.
+      { id: "lanes.density", label: "AIS traffic density (this map's own coverage)", value: "#5cc4f2" },
       // DeFlock ALPR camera locations. A muted violet, deliberately quiet: this is
       // crowd-sourced surveillance-infrastructure metadata, not a live feed.
       { id: "deflock.camera", label: "ALPR camera (DeFlock / OpenStreetMap)", value: "#a78bba" },
+      // Dark-ship reachability (Task 21): the contour bands and the
+      // went-dark -> resumed line both dark_vessels' ais_gap and gfw_gaps
+      // records can draw, once a gap has closed, in the shared
+      // uncertaintyPane. One token for both shapes -- a 50/80/95% nesting and
+      // the line back to where the gap actually closed are one claim about
+      // one silence, not two different things -- and it is not filed under
+      // either layer (see TOKEN_LAYER) because it belongs to neither alone.
+      { id: "reach.contour", label: "Dark-ship reachability region", value: "#9d8bf0" },
     ],
   },
   {
@@ -183,6 +286,22 @@ export const PALETTE_GROUPS = [
       { id: "choropleth.low", label: "Low", value: "#2dd4bf" },
       { id: "choropleth.mid", label: "Middle", value: "#6366f1" },
       { id: "choropleth.high", label: "High", value: "#c026d3" },
+    ],
+  },
+  {
+    id: "water",
+    label: "Water bodies",
+    note: "Seas, lakes and rivers (Natural Earth, see backend/sources/water_bodies.py) -- the"
+      + " first polygon layer here that is not an administrative boundary. Like the country fill"
+      + " above, a marine or lake polygon is invisible until hovered or selected (see water.js),"
+      + " so 'Fill' and 'Outline' are what a reader sees on the shape their pointer is over and"
+      + " 'Selected fill' is what stays lit once they have clicked it -- the same distinction"
+      + " country-selected draws with the accent colour, given its own tokens here because an"
+      + " ocean should not have to share a hue with a border.",
+    tokens: [
+      { id: "water.fill", label: "Fill (hovered)", value: "#4fd1ff" },
+      { id: "water.outline", label: "Outline", value: "#8be9ff" },
+      { id: "water.selected", label: "Selected fill", value: "#0ea5e9" },
     ],
   },
 ];
@@ -208,7 +327,17 @@ export const DEFAULT_COLORS = Object.freeze(
  */
 const COLOUR_ONLY_TOKENS = new Set([
   "event.corroborated", "sanctions.designated", "cable.route", "railway.line",
+  // Task 27: the OSM line overlay's three tokens are colour-only for the same
+  // reason railway.line is -- each colours a polyline, not a pin. railway.live
+  // is deliberately absent: it is a genuine marker (a live train position) and
+  // earns the size dial the other three have no shape to apply to.
+  "railway.electrified", "railway.nonElectrified", "railway.narrowGauge",
+  // Task 28: the transmission-line layer's own colour-only token, same
+  // reasoning as railway.line just above -- a polyline, not a pin.
+  "grid.line",
+  "lanes.route", "lanes.density", "reach.contour",
   "choropleth.low", "choropleth.mid", "choropleth.high",
+  "water.fill", "water.outline", "water.selected",
 ]);
 
 export function tokenHasSize(token) {
@@ -227,11 +356,20 @@ export const DEFAULT_SIZES = Object.freeze(
  * layer's -- the later of the two wins (see tokenZoom below and pinZoomGate in
  * createMapController.js). A token with no entry here is one with no pin of its
  * own to withhold: the three colour-only tokens, the choropleth ramp, and
- * outage.country, which names a colour the palette does not offer.
+ * outage.country/outage.region, which name a colour the palette does not
+ * offer.
  *
  * Deliberately not derived from the palette groups. Those group by subject --
  * "Air & sea traffic" holds three ship classes and four aircraft classes across
  * five different layers -- and a layer is not a subject.
+ *
+ * water.fill/water.outline/water.selected join the choropleth ramp in staying
+ * out of this table on purpose: they colour a polygon fill, not a pin with a
+ * zoom of its own, so there is no gate for them to sit under. They still get a
+ * control -- see TOKENS_BY_LAYER in components/admin/sections/shared.jsx, where
+ * an entry with no home here falls through to "Shared colours" rather than a
+ * per-layer block, the same place railway.line's colour lives for the same
+ * reason (a polyline, not a pin).
  */
 export const TOKEN_LAYER = Object.freeze({
   "severity.critical": "events",
@@ -269,6 +407,13 @@ export const TOKEN_LAYER = Object.freeze({
   "infra.pipeline": "infra",
   "satellite.stations": "satellites",
   "satellite.military": "satellites",
+  "satellite.navigation": "satNavigation",
+  "satellite.weather": "satWeather",
+  "satellite.imaging": "satImaging",
+  "satellite.science": "satScience",
+  "satellite.geo": "satGeo",
+  "satellite.starlink": "satStarlink",
+  "satellite.oneweb": "satOneweb",
   "airfield.large": "airports",
   "airfield.medium": "airports",
   "airfield.small": "airports",
@@ -281,10 +426,52 @@ export const TOKEN_LAYER = Object.freeze({
   "osm.military_area": "osmInfra",
   "osm.power": "osmInfra",
   "osm.border": "osmInfra",
-  "osm.railway_station": "osmInfra",
-  "osm.railway_halt": "osmInfra",
-  "osm.railway_yard": "osmInfra",
-  "osm.railway_border": "osmInfra",
+  // Task 28: the four new osm_infra.py point classes, riding osmInfra's own
+  // zoom gate exactly like military_area/border above.
+  "osm.power_substation": "osmInfra",
+  "osm.refinery": "osmInfra",
+  "osm.storage_tank": "osmInfra",
+  "osm.oil_well": "osmInfra",
+  // Task 29: the five base classes stay on osmInfra's own zoom gate --
+  // merge_military_bases pairs them with the curated list for the country
+  // card, but the pins themselves still ride the generic OSM layer, same as
+  // military_airfield/military_area above.
+  "osm.military_base": "osmInfra",
+  "osm.military_naval_base": "osmInfra",
+  "osm.military_training_area": "osmInfra",
+  "osm.military_barracks": "osmInfra",
+  "osm.military_danger_area": "osmInfra",
+  // Task 29: the three air-defence/radar classes ride their own layer
+  // (LAYER_MANIFEST's airDefense), default off with its own completeness
+  // caveat -- see decorateOsmInfra's "airDefense" branch.
+  "osm.radar_station": "airDefense",
+  "osm.military_bunker": "airDefense",
+  "osm.military_checkpoint": "airDefense",
+  // Task 28: power plants moved off osmInfra onto their own layer -- these
+  // eight fuel tokens are checked against powerPlants' own zoom gate, not
+  // osmInfra's, the same reason the four railway_* tokens moved to
+  // "railwayPoints" when that split happened (Task 27).
+  "powerPlant.nuclear": "powerPlants",
+  "powerPlant.coal": "powerPlants",
+  "powerPlant.gas": "powerPlants",
+  "powerPlant.hydro": "powerPlants",
+  "powerPlant.wind": "powerPlants",
+  "powerPlant.solar": "powerPlants",
+  "powerPlant.biomass": "powerPlants",
+  "powerPlant.other": "powerPlants",
+  // grid.line is deliberately absent here, the same as railway.line/
+  // cable.route/lanes.route/lanes.density above: it colours a polyline, not
+  // a pin with a zoom of its own, so there is no gate for it to sit under
+  // (see this table's own docstring).
+  // Task 27: moved from "osmInfra" to "railwayPoints" -- these four kinds now
+  // ride the Railways layer's own toggle rather than OSM infrastructure's
+  // (see LAYER_MANIFEST's note in scene.js), so their own per-pin zoom gate
+  // must be checked against that layer's floor, not the one they left.
+  "osm.railway_station": "railwayPoints",
+  "osm.railway_halt": "railwayPoints",
+  "osm.railway_yard": "railwayPoints",
+  "osm.railway_border": "railwayPoints",
+  "railway.live": "railLive",
   "deflock.camera": "deflock",
   "czib.active": "czib",
   "czib.withdrawn": "czib",
@@ -330,11 +517,38 @@ export const TOKEN_LAYER = Object.freeze({
 // inferred or in motion, then the places all of it happened to.
 export const PIN_STACK = [
   "events", "conflictHistory", "czib", "hazards", "floods", "gdelt", "officials",
-  "darkVessels", "gfwGaps", "gfwDetections", "satellites", "launches",
-  "cities", "infra", "osmInfra", "deflock", "airports", "ports", "dams",
-  "railways", "cables", "outagePoints",
+  "darkVessels", "gfwGaps", "gfwDetections", "satellites",
+  // The three DOM-marker client-propagated groups (Task 24), right beside
+  // the server-propagated satellites above -- one family, split only by how
+  // each is computed. satImaging/satGeo/satStarlink/satOneweb are not here:
+  // they draw on the WebGL entity canvas instead (see STACK_ALIAS below).
+  "satNavigation", "satWeather", "satScience", "launches",
+  "cities", "infra", "osmInfra",
+  // Task 28: a genuine independent toggle, placed beside osmInfra (the layer
+  // it was pulled off of) rather than mirroring anything -- see its own note
+  // in map/scene.js on why it has no natural parent toggle to ride.
+  "powerPlants",
+  // Task 29: same reasoning as powerPlants just above -- a genuine
+  // independent toggle (default off, see LAYER_MANIFEST's airDefense entry),
+  // placed beside the layer it was pulled off of.
+  "airDefense",
+  "deflock", "airports", "ports", "dams",
+  // Task 27: railLive gets its own position -- a genuine independent toggle,
+  // unlike railwayPoints just below it, which has none (see STACK_ALIAS).
+  "railLive",
+  "railways",
+  // Task 28: beside railways, the layer whose rendering technique it copies.
+  "powerLines",
+  "cables", "shippingLanes", "outagePoints", "outageRegionPoints",
 ];
-export const WASH_STACK = ["vehicles", "jamming", "firms"];
+export const WASH_STACK = ["vehicles", "jamming", "firms", "laneDensity"];
+
+// water carries no PIN_STACK/WASH_STACK entry, deliberately: like the country
+// and subdivision shapes it is drawn `interactive: false` in its own pane
+// (waterPane, z 345, below countriesPane) rather than as a marker or a canvas,
+// so neither drawing mechanism this stack orders applies to it. It is
+// substrate in exactly the sense stackFade's own docstring already uses that
+// word for country shapes and districts -- see below.
 
 /**
  * Layer keys that ride another key's place in the stack.
@@ -344,11 +558,28 @@ export const WASH_STACK = ["vehicles", "jamming", "firms"];
  * each its own would undo the reason it exists. Cable landings are drawn as part
  * of the cables layer for the same reason its checkbox covers both: a cable and
  * the place it comes ashore are one fact.
+ *
+ * satImaging/satGeo/satStarlink/satOneweb (Task 24) join the same canvas for
+ * the same reason the six above do -- several hundred to several thousand
+ * objects apiece is exactly the count the WebGL path exists for, and a DOM
+ * marker per object was never on the table for these four (see
+ * createMapController.js's DOM-vs-WebGL note). The three small groups drawn
+ * as DOM markers instead (satNavigation/satWeather/satScience) sit in
+ * PIN_STACK directly, beside `satellites`, rather than here.
  */
 export const STACK_ALIAS = Object.freeze({
   aisNavy: "vehicles", aisTanker: "vehicles", aisCivilian: "vehicles",
   adsbMilitary: "vehicles", adsbCivilian: "vehicles", adsbFlagged: "vehicles",
+  satImaging: "vehicles", satGeo: "vehicles", satStarlink: "vehicles", satOneweb: "vehicles",
   cableLandings: "cables",
+  // Task 27: the station/halt/yard/border points ride the rail linework's
+  // position, the same way cableLandings rides cables' -- one toggle, one
+  // place in the stack, for a subject that used to be split across two.
+  railwayPoints: "railways",
+  // Task 27 fix: the Digitraffic station gazetteer rides railLive's position
+  // for the same reason -- one toggle, live trains and the stations they
+  // call at together.
+  railStations: "railLive",
   firmsPoints: "firms",
 });
 
@@ -567,8 +798,8 @@ function stackEntryFor(layerKey) {
  * per-layer slider stays an absolute correction on that.
  *
  * A key with no place in the stack is not faded. Those are the substrate --
- * country shapes, districts, the basemap -- which sit under everything by
- * construction and have nothing to be ranked against.
+ * country shapes, districts, water bodies, the basemap -- which sit under
+ * everything by construction and have nothing to be ranked against.
  */
 export function stackFade(layerKey) {
   const entry = stackEntryFor(layerKey);

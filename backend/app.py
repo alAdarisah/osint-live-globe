@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import logging
+import math
 import os
+import re
 import time
 import uuid
 import webbrowser
@@ -14,12 +16,22 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import (
-    admin_config, cachestore, config, escalation, history, infrastructure, ingest, metrics, mirror,
-    refine, regions, replay, storage,
+    admin_config, cachestore, config, escalation, history, infrastructure, ingest, inference_config, metrics,
+    mirror, refine, regions, replay, storage,
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity
+from backend.refine import (
+    cable_outage, flight_legs, infra_risk, jam_crosscheck, lane_density, naval_presence, port_call_thresholds,
+)
+# Aliased: this module already has a route handler literally named
+# `satellites` (see /api/satellites below, unchanged from before this task),
+# and that function def rebinds the bare module-level name `satellites` --
+# so an unaliased import here would be shadowed by it for every reference
+# below the route, the same reason admin1_boundaries/water_bodies's own
+# route handlers are named *_endpoint rather than reusing their module's name.
+from backend.sources import admin1_boundaries, admin2_boundaries, airfield_activity, gazetteer, sat_passes, water_bodies
+from backend.sources import satellites as satellites_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("osint-globe")
@@ -71,6 +83,12 @@ _SOURCE_MODULES = (
     # more logical.
     "icao_blocks", "maritime_watchlists",
     "cables", "railways", "dams", "ports", "czib", "outages", "launches", "energy_flows",
+    # Task 28: a plain Postgres re-serve of osm_infra.py's own "power_lines_osm"
+    # document (that sweep runs in the ingest process, on its own daily clock --
+    # see power_lines.py's own module docstring, same reasoning railways.py's
+    # OSM half already gives). No network fetch of its own, so it costs nothing
+    # to poll from the backend process instead.
+    "power_lines",
     # 99.78% United States, and there is no US theatre -- so this layer is
     # visible only on the unfiltered World view, by design. See
     # backend/sources/deflock.py.
@@ -89,6 +107,9 @@ _SOURCE_MODULES = (
     # Also weekly: states and provinces, drawn when a country that has them is
     # selected. Nine federations, one 2.3 MB file.
     "admin1_boundaries",
+    # Also weekly, same mirror: seas, lakes and river centrelines -- the first
+    # real water geometry on this map (see backend/sources/water_bodies.py).
+    "water_bodies",
 )
 
 # Everything this process serves but does not produce: the ingest process's
@@ -216,6 +237,51 @@ async def metrics_endpoint():
     return Response(content=metrics.render(), media_type=metrics.CONTENT_TYPE)
 
 
+# The refine jobs whose output is a table rather than a registry-mirrored
+# layer -- every Job in backend/refine/__init__.py with publishes=() -- so
+# unlike every polled source, registry.health() has never had anything to say
+# about them. Task 31 gives the four Task 15/16/19/23 built (port calls,
+# vessel profiles, lane density, flight legs) a row here, by name, matching
+# the brief's own list; escalation/airfield_activity/naval_presence have the
+# identical gap and are left for whichever task actually asks for them.
+_DERIVED_JOB_HEALTH_NAMES = {"port_calls", "vessel_profiles", "lane_density", "flight_legs"}
+
+
+async def _derived_job_health() -> dict:
+    """Health rows for the derived-job names in _DERIVED_JOB_HEALTH_NAMES,
+    shaped exactly like registry.health()'s own rows so SourceStatusSection's
+    generic renderer (frontend/src/components/controlPanel/SourceStatusSection.jsx,
+    which keys off "item_count" in info) picks them up without any change of
+    its own.
+
+    Read the same way mirror.py reads every *mirrored* source's verdict --
+    storage.source_health_latest() plus mirror.health_verdict() -- so a
+    stalled refine job goes red exactly like a stalled ingest source does,
+    rather than reading as a layer nobody ever wired a light up for.
+    `expected_every` comes from the job table itself (refine.all_jobs()),
+    not restated, so this cannot drift from the interval the job actually
+    runs on.
+    """
+    now = time.time()
+    jobs = {job.health_name: job for job in refine.all_jobs() if job.health_name in _DERIVED_JOB_HEALTH_NAMES}
+    out = {}
+    for name, job in jobs.items():
+        newest, newest_ok = await storage.source_health_latest(name)
+        last_success, last_error = mirror.health_verdict(
+            newest, newest_ok, job.expected_every(), now, "the refine service"
+        )
+        out[name] = {
+            "name": name,
+            "key_configured": True,
+            "item_count": (newest_ok or {}).get("item_count") or 0,
+            "version": 0,
+            "last_success": last_success,
+            "seconds_since_success": round(now - last_success) if last_success else None,
+            "last_error": last_error,
+        }
+    return out
+
+
 @app.get("/api/health")
 async def health():
     """Per-source status, plus whatever the cache worker is currently reporting.
@@ -226,7 +292,26 @@ async def health():
     stopped producing. Read from the alerts table rather than recomputed here,
     so the API and the worker cannot disagree about what is wrong.
     """
-    return {**registry.health(), "alerts": await storage.active_alerts()}
+    return {
+        **registry.health(),
+        **(await _derived_job_health()),
+        "alerts": await storage.active_alerts(),
+    }
+
+
+@app.get("/api/inference-config")
+async def inference_config_get():
+    """The thresholds behind this map's inferred products, read-only.
+
+    See backend/inference_config.py's module docstring for why read-only: the
+    refine jobs that actually apply these numbers are a separate long-running
+    process with no channel for Admin Mode's frontend-only settings PUT to
+    reach it. Static for the process lifetime (every value is a module-level
+    constant, read once at import), so this is cached the same way
+    /api/regions is -- no version/ETag machinery, just tell the browser to
+    hold on to it.
+    """
+    return JSONResponse(inference_config.describe(), headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.get("/api/admin-config")
@@ -289,10 +374,68 @@ async def regions_list():
     return JSONResponse(regions.serialize(), headers={"Cache-Control": "public, max-age=3600"})
 
 
+async def _curated_pipeline_records() -> list[dict]:
+    """backend/infrastructure.py's PIPELINE_ROUTES, wrapped with the one field
+    that matters once OSM pipelines ride the same array: which of the two
+    claims a route is. `path`, not `coords`, so the frontend's renderPipelines
+    reads one field name for both halves rather than branching on source.
+
+    Task 28: kept a plain synchronous list -> wrapper rather than folded into
+    infrastructure.serialize() itself, so that function's own "static for the
+    process lifetime" promise (see infrastructure.py's module docstring)
+    stays true of the `sites`/`lanes` halves it still serves unmerged.
+    """
+    return [
+        {
+            "source": "curated",
+            "path": route["coords"],
+            "name": route.get("name"),
+            "note": route.get("note"),
+            "region_key": None,  # curated routes are not theatre-scoped the way an OSM sweep is
+        }
+        for route in infrastructure.PIPELINE_ROUTES
+    ]
+
+
 @app.get("/api/infrastructure")
 async def infrastructure_list():
-    # Static for the process lifetime, same as /api/regions above.
-    return JSONResponse(infrastructure.serialize(), headers={"Cache-Control": "public, max-age=86400"})
+    # `sites`/`lanes` are static for the process lifetime, same as
+    # /api/regions above. `pipelines` is not, as of Task 28: it now folds in
+    # whatever osm_infra.py's own Overpass sweep last found (a plain Postgres
+    # read here, not a fetch -- see backend/sources/osm_infra.py's own
+    # "pipelines_osm" document) alongside the curated PIPELINE_ROUTES, which
+    # stay exactly as they were, provenance intact, as the fallback outside
+    # (and inside) the eleven theatres OSM is limited to. Cache-Control is
+    # unchanged at a day: the OSM sweep behind it moves at most once a day,
+    # so this was already the honest ceiling for how fresh a cached copy
+    # could be.
+    osm_doc = (await storage.reference("pipelines_osm")) or {}
+    curated = await _curated_pipeline_records()
+    pipelines = curated + (osm_doc.get("lines") or [])
+    # Task 29: the same source-tagged merge idiom as pipelines just above,
+    # applied to military installations -- curated MILITARY_BASES beside
+    # whatever osm_infra.py's own Overpass sweep last found for the six
+    # comparable military=* kinds (see infrastructure.merge_military_bases).
+    # A registry read, not a fetch: osm_infra.py runs in the ingest process on
+    # its own daily clock (see its own module docstring), and this process
+    # already mirrors its published "osm_infra" state -- the same registry
+    # read /api/osm-infrastructure itself serves from. Reading it here, once
+    # a day at most (the Cache-Control below is unchanged), costs nothing.
+    osm_military = (registry.get("osm_infra").data if registry.has("osm_infra") else None) or []
+    military_bases = infrastructure.merge_military_bases(infrastructure.MILITARY_BASES, osm_military)
+    payload = {
+        **infrastructure.serialize(),
+        "pipelines": pipelines,
+        # Review fix (Task 28, Critical): osm_infra.py computes and stores
+        # this exactly like power_lines_osm's own truncated_regions -- it was
+        # being read into `osm_doc` above and then dropped rather than
+        # served, so a theatre that hit MAX_PIPELINE_WAYS read as "OSM mapped
+        # less here" with nothing saying it was capped. Carried straight
+        # through, same as power_lines.py's own serialize() does for its half.
+        "pipelines_truncated_regions": sorted(osm_doc.get("truncated_regions") or []),
+        "military_bases": military_bases,
+    }
+    return JSONResponse(payload, headers={"Cache-Control": "public, max-age=86400"})
 
 
 # Filtered payloads, keyed by (source, version, region, bbox).
@@ -471,6 +614,115 @@ async def admin1_boundaries_endpoint(country: str):
         }
         _ADMIN1_BOUNDARY_CACHE.set(iso3, cached)
     return JSONResponse(cached, headers={"Cache-Control": "public, max-age=86400"})
+
+
+# Seas, lakes and river centrelines, stored one reference_snapshots row per
+# kind (see sources/water_bodies.py). This reads from Postgres per request,
+# the same as the district/admin1 boundaries above and for the same reason:
+# water_bodies.py deliberately does not warm its geometry into registry state
+# (see its NOT_WARMED entry in test_persistence_coverage.py), so there is no
+# SourceState.data/version for _cached_source_response to key an ETag off --
+# that machinery assumes a registry-backed source, which this is not.
+#
+# Kind -> snapshot name is built from water_bodies.DATASETS rather than
+# retyping "water_marine"/"water_lakes"/"water_rivers" here, so the two
+# cannot drift apart.
+_WATER_SNAPSHOT_BY_KIND = {key: snapshot for key, snapshot, *_rest in water_bodies.DATASETS}
+
+# Keyed by (kind, bbox) the same way _FILTERED_CACHE above is keyed by
+# (source, version, region, bbox) -- three kinds times however many distinct
+# viewport cells are actually asked for inside an hour, which is small next
+# to that cache's 256.
+_WATER_CACHE = LruTtlCache(maxsize=64, ttl=3600)
+metrics.track_local_cache("water", _WATER_CACHE)
+
+
+def _water_bbox_overlaps(feature_bbox: list, bounds) -> bool:
+    """Rectangle overlap between one water feature's stored bbox and a query
+    box, antimeridian-aware.
+
+    Every kind stores a bbox now (see water_bodies._build_collection) --
+    a Task 5 review finding was that giving one to marine only forced this
+    endpoint to fall back to regions.filter_geojson for lakes and rivers,
+    which recomputes a bbox by walking every coordinate, and does it on
+    *every* request: storage.reference() (backend/storage.py) does a fresh
+    Postgres read plus json.loads every call, so filter_geojson's memo, keyed
+    on Python object identity, never once fired for water traffic. The fix
+    is this endpoint never walking geometry at all, for any kind -- not
+    caching the walk harder.
+
+    Only marine has features that actually wrap the antimeridian in the live
+    data (west > east -- six named seas; see water_bodies._bbox's
+    docstring), but the test itself doesn't need to know which kind it is
+    looking at: it reads whatever bbox is stored, wrapped or not.
+    regions.parse_bbox refuses a wrapped *query* box outright (a client
+    wanting both halves of a wrap asks twice), so only the feature side ever
+    needs the two-range treatment below.
+    """
+    f_south, f_west, f_north, f_east = feature_bbox
+    q_south, q_west, q_north, q_east = bounds
+    if f_south > q_north or q_south > f_north:
+        return False
+    if f_west <= f_east:
+        return f_west <= q_east and q_west <= f_east
+    return q_east >= f_west or q_west <= f_east
+
+
+def _filter_water(collection: dict, bounds) -> dict:
+    """Bbox-filter a water dataset against each feature's stored bbox, or
+    hand the collection back whole when bounds is None (kind=rivers never
+    reaches here with bounds None -- see the 400 in water_endpoint below).
+    One path for all three kinds: every kind carries a stored bbox, so
+    there is no geometry to fall back to walking and nothing kind-specific
+    left in this function.
+    """
+    if not isinstance(collection, dict):
+        return {"type": "FeatureCollection", "features": []}
+    if bounds is None:
+        return collection
+    features = [
+        f for f in collection.get("features", [])
+        if _water_bbox_overlaps(f.get("properties", {}).get("bbox") or [0.0, 0.0, 0.0, 0.0], bounds)
+    ]
+    return {"type": "FeatureCollection", "features": features}
+
+
+@app.get("/api/water")
+async def water_endpoint(kind: str = "marine", bbox: str | None = None):
+    """Seas, lakes or river centrelines, from Natural Earth via
+    sources/water_bodies.py.
+
+    kind=rivers must carry a bbox: the unfiltered dataset serialises to about
+    5.12 MB (re-measured after lakes/rivers gained a stored bbox -- see
+    water_bodies._build_collection -- since that grows every feature a
+    little; up from 5.02 MB), the same order of size
+    /api/district-boundaries and /api/admin1-boundaries avoid by requiring a
+    country rather than serving every boundary at once. Marine (1.19 MB,
+    unchanged) and lakes (3.19 MB, up from 3.10 MB) are small enough to
+    still be served whole.
+    """
+    if kind not in _WATER_SNAPSHOT_BY_KIND:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of: {', '.join(_WATER_SNAPSHOT_BY_KIND)}",
+        )
+    bounds = regions.parse_bbox(bbox)
+    if kind == "rivers" and bounds is None:
+        raise HTTPException(
+            status_code=400,
+            detail="kind=rivers requires a bbox parameter -- the unfiltered river "
+                   "dataset is about 5 MB and is not served whole",
+        )
+    box_key = ",".join(f"{v:g}" for v in bounds) if bounds else "-"
+    cache_key = (kind, box_key)
+    payload = _WATER_CACHE.get(cache_key)
+    if payload is None:
+        raw = await storage.reference(_WATER_SNAPSHOT_BY_KIND[kind]) or {
+            "type": "FeatureCollection", "features": [],
+        }
+        payload = _filter_water(raw, bounds)
+        _WATER_CACHE.set(cache_key, payload)
+    return JSONResponse(payload, headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/conflict-district-months")
@@ -675,6 +927,15 @@ async def railways_endpoint(request: Request):
     return _cached_source_response(request, "railways", None, lambda data, _bounds: data, max_age=86400)
 
 
+@app.get("/api/power-lines")
+async def power_lines_endpoint(request: Request):
+    # Transmission-line geometry, theatre-clipped and served whole (see
+    # backend/sources/power_lines.py) -- same shape and hard cache as
+    # /api/railways, and for the same reason: a line is one object the client
+    # splits into a polyline, not a set of points to clip to a region.
+    return _cached_source_response(request, "power_lines", None, lambda data, _bounds: data, max_age=86400)
+
+
 @app.get("/api/deflock")
 async def deflock_endpoint(request: Request, region: str | None = None):
     # ALPR camera locations, worldwide (see backend/sources/deflock.py). 99.78%
@@ -689,6 +950,15 @@ async def outages_endpoint(request: Request):
     # Country-keyed, not point data (see backend/sources/outages.py) -- no
     # region filter, same as /api/conflict-stats.
     return _cached_source_response(request, "outages", None, lambda data, _bounds: data)
+
+
+@app.get("/api/outages/regions")
+async def outage_regions_endpoint(request: Request):
+    # {ISO2: {region_code_or_entity_code: record}} -- see outages.py's own
+    # docstring for the match-quality tiers. Unscoped like /api/outages above:
+    # a reader comparing regions across countries wants the whole set, not one
+    # bbox's worth of it, and the payload is small (a few hundred rows at most).
+    return _cached_source_response(request, "outages_regions", None, lambda data, _bounds: data)
 
 
 @app.get("/api/dark-vessels")
@@ -786,6 +1056,204 @@ async def track(kind: str, entity_id: str, points: int = 800):
     }
 
 
+# What a port_calls row's `confidence` tier actually means, in the distance
+# AIS gave no berth for. Read from backend/refine/port_call_thresholds.py --
+# a leaf module with no other imports, split out of refine/port_calls.py
+# specifically so this process could read these three numbers without also
+# pulling in that module's ingest-side ProximityIndex/dark_vessels
+# dependencies -- rather than duplicated as a second copy of the same
+# floats, which a change to one and not the other would silently desync.
+# vessel_port_calls itself stores only the tier, never the distance that
+# produced it (see _classify in port_calls.py), so this is the one place
+# that distance can still reach a card: sent with every response rather than
+# hardcoded a third time in the frontend, so a reader sees the actual radius
+# behind "exact"/"proximity"/"inferred" instead of just the word.
+PORT_CALL_CONFIDENCE_KM = {
+    "exact": port_call_thresholds.PORT_EXACT_RADIUS_KM,
+    "proximity": port_call_thresholds.PORT_PROXIMITY_RADIUS_KM,
+    "inferred": port_call_thresholds.PORT_SEARCH_RADIUS_KM,
+}
+
+
+def _curated_port_by_id() -> dict[str, dict]:
+    """The curated harbours in backend/infrastructure.py, keyed by id -- the
+    free half of the port-name lookup below, since these never touch
+    Postgres. Mirrors the same filter backend/refine/vessel_profile.py's own
+    _load_port_labels applies to the same list."""
+    return {
+        str(site.get("id") or site.get("name")): site
+        for site in infrastructure.INFRA_SITES
+        if site.get("type") == "port"
+    }
+
+
+async def _port_labels_for(port_ids: set[str]) -> dict[str, dict]:
+    """port_id -> {"name", "country"} for a small, already-known set of ids.
+
+    Same two sources vessel_profile.py's _load_port_labels combines (the
+    curated list above, plus the World Port Index rows in entity_latest), but
+    scoped to only the ids one card's rows actually name rather than every
+    port this map knows. That module runs on a schedule and can afford
+    entity_latest("ports") whole; this runs on a request path and reads one
+    indexed row per still-unresolved id instead (storage.entity_latest_one).
+    """
+    if not port_ids:
+        return {}
+    curated = _curated_port_by_id()
+    labels: dict[str, dict] = {}
+    missing = []
+    for port_id in port_ids:
+        site = curated.get(port_id)
+        if site:
+            labels[port_id] = {"name": site.get("name") or port_id, "country": site.get("country")}
+        else:
+            missing.append(port_id)
+    if missing:
+        found = await asyncio.gather(*(storage.entity_latest_one("ports", pid) for pid in missing))
+        for port_id, port in zip(missing, found):
+            if port:
+                labels[port_id] = {"name": port.get("name") or port_id, "country": port.get("country")}
+    return labels
+
+
+def _with_port_labels(rows: list[dict], labels: dict[str, dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        label = labels.get(str(row.get("port_id"))) or {}
+        out.append({**row, "port_name": label.get("name"), "port_country": label.get("country")})
+    return out
+
+
+@app.get("/api/vessel/{mmsi}")
+async def vessel_detail(mmsi: str):
+    """One hull's identity, inferred cargo/laden profile and recent port calls.
+
+    Per-entity route, following /api/track's shape above rather than
+    _cached_source_response: no region filter, no ETag machinery, keyed by a
+    single MMSI a reader just clicked, nothing for a second caller to share.
+
+    Reads vessel_profiles (Task 16's refine/vessel_profile.py),
+    vessel_port_calls (Task 15's refine/port_calls.py) and entity_latest --
+    never entity_history. That table is read incrementally, on a schedule, by
+    the two refine jobs above; a request path must never open it directly
+    (see global-constraints.md), and nothing below does.
+    """
+    # storage.reference decodes the whole vessel_profiles document (one entry
+    # per hull this map has ever profiled, capped at vessel_profile.HULL_CAP)
+    # just to pick this one mmsi out of it -- the same whole-document read
+    # entity_latest_one was added in this diff specifically to avoid for
+    # entity_latest and ports. Left as-is because vessel_profiles has no
+    # per-hull row to key a lookup against (see storage.record_reference: it
+    # is one reference_snapshots document, not a table); a keyed table would
+    # be real schema work, not a one-line fix, so this is a known scaling
+    # edge rather than an oversight -- flagged in the task report.
+    identity, profiles, port_calls, open_call = await asyncio.gather(
+        storage.entity_latest_one("ais", mmsi),
+        storage.reference("vessel_profiles"),
+        storage.port_calls_for(mmsi, limit=10),
+        storage.open_port_call(mmsi),
+    )
+    profile = profiles.get(mmsi) if isinstance(profiles, dict) else None
+    if identity is None and profile is None and not port_calls and open_call is None:
+        raise HTTPException(status_code=404, detail=f"no record for vessel '{mmsi}'")
+
+    port_ids = {str(r["port_id"]) for r in port_calls if r.get("port_id")}
+    if open_call and open_call.get("port_id"):
+        port_ids.add(str(open_call["port_id"]))
+    labels = await _port_labels_for(port_ids)
+
+    return {
+        "identity": identity,
+        "profile": profile,
+        "port_calls": _with_port_labels(port_calls, labels),
+        "open_call": _with_port_labels([open_call], labels)[0] if open_call else None,
+        "confidence_radius_km": PORT_CALL_CONFIDENCE_KM,
+    }
+
+
+@app.get("/api/vessel/port/{port_id}")
+async def vessel_port_calls(port_id: str):
+    """One port's recent traffic -- the port card's "recent arrivals and
+    departures" section.
+
+    A sibling of vessel_detail above rather than a query-param variant of it:
+    the two live at the same prefix and read the same table
+    (vessel_port_calls), but a port_id and an MMSI are different id spaces,
+    and folding them into one path/shape would make the route's own URL say
+    nothing about which one it expects. Kept in this module (not /api/ports)
+    because it is one more read of the port-call table Task 15's
+    refine/port_calls.py and storage.port_calls_at already define, not a new
+    concern of the World Port Index endpoint's own.
+    """
+    port_calls = await storage.port_calls_at(port_id, limit=10)
+    mmsis = {str(r["mmsi"]) for r in port_calls if r.get("mmsi")}
+    identities = await asyncio.gather(*(storage.entity_latest_one("ais", mmsi) for mmsi in mmsis))
+    names = {mmsi: (identity or {}).get("name") for mmsi, identity in zip(mmsis, identities)}
+    return {
+        "port_id": port_id,
+        "port_calls": [
+            {**row, "vessel_name": names.get(str(row.get("mmsi")))} for row in port_calls
+        ],
+        "confidence_radius_km": PORT_CALL_CONFIDENCE_KM,
+    }
+
+
+def _lane_course_deg(mean_sin: float, mean_cos: float) -> float | None:
+    """atan2 over the stored unit-vector sum -- see the schema comment on
+    lane_cells in backend/storage.py for why the table keeps mean_sin/mean_cos
+    rather than a mean bearing column. Both exactly zero means this cell has
+    no net directional evidence at all (every position in it either never
+    reported a usable course or the courses it did report cancelled out), so
+    None is returned rather than an arbitrary 0deg claiming due north."""
+    if mean_sin == 0.0 and mean_cos == 0.0:
+        return None
+    return math.degrees(math.atan2(mean_sin, mean_cos)) % 360.0
+
+
+@app.get("/api/lanes")
+async def lanes_endpoint(bbox: str | None = None, min_transits: int = 1):
+    """The AIS traffic grid: where this map's own AIS coverage has actually
+    seen ships. Never a claim about where shipping lanes run in general --
+    see backend/refine/lane_density.py's module docstring, and `note` below,
+    which repeats that module's own NOTE constant verbatim so the wording
+    served here can't quietly drift from the one explaining the job that
+    built it.
+
+    Reads storage.lane_cells only -- never entity_history, the 11 GB raw
+    movement log the grid is derived from on a schedule (see global
+    constraints: that table is never read on a request path). No ETag/version
+    machinery: lane_cells changes at most once an hour
+    (config.LANE_DENSITY_INTERVAL) and bbox/min_transits both vary per client,
+    so there is nothing here for _cached_source_response's per-source version
+    counter to usefully key off -- the same reasoning /api/replay's per-request
+    `at` already gets.
+
+    `min_transits` keeps storage.lane_cells's own parameter name -- it filters
+    the stored `transits` column -- but each returned cell renames that same
+    number to `sightings` (Task 19 review): a hull sitting in one cell for a
+    month adds to it on every sweep that finds the hull still there, the same
+    as a cell that saw that many different hulls pass through once each, so
+    "transits" would claim a precision -- distinct ships -- this number does
+    not have. See the column's own comment on lane_cells in backend/storage.py.
+    """
+    bounds = regions.parse_bbox(bbox)
+    cells = await storage.lane_cells(bounds, min_transits=max(1, min_transits))
+    return JSONResponse(
+        {
+            "note": lane_density.NOTE,
+            "cells": [
+                {
+                    **{k: v for k, v in cell.items() if k != "transits"},
+                    "sightings": cell["transits"],
+                    "course_deg": _lane_course_deg(cell["mean_sin"], cell["mean_cos"]),
+                }
+                for cell in cells
+            ],
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/hazards")
 async def hazards_endpoint(request: Request, region: str | None = None):
     # Earthquakes (USGS, ~5min) and volcanic activity (Smithsonian GVP, weekly)
@@ -842,11 +1310,164 @@ async def satellites(region: str | None = None):
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
+def _satellite_elements_filter(layer_keys: set[str]):
+    # A closure rather than a top-level function so _cached_source_response's
+    # filter_fn(items, bounds) signature doesn't have to grow a third
+    # argument just for this one caller -- same shape _ships_callsign_filter
+    # above already uses. `bounds` is accepted and ignored: element sets
+    # carry no lat/lon (see backend/sources/satellites.py's module docstring
+    # on why positions are never stored), so there is nothing here for
+    # regions.filter_points to do.
+    def _filter(items: list[dict], bounds) -> list[dict]:
+        return satellites_source.filter_elements_by_layer(items, layer_keys)
+    return _filter
+
+
+@app.get("/api/satellites/elements")
+async def satellite_elements(request: Request, groups: str | None = None):
+    """Stored OMM element sets for the client-propagated satellite layers
+    (backend/sources/satellites.py's ELEMENT_LAYER_GROUPS) -- SGP4 runs in
+    the browser via satellite.js (frontend/src/map/satPropagate.js), not
+    here. See /api/satellites above for the two small groups this server
+    still propagates itself, every ten seconds, exactly as before this
+    endpoint existed.
+
+    `groups` is a comma-separated list of *layer* keys (navigation, weather,
+    imaging, science, geo, starlink, oneweb) -- the control panel's toggles,
+    not CelesTrak's own group names, since one toggle can span more than one
+    CelesTrak group and a reader turning on "navigation" should get
+    gps-ops+galileo+glo-ops+beidou in one request, not four. Missing or
+    empty answers empty, not "every group": a reader who has not asked for
+    anything should not pull every stored element set (starlink and oneweb
+    alone run to several thousand) just by omitting the parameter.
+    """
+    wanted = {g.strip() for g in (groups or "").split(",") if g.strip()}
+    return _cached_source_response(
+        request, "satellite_elements", None, _satellite_elements_filter(wanted),
+        variant=f"groups:{','.join(sorted(wanted)) or '-'}",
+    )
+
+
+@app.get("/api/satellites/passes")
+async def satellite_passes(lat: float, lon: float, hours: float = sat_passes.MAX_PASS_HOURS, groups: str | None = None):
+    """Task 25's overpass prediction: the next passes of the requested
+    satellite groups over (lat, lon), for a country, water body or point the
+    reader currently has selected.
+
+    Not cached through _cached_source_response like the sources above --
+    this is a per-request computation over a caller-supplied lat/lon/hours,
+    not a narrowing of one shared payload, the same reason /api/track/{kind}/
+    {id} skips that machinery too. `groups` takes the same layer-key
+    vocabulary as /api/satellites/elements above (navigation, weather,
+    imaging, ...), not CelesTrak's own group names, and an empty or missing
+    value answers "no satellites in scope" rather than "every group", for
+    the identical reason that endpoint's own `groups` does.
+
+    `hours` is silently clamped to sat_passes.MAX_PASS_HOURS (24, the
+    brief's own window) rather than rejected -- a caller asking for more is
+    narrowed, not errored, matching filter_elements_by_layer's own "narrow,
+    don't error" contract for an unrecognised group name. See
+    backend/sources/sat_passes.py's module docstring for the other cap (how
+    many satellites a single request will actually run a real pass search
+    for) and the benchmark behind its number.
+
+    Every pass is derived, not observed: arithmetic (SGP4 plus a horizon
+    search) over an orbital element set someone else reported, and it
+    carries that element set's own `epoch` so the card can say how old the
+    orbit behind the prediction is -- the same honesty point Task 25's card
+    makes about the ground track and footprint.
+
+    compute_passes is CPU-bound (a real SGP4 pass search per satellite, see
+    that function's own docstring), and this app runs single-process,
+    single-event-loop (no `workers=`, see uvicorn.run below). Called
+    directly inside this `async def`, it would stall that one loop -- and
+    with it every other client's AIS/ADS-B polling -- for however long the
+    search itself takes, which review measured at ~0.68s for a full
+    200-satellite cap. `asyncio.to_thread` moves the computation off the
+    loop, the same fix admin_config_put above already applies to its own
+    (much smaller) blocking call.
+    """
+    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+        raise HTTPException(status_code=400, detail="lat/lon out of range")
+    wanted = {g.strip() for g in (groups or "").split(",") if g.strip()}
+    elements = satellites_source.filter_elements_by_layer(registry.get("satellite_elements").data, wanted)
+    result = await asyncio.to_thread(sat_passes.compute_passes, elements, lat, lon, hours)
+    return JSONResponse(
+        {"lat": lat, "lon": lon, "groups": sorted(wanted), **result},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _matches_callsign_query(value, query: str) -> bool:
+    """Case-insensitive, `*`-as-wildcard, implicit-prefix match on a callsign.
+
+    The same rule frontend/src/utils/entityFilter.js's matchQuery applies to
+    the client-side vessel filter, kept in step by hand (there is no shared
+    module between a Python process and a browser bundle) rather than by
+    import -- see `callsign` on the /api/ships endpoint below for which of
+    the two filters is authoritative and why keeping this one narrow to
+    *only* callsign, rather than growing it to match the client's callsign/
+    name/mmsi/imo, is deliberate.
+
+    An empty query matches everything, including a ship with no callsign at
+    all -- checked before the value is, so the two clauses agree with
+    matchQuery's own "no query is not a query about this field" rule instead
+    of just happening to coincide with it. The route above only ever calls
+    this when `callsign` is truthy, so this ordering is currently unreachable
+    from the one caller this module has, not a live bug -- it is here so a
+    future caller (or a test) reading this function in isolation gets the
+    same answer matchQuery would, rather than one that only matches it by
+    accident of how the route happens to guard the call.
+    """
+    haystack = str(value).strip().upper() if value else ""
+    needle = query.strip().upper()
+    if not needle:
+        return True
+    if not haystack:
+        return False
+    if "*" not in needle:
+        return haystack.startswith(needle)
+    pattern = "^" + re.escape(needle).replace(r"\*", ".*") + "$"
+    return re.match(pattern, haystack) is not None
+
+
+def _ships_callsign_filter(query: str):
+    # A closure rather than a top-level function so _cached_source_response's
+    # filter_fn(items, bounds) signature doesn't have to grow a third
+    # argument just for this one caller -- same shape _gdelt_filter and
+    # _aircraft_priority_filter above already use for a fixed predicate.
+    def _filter(items: list[dict], bounds) -> list[dict]:
+        matched = [d for d in items if _matches_callsign_query(d.get("callsign"), query)]
+        return regions.filter_points(matched, bounds)
+    return _filter
+
+
 @app.get("/api/ships")
-async def ships(request: Request, region: str | None = None):
+async def ships(request: Request, region: str | None = None, callsign: str | None = None):
     # AIS is a live websocket stream snapshotted every few seconds (see
     # backend/sources/ais.py) -- ETag/304 still saves the body bytes, `no-cache`
     # (see _cached_source_response) just means every poll actually asks.
+    #
+    # `callsign` is an *independent* narrowing, not a second copy of the
+    # client-side vessel filter (frontend/src/utils/entityFilter.js), and the
+    # two are not meant to be composed. This map's own poller
+    # (useOsintData.js's POLL_CONFIG entry for "ais") never sends it -- the
+    # client-side filter is what decides what a reader sees and what the
+    # filter bar's own "N / total" count reads, and it matches four fields
+    # (callsign, name, mmsi, imo) this parameter deliberately does not try to
+    # widen to match. Composing the two would risk exactly the bug Task 12
+    # spent two review rounds on for the conflict-event filters: a client
+    # holding the *full* feed while believing it holds a server-narrowed one
+    # (or vice versa) would show a match count measured against the wrong
+    # total. This parameter exists for a caller that wants the server to do
+    # the narrowing before the payload leaves it -- fetching the global feed
+    # from outside this map's own client, where four-field client-side
+    # filtering over the whole thing isn't an option in the first place.
+    if callsign:
+        return _cached_source_response(
+            request, "ais", region, _ships_callsign_filter(callsign),
+            variant=f"callsign:{callsign.strip().upper()}",
+        )
     return _cached_source_response(request, "ais", region, regions.filter_points)
 
 
@@ -967,6 +1588,68 @@ async def aircraft(request: Request, region: str | None = None, civilian: str | 
     )
 
 
+@app.get("/api/aircraft/{icao24}")
+async def aircraft_detail(icao24: str):
+    """One airframe's identity and its recent flight legs (Task 23).
+
+    Per-entity route, following /api/vessel/{mmsi}'s shape (Task 17) rather
+    than _cached_source_response: no region filter, no ETag machinery, keyed
+    by a single icao24 a reader just clicked, nothing for a second caller to
+    share.
+
+    Reads flight_legs (backend/refine/flight_legs.py, via flight_legs_for /
+    open_flight_leg), entity_latest and one cached refine document -- never
+    entity_history. That table is read incrementally, on a schedule, by the
+    refine jobs above; a request path must never open it directly (see
+    global-constraints.md), and nothing below does.
+
+    `jam_crosscheck` (Task 39) is this airframe's own slice of
+    jam_crosscheck.REFERENCE_NAME -- the same cached document
+    GET /api/jam-crosscheck serves whole (see _jam_crosscheck_doc above,
+    shared between the two so a card open and a panel poll cost at most one
+    Postgres read per cache TTL between them). `None` here is not "checked,
+    clean" -- it is "this airframe has never sat inside one of gpsjam's
+    currently-tracked worst-hundred cells", a different fact the card has to
+    render differently (see jam_crosscheck.py's own docstring on why only
+    cell-relevant airframes get an entry at all). `jam_crosscheck_window_
+    seconds` rides alongside it -- Task 39 review, Important 1: `sample_count`/
+    `flag_count` are a true rolling-window total, not a since-first-seen one,
+    and the card has to say what window it is quoting rather than print a
+    bare, unqualified number.
+    """
+    identity, legs, current_leg, jam_doc = await asyncio.gather(
+        storage.entity_latest_one("adsb", icao24),
+        storage.flight_legs_for(icao24, limit=20),
+        storage.open_flight_leg(icao24),
+        _jam_crosscheck_doc(),
+    )
+    if identity is None and not legs and current_leg is None:
+        raise HTTPException(status_code=404, detail=f"no record for aircraft '{icao24}'")
+
+    # Route context for the cargo hint below: the leg still in progress, if
+    # there is one, otherwise the most recently completed leg -- `legs` is
+    # already newest-departure-first (see flight_legs_for), so index 0 is it.
+    route = current_leg or (legs[0] if legs else {})
+    identity_fields = identity or {}
+    cargo_hint = flight_legs.aircraft_cargo_hint(
+        identity_fields.get("type_code"),
+        identity_fields.get("type_desc"),
+        identity_fields.get("operator"),
+        route.get("origin_code"),
+        route.get("dest_code"),
+    )
+
+    return {
+        "identity": identity,
+        "legs": legs,
+        "current_leg": current_leg,
+        "cargo_hint": cargo_hint,
+        "jam_crosscheck": (jam_doc.get("aircraft") or {}).get(icao24),
+        "jam_crosscheck_note": jam_crosscheck.NOTE if jam_doc else None,
+        "jam_crosscheck_window_seconds": jam_doc.get("window_seconds") if jam_doc else None,
+    }
+
+
 @app.get("/api/countries")
 async def countries(request: Request, region: str | None = None):
     # Refreshed server-side once/day (see backend/sources/countries.py) --
@@ -987,6 +1670,116 @@ async def airports_endpoint(request: Request, region: str | None = None, bbox: s
     # every poll. Only the served slice is here -- the wider index ADS-B popups
     # query never leaves the backend (see backend/sources/airports.py).
     return _cached_source_response(request, "airports", region, regions.filter_points, max_age=3600, bbox=bbox)
+
+
+# Task 34: place search. gazetteer_places/gazetteer_alternates (see
+# backend/sources/gazetteer.py) are a Postgres-backed kind, but unlike every
+# _cached_source_response source above there is no warmed registry.SourceState
+# holding the full ~270k-place list for a filter_fn to run over -- the
+# "gazetteer" registry entry gazetteer.py registers is deliberately just a
+# summary count (`[{"places": N}]`, read by /api/health), not the list itself,
+# because publishing 270k rows behind that would turn a status check into a
+# several-megabyte response. So this is the same mismatch /api/water (Task 5)
+# hit, but not the same fix: water_bodies.py holds nothing in memory between
+# requests, so /api/water reads storage.reference() fresh each time. Gazetteer
+# is the opposite case -- it already keeps the *entire* index resident (see
+# the module's own docstring: "Lookups are served entirely from memory ...
+# Postgres is the cache that avoids [rebuilding it], never the thing a lookup
+# goes through"), rebuilt from that Postgres table on every refresh and warmed
+# from it at boot. Querying Postgres again here would mean parsing the same
+# ~270k JSONB rows a second time, in the request path, for data already
+# sitting folded and indexed in this process's memory.
+#
+# So /api/places issues no Postgres query and needs no new storage.py index:
+# Gazetteer.search() (added for this task, see gazetteer.py) runs one pass
+# over the live index's own name map, which already carries every alternate
+# name folded the same diacritic-insensitive way gazetteer.normalize() folds
+# the query below -- one in-memory scan covers both "on name" and "on the
+# stored alternates" the brief asks for. See search()'s docstring for the
+# measured cost of that scan (synthetic 270k-place index: 10-70ms typical,
+# up to ~200ms for a very common two-character prefix).
+#
+# MIN_PLACE_QUERY_LENGTH exists because of that last number: a one- or
+# two-character query starts to match a meaningful fraction of the whole
+# gazetteer, which is real CPU spent computing a ranking for a result list
+# capped at PLACE_SEARCH_LIMIT anyway -- nobody scans past 20 hits typed "s".
+MIN_PLACE_QUERY_LENGTH = 2
+PLACE_SEARCH_LIMIT = 20
+
+
+@app.get("/api/places")
+async def places_endpoint(q: str = "", limit: int = PLACE_SEARCH_LIMIT):
+    """GeoNames cities500 place search: type a few characters, fly to a town.
+
+    Every result is GeoNames' record, not a placement judgement -- 'reported'
+    evidence in this project's four-word provenance vocabulary (see
+    global-constraints.md): GeoNames states this place is here, at this
+    population, in this country and admin-1. country_code, admin1, population
+    and feature_class all come back with every result specifically so two
+    identically-named places (there are two Tripolis, three dozen
+    Springfields) can be told apart in the list, not just picked between by
+    whichever the ranking happens to prefer.
+
+    `limit` is clamped to PLACE_SEARCH_LIMIT regardless of what is asked for,
+    and `total_matches` says how many places matched before truncation -- so a
+    capped list reads as "20 of 214 matches", never silently as if those were
+    the only 20 places on Earth called that.
+
+    `ready` distinguishes "the index has data and genuinely found nothing"
+    from "the index has no data yet" -- gazetteer.py's index is rebuilt from
+    Postgres on every 24h refresh and warmed from it at boot, but that
+    rehydrate/fetch runs fire-and-forget rather than being awaited before the
+    server starts accepting requests (see gazetteer.py's start()), and
+    gazetteer is not in BOOT_SOURCES either -- so this box is interactive
+    before the index is necessarily populated. Without `ready`, a reader
+    searching a real capital in the first seconds after boot would be told
+    that place does not exist -- the found-nothing-versus-did-not-look
+    distinction this project holds everywhere else, missed here on a Task 34
+    review pass and fixed in the same round.
+    """
+    query = q.strip()
+    ready = len(gazetteer.current()) > 0
+    if len(gazetteer.normalize(query)) < MIN_PLACE_QUERY_LENGTH:
+        # Not an error: an empty or still-being-typed query is the normal
+        # resting state of a search box, exactly like gazetteer.resolve("")
+        # returning no candidates rather than raising.
+        return JSONResponse({
+            "query": query, "limit": PLACE_SEARCH_LIMIT, "total_matches": 0, "results": [], "ready": ready,
+        })
+    if not ready:
+        # Nothing to search yet -- report that plainly rather than let an
+        # empty index be indistinguishable from a genuine zero-match answer.
+        return JSONResponse({
+            "query": query, "limit": PLACE_SEARCH_LIMIT, "total_matches": 0, "results": [], "ready": False,
+        })
+
+    capped_limit = max(1, min(limit, PLACE_SEARCH_LIMIT))
+    hits, total_matches = gazetteer.search(query, limit=capped_limit)
+    results = [
+        {
+            "geonameid": hit.place.geonameid,
+            "name": hit.place.name,
+            "matched_name": hit.matched_name,
+            "is_alternate": hit.is_alternate,
+            "country_code": hit.place.country_code,
+            "admin1": hit.place.admin1,
+            # The ADM1 division's own name ("Kyiv City") when gazetteer.py
+            # loaded admin1CodesASCII.txt, so a result reads as a place a
+            # reader recognises rather than GeoNames' bare admin1 code; None
+            # when it isn't loaded (frontend falls back to the code itself --
+            # see placeResultTitle in placeSearchFormat.js).
+            "admin1_name": gazetteer.admin1_name(hit.place.country_code, hit.place.admin1),
+            "population": hit.place.population,
+            "feature_class": hit.place.feature_class,
+            "feature_code": hit.place.feature_code,
+            "lat": hit.place.lat,
+            "lon": hit.place.lon,
+        }
+        for hit in hits
+    ]
+    return JSONResponse({
+        "query": query, "limit": capped_limit, "total_matches": total_matches, "results": results, "ready": True,
+    })
 
 
 # The ranking is computed by the refine process now, so this is a read of one
@@ -1038,6 +1831,215 @@ async def airfield_activity_endpoint():
         cached = await storage.reference(airfield_activity.SNAPSHOT_NAME) or {}
         _AIRFIELD_ACTIVITY_CACHE.set("all", cached)
     return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the escalation/airfield-activity caches
+# just above: one stored document written by the refine process (four times a
+# day, see config.NAVAL_PRESENCE_INTERVAL), read by a frontend on its own timer.
+_NAVAL_PRESENCE_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("naval_presence", _NAVAL_PRESENCE_CACHE)
+
+
+@app.get("/api/naval-presence")
+async def naval_presence_endpoint():
+    """Navy-classified AIS presence per conflict theatre and per curated port,
+    with a 7-day trend (backend/refine/naval_presence.py).
+
+    An empty object -- not an error -- before the refine process has written a
+    pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document exists,
+    a theatre with `trend_computable: false` is not silence: it is this map
+    saying its own AIS coverage moved too much across the window to trust a
+    difference, which is the one thing worse than staying quiet -- presenting
+    a coverage change as a naval one.
+    """
+    cached = _NAVAL_PRESENCE_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(naval_presence.REFERENCE_NAME) or {}
+        _NAVAL_PRESENCE_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the naval-presence cache just above:
+# one stored document written by the refine process (backend/refine/
+# lane_density.py's chokepoint accounting, which rides lane_density's own
+# LANE_DENSITY_INTERVAL cadence -- once an hour by default), read by a
+# frontend on its own slower timer.
+_CHOKEPOINTS_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("chokepoints", _CHOKEPOINTS_CACHE)
+
+
+@app.get("/api/chokepoints")
+async def chokepoints_endpoint():
+    """Distinct hulls this map's own AIS coverage has recorded crossing each
+    config.WATCHED_WATERS box, per day, by cargo class, with a 30-day trend
+    (backend/refine/lane_density.py's chokepoint accounting, Task 36).
+
+    An empty object -- not an error -- before the refine process has written
+    a pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document exists,
+    every trend entry carries a `status` of "counted", "partial" or
+    "missing" (see lane_density.build_chokepoint_document's own docstring for
+    what each means) -- a day this job never got to look at is served as
+    `total: null` under `status: "missing"`, never as a `0` a reader could
+    mistake for an observed absence of traffic. `note` restates the coverage
+    caveat this data rests on: a distinct-hull count is derived by counting
+    MMSIs this map actually heard, not a traffic census, and AIS reception is
+    not uniform across the eight boxes or across time.
+
+    Reads storage.reference(lane_density.CHOKEPOINT_DOC_NAME) only -- never
+    entity_history, the same "derived product read from its own compact
+    table" rule every other refine-derived endpoint here follows.
+    """
+    cached = _CHOKEPOINTS_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(lane_density.CHOKEPOINT_DOC_NAME) or {}
+        _CHOKEPOINTS_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the chokepoints cache just above: one
+# stored document written by the refine process (backend/refine/
+# infra_risk.py, on its own INFRA_RISK_INTERVAL cadence -- an hour by
+# default), read by a frontend on its own slower timer.
+_INFRA_RISK_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("infra_risk", _INFRA_RISK_CACHE)
+
+
+@app.get("/api/infra-risk")
+async def infra_risk_endpoint():
+    """Task 37: which dams, power plants, cable landings, airfields and ports
+    have the most conflict events inside their own uncertainty radius, over
+    backend/refine/infra_risk.py's 30-day window.
+
+    An empty object -- not an error -- before the refine process has written
+    a pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document
+    exists, `events_without_radius` and `category_counts` say what was and
+    was not actually searched (see infra_risk.py's own module docstring for
+    the three-way "found nothing / did not look / not collected here"
+    distinction this document keeps apart) -- an empty `top` is never on its
+    own evidence that nothing is at risk.
+
+    **Proximity is not causation** -- restated in the document's own `note`
+    field, verbatim, so a consumer of the raw JSON gets the same caveat a
+    reader of the panel does: a site in this ranking sits inside one or more
+    events' own radius of positional doubt, not evidence it was targeted,
+    struck, or involved.
+
+    Reads storage.reference(infra_risk.REFERENCE_NAME) only -- never
+    conflict_events or entity_latest directly, and never entity_history at
+    all. The aggregation itself happens in the refine process precisely so
+    this endpoint does not have to run it (see infra_risk.py's own docstring
+    on why this moved out of the request path, the same trade
+    escalation.py made for the same table).
+    """
+    cached = _INFRA_RISK_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(infra_risk.REFERENCE_NAME) or {}
+        _INFRA_RISK_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the infra-risk cache just above: one
+# stored document written by the refine process (backend/refine/
+# cable_outage.py, on its own CABLE_OUTAGE_INTERVAL cadence -- 15 minutes by
+# default, matched to outages.py's own poll), read by a frontend on its own
+# slower timer.
+_CABLE_OUTAGE_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("cable_outage", _CABLE_OUTAGE_CACHE)
+
+
+@app.get("/api/cable-outage-risk")
+async def cable_outage_endpoint():
+    """Task 38: which countries with submarine-cable landings have an IODA
+    outage score spiking against their own recent history right now, and
+    whether any conflict event this map has fused landed near one of those
+    landings inside backend/refine/cable_outage.py's own event window.
+
+    An empty object -- not an error -- before the refine process has written
+    a pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document exists,
+    `status_counts`/`statuses` say which of four things is true for every
+    landing-holding country this pass -- spiking, checked and quiet,
+    checked but with too little history to call, or never once seen above
+    IODA's own noise floor -- so an empty `coincidences` list is never on its
+    own evidence that nothing is happening; see the module's own docstring
+    for what each status means.
+
+    **This is a coincidence, not a cause** -- restated in the document's own
+    `note` field, verbatim, and in the same words every time, so a consumer of
+    the raw JSON gets the identical caveat a reader of the panel does. A
+    country appearing in `coincidences` had a spiking score, at least one
+    cable landing, and a fused conflict event inside that landing's own
+    uncertainty radius during the same window -- nothing more, and nothing
+    here draws a connection between the three beyond that shared window.
+
+    Reads storage.reference(cable_outage.REFERENCE_NAME) only -- never
+    conflict_events, entity_latest or entity_history directly. The
+    correlation itself runs in the refine process precisely so this endpoint
+    does not have to (see cable_outage.py's own docstring on why it keeps its
+    own bounded score history rather than recomputing one on every request).
+    """
+    cached = _CABLE_OUTAGE_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(cable_outage.REFERENCE_NAME) or {}
+        _CABLE_OUTAGE_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the cable-outage cache just above: one
+# stored document written by the refine process (backend/refine/
+# jam_crosscheck.py, on its own JAM_CROSSCHECK_INTERVAL cadence -- 15 minutes
+# by default), read by a frontend on its own slower timer. Also reused by
+# aircraft_detail below (its own `jam_crosscheck` field is a slice of this
+# same document, not a second read of entity_history) so both consumers pay
+# for at most one Postgres read per cache TTL rather than one each.
+_JAM_CROSSCHECK_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("jam_crosscheck", _JAM_CROSSCHECK_CACHE)
+
+
+async def _jam_crosscheck_doc() -> dict:
+    cached = _JAM_CROSSCHECK_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(jam_crosscheck.REFERENCE_NAME) or {}
+        _JAM_CROSSCHECK_CACHE.set("all", cached)
+    return cached
+
+
+@app.get("/api/jam-crosscheck")
+async def jam_crosscheck_endpoint():
+    """Task 39: aircraft whose own reported track did something physically
+    implausible while sitting inside one of gpsjam.org's currently
+    worst-affected cells (backend/refine/jam_crosscheck.py) -- independent
+    corroboration for a jamming layer that otherwise stands alone.
+
+    An empty object -- not an error -- before the refine process has written
+    a pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document
+    exists, every cell in gpsjam's own current top hundred gets an entry
+    keyed by its own H3 hex id, `status` (`"no_traffic"` / `"clean"` /
+    `"flagged"`) and `tracked_seconds` say how long this map has actually
+    been able to look at that cell, and an aircraft entry only exists for an
+    airframe that has itself sat inside a tracked cell at least once -- see
+    the module's own docstring for why an airframe elsewhere on the map has
+    no entry here at all rather than a fabricated "checked" one.
+
+    **This is corroboration, not detection** -- restated in the document's
+    own `note` field verbatim, the same "one home for the caveat" discipline
+    cable_outage.py's own NOTE and infra_risk.py's own `note` already use:
+    that a flagged jump coincides with a reported cell is derived arithmetic;
+    that jamming explains it is an inference, never printed as an
+    observation.
+
+    Reads storage.reference(jam_crosscheck.REFERENCE_NAME) only -- never
+    entity_history or entity_latest("jamming") directly. Both the anomaly
+    detection and the cell-membership test run in the refine process
+    precisely so this endpoint never has to touch either (see
+    jam_crosscheck.py's own docstring on why entity_history is read there,
+    incrementally, and nowhere else).
+    """
+    return JSONResponse(await _jam_crosscheck_doc(), headers={"Cache-Control": "no-store"})
 
 
 async def _replay_source(kind, registry_key, ts_fn, at, bounds, window_seconds=None):

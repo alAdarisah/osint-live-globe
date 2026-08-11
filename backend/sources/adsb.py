@@ -562,6 +562,20 @@ async def _fetch() -> list[dict]:
             "updated": item.get("updated") or base.get("updated"),
         }
     for item in merged.values():
+        # Which upstream(s) actually contributed to this specific record. The
+        # merge above is silent about this by construction -- a card reading
+        # only the merged fields has no way to say whose numbers they are
+        # looking at, and "ADS-B" is not an answer to that when two
+        # independent feeds with different coverage and different failure
+        # modes stand behind the word. Looked up against the two source dicts
+        # rather than inferred from which fields happen to be set, because
+        # inferring it would be wrong exactly when it matters most: an
+        # airplanes.live aircraft with no reference data on file (no
+        # registration, no type) sets none of the fields a guess would key on.
+        item["data_sources"] = [
+            name for name, feed in (("OpenSky", opensky_items), ("airplanes.live", airplanes_live_items))
+            if item["icao24"] in feed
+        ]
         # All three no-op until their own source's first download lands, which
         # is the point of them being lookups rather than dependencies: ADS-B
         # never waits on any of them, and re-runs them from scratch on every

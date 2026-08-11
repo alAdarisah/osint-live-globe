@@ -18,6 +18,9 @@ import {
   severityBand, severityColor,
 } from "./severity";
 import {
+  filterVessels, filterAircraft, DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER,
+} from "../utils/entityFilter";
+import {
   createBaseLayer,
   basemapUrlFor,
   createWeatherLayers,
@@ -28,6 +31,9 @@ import {
   createJammingPingGroup,
   createCablesGroup,
   createRailwaysGroup,
+  createLaneDensityLayers,
+  LANE_DENSITY_HEAT_OPACITY,
+  createShippingLanesGroup,
   createImageryLayer,
   gibsUrlFor,
   GIBS_LAYERS,
@@ -38,10 +44,12 @@ import {
   createCitiesGroup,
   createInfraGroup,
   createPipelinesGroup,
+  createPowerLinesGroup,
   createSatelliteGroup,
   createTrailLayers,
   createWindFlowLayer,
 } from "./layers";
+import { attachTileTintMotionGate } from "./tileTintMotion";
 import {
   decorateEvent,
   decorateHistoricalEvent,
@@ -51,6 +59,9 @@ import {
   decorateInfra,
   decorateSatellite,
   isMilitarySatellite,
+  decorateSatElement,
+  satElementStyle,
+  SAT_ELEMENT_LAYERS,
   classifyAircraft,
   classifyShip,
   SHIP_STYLE,
@@ -70,6 +81,7 @@ import {
   pipelineRouteColor,
   decorateHazard,
   hazardIconSize,
+  aircraftFlag,
   aircraftFlagBucket,
   withAircraftFlag,
   isSanctioned,
@@ -79,16 +91,37 @@ import {
   airportIconSize,
   decorateDarkVessel,
   darkVesselIconSize,
+  reachContourColor,
   decorateCableLanding,
   cableLandingIconSize,
   cableRouteColor,
-  railwayRouteColor,
+  gridLineColor,
+  railwayLineColor,
+  railwayLineBaseWeight,
+  railwayLineDash,
+  railwayOsmClass,
+  railwayIsElectrified,
+  decorateRailwayPoint,
+  railwayPointIconSize,
+  decorateRailLive,
+  railLiveIconSize,
+  decorateRailStation,
+  railStationIconSize,
+  shippingLaneColor,
+  laneDensityColor,
+  laneDensityIntensity,
   decorateLaunch,
   launchIconSize,
   decorateOsmInfra,
   osmInfraIconSize,
+  decoratePowerPlant,
+  powerPlantIconSize,
+  decorateAirDefense,
+  airDefenseIconSize,
   decorateOutage,
   outageIconSize,
+  decorateOutageRegion,
+  outageRegionIconSize,
   decorateGfwGap,
   gfwGapIconSize,
   decorateGfwDetection,
@@ -107,6 +140,8 @@ import {
   detailSize,
   applyCollapsedFallback,
   TOKEN_FOR,
+  satellitePassesPopupHtml,
+  jamCellCrosscheckNote,
 } from "./decorators";
 import {
   setIconTheme, themedStyle, tokenZoom, tokenZoomMax, layerHasTokenZoom, layerHasTokenZoomMax, layerOpacity, stackZIndex, scaledSize, scaledWeight, layerScale,
@@ -121,31 +156,47 @@ import {
   AIRFIELD_MATCH_KM, DAM_MATCH_KM, buildTwinIndex, buildAbsorbedArticles,
   normalizeArticleUrl,
 } from "./crossSource";
-import { resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST } from "./scene";
+import {
+  resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST,
+  REFERENCE_ONLY_FEEDS,
+} from "./scene";
+import { reachLineEnds, reachContourRings, reachOnScreen } from "./reachGeometry";
 import { profileViewport } from "./viewportProfile";
 import { buildCountryIndex, findCountryAt, representativePointOf } from "./countryHitTest";
 import { createBorderEditor } from "./borderEdit";
 import { countryFingerprints } from "../settings/borderOverrides";
-import { countryCardSections, cityPopupHtml, normalizeCountryName } from "./popups";
+import {
+  countryCardSections, waterCardSections, subdivisionCardSections, districtCardSections,
+  cityPopupHtml, normalizeCountryName,
+} from "./popups";
+// Task 40: the comparison table's own pure module -- see its own header note
+// on why it does not reuse countryCardSections' HTML output (statRow drops a
+// real zero, which a comparison table must never do).
+import { buildCountryComparison } from "../components/countryCompareLogic";
+import { buildEventDetailHtml } from "./eventDetail";
 import { buildChoropleth } from "./choropleth";
 import {
   createDistrictOutlineLayer, indexDistrictCounts,
-  buildDistrictIndex, findDistrictAt, districtPopupHtml,
+  buildDistrictIndex, findDistrictAt,
 } from "./districts";
 import {
-  createSubdivisionsLayer, buildSubdivisionIndex, findSubdivisionAt, subdivisionPopupHtml,
+  createSubdivisionsLayer, buildSubdivisionIndex, findSubdivisionAt,
   subdivisionKeyOf,
 } from "./subdivisions";
+import { createWaterLayer, syncWater, buildWaterIndex, findWaterAt } from "./water";
 import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
 import { newArrivals } from "./arrivals";
 import { createEntityWebglLayer } from "./webglLayer";
+import { createPropagationTracker, satrecFromElements, propagateEci } from "./satPropagate";
+import { footprintRadiusKm, groundTrackSegments } from "./groundTrack";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
 import {
   nearestLon, unwrapPath, boundsContainsPoint,
   worldCopyOffsets, worldCopyDraws, worldCopyKey, worldCopyPlacer, shiftPathLon,
 } from "../utils/geo";
-import { fetchJson } from "../api";
+import { createGenerationGuard } from "../utils/fetchGeneration";
+import { fetchJson, vesselDetailUrl, portCallsUrl, aircraftDetailUrl } from "../api";
 
 // A nearby ACLED/GDELT event within this radius flags an infrastructure
 // site as a "hot zone" and triggers its flare animation -- same radius
@@ -189,15 +240,122 @@ const WAR_EVENT_COUNT_THRESHOLD = 8;
 // Only ever one selected ship and one selected aircraft, so this is a few
 // hundred short polylines at most -- far below what the FIRMS canvas layer
 // already draws.
-const SHIP_TRAIL_MAX_POINTS = 300;
-const AIRCRAFT_TRAIL_MAX_POINTS = 400;
+// `let`, not `const` -- Task 31's Performance admin section exposes every
+// name in this block (through setPerformanceOptions below) with these
+// numbers as its shipped defaults. A trail budget is read fresh on every
+// updateTrails call rather than baked into a timer, so reassigning the
+// binding here takes effect on the very next trail update, not the next
+// reload -- unlike SAT_ELEMENT_REDRAW_MS a little further down, which is
+// baked into a setInterval at construction and stays out of this dial for
+// exactly that reason.
+let SHIP_TRAIL_MAX_POINTS = 300;
+let AIRCRAFT_TRAIL_MAX_POINTS = 400;
 // Satellites poll every 10s (see useOsintData.js's POLL_CONFIG) -- 36 points
 // is a several-minute trailing arc, same "grows from app-open" cold start as
 // ship/aircraft trails.
-const SATELLITE_TRAIL_MAX_POINTS = 36;
+let SATELLITE_TRAIL_MAX_POINTS = 36;
 // Tankers poll on the same cadence as the rest of AIS -- same "several
 // polls back" length as ship trails, not satellites' longer arc.
-const TANKER_TRAIL_MAX_POINTS = 60;
+let TANKER_TRAIL_MAX_POINTS = 60;
+
+// Task 24: client-propagated satellite layers -- see map/satPropagate.js and
+// backend/sources/satellites.py's ELEMENT_LAYER_GROUPS/cadence_seconds. This
+// is the frontend's own copy of that backend cadence classification: there
+// is no shared module between a Python process and a browser bundle, the
+// same reason backend/app.py's _matches_callsign_query keeps its own copy of
+// the client's matchQuery in step by hand rather than importing it.
+//
+// The cadence gates only tick() (a real SGP4 pass, see satPropagate.js) --
+// SAT_ELEMENT_REDRAW_MS below is how often the *drawn* position is
+// recomputed by interpolating between the last two fixes, which is cheap
+// enough to do far more often than SGP4 itself.
+// `let` for the same reason the trail budgets above are: read fresh on every
+// tickSatElementLayer call, so Task 31's Performance dial takes effect on the
+// tab's very next tick rather than needing anything re-registered.
+let SAT_ELEMENT_SMALL_CADENCE_MS = 10_000;
+let SAT_ELEMENT_LARGE_CADENCE_MS = 60_000;
+const SAT_ELEMENT_LARGE_LAYERS = new Set(["satImaging", "satGeo", "satStarlink", "satOneweb"]);
+function satElementCadenceMs(layerKey) {
+  return SAT_ELEMENT_LARGE_LAYERS.has(layerKey) ? SAT_ELEMENT_LARGE_CADENCE_MS : SAT_ELEMENT_SMALL_CADENCE_MS;
+}
+// Redrawn (interpolated + repositioned/re-styled) this often, regardless of
+// cadence -- frequent enough to read as smooth motion, coarse enough that
+// even the several-thousand-object Starlink/OneWeb layers cost only a
+// handful of milliseconds per tick rather than a per-frame cost. Baked into
+// a setInterval at construction (see the bottom of this file), so unlike the
+// two cadences above it is not part of Task 31's live dial -- changing it
+// would need the interval re-registered, not just the number reassigned.
+const SAT_ELEMENT_REDRAW_MS = 2000;
+
+// Task 31: the WebGL sprite cap and the two poll-scheduling dials, plus the
+// setter every one of them is read through. No prior constant existed for
+// any of these -- unlike the trail/cadence numbers above, there was no
+// per-bucket ceiling on how many ship/aircraft sprites draw and no way to
+// scale back or pause polling from Admin Mode -- so each defaults to
+// exactly the behaviour this map already has: `spriteCap: null` draws every
+// sprite a layer's own filters leave it (see capSprites below),
+// `pollIntervalMultiplier: 1` leaves useOsintData.js's intervals alone, and
+// `pausePollingWhenHidden: true` matches that hook's own unconditional
+// "backgrounded tab" skip, which existed before this task and is now a
+// dial rather than a fixed behaviour. Module-level for the same reason
+// map/cursor.js's setCursorOptions is: this controller is imperative and
+// constructed once, and these values are read at arbitrary later times (a
+// render pass, a poll tick), not at construction.
+let webglSpriteCap = null;
+
+export function setPerformanceOptions(patch = {}) {
+  if (Number.isFinite(patch.shipTrailPoints)) SHIP_TRAIL_MAX_POINTS = patch.shipTrailPoints;
+  if (Number.isFinite(patch.aircraftTrailPoints)) AIRCRAFT_TRAIL_MAX_POINTS = patch.aircraftTrailPoints;
+  if (Number.isFinite(patch.satelliteTrailPoints)) SATELLITE_TRAIL_MAX_POINTS = patch.satelliteTrailPoints;
+  if (Number.isFinite(patch.tankerTrailPoints)) TANKER_TRAIL_MAX_POINTS = patch.tankerTrailPoints;
+  if (Number.isFinite(patch.satSmallCadenceMs)) SAT_ELEMENT_SMALL_CADENCE_MS = patch.satSmallCadenceMs;
+  if (Number.isFinite(patch.satLargeCadenceMs)) SAT_ELEMENT_LARGE_CADENCE_MS = patch.satLargeCadenceMs;
+  // null (the shipped default) is a real, meaningful value here -- "no cap"
+  // -- so it has to be assignable, not just skipped the way the five
+  // Number.isFinite guards above skip anything that is not a real number.
+  if (patch.webglSpriteCap === null || Number.isFinite(patch.webglSpriteCap)) {
+    webglSpriteCap = patch.webglSpriteCap;
+  }
+}
+
+/** `items`, capped at webglSpriteCap if one is set -- otherwise unchanged.
+ *  Applied per bucket (civilian ships, tanker ships, navy ships, and the
+ *  three ADS-B buckets) rather than as one combined total across all six:
+ *  a shared running total would need real accounting across renderAisLayer
+ *  and renderAdsbLayer's independent passes for a global figure this dial
+ *  does not promise -- "cap this bucket" is the honest, simple claim it
+ *  actually makes. */
+function capSprites(items) {
+  return Number.isFinite(webglSpriteCap) && items.length > webglSpriteCap
+    ? items.slice(0, webglSpriteCap)
+    : items;
+}
+
+// Which CelesTrak groups (see backend/sources/satellites.py's
+// ELEMENT_LAYER_GROUPS) sit behind each control-panel toggle -- the same
+// string /api/satellites/elements?groups= expects.
+const SAT_ELEMENT_CELESTRAK_GROUP = {
+  satNavigation: "navigation", satWeather: "weather", satImaging: "imaging",
+  satScience: "science", satGeo: "geo", satStarlink: "starlink", satOneweb: "oneweb",
+};
+
+// satNavigation/satWeather/satImaging are on by default, so their element
+// sets are fetched by useOsintData.js's own POLL_CONFIG (see that file) --
+// the recipe's touch point 2, the same machinery every other default-on
+// source gets (fetch-coverage bookkeeping, the boot screen, a tab-refocus
+// catch-up). The other four are off by default, and nothing has been
+// fetched for one until a reader actually reaches for it -- that fetch
+// happens here in the controller instead, on the layer's own first
+// toggle-on, the same precedent waterLakes' fetch-on-first-toggle already
+// sets (see setLayerVisible's "waterLakes" branch below).
+const SAT_ELEMENT_ON_DEMAND_LAYERS = new Set(["satScience", "satGeo", "satStarlink", "satOneweb"]);
+
+// The three on-by-default groups are zoom-gated at THEATRE (see
+// map/scene.js) -- these are the only satX keys that ever need a
+// zoomNotes entry (the panel's "Zoom in to show X" hint). The four
+// off-by-default groups stay ungated, so their zoomNotes would always read
+// false; not worth reporting.
+const SAT_ELEMENT_ZOOM_NOTE_KEYS = new Set(["satNavigation", "satWeather", "satImaging"]);
 
 // The whole world, once: the full Web Mercator extent. The latitude limit is
 // Mercator's own -- the projection runs to infinity at the poles and 85.051129 is
@@ -222,20 +380,42 @@ const ID_FIELD = {
   launches: "id", osmInfra: "id",
   gfwGaps: "id", gfwDetections: "id", czib: "id", floods: "id", ports: "id", dams: "id",
   deflock: "id",
+  // Task 27: railwayPoints reuses osm_infra's own prefixed "osm:type/id" ids
+  // (it reads the same raw items, just split into their own array -- see
+  // applyData's own note on where that split happens). railLive's id is
+  // digitraffic_rail's synthetic "departureDate:trainNumber" composite (see
+  // backend/sources/digitraffic_rail.py's own note on why trainNumber alone
+  // is not a stable identity). railStations' id is the station's own short
+  // code (see digitraffic_rail.parse_station).
+  railwayPoints: "id", railLive: "id", railStations: "id",
+  // Task 28: powerPlants reuses osm_infra's own prefixed "osm:type/id" ids,
+  // the same reason railwayPoints does just above -- it reads the same raw
+  // items, split into their own array (see applyData's own note).
+  powerPlants: "id",
+  // Task 29: same reasoning again -- airDefense reads the same osm_infra
+  // sweep, split into its own array.
+  airDefense: "id",
   // One pin per country, so the country code *is* the identity -- a country
   // whose score changes between polls has to update its existing marker rather
   // than be torn down and rebuilt under a new key.
   outagePoints: "country_code",
+  // "country:key" (see rebuildOutageRegionPoints), because a bare region_code
+  // is not unique across the whole feed the way a country code is -- IODA's
+  // own entity code, the fallback for an unmatched region, isn't either.
+  outageRegionPoints: "id",
 };
 const DECORATORS = {
   events: decorateEvent, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
   conflictHistory: decorateHistoricalEvent, officials: decorateOfficials,
   hazards: decorateHazard, airports: decorateAirport, darkVessels: decorateDarkVessel,
   cableLandings: decorateCableLanding, launches: decorateLaunch,
-  osmInfra: decorateOsmInfra, outagePoints: decorateOutage,
+  osmInfra: decorateOsmInfra, outagePoints: decorateOutage, outageRegionPoints: decorateOutageRegion,
   gfwGaps: decorateGfwGap, gfwDetections: decorateGfwDetection,
   czib: decorateCzib, floods: decorateFlood, ports: decoratePort, dams: decorateDam,
   deflock: decorateDeflock,
+  railwayPoints: decorateRailwayPoint, railLive: decorateRailLive, railStations: decorateRailStation,
+  powerPlants: decoratePowerPlant,
+  airDefense: decorateAirDefense,
 };
 // The placement pass has to know how much room each icon needs before any of
 // them are drawn, so the size formulas live in decorators.js and are read from
@@ -245,9 +425,13 @@ const ICON_SIZE_FOR_GLYPH = {
   officials: officialsIconSize, hazards: hazardIconSize, airports: airportIconSize,
   darkVessels: darkVesselIconSize, cableLandings: cableLandingIconSize,
   launches: launchIconSize, osmInfra: osmInfraIconSize, outagePoints: outageIconSize,
+  outageRegionPoints: outageRegionIconSize,
   gfwGaps: gfwGapIconSize, gfwDetections: gfwDetectionIconSize,
   czib: czibIconSize, floods: floodIconSize, ports: portIconSize, dams: damIconSize,
   deflock: deflockIconSize,
+  railwayPoints: railwayPointIconSize, railLive: railLiveIconSize, railStations: railStationIconSize,
+  powerPlants: powerPlantIconSize,
+  airDefense: airDefenseIconSize,
 };
 // The same sizes with the current level of detail applied, which is what the
 // placement pass has to reserve: a dot needs a dot's worth of room, and routing
@@ -305,7 +489,62 @@ const COUNTRY_CARD_FEEDS = new Set([
   // a marketing-year balance sheet is a forecast about a whole state. Both are
   // read only by the country card and the choropleth.
   "energyFlows", "foodTrade", "foodPriceIndex",
+  // Task 9's energy/military/transport sections read these four -- none of
+  // them polls faster than 30 minutes (osmInfra) to 6 hours (dams, ports), so
+  // none of the ais/adsb/firms throttle reasoning above applies. Without this,
+  // a card opened before a gated feed's first fetch for this country landed
+  // would keep showing its own "not loaded" coverage line indefinitely, since
+  // nothing would tell it to look again.
+  "osmInfra", "dams", "airports", "ports",
+  // Task 29: naval_presence.py recomputes every 15 minutes and czib.py every
+  // hour -- both genuinely move mid-session, unlike the one-shot
+  // /api/infrastructure fetch militaryBases/pipelines/shippingLanes ride
+  // (not listed here for the same reason "infra" itself is not: nothing
+  // about a boot-time fetch benefits from a rebuild trigger).
+  "navalPresence", "czib",
 ]);
+
+// The water-card counterpart to COUNTRY_CARD_FEEDS above, same reasoning and
+// same exclusion: an open water card is built from `raw` at the moment it was
+// clicked, so without this it would keep showing the counts that were true
+// then, indefinitely, since the card outlives pans and zooms. `ais` is left
+// out on purpose, for the exact reason refreshFocusedCountryCard gives for
+// excluding it from the country set -- it polls every 10-20 seconds, and
+// re-rendering the traffic tally that often would fight anyone reading or
+// selecting text in the card. The curated infrastructure gazetteers (cables,
+// cableLandings, ports) are left out too: none of them refreshes more than
+// about once a day, so there is nothing here for a mid-session poll to move.
+// Task 29: navalPresence added -- the water card's own "three naval hulls in
+// this sea" line reads it directly (buildWaterTraffic), and it recomputes
+// every 15 minutes, well inside a plausible card session.
+//
+// Task 36: chokepoints added for the same reason -- the water card's own
+// "Chokepoint traffic" fold reads it directly, and lane_density's own
+// LANE_DENSITY_INTERVAL cadence (an hour by default) is well inside a
+// plausible card session too.
+const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps", "navalPresence", "chokepoints"]);
+
+// REFERENCE_ONLY_FEEDS -- the feeds applyData must not try to draw -- lives in
+// scene.js beside UNGATED_FEEDS rather than here, because the two lists say
+// the same thing about the same feeds and drifting apart is exactly the bug
+// that made either of them worth naming. See its docstring there.
+
+// The admin-1/admin-2 card counterpart to COUNTRY_CARD_FEEDS/WATER_CARD_FEEDS
+// above -- same reasoning: an open card is built from `raw` at the moment it
+// was clicked, and without this it would keep showing what was true then. The
+// district card's own conflict fold is excluded here on purpose: its record
+// and trend come from `districtCounts`/`districtSeries`, which are refreshed
+// by their own dedicated fetches (loadDistrictMonth, loadDistrictSeries) and
+// call refreshFocusedDistrictCard directly rather than riding through
+// applyData's per-key dispatch. "cities" is here for both -- GeoNames rarely
+// moves mid-session, but a card opened before that boot fetch lands should
+// not keep saying zero once it does.
+// "outagesRegions" (Task 26) is on both: the district card reads it too, via
+// its parent state (see popups.js's regionOutageFor and the districtStateByPcode
+// join), so a card opened before that feed's first delivery lands should stop
+// saying "no disruption" the moment it does, same as every other feed here.
+const SUBDIVISION_CARD_FEEDS = new Set(["events", "cities", "osmInfra", "dams", "airports", "ports", "outagesRegions"]);
+const DISTRICT_CARD_FEEDS = new Set(["cities", "osmInfra", "dams", "airports", "ports", "outagesRegions"]);
 
 // leaflet.heat's setLatLngs() always calls its own redraw(), which
 // dereferences `this._map._animating` with no null check -- harmless when
@@ -460,12 +699,23 @@ export function createMapController(container, initial, callbacks) {
   // DOM cursor and what it reads is the DOM under the pointer. Returns its own
   // teardown, called from destroy() below.
   const detachCursor = attachCursor(container);
+  // Task 30: the class style.css keys the "tint off while panning" escape
+  // hatch on -- see tileTintMotion.js for why the flag it reads lives at
+  // module scope instead of arriving as a parameter here.
+  const detachTileTintMotion = attachTileTintMotionGate(map);
   const baseLayer = createBaseLayer(map, initial.theme);
   const weatherLayers = createWeatherLayers(map);
   const { firmsHeat, firmsPointsLayer, firmsLayer, firmsCanvasRenderer } = createFirmsLayers(map);
   const { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer } = createJammingLayers(map);
   const jammingPingGroup = createJammingPingGroup();
   const jammingLayerWithPing = L.layerGroup([jammingLayer, jammingPingGroup]).addTo(map);
+  // Task 20a: the AIS density wash. Added at construction like firms/jamming
+  // above (AUTO disposition, see map/scene.js) -- applyLayerWishes below
+  // corrects visibility to whatever the resolver's initial answer is before
+  // the first paint, the same way it does for every other AUTO layer.
+  const { laneDensityHeat, laneDensityPointsLayer, laneDensityLayer, laneDensityCanvasRenderer } =
+    createLaneDensityLayers(map);
+  laneDensityLayer.addTo(map);
   const { groups } = createEntityClusterGroups(map);
   // The area a conflict event could actually be in, drawn under its pin. Tied
   // to the events layer rather than toggled separately -- it is the same claim
@@ -482,17 +732,70 @@ export function createMapController(container, initial, callbacks) {
   // the layer is off by default (see DEFAULT_LAYER_VISIBILITY in App.jsx).
   const cablesGroup = createCablesGroup();
   const cablesLayer = L.layerGroup([cablesGroup, groups.cableLandings]);
-  // Coarse Natural Earth railway linework. NOT added to the map here -- off by
-  // default (MANUAL disposition, see map/scene.js), toggled on from the panel.
+  // Coarse Natural Earth railway linework, now merged with an attributed OSM
+  // overlay (Task 27) -- still one document, one polyline group. NOT added to
+  // the map here -- off by default (MANUAL disposition, see map/scene.js),
+  // toggled on from the panel.
   const railwaysGroup = createRailwaysGroup();
+  // The station/halt/yard/border points ride the same toggle as the lines
+  // above, same "one fact, one checkbox" treatment cablesGroup+cableLandings
+  // just above already gets -- see LAYER_MANIFEST's own note on railwayPoints.
+  const railwaysLayer = L.layerGroup([railwaysGroup, groups.railwayPoints]);
+  // Task 27 fix: the Finnish station gazetteer rides railLive's own toggle,
+  // same "one fact, one checkbox" wrapping railwaysLayer just above uses --
+  // see LAYER_MANIFEST's own note on why the stations have no toggle of
+  // their own.
+  const railLiveLayer = L.layerGroup([groups.railLive, groups.railStations]);
+  // Task 28: transmission-line geometry, "the same polyline path as
+  // railways" per the brief -- same treatment as railwaysGroup just above,
+  // right down to being off by default (MANUAL, see map/scene.js). No point
+  // sub-layer wraps it the way railwayPoints wraps railwaysGroup: substations
+  // ride the generic osmInfra layer instead (see decorators.js's
+  // OSM_INFRA_STYLE), there being no natural "one toggle for the whole grid"
+  // pairing the way stations-on-their-own-lines has for rail.
+  const powerLinesGroup = createPowerLinesGroup();
+  // Task 20b: the ten named corridors. Same treatment as railwaysGroup above
+  // -- off by default (MANUAL, see map/scene.js), toggled on from the panel.
+  const shippingLanesGroup = createShippingLanesGroup();
+  // Seas, lakes and rivers. Also NOT added to the map here, for the same
+  // reason -- MANUAL and off by default, see map/scene.js's `water` entry.
+  const waterLayer = createWaterLayer(map);
   // NASA GIBS imagery. Not added to the map until a reader picks a layer.
   const imageryLayer = createImageryLayer(map);
   let imageryKey = null;   // null == off; otherwise a key of GIBS_LAYERS
   let imageryDate = null;  // "YYYY-MM-DD", UTC
   const satelliteGroup = createSatelliteGroup();
+  // Task 24: the three client-propagated groups small enough to draw as DOM
+  // markers (navigation/weather/science -- see decorators.js's
+  // SAT_ELEMENT_LAYERS and createMapController's own DOM-vs-WebGL note
+  // below). createSatelliteGroup is generic enough to reuse as-is: it
+  // returns a bare L.layerGroup(), which is exactly what these need too.
+  // satImaging/satGeo/satStarlink/satOneweb have no Leaflet layer of their
+  // own -- they draw on entityWebglLayer's shared canvas instead.
+  const satNavigationGroup = createSatelliteGroup();
+  const satWeatherGroup = createSatelliteGroup();
+  const satScienceGroup = createSatelliteGroup();
   const { shipTrailsLayer, aircraftTrailsLayer, satelliteTrailsLayer, tankerTrailsLayer, militaryTrailsLayer } =
     createTrailLayers(map);
+  // Task 25: the ground track (one or more polylines, split at the
+  // antimeridian -- see map/groundTrack.js's splitAtAntimeridian) and
+  // visibility footprint (one L.circle) for whichever single satellite card
+  // is currently open. Always on the map (an empty layer group costs
+  // nothing) rather than added/removed per popup, so opening and closing a
+  // card repeatedly does not churn map.addLayer/removeLayer calls -- only
+  // its *contents* change, in drawSatelliteOverlay/clearSatelliteOverlay
+  // below. At most one satellite's worth of geometry is ever in it: Leaflet
+  // closes a previously-open popup when a new one opens (autoClose, the
+  // default), and every popupclose handler below clears this layer, so a
+  // second selection can never leave the first one's track behind.
+  const satelliteOverlayLayer = L.layerGroup().addTo(map);
   satelliteGroup.addTo(map);
+  // navigation/weather are on by default (see map/scene.js); science is
+  // MANUAL/off by default, so it is not added here -- setLayerVisible adds
+  // it the first time a reader switches it on, same as railwaysGroup/
+  // waterLayer below.
+  satNavigationGroup.addTo(map);
+  satWeatherGroup.addTo(map);
   const windFlowLayer = createWindFlowLayer(map);
   // GPU-batched sprite rendering for AIS/ADS-B markers (see webglLayer.js) --
   // replaces the L.marker+L.divIcon path buildMarker/updateMarker below still
@@ -503,17 +806,101 @@ export function createMapController(container, initial, callbacks) {
   // per-bucket setVisible instead of map.addLayer/removeLayer for these keys.
   const entityWebglLayer = createEntityWebglLayer(map);
 
+  // Task 24: one shared SGP4 propagation tracker across all seven client-
+  // propagated groups. CelesTrak's own groups never overlap (see
+  // backend/sources/satellites.py's ELEMENT_LAYER_GROUPS), so a NORAD id is
+  // never claimed by two of these layers at once, and one Map keyed on it
+  // (see map/satPropagate.js's createPropagationTracker) is simpler than
+  // seven separate ones with no risk of an id landing in the wrong one.
+  const satElementTracker = createPropagationTracker();
+  // Raw OMM element sets per layer, from /api/satellites/elements -- null
+  // means "never fetched", [] means "fetched, empty". Held here rather than
+  // in `raw` because these never arrive through applyData's generic
+  // raw[key]=data assignment (see fetchSatElements below), the same reason
+  // waterLakesFeatures/waterRiversFeatures are not in `raw` either.
+  const satElements = {
+    satNavigation: null, satWeather: null, satImaging: null,
+    satScience: null, satGeo: null, satStarlink: null, satOneweb: null,
+  };
+  // Task 25: the same seven arrays as satElements above, indexed by NORAD id
+  // for O(1) lookup rather than a .find() scan -- built once per fetch (see
+  // fetchSatElements) and read every time a marker's popup opens, to merge
+  // the static orbital fields (intl_designator/inclination/period/apogee/
+  // perigee/epoch) satElementPositions' slim {norad_id,name,lat,lon,alt_km}
+  // does not carry, and to hand the raw OMM to satrecFromElements for a
+  // fresh ground-track/velocity propagation. A plain object of Maps, same
+  // shape as satElements, rather than folding this into that array: the
+  // array is what gets replaced wholesale on each (one-shot) fetch, and
+  // rebuilding a Map alongside it in the same place keeps the two from ever
+  // drifting out of step.
+  const satElementIndex = {
+    satNavigation: null, satWeather: null, satImaging: null,
+    satScience: null, satGeo: null, satStarlink: null, satOneweb: null,
+  };
+  // Mirrors each layer's actual add/remove (or WebGL bucket) state, same
+  // reason satellitesVisible does for the server-propagated pair below --
+  // lets the tick/redraw loop skip work for a layer nobody can see rather
+  // than just hiding the result. navigation/weather/imaging default on,
+  // science/geo/starlink/oneweb off -- see map/scene.js's own entries; the
+  // first real applyScene pass (moments after construction) confirms these.
+  const satElementVisible = {
+    satNavigation: true, satWeather: true, satImaging: true,
+    satScience: false, satGeo: false, satStarlink: false, satOneweb: false,
+  };
+  // ms epoch of each layer's last real SGP4 pass (satElementTracker.tick) --
+  // compared against satElementCadenceMs so a busy layer is not re-SGP4'd
+  // more often than its cadence allows, while positionAt's cheap
+  // interpolation still redraws on the faster SAT_ELEMENT_REDRAW_MS below.
+  const satElementLastTick = {};
+
   // ---------- state that used to be top-level `let`s in app.js ----------
   // All internal to the controller: nothing outside the map needs to know
   // which aircraft is selected, so it never needs to be React state.
   const raw = {
     events: [], firms: [], ais: [], gdelt: [], adsb: [], officials: [],
-    countries: { features: [] }, cities: [], infra: [], pipelines: [], jamming: [], satellites: [],
+    countries: { features: [] }, cities: [], infra: [], pipelines: [],
+    // Review fix (Task 28, Critical): osm_infra.py's own per-region cap flag
+    // for the OSM half of `pipelines`, threaded through /api/infrastructure
+    // and read by renderPipelines() below -- same shape and reason as
+    // raw.railways/raw.powerLines carrying their own truncated_regions.
+    pipelinesTruncatedRegions: [],
+    // Task 29: curated MILITARY_BASES beside osm_infra.py's own military=*
+    // sweep, pre-merged and source-tagged by the backend (see
+    // infrastructure.merge_military_bases) -- consumed only by the country
+    // card's Military & security section (map/popups.js), not drawn as a
+    // marker layer of its own: the two provenances already ride the map as
+    // the existing `infra`/`osmInfra` pins, and this is the one list that
+    // pairs them without blending the two data models.
+    militaryBases: [],
+    jamming: [], satellites: [],
+    // buildCountryIndex's own output, cached here (not just in the `countryIndex`
+    // local below) so the water body card's bordering-country match
+    // (map/popups.js's waterBorderingCountries) can reach it through the same
+    // `raw` bag every other section builder reads, without a fourth parameter
+    // threaded through waterCardSections just for this one lookup. Kept in step
+    // wherever `countryIndex` itself is rebuilt.
+    countryIndex: [],
     conflictStats: {},
     // Not live: UCDP's reviewed record (a month or more behind) and ACLED's
     // district-level monthly counts. Held here so country cards can show the
     // verified numbers next to the live picture, each labelled for what it is.
     conflictHistory: [], conflictDistricts: [], escalation: [],
+    // The admin-2 drill-down's own archive state, mirrored here so
+    // districtCardSections (map/popups.js) can read it the same way every
+    // other section builder reads `raw` -- reassigned in step wherever the
+    // controller's own districtCounts/districtCountsLoading/districtSeries
+    // locals change (see loadDistrictMonth, ensureDistrictArchive,
+    // loadDistrictSeries). `districtCounts` is a Map (pcode -> one month's
+    // record); `districtSeries` is {ISO3: record[]}, this app's own slice of
+    // the archive for whichever countries have been drilled into so far.
+    districtCounts: new Map(), districtMonthLoading: false, districtSeries: {},
+    // Task 25's overpass prediction, keyed "country:<key>"/"water:<id>" --
+    // {status: "gated"|"loading"|"error"|"ready", data}, one entry per place
+    // a reader has actually selected (see loadSatellitePasses below).
+    // Country/water cards read their own key straight out of this bag the
+    // same way districtSeries above is read, through popups.js's
+    // countryCardSections/waterCardSections.
+    satellitePasses: {},
     // Earthquakes (USGS, ~5min) and volcanic activity (Smithsonian GVP, weekly)
     // in one array, each row carrying its own `kind` -- see hazards.py.
     hazards: [],
@@ -538,6 +925,12 @@ export function createMapController(container, initial, callbacks) {
     // boundaries are in (see rebuildOutagePoints). Same two-keys-one-source
     // split as cables/cableLandings above.
     cables: [], cableLandings: [], outages: {}, outagePoints: [],
+    // Task 26's sub-national counterpart: `outagesRegions` is the
+    // {ISO2: {code: record}} dict as served, read straight out of here by the
+    // state/district cards and the state-target choropleth;
+    // `outageRegionPoints` is the badge array derived from it once the
+    // relevant admin-1 boundaries are in (see rebuildOutageRegionPoints).
+    outagesRegions: {}, outageRegionPoints: [],
     // Country-keyed humanitarian aggregates (ISO3), read by the country card
     // only -- see backend/sources/humanitarian.py for why none of it is drawn.
     humanitarian: {},
@@ -546,6 +939,24 @@ export function createMapController(container, initial, callbacks) {
     // (see backend/sources/airfield_activity.py) rather than fetched, and
     // attached to existing pins rather than drawn as a layer.
     airfieldActivity: {},
+    // Task 29: backend/refine/naval_presence.py's document -- also consumed
+    // only by the country card, not drawn as its own layer (the hulls
+    // themselves already draw as ordinary AIS navy pins; this is the
+    // per-theatre/per-port trend over them).
+    navalPresence: {},
+    // Task 36: backend/refine/lane_density.py's chokepoint accounting,
+    // keyed by the same box labels config.WATCHED_WATERS_LABELS names
+    // server-side. Same footing as navalPresence just above: a derived
+    // reference document, not a layer of its own -- the hulls it counts
+    // already draw as ordinary AIS pins, and ChokepointPanel.jsx polls this
+    // same endpoint independently for its own standalone view.
+    chokepoints: {},
+    // Task 39: backend/refine/jam_crosscheck.py's document -- also consumed
+    // only by the jamming layer's own popup (renderJamming) and the aircraft
+    // card's route section, not drawn as its own layer: the cells already
+    // draw on the jamming layer and the airframes already draw on the adsb
+    // one, this is corroboration attached to both.
+    jamCrosscheck: {},
     // Global Fishing Watch's two published maritime layers. Kept apart from
     // darkVessels above on purpose: that array is this app's inference from its
     // own three-day AIS history, these are another organisation's findings
@@ -558,26 +969,72 @@ export function createMapController(container, initial, callbacks) {
     // Two published gazetteers: harbours (NGA) and barriers (Global Dam Watch).
     // Neither is a feed and nothing in either is current.
     ports: [], dams: [],
-    // DeFlock ALPR camera locations (deflock.py) and the coarse Natural Earth
-    // railway linework (railways.py). Neither is a feed; the first is a worldwide
-    // point layer gated deep by zoom, the second a whole-document set of lines.
+    // DeFlock ALPR camera locations (deflock.py) and the railway linework
+    // (railways.py, now Natural Earth + an OpenStreetMap overlay -- Task 27).
+    // Neither is a feed; the first is a worldwide point layer gated deep by
+    // zoom, the second a whole-document set of lines.
     deflock: [], railways: { lines: [] },
+    // Task 27: the station/halt/yard/border points, split out of osmInfra at
+    // render time (see applyData's own note) -- and Digitraffic's live
+    // Finnish train positions, a genuine feed with its own POLL_CONFIG row.
+    // railStations (fix, post-review) is the Finnish gazetteer railLive
+    // needs to mean anything -- Finland sits outside every conflict
+    // theatre, so railwayPoints above can never cover it.
+    railwayPoints: [], railLive: [], railStations: [],
+    // Task 28: power plants, split out of osmInfra at render time (same
+    // mechanism as railwayPoints above -- see applyData's own note), and the
+    // transmission-line document power_lines.py serves, a whole-document set
+    // of lines on the same footing as `railways` above.
+    powerPlants: [], powerLines: { lines: [] },
+    // Task 29: radar_station/military_bunker/military_checkpoint, split out
+    // of osmInfra at render time the same way powerPlants is just above --
+    // its own default-off layer with its own completeness caveat (see
+    // decorateOsmInfra's "airDefense" branch in decorators.js).
+    airDefense: [],
+    // Task 20b's corridors (a plain array, like pipelines) and Task 20a's
+    // AIS density grid (a whole document -- {note, cells} -- like railways
+    // above, so the popup/legend can state the endpoint's own `note` rather
+    // than a copy of it kept in step by hand).
+    shippingLanes: [], laneDensity: { note: "", cells: [] },
+    // Marine polygons only (water_bodies.py) -- lakes and rivers are fetched on
+    // demand, the first time their own sub-toggle is switched on, and held in
+    // waterLakesFeatures/waterRiversFeatures below rather than here, since they
+    // never arrive through applyData's generic raw[key]=data assignment.
+    water: { type: "FeatureCollection", features: [] },
     // Country-keyed and drawn nowhere, same footing as `humanitarian` above.
     // energyFlows is keyed by ISO2 (Energy-Charts' own key), foodTrade by ISO3,
     // and foodPriceIndex is a single global document rather than a country map.
     energyFlows: {}, foodTrade: {}, foodPriceIndex: {},
+    // Per-feed fetch coverage (useOsintData.js's recordCoverageRef), keyed by
+    // the same raw[key] names above: whether each feed's poller last landed a
+    // real fetch, was skipped because its zoom gate hasn't lifted, or errored
+    // -- and, for a bbox-scoped feed, which bbox that fetch actually covered.
+    // Read only by the country card's coverage section (buildCoverage,
+    // map/popups.js), which is the reason it exists: `raw[key]` starting life
+    // as `[]` cannot on its own tell "swept this country's bbox and found
+    // nothing" apart from "never swept at all", and that is exactly the
+    // conflation the coverage section exists to resolve.
+    fetchCoverage: {},
   };
   // ais/aisNavy/aisTanker/adsb/adsbMilitary are no longer here -- their
   // markers live inside entityWebglLayer's own per-bucket entry maps now
   // (see webglLayer.js's updateEntities), not as L.marker instances.
   const markersByKey = {
     events: new Map(), gdelt: new Map(), cities: new Map(), infra: new Map(), satellites: new Map(),
+    // Task 24: the three DOM-marker client-propagated groups. The four
+    // WebGL ones (satImaging/satGeo/satStarlink/satOneweb) have no marker
+    // Map of their own -- entityWebglLayer keeps their entries internally,
+    // same as the AIS/ADS-B buckets.
+    satNavigation: new Map(), satWeather: new Map(), satScience: new Map(),
     conflictHistory: new Map(), officials: new Map(), hazards: new Map(), airports: new Map(), darkVessels: new Map(),
     cableLandings: new Map(), launches: new Map(), osmInfra: new Map(),
-    outagePoints: new Map(),
+    outagePoints: new Map(), outageRegionPoints: new Map(),
     gfwGaps: new Map(), gfwDetections: new Map(),
     czib: new Map(), floods: new Map(), ports: new Map(), dams: new Map(),
     deflock: new Map(),
+    railwayPoints: new Map(), railLive: new Map(), railStations: new Map(),
+    powerPlants: new Map(),
+    airDefense: new Map(),
   };
   // Which record ids each layer held last render, and which of them are new
   // enough to still be flashing. Only the layers where a new record is news --
@@ -605,6 +1062,15 @@ export function createMapController(container, initial, callbacks) {
   // Same layer, separate diff: a refined event has both a circle and a line,
   // and one Map keyed by event id cannot hold two shapes for one key.
   const refinementLines = new Map();
+  // Dark-ship reachability geometry (Task 21): a group of shapes per record
+  // (the went-dark -> resumed line, plus up to three contour polygons for an
+  // ais_gap record), one Map per layer key for the same reason
+  // markersByKey has one entry per key -- darkVessels and gfwGaps ids are not
+  // guaranteed unique against each other, and even where they are, mixing two
+  // layers' diffs into one Map would let toggling one layer off remove
+  // shapes that belong to the other's still-visible records.
+  const darkVesselReachShapes = new Map();
+  const gfwGapReachShapes = new Map();
   const shipTrails = new Map();
   const aircraftTrails = new Map();
   const satelliteTrails = new Map();
@@ -612,6 +1078,61 @@ export function createMapController(container, initial, callbacks) {
   const militaryTrails = new Map();
   let selectedIcao = null;
   let selectedMmsi = null;
+  // The ship popup selectShip opens, kept so loadVesselDetail can refresh its
+  // content in place once /api/vessel/{mmsi} answers -- that fetch cannot
+  // finish before the popup itself opens (see selectShip), so the popup is
+  // first drawn without the Cargo/Port calls sections and then updated.
+  let shipPopup = null;
+  // Same reason, same shape, for the aircraft popup: decorateAdsb's vertical
+  // trend (Task 22) needs the recorded track, which arrives after the popup
+  // itself is already open -- see selectAircraft's onPoints callback below,
+  // which reuses loadRecordedTrack's existing /api/track/adsb fetch.
+  let aircraftPopup = null;
+  // Task 25's overpass prediction has two homes, per review's Important 2/3:
+  // country and water selections show it as a `satellitePasses` section
+  // inside their own PlaceInfoCard (raw.satellitePasses + loadSatellitePasses
+  // below feed popups.js's countryCardSections/waterCardSections, the same
+  // fetch-then-store-in-raw-then-refresh-the-open-card shape
+  // loadDistrictSeries already uses for the district trend). A marker click
+  // -- the brief's third case, "a point" -- has no sidebar card to fold
+  // into, so it is appended to the marker's own popup content instead (see
+  // buildMarker's pointOverpassHtml/loadPointSatellitePasses/
+  // pointSatellitePasses further down), not a second, competing popup.
+  //
+  // satellitePassesGuard guards the same out-of-order race loadVesselDetail/
+  // loadPortTraffic do below, for all three triggers at once: a later
+  // request for a *different* place/point landing before an earlier one
+  // resolves must not let that earlier response overwrite fresher data --
+  // see loadSatellitePasses and loadPointSatellitePasses, its two callers.
+  const satellitePassesGuard = createGenerationGuard();
+  // Keyed by mmsi/port_id, so a fetch that lands out of order (an ordinary
+  // flaky-connection case, not a hypothetical one) never overwrites a
+  // popup with data older than what it already shows -- see
+  // utils/fetchGeneration.js for why stillSelected() alone can't cover
+  // this: reselecting the *same* hull, or reopening the *same* port's
+  // popup, before an earlier fetch for it resolves passes that check for
+  // both requests. loadVesselDetail and loadPortTraffic below are the two
+  // users.
+  const vesselDetailGuard = createGenerationGuard();
+  const portTrafficGuard = createGenerationGuard();
+  // Same race, same fix, for the aircraft track fetch: reselecting the same
+  // icao24 before an earlier /api/track/adsb request for it resolves must not
+  // let that earlier response overwrite the popup with an older track.
+  const aircraftTrackGuard = createGenerationGuard();
+  // Same race again, for /api/aircraft/{icao24} (Task 23's Route section).
+  // This is a *third* independent fetch racing to update the same aircraft
+  // popup (alongside the live poll and the recorded-track fetch above), so
+  // selectAircraft keeps its own last-known answer for each and rebuilds the
+  // popup from both together -- see selectAircraft's `refresh` closure.
+  const aircraftDetailGuard = createGenerationGuard();
+  // port_id -> {status: "loading"|"ready"|"error", data} for the port card's
+  // "recent arrivals and departures" fetch -- not a request cache (see
+  // loadPortTraffic, which refetches on every open), just the hand-off
+  // between it and decorateOptionsFor below: popups for the "ports" layer
+  // are lazy (see buildMarker) and rebuilt from scratch on every open, so
+  // this is where the in-flight/last-landed answer for whichever port is
+  // currently open lives for that rebuild to read.
+  const portDetailCache = new Map();
   let countryNameByIso2 = {};
   // The conflict zone currently flown to, or null for World -- read only by the
   // moveend handler, to tell a pan away from a zone from a pan within one.
@@ -621,6 +1142,12 @@ export function createMapController(container, initial, callbacks) {
   let windRefreshTimer = null;
   let moveEndWindTimer = null;
   let precipRefreshTimer = null;
+  // Task 24: the tick/redraw loop for the seven client-propagated satellite
+  // layers -- see tickAndRedrawSatElements and SAT_ELEMENT_REDRAW_MS.
+  let satElementTickTimer = null;
+  // Debounced re-check of the rivers sub-toggle's loaded extent -- see
+  // maybeRefetchRivers below, wired to moveend next to moveEndWindTimer above.
+  let moveEndRiversTimer = null;
 
   // ---------- cities gate + country selection/highlight ----------
   // Cities only render once the user has opted into a scope (clicking a
@@ -663,6 +1190,11 @@ export function createMapController(container, initial, callbacks) {
   // handlers (see countryHitTest.js), so the map-level hit-test has to know
   // whether the layer is actually on before it selects anything.
   let countriesVisible = true;
+  // Same mirror for "water": MANUAL and off by default (see its LAYER_MANIFEST
+  // entry in scene.js), so unlike countriesVisible this starts false. Read by
+  // the click/hover chain below so a hidden water layer never answers for a
+  // click that landed on a sea nobody asked to see.
+  let waterVisible = false;
   // These three mirror their own dedicated "*Trails" sub-ticker toggle (see
   // LayersSection.jsx's "Show ... trails" rows and the matching keys in
   // setLayerVisible below) -- entityWebglLayer/renderSatellites keep
@@ -826,6 +1358,7 @@ export function createMapController(container, initial, callbacks) {
     const canvases = [
       [firmsHeat?._canvas, FIRMS_HEAT_OPACITY, "firms"],
       [jammingHeat?._canvas, JAMMING_HEAT_OPACITY, "jamming"],
+      [laneDensityHeat?._canvas, LANE_DENSITY_HEAT_OPACITY, "laneDensity"],
       [entityWebglLayer.canvas?.(), 1, "vehicles"],
     ];
     for (const [canvas, shipped, key] of canvases) {
@@ -861,6 +1394,7 @@ export function createMapController(container, initial, callbacks) {
   const HEAT_KERNEL = {
     firms: { radius: 16, blur: 22 },
     jamming: { radius: 22, blur: 28 },
+    laneDensity: { radius: 18, blur: 24 },
   };
 
   function applyHeatKernel(heat, key) {
@@ -996,6 +1530,8 @@ export function createMapController(container, initial, callbacks) {
     for (const key of SCENE_APPLY_KEYS) on[key] = layerOnMap[key] === true;
     for (const trailKey of Object.keys(TRAIL_TOGGLES)) on[trailKey] = layerOnMap[trailKey] === true;
     on.satellitesMilitary = satellitesMilitaryVisible;
+    on.waterLakes = waterLakesVisible;
+    on.waterRivers = waterRiversVisible;
     const signature = `${JSON.stringify(on)}|${JSON.stringify(userLayerWish)}|${sceneBypass}`;
     if (signature === lastLayerStateSignature) return;
     lastLayerStateSignature = signature;
@@ -1067,6 +1603,20 @@ export function createMapController(container, initial, callbacks) {
   // special-casing "events" inside the generic loop, so adding a filter to
   // another layer later is a table entry.
   let eventFilter = { ...DEFAULT_EVENT_FILTER };
+
+  // ---------- vessel/aircraft filter bars (Task 18) ----------
+  //
+  // Same "one copy, held here, applied per item" shape as eventFilter above.
+  // The predicate lives in utils/entityFilter.js (not here and not in
+  // decorators.js) so it can be asserted headlessly under `node --test` --
+  // see that module's own note on why it does not import classifyAircraft.
+  // Applied inline inside renderAisLayer/renderAdsbLayer's own per-item loop,
+  // rather than as a LAYER_ITEM_FILTER table entry the way events does it:
+  // those two renderers already split one raw feed into several buckets by
+  // hand (civilian/tanker/navy, civilian/military/flagged), so the filter
+  // has to run before that split, not per rendered bucket.
+  let vesselFilter = { ...DEFAULT_VESSEL_FILTER };
+  let aircraftFilter = { ...DEFAULT_AIRCRAFT_FILTER };
 
   // The moment every age is measured against. Null means "live", i.e. now.
   // Replay sets it to the scrubbed timestamp: without that, a snapshot from
@@ -1153,8 +1703,10 @@ export function createMapController(container, initial, callbacks) {
       raw.dams || [],
       // Only the hydro ones. A gas plant that happens to be near a dam is a
       // different structure, and absorbing it would be a factual claim the data
-      // does not make.
-      osm.filter((d) => d.kind === "power_plant" && d.source_tag === "hydro"),
+      // does not make. Task 28: power plants moved off raw.osmInfra onto their
+      // own raw.powerPlants (see applyData's own note) -- this has to read
+      // that array now, or every hydro plant would stop matching silently.
+      (raw.powerPlants || []).filter((d) => d.source_tag === "hydro"),
       { radiusKm: DAM_MATCH_KM, primaryId: (d) => d.id, secondaryId: (d) => d.id },
     );
     const absorbed = new Map();
@@ -1182,11 +1734,44 @@ export function createMapController(container, initial, callbacks) {
     return false;
   }
 
+  // Task 27: the one osm_infra sweep still returns all five kinds in one
+  // list -- moving the four railway kinds to their own layer (see
+  // LAYER_MANIFEST's note) is a rendering split, not a fetch split. applyData
+  // does the actual splitting (see its own note), into raw.osmInfra and
+  // raw.railwayPoints; this predicate is what it splits by, and is exported
+  // to that closure by being a plain function declaration in this scope.
+  function isRailwayPointItem(item) {
+    return typeof item.kind === "string" && item.kind.startsWith("railway_");
+  }
+
+  // Task 28: the same rendering split as isRailwayPointItem above, for the
+  // power_plant kind -- applyData reads this to pull plants off raw.osmInfra
+  // onto their own raw.powerPlants array (see its own note there and in
+  // map/scene.js's powerPlants entry on why they get a layer of their own
+  // rather than mirroring another one).
+  function isPowerPlantItem(item) {
+    return item.kind === "power_plant";
+  }
+
+  // Task 29: the same rendering split, for the three air-defence/radar
+  // kinds -- applyData reads this to pull them off raw.osmInfra onto their
+  // own raw.airDefense array, default-off with its own completeness caveat.
+  const AIR_DEFENSE_KINDS = new Set(["radar_station", "military_bunker", "military_checkpoint"]);
+  function isAirDefenseItem(item) {
+    return AIR_DEFENSE_KINDS.has(item.kind);
+  }
+
   const LAYER_ITEM_FILTER = {
     events: (item) => passesEventFilter(item, eventFilter, ageNow()),
     gdelt: passesNewsFilter,
     officials: passesOfficialsFilter,
     osmInfra: passesOsmInfraFilter,
+    // Task 28: a hydro plant absorbed into a dam's own pin (see
+    // rebuildOsmTwins' dams twin index, now built from raw.powerPlants) must
+    // be suppressed on *this* layer too, or the exact duplicate pin the twin
+    // mechanism exists to prevent reappears the moment power plants got a
+    // layer of their own.
+    powerPlants: passesOsmInfraFilter,
   };
 
   /**
@@ -1511,12 +2096,20 @@ export function createMapController(container, initial, callbacks) {
   // sitting above the countries pane made every country unclickable from the
   // first zoom-in onwards, and no pane ordering fixes that without breaking
   // marker clicks instead.
-  // Which country-level number, if any, the shapes are painted by. Null is the
-  // shipped default: the fill is opt-in, because a permanently-tinted world
-  // would compete with every pin drawn on top of it.
+  // Which number, if any, the shapes are painted by, and which shapes --
+  // countries or states -- that number is painted onto (Task 26 generalised
+  // this from countries-only). Null metric is the shipped default in either
+  // target: the fill is opt-in, because a permanently-tinted world would
+  // compete with every pin drawn on top of it. `choropleth.styleFor` is one
+  // function shared by both layers below; which of them actually calls it on
+  // any given feature is decided by `choroplethTarget` in each layer's own
+  // getFill closure, so switching target never paints two layers at once.
+  let choroplethTarget = "country";
   let choroplethMetricId = null;
   let choropleth = { metric: null, styleFor: () => null, covered: 0, total: 0 };
-  const countriesLayer = createCountriesLayer(map, (props) => choropleth.styleFor(props));
+  const countriesLayer = createCountriesLayer(
+    map, (props) => (choroplethTarget === "country" ? choropleth.styleFor(props) : null)
+  );
 
   // ---------- admin-2 district record ----------
   // A historical monthly archive over six countries, and it draws nothing of its
@@ -1535,6 +2128,14 @@ export function createMapController(container, initial, callbacks) {
   // ISO3 -> FeatureCollection, or null while a request is in flight, so a
   // country drilled into twice is fetched once.
   const districtGeometry = new Map();
+  // ISO3 -> that country's own slice of the hapi_conflict archive (up to its
+  // 24-month retention), or null while a request is in flight -- the district
+  // card's 24-month trend sparkline reads this. Fetched once per country,
+  // scoped by the existing /api/conflict-districts endpoint's own `country`
+  // parameter rather than the unscoped `months=24` the endpoint's own
+  // docstring warns off (see loadDistrictSeries): a single country's slice is
+  // a few hundred KB at most, not the ~23 MB whole-world archive.
+  const districtSeriesByCountry = new Map();
 
   // ---------- country, then state, then district ----------
   // The last step of the selection: the districts of the one state singled out,
@@ -1550,28 +2151,44 @@ export function createMapController(container, initial, callbacks) {
   // Earth name 325 times out of 401. A district in neither layer's hands is
   // drawn exactly like sea.
   const districtStateByPcode = new Map();
+  // Published by reference -- a Map's own .set mutates in place, so this needs
+  // assigning only once, here, rather than every time assignDistrictStates adds
+  // to it. Read by popups.js's admin-2 Connectivity fold (Task 26): IODA has no
+  // district-level reading, so a district card shows its parent state's, found
+  // through this same geometric join rather than a second, name-based one.
+  raw.districtStateByPcode = districtStateByPcode;
   const districtStatesAssigned = new Set();  // ISO3s already worked out
   let selectedDistrictPcode = null;
   let hoveredDistrictPcode = null;
   let drawnDistrictState = "";               // which state's districts are drawn
-  // The popup a state click opened, held so it can be rewritten once that
-  // state's districts land -- see the tail of drawStateDistricts.
-  let subdivisionPopup = null;
+  // The Leaflet layer backing the district whose card is open, held so its
+  // on-screen anchor point can be recomputed on every pan/zoom (see
+  // districtAnchorPoint and the "move zoom" handler) -- the district
+  // counterpart to focusedWaterLayer below.
+  let focusedDistrictLayer = null;
   // ---------- admin-1 subdivisions ----------
   // Drawn for whichever countries are selected right now, and for no others --
   // see subdivisions.js on why this rides on the selection instead of being a
   // layer with a checkbox. Everything here is per-session: geometry fetched
   // once per country and kept (administrative borders do not move while a tab
   // is open), selection dropped the moment its country stops being selected.
-  const subdivisionsLayer = createSubdivisionsLayer(map);
+  const subdivisionsLayer = createSubdivisionsLayer(
+    map, (props) => (choroplethTarget === "state" ? choropleth.styleFor(props) : null)
+  );
   // ISO3 -> FeatureCollection, or null while a request is in flight. A country
   // the source has no subdivisions for is stored as an empty collection rather
   // than left absent, so it is asked for once per session and not once a click.
   const subdivisionGeometry = new Map();
   let subdivisionIndex = [];        // every country loaded so far, flat
+  // Published by reference on every reassignment below (see the state-target
+  // choropleth and popups.js's regionOutageFor/buildAdminConnectivity, Task
+  // 26) -- read the same way raw.countryIndex is for the country layer.
+  raw.subdivisionIndex = subdivisionIndex;
   let selectedSubdivisionKey = null;
   let hoveredSubdivisionKey = null;
   let drawnSubdivisionCountries = "";  // signature of what is currently drawn
+  // The subdivision counterpart to focusedDistrictLayer above.
+  let focusedSubdivisionLayer = null;
 
   let countryIndex = [];          // see buildCountryIndex -- smallest-area-first
   let layerByCountryKey = new Map();
@@ -1608,6 +2225,7 @@ export function createMapController(container, initial, callbacks) {
     // outage pins, which are positioned from the country's own geometry.
     onGeometryChanged: () => {
       countryIndex = buildCountryIndex(raw.countries);
+      raw.countryIndex = countryIndex;
       focusedCountryLayer = countryLayerFor(focusedCountryKey);
       reportCountrySelection();
       rebuildOutagePoints();
@@ -1655,7 +2273,7 @@ export function createMapController(container, initial, callbacks) {
     const layer = countryLayerFor(entry.key);
     // The country's own bbox drives every "inside this country" count in the
     // card (see popups.js).
-    const { sections } = countryCardSections(
+    const { sections, summary, groups } = countryCardSections(
       entry.props,
       raw,
       layer ? boundsToPlainObject(layer.getBounds()) : null
@@ -1665,6 +2283,13 @@ export function createMapController(container, initial, callbacks) {
       iso: entry.iso,
       name: entry.name,
       sections,
+      // Task 10: the summary strip's seven tiles and the table PlaceInfoCard
+      // groups `sections` by -- both optional on the card payload the same
+      // way they are optional on PlaceInfoCard itself, so nothing downstream
+      // that only ever reads `.sections` (e.g. the search index) needs to
+      // change for either to exist.
+      summary,
+      groups,
       point: layer ? countryAnchorPoint(layer) : null,
     };
   }
@@ -1834,6 +2459,109 @@ export function createMapController(container, initial, callbacks) {
     return b ? [b.minLat, b.minLon, b.maxLat, b.maxLon] : null;
   }
 
+  /**
+   * Task 25's overpass prediction, for the country or water body `key`
+   * names -- GET /api/satellites/passes?lat=&lon=&hours=24&groups=imaging
+   * (see backend/sources/sat_passes.py for the two work caps this applies
+   * and why), written into raw.satellitePasses[key] and then re-rendered
+   * through whichever of the country/water cards is open, the same fetch-
+   * then-store-in-raw-then-refresh-the-open-card shape loadDistrictSeries
+   * already uses for the district trend fold (see that function's own
+   * comment). Both refresh calls below are unconditional and each guards
+   * itself (refreshFocusedCountryCard/refreshFocusedWaterCard are no-ops
+   * when nothing of that kind is open) -- simpler than this function
+   * having to know which of the two `key` belongs to.
+   *
+   * Refetched every call rather than cached forever: unlike a 24-month
+   * conflict archive, a pass prediction is time-sensitive -- the same
+   * place queried a minute later can have a different next pass -- so a
+   * cached "ready" answer served on reselection would go stale exactly
+   * the way Task 17's port-traffic fold already ruled out for its own
+   * fetch (see loadPortTraffic's own note).
+   *
+   * Scoped to the "imaging" layer specifically -- the brief's own words are
+   * "enabled imaging satellites" -- and only fetched when that layer is
+   * actually switched on (satElementVisible.satImaging); otherwise the
+   * section says so ("gated", not silently blank or stuck loading) rather
+   * than hiding that there is a reason.
+   *
+   * `key` ("country:FRA", "water:482") is both the raw.satellitePasses key
+   * and what satellitePassesGuard tracks, so a later request for a
+   * *different* place landing before an earlier one resolves can never
+   * overwrite that place's fresher data with the earlier place's stale
+   * answer -- the same out-of-order protection loadVesselDetail/
+   * loadPortTraffic give their own fetches above.
+   */
+  function loadSatellitePasses(key, lat, lon) {
+    const publish = (entry) => {
+      raw.satellitePasses = { ...raw.satellitePasses, [key]: entry };
+      refreshFocusedCountryCard();
+      refreshFocusedWaterCard();
+    };
+    if (!satElementVisible.satImaging || typeof lat !== "number" || typeof lon !== "number") {
+      publish({ status: "gated" });
+      return;
+    }
+    const token = satellitePassesGuard.start(key);
+    publish({ status: "loading" });
+    fetchJson(`/api/satellites/passes?lat=${lat}&lon=${lon}&hours=24&groups=imaging`)
+      .then((data) => {
+        if (!satellitePassesGuard.isCurrent(key, token)) return;
+        publish({ status: "ready", data });
+      })
+      .catch(() => {
+        if (!satellitePassesGuard.isCurrent(key, token)) return;
+        publish({ status: "error" });
+      });
+  }
+
+  /** Re-runs loadSatellitePasses for whichever country and/or water body is
+   *  currently open -- called when the imaging layer's own visibility
+   *  changes (see setLayerVisible's satImaging branch), so a card already
+   *  showing "gated" (or a stale "ready" from before the layer was turned
+   *  off) picks up the new state instead of sitting stale until the reader
+   *  reselects the same place. A no-op for whichever of the two is not
+   *  currently open, same as the publish() calls inside loadSatellitePasses
+   *  itself. */
+  function refreshSatellitePassesForOpenPlace() {
+    if (focus?.kind === "country") {
+      const bounds = boundsOfCountry(focus.key);
+      const [lat, lon] = bounds ? boundsCentroid(bounds) : [null, null];
+      loadSatellitePasses(`country:${focus.key}`, lat, lon);
+    }
+    if (selectedWaterId != null) {
+      const entry = waterEntryFor(selectedWaterId);
+      if (entry?.bbox) {
+        const [lat, lon] = boundsCentroid([entry.bbox.minLat, entry.bbox.minLon, entry.bbox.maxLat, entry.bbox.maxLon]);
+        loadSatellitePasses(`water:${selectedWaterId}`, lat, lon);
+      }
+    }
+  }
+
+  /** The centroid of a [south, west, north, east] bounds array -- an
+   *  approximation of "over this place" a country or water body's own
+   *  extent is generously bigger than, but the brief asks for a point to
+   *  query passes for and a bounding box has no single better answer than
+   *  its own middle.
+   *
+   *  A wrapped bbox (west > east) names two ranges, not an inverted box --
+   *  west..180 and -180..east -- the same convention Task 4's water bodies
+   *  established (`antimeridian`/`west > east` in their own stored bbox).
+   *  Averaging west and east directly would land the centroid on the far
+   *  side of the planet from the sliver either range actually covers (west
+   *  170, east -170 averages to 0 -- the opposite side of the globe from
+   *  the 20-degree strip straddling the seam that bbox actually names).
+   *  Unwrapping east onto the same continuous line as west before
+   *  averaging, then wrapping the sum back into [-180, 180], gives the
+   *  true midpoint of the short arc through the seam instead. */
+  function boundsCentroid([south, west, north, east]) {
+    const lat = (south + north) / 2;
+    const unwrappedEast = east < west ? east + 360 : east;
+    let lon = (west + unwrappedEast) / 2;
+    if (lon > 180) lon -= 360;
+    return [lat, lon];
+  }
+
   function setFocus(next) {
     const before = focus ? `${focus.kind}:${focus.key}` : "";
     const after = next ? `${next.kind}:${next.key}` : "";
@@ -1847,6 +2575,18 @@ export function createMapController(container, initial, callbacks) {
     applyScene();
     renderAll();
     callbacks.onFocusChange?.(next);
+    // Task 25: a country focus loads its card's overpass section here --
+    // water selection does not go through setFocus at all (see selectWater's
+    // own call to loadSatellitePasses) and a "layer" focus (a marker click,
+    // the brief's third case, "a point") has no sidebar card to load a
+    // section into at all -- see buildMarker's pointOverpassHtml/
+    // loadPointSatellitePasses, wired from its own popupopen handler
+    // instead, appended to the marker's own popup rather than a card.
+    if (next?.kind === "country") {
+      const bounds = boundsOfCountry(next.key);
+      const [lat, lon] = bounds ? boundsCentroid(bounds) : [null, null];
+      loadSatellitePasses(`country:${next.key}`, lat, lon);
+    }
   }
 
   function setHoveredCountry(key) {
@@ -1864,20 +2604,30 @@ export function createMapController(container, initial, callbacks) {
     if (key === "cities") return citiesGroup;
     if (key === "infra") return infraLayer; // wraps infraGroup + pipelinesGroup together
     if (key === "cables") return cablesLayer; // wraps cablesGroup + the landing-point markers
-    if (key === "railways") return railwaysGroup;
+    if (key === "railways") return railwaysLayer; // wraps railwaysGroup (lines) + railwayPoints (stations)
+    if (key === "railLive") return railLiveLayer; // wraps groups.railLive (trains) + groups.railStations
+    if (key === "powerLines") return powerLinesGroup;
+    if (key === "shippingLanes") return shippingLanesGroup;
+    if (key === "water") return waterLayer;
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
     if (key === "clouds") return weatherLayers.clouds;
     if (key === "jamming") return jammingLayerWithPing;
+    if (key === "laneDensity") return laneDensityLayer;
     if (key === "satellites") return satelliteGroup;
+    if (key === "satNavigation") return satNavigationGroup;
+    if (key === "satWeather") return satWeatherGroup;
+    if (key === "satScience") return satScienceGroup;
     return groups[key];
   }
 
-  // The five AIS/ADS-B bucket keys route through entityWebglLayer's own
-  // per-bucket visibility instead of a Leaflet layerForKey lookup -- see the
-  // comment where entityWebglLayer is created above.
+  // The five AIS/ADS-B bucket keys, plus Task 24's four bulk satellite
+  // layers, route through entityWebglLayer's own per-bucket visibility
+  // instead of a Leaflet layerForKey lookup -- see the comment where
+  // entityWebglLayer is created above.
   const WEBGL_BUCKET_KEYS = new Set([
     "adsbCivilian", "adsbMilitary", "adsbFlagged", "aisCivilian", "aisNavy", "aisTanker",
+    "satImaging", "satGeo", "satStarlink", "satOneweb",
   ]);
 
   // Each entry: the trail flag it drives, the trail layer to add/remove, the
@@ -1916,6 +2666,44 @@ export function createMapController(container, initial, callbacks) {
     // treated as permanently hidden and take up no room, so visible pins would
     // be free to sit on top of them.
     if (key === "cables") layerOnMap.cableLandings = visible;
+    // Same arrangement, one layer over: the station/halt/yard/border points
+    // live inside the combined "railways" layer and have no toggle of their
+    // own -- see railwaysLayer's construction and LAYER_MANIFEST's own note.
+    if (key === "railways") layerOnMap.railwayPoints = visible;
+    // Same arrangement again, one layer over from railLive: the Finnish
+    // station gazetteer has no toggle of its own either.
+    if (key === "railLive") layerOnMap.railStations = visible;
+
+    // Task 24: the seven client-propagated satellite layers. Deliberately
+    // does not `return` -- satNavigation/satWeather/satScience still need
+    // the generic layerForKey add/remove below (they are ordinary Leaflet
+    // layerGroups), and satImaging/satGeo/satStarlink/satOneweb still need
+    // the WEBGL_BUCKET_KEYS branch below to flip their bucket's own
+    // visibility. This block only owns what those two paths don't know
+    // about: satElementVisible (read by the tick/redraw loop, see
+    // tickAndRedrawSatElements), the on-demand fetch for the four
+    // default-off groups (see SAT_ELEMENT_ON_DEMAND_LAYERS above), and an
+    // immediate catch-up render so switching a layer on shows something
+    // before the next redraw tick rather than up to two seconds later.
+    if (key in SAT_ELEMENT_CELESTRAK_GROUP) {
+      satElementVisible[key] = visible;
+      if (visible) {
+        // navigation/weather/imaging are fetched by useOsintData.js's own
+        // poller from boot regardless of this toggle (see POLL_CONFIG and
+        // this controller's applyData dispatch) -- calling fetchSatElements
+        // for them here as well would race that poller's own first fetch
+        // with a second, redundant one.
+        if (SAT_ELEMENT_ON_DEMAND_LAYERS.has(key)) fetchSatElements(key);
+        renderSatElement(key); // catch up now rather than waiting for the next tick
+      }
+      // Task 25: imaging is what the overpass section is scoped to (see
+      // loadSatellitePasses) -- flipping it on or off while a country/water
+      // card is already open has to update that section immediately
+      // ("gated" the moment it's switched off, a real fetch the moment it's
+      // switched back on) rather than leaving it stale until the reader
+      // reselects the same place.
+      if (key === "satImaging") refreshSatellitePassesForOpenPlace();
+    }
 
     if (key === "gdelt") {
       newsVisible = visible;
@@ -1928,6 +2716,38 @@ export function createMapController(container, initial, callbacks) {
     if (key === "satellitesMilitary") {
       satellitesMilitaryVisible = visible;
       renderSatellites();
+      return;
+    }
+
+    // Water's own sub-toggles. Neither lakes nor rivers has a Leaflet layer of
+    // its own to add or remove -- both ride the single `waterLayer` -- so, like
+    // satellitesMilitary above, this re-renders in place instead of going
+    // through layerForKey. The first time either is switched on, its geometry
+    // has not been fetched at all (marine is the only kind the boot fetch
+    // loads, see useOsintData.js), so this is also where that fetch happens --
+    // once per session, not once per toggle; flipping the checkbox back on
+    // after switching it off re-uses whatever already landed.
+    if (key === "waterLakes") {
+      waterLakesVisible = visible;
+      if (visible && waterLakesFeatures == null) {
+        waterLakesFeatures = []; // in flight -- guards against a double fetch from a fast double-click
+        fetchJson("/api/water?kind=lakes")
+          .then((data) => {
+            waterLakesFeatures = data?.features || [];
+            renderWater();
+          })
+          .catch((err) => {
+            waterLakesFeatures = null; // let the next toggle retry rather than pin an empty layer
+            console.warn("Failed to load lakes:", err);
+          });
+      }
+      renderWater();
+      return;
+    }
+    if (key === "waterRivers") {
+      waterRiversVisible = visible;
+      if (visible) maybeRefetchRivers();
+      renderWater();
       return;
     }
 
@@ -1994,6 +2814,16 @@ export function createMapController(container, initial, callbacks) {
       else repaintCountryClasses();
     }
 
+    if (key === "water") {
+      waterVisible = visible;
+      if (!visible) setHoveredWater(null);
+      // Same reason as countries above: addLayer re-creates every path element
+      // from scratch, throwing away whatever selection/hover class it carried,
+      // so a water body already selected before the layer was switched off
+      // needs its highlight repainted rather than left to the next click.
+      else updateWaterHighlights();
+    }
+
     if (key === "satellites") {
       satellitesVisible = visible;
       if (visible) {
@@ -2017,6 +2847,7 @@ export function createMapController(container, initial, callbacks) {
       if (key === "windArrows") refreshWindArrows();
       else if (key === "firms") renderFirms();
       else if (key === "jamming") renderJamming();
+      else if (key === "laneDensity") renderLaneDensity();
       else if (key === "cities") renderCities();
       else if (key === "infra") renderInfra();
       else if (MARKER_LAYER_KEYS.has(key)) renderMarkerLayer(key);
@@ -2048,19 +2879,101 @@ export function createMapController(container, initial, callbacks) {
   // Guarded on the selection still being the same entity when the response
   // lands. A reader clicking through three aircraft in quick succession would
   // otherwise get the first one's track painted under the third one's pin.
-  async function loadRecordedTrack(kind, id, trailMap, maxPoints, stillSelected, redraw) {
+  //
+  // `onPoints`, when given, is handed the raw points array once the fetch has
+  // settled -- an empty array on failure or on a genuinely empty response,
+  // never skipped, so a caller using it for more than the trail (see
+  // selectAircraft's onPoints callback below) can tell "checked, nothing
+  // there" from "still loading" rather than waiting forever on a silent
+  // failure. Ships don't pass it and see no change: the trail-only behaviour
+  // below is exactly what ran before this parameter existed.
+  async function loadRecordedTrack(kind, id, trailMap, maxPoints, stillSelected, redraw, onPoints) {
+    let points = [];
     try {
       const data = await fetchJson(`/api/track/${kind}/${encodeURIComponent(id)}?points=${maxPoints}`);
-      if (!stillSelected() || !data?.points?.length) return;
-      seedTrailFromTrack(trailMap, id, data.points, maxPoints);
-      redraw();
+      points = Array.isArray(data?.points) ? data.points : [];
     } catch {
       // A track is an enhancement to a trail that already draws. Failing loudly
       // here would put an error in front of a reader who just clicked a plane
-      // and can already see where it has been since they did.
+      // and can already see where it has been since they did -- points stays
+      // empty and onPoints below still gets called with that fact.
     }
+    if (!stillSelected()) return;
+    if (points.length) {
+      seedTrailFromTrack(trailMap, id, points, maxPoints);
+      redraw();
+    }
+    if (onPoints) onPoints(points);
   }
 
+  // Fetches /api/vessel/{mmsi} (Task 17) and refreshes the open ship popup
+  // once it lands. Never on the critical path of opening the popup: selectShip
+  // has already drawn Identity/Voyage/Flags synchronously from the live AIS
+  // record by the time this is called, so the Cargo and Port calls sections
+  // arrive a moment later rather than delaying the popup itself.
+  //
+  // Unlike loadRecordedTrack's silent failure (a trail is an enhancement with
+  // an existing line to fall back on), a failure here is recorded as a real
+  // "error" state -- the brief requires the two new sections to say
+  // "unavailable" rather than just not appear, since there is no earlier
+  // render of them to fall back to.
+  //
+  // vesselDetailGuard (see above) guards against a second, narrower race
+  // than stillSelected() covers: reselecting the *same* hull before an
+  // earlier request for it has resolved. Both requests would pass
+  // stillSelected() (selectedMmsi never stopped naming this mmsi), so
+  // without the guard an out-of-order response could still overwrite the
+  // popup with data older than what is already showing.
+  async function loadVesselDetail(mmsi, item, stillSelected) {
+    const token = vesselDetailGuard.start(mmsi);
+    let entry;
+    try {
+      const data = await fetchJson(vesselDetailUrl(mmsi));
+      entry = { status: "ready", data };
+    } catch {
+      entry = { status: "error" };
+    }
+    if (!vesselDetailGuard.isCurrent(mmsi, token) || !stillSelected() || !shipPopup) return;
+    const d = decorateAis(item, { selectedMmsi, vesselDetail: entry });
+    shipPopup.setContent(d.detail);
+  }
+
+  // Fetches /api/aircraft/{icao24} (Task 23) and hands the settled entry to
+  // `onDetail` -- the same shape loadRecordedTrack hands its points to
+  // onPoints, rather than writing the popup itself the way loadVesselDetail
+  // does. It has to be a hand-off, not a direct write: selectAircraft below
+  // already has a second fetch (the recorded track) racing to update the
+  // very same popup, and each has to merge its own answer with whatever the
+  // other last produced rather than one overwriting the other's section.
+  //
+  // Same "error" state on failure as loadVesselDetail, for the same reason:
+  // the Route section has no earlier render to fall back to, so a failure
+  // has to say "unavailable" rather than silently stay blank.
+  async function loadAircraftDetail(icao24, stillSelected, onDetail) {
+    let entry;
+    try {
+      const data = await fetchJson(aircraftDetailUrl(icao24));
+      entry = { status: "ready", data };
+    } catch {
+      entry = { status: "error" };
+    }
+    if (!stillSelected()) return;
+    onDetail(entry);
+  }
+
+  // Refreshes the open aircraft popup once /api/track/adsb/{icao} and/or
+  // /api/aircraft/{icao24} answer, the same follow-up loadVesselDetail does
+  // for the ship card (Task 17) -- except here there are two independent
+  // fetches racing to update the same popup (the recorded track, for
+  // decorateAdsb's vertical trend, and the flight-leg detail for its Route
+  // section), so `latestTrack`/`latestFlightDetail` and the shared `refresh`
+  // closure exist to merge whichever has landed so far into one re-render,
+  // rather than the second fetch's callback clobbering the first's.
+  //
+  // aircraftTrackGuard/aircraftDetailGuard guard the same race
+  // vesselDetailGuard does: reselecting the *same* icao24 before an earlier
+  // request for it resolves must not let that earlier response land after
+  // the later one and overwrite the popup with older data.
   function selectAircraft(item) {
     selectedIcao = selectedIcao === item.icao24 ? null : item.icao24;
     if (selectedIcao) {
@@ -2069,14 +2982,39 @@ export function createMapController(container, initial, callbacks) {
       // looked like flight history didn't work.
       updateTrails(aircraftTrails, raw.adsb, "icao24", AIRCRAFT_TRAIL_MAX_POINTS, selectedIcao);
       const chosen = selectedIcao;
+      // undefined until each fetch's own callback below sets it -- decorateAdsb
+      // reads "still undefined" as "still fetching" for both.
+      let latestTrack;
+      let latestFlightDetail;
+      const refresh = () => {
+        if (selectedIcao !== chosen || !aircraftPopup) return;
+        const d = decorateAdsb(item, { selectedIcao, track: latestTrack, flightDetail: latestFlightDetail });
+        aircraftPopup.setContent(d.detail);
+      };
+      const trackToken = aircraftTrackGuard.start(chosen);
       loadRecordedTrack(
         "adsb", chosen, aircraftTrails, AIRCRAFT_TRAIL_MAX_POINTS,
-        () => selectedIcao === chosen, renderAdsbLayer
+        () => selectedIcao === chosen, renderAdsbLayer,
+        (points) => {
+          if (!aircraftTrackGuard.isCurrent(chosen, trackToken)) return;
+          latestTrack = points;
+          refresh();
+        }
       );
+      const detailToken = aircraftDetailGuard.start(chosen);
+      loadAircraftDetail(chosen, () => selectedIcao === chosen, (entry) => {
+        if (!aircraftDetailGuard.isCurrent(chosen, detailToken)) return;
+        latestFlightDetail = entry;
+        refresh();
+      });
+      // track/flightDetail are omitted (undefined) on this first, synchronous
+      // render -- decorateAdsb reads that as "still fetching" and says so, the
+      // same way vesselDetail starts undefined in selectShip below.
       const d = decorateAdsb(item, { selectedIcao });
-      L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+      aircraftPopup = L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
     } else {
       aircraftTrails.clear();
+      aircraftPopup = null;
       map.closePopup();
     }
     renderAdsbLayer(); // re-decorate every visible aircraft so the highlight moves
@@ -2091,10 +3029,18 @@ export function createMapController(container, initial, callbacks) {
         "ais", chosen, shipTrails, SHIP_TRAIL_MAX_POINTS,
         () => selectedMmsi === chosen, () => renderMarkerLayer("ais")
       );
-      const d = decorateAis(item, { selectedMmsi });
-      L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+      // vesselDetail is always undefined on this first render, whether or not
+      // this hull's card has been opened before this tab: the brief requires
+      // a real "loading" state on the way in, not a stale answer old enough
+      // to read as current when it may not be (a laden verdict from an hour
+      // ago on a hull that has since discharged, say) -- so this never reuses
+      // a previous fetch, unlike the port card's cache below.
+      const d = decorateAis(item, { selectedMmsi, vesselDetail: undefined });
+      shipPopup = L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
+      loadVesselDetail(chosen, item, () => selectedMmsi === chosen);
     } else {
       shipTrails.clear();
+      shipPopup = null;
       map.closePopup();
     }
     renderMarkerLayer("ais");
@@ -2271,7 +3217,7 @@ export function createMapController(container, initial, callbacks) {
   // on every moveend is exactly the cost these layers were written to avoid by
   // drawing once. Keyed per layer rather than shared, because each is also
   // redrawn on its own when its data arrives (see applyData).
-  const worldCopyKeys = { cables: null, pipelines: null, railways: null };
+  const worldCopyKeys = { cables: null, pipelines: null, railways: null, powerLines: null, shippingLanes: null };
 
   /**
    * Redraw the whole-world layers when, and only when, the visible copies change.
@@ -2285,6 +3231,8 @@ export function createMapController(container, initial, callbacks) {
     if (worldCopyKeys.cables !== key) renderCables();
     if (worldCopyKeys.pipelines !== key) renderPipelines();
     if (worldCopyKeys.railways !== key) renderRailways();
+    if (worldCopyKeys.powerLines !== key) renderPowerLines();
+    if (worldCopyKeys.shippingLanes !== key) renderShippingLanes();
   }
 
   function applyStacking(marker, size, key) {
@@ -2328,7 +3276,46 @@ export function createMapController(container, initial, callbacks) {
       twin: key === "airports" ? osmTwins.airfieldTwinOf.get(String(item.id))
         : key === "dams" ? osmTwins.damTwinOf.get(String(item.id))
         : undefined,
+      // Task 17's "recent arrivals and departures": whatever this port's
+      // GET /api/vessel/port/{port_id} fetch currently knows, or undefined
+      // before that fetch has ever run (see loadPortTraffic, wired to this
+      // layer's popupopen below) -- decoratePort reads undefined as "loading".
+      portDetail: key === "ports" ? portDetailCache.get(String(item.id)) : undefined,
     };
+  }
+
+  // Fetches /api/vessel/port/{port_id} (Task 17) every time a port's popup
+  // opens, and calls `onUpdate` once it lands so the caller can re-render
+  // whatever is currently showing. Matches loadVesselDetail's ship-side
+  // sibling on purpose, not "cache for the session" as an earlier version of
+  // this did: vessel_port_calls rows accrue continuously (a vessel can call
+  // between one open and the next), so a cached "ready" answer served on
+  // reopen would silently omit a new arrival -- the same silent-omission
+  // failure the brief already rules out for the fetch-*failure* case,
+  // recurring here on the success path if this were allowed to go stale. A
+  // port's popup opens far less often than a track fetch already firing on
+  // every ship selection, so refetching every time costs little.
+  //
+  // portTrafficGuard (see above) is what refetching-on-every-open needs
+  // that the old cache-and-skip version got for free: close a port's popup
+  // and reopen it before the first fetch resolves and two requests for the
+  // same port_id are in flight together. Responses are not guaranteed to
+  // arrive in request order, so without the guard an earlier request
+  // landing after the later one would overwrite the fresher render with
+  // staler data.
+  async function loadPortTraffic(portId, onUpdate) {
+    const token = portTrafficGuard.start(portId);
+    portDetailCache.set(portId, { status: "loading" });
+    let entry;
+    try {
+      const data = await fetchJson(portCallsUrl(portId));
+      entry = { status: "ready", data };
+    } catch {
+      entry = { status: "error" };
+    }
+    if (!portTrafficGuard.isCurrent(portId, token)) return;
+    portDetailCache.set(portId, entry);
+    onUpdate();
   }
 
   /**
@@ -2347,6 +3334,92 @@ export function createMapController(container, initial, callbacks) {
     const existing = icon.options.className || "";
     if (!existing.includes(`layer-${key}`)) icon.options.className = `${existing} layer-${key}`.trim();
     return icon;
+  }
+
+  // Task 25's overpass prediction for "a point" -- the brief's third
+  // trigger, alongside country and water above. A marker click is this
+  // app's only notion of a reader picking one specific point outside those
+  // two (see buildMarker's own click handler below, the sole caller) --
+  // review's Important 3 named this after an earlier draft dismissed it on
+  // the grounds that a "layer" focus was not one of the three named cases,
+  // which read the brief's "point" too narrowly: whatever the *reason* the
+  // click set focus to "this layer", the click itself picked a specific
+  // lat/lon, and that is the point the brief means.
+  //
+  // Appended to the marker's own popup content (via lazyDecorate below)
+  // rather than opened as a second, independent L.popup: a marker already
+  // owns the one popup slot a click opens (bindPopup's native open-on-
+  // click), and a competing popup on the same click would immediately
+  // supersede -- Leaflet's autoClose default -- the item detail the reader
+  // actually clicked for, hiding it behind the overpass content instead of
+  // adding to it. Keyed by rounded lat/lon (0.01 degrees, ~1km) rather than
+  // per-marker, so two markers close enough to share a meaningful pass
+  // search share one fetch instead of issuing a near-duplicate for each.
+  const pointSatellitePasses = new Map();
+
+  function pointOverpassKey(lat, lon) {
+    return `${lat.toFixed(2)},${lon.toFixed(2)}`;
+  }
+
+  /** The overpass fold's HTML for one point, or "" when there is nothing to
+   *  say -- no coordinate, or the imaging layer is switched off (appending
+   *  a permanent "layer is off" notice to every point layer's popup on the
+   *  map, the common case since imaging defaults on but plenty of readers
+   *  will still have it off, would be clutter with nothing to act on; the
+   *  country/water card's own section says so instead, where a reader has
+   *  already opened a bigger card and a named reason is worth a line).
+   *  Uses the popup variant (its own header) rather than the section
+   *  variant this file also imports for country/water cards -- this is
+   *  being appended to an existing marker popup, not slotted into a
+   *  {title, html} section entry, so it needs a header of its own. `label`
+   *  is the item's own name when it has one, so the header reads "over
+   *  Rotterdam" rather than the less useful "over this location". */
+  function pointOverpassHtml(lat, lon, label) {
+    if (!satElementVisible.satImaging || typeof lat !== "number" || typeof lon !== "number") return "";
+    const entry = pointSatellitePasses.get(pointOverpassKey(lat, lon));
+    if (!entry) return ""; // not fetched yet -- the popupopen handler below starts it
+    return satellitePassesPopupHtml(entry, label);
+  }
+
+  /** Starts (once per rounded point, for the session) the same
+   *  GET /api/satellites/passes fetch loadSatellitePasses uses for
+   *  country/water, storing the answer in pointSatellitePasses instead of
+   *  raw.satellitePasses -- this is not card state React reads, only a
+   *  Leaflet popup's own content function, so it does not need `raw`'s
+   *  reactivity. `onUpdate` is always lazyDecorate's own popup.setContent
+   *  call (see buildMarker) -- passed in rather than assumed, so this stays
+   *  reusable regardless of which marker's popup happens to be open for
+   *  this point right now.
+   *
+   *  Unlike loadSatellitePasses (refetched on every country/water
+   *  selection, deliberately, since a prediction is time-sensitive), a
+   *  point's answer is cached for the rest of the session rather than
+   *  refetched on every popup reopen: a click layer can hold thousands of
+   *  markers, several of which can legitimately round to the same point,
+   *  and this is a secondary fold on an existing popup, not the primary
+   *  reason the reader opened it -- the same "session-lifetime, never
+   *  evicted" tradeoff this file already makes for portDetailCache and the
+   *  generation guards' own key maps (see Task 17's interface note on
+   *  that). A reader who wants a fresher answer for the same point can
+   *  reselect the country or water body it sits inside instead. */
+  function loadPointSatellitePasses(lat, lon, onUpdate) {
+    const roundedKey = pointOverpassKey(lat, lon);
+    if (pointSatellitePasses.has(roundedKey)) return; // already fetched this session, or in flight
+    pointSatellitePasses.set(roundedKey, { status: "loading" });
+    onUpdate();
+    const guardKey = `point:${roundedKey}`;
+    const token = satellitePassesGuard.start(guardKey);
+    fetchJson(`/api/satellites/passes?lat=${lat}&lon=${lon}&hours=24&groups=imaging`)
+      .then((data) => {
+        if (!satellitePassesGuard.isCurrent(guardKey, token)) return;
+        pointSatellitePasses.set(roundedKey, { status: "ready", data });
+        onUpdate();
+      })
+      .catch(() => {
+        if (!satellitePassesGuard.isCurrent(guardKey, token)) return;
+        pointSatellitePasses.set(roundedKey, { status: "error" });
+        onUpdate();
+      });
   }
 
   // True while `id` is still within its ARRIVAL_FLASH_MS window, and prunes
@@ -2398,13 +3471,46 @@ export function createMapController(container, initial, callbacks) {
     // than captured, because the table behind it is refreshed on its own timer.
     const lazyOptions = () => ({ selectedIcao, selectedMmsi, ...decorateOptionsFor(key, marker._item, id) });
     // Through the same fallback as the icon above, or a collapsed head would
-    // draw a count badge and then open a popup describing only itself.
-    const lazyDecorate = () =>
-      applyCollapsedFallback(decorate(marker._item, lazyOptions()), marker._item);
+    // draw a count badge and then open a popup describing only itself. The
+    // overpass fold is appended here, at the one place every caller of
+    // lazyDecorate().detail already goes through (the popup binder below,
+    // and the ports popupopen handler further down) -- appending it at
+    // either call site alone would race the other's own re-render and
+    // sometimes lose the suffix, the same clobbering hazard selectAircraft's
+    // `refresh` closure guards against for its own two racing fetches.
+    const lazyDecorate = () => {
+      const base = applyCollapsedFallback(decorate(marker._item, lazyOptions()), marker._item);
+      const label = typeof marker._item.name === "string" ? marker._item.name : undefined;
+      return { ...base, detail: base.detail + pointOverpassHtml(marker._item.lat, marker._item.lon, label) };
+    };
     marker.bindPopup(() => lazyDecorate().detail, popupOptions(320));
     marker.bindTooltip(() => lazyDecorate().tooltip, {
       className: "map-tooltip",
       direction: "top",
+    });
+    // Task 17's port-card traffic fold: kicked off on open rather than
+    // fetched for every port up front, since there can be thousands of World
+    // Port Index entries in view and a reader only ever looks at the one
+    // they clicked. lazyOptions() re-reads portDetailCache on the way back
+    // in, so once loadPortTraffic resolves, re-running the same popup
+    // content function it is already bound to (lazyDecorate) picks up the
+    // answer with no separate render path to keep in sync.
+    if (key === "ports") {
+      marker.on("popupopen", () => {
+        loadPortTraffic(String(marker._item.id), () => {
+          const popup = marker.getPopup();
+          if (popup?.isOpen()) popup.setContent(lazyDecorate().detail);
+        });
+      });
+    }
+    // Task 25: every point layer's popup, not just ports -- the marker's
+    // own lat/lon is "the point" the overpass search runs against.
+    marker.on("popupopen", () => {
+      if (typeof marker._item.lat !== "number" || typeof marker._item.lon !== "number") return;
+      loadPointSatellitePasses(marker._item.lat, marker._item.lon, () => {
+        const popup = marker.getPopup();
+        if (popup?.isOpen()) popup.setContent(lazyDecorate().detail);
+      });
     });
     return marker;
   }
@@ -2446,7 +3552,10 @@ export function createMapController(container, initial, callbacks) {
 
   const counts = {
     events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
-    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    satellites: 0,
+    // Task 24: the seven client-propagated satellite layers.
+    satNavigation: 0, satWeather: 0, satImaging: 0, satScience: 0, satGeo: 0, satStarlink: 0, satOneweb: 0,
+    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
     hazards: 0, hazardsQuake: 0, hazardsVolcano: 0,
@@ -2454,21 +3563,42 @@ export function createMapController(container, initial, callbacks) {
     aisSanctioned: 0, adsbSanctioned: 0,
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
-    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0, osmRailway: 0,
-    outagePoints: 0,
+    osmInfra: 0, osmMilitary: 0, osmSubstation: 0, osmBorder: 0, osmEnergyOther: 0,
+    // Task 27: osmRailway's old lumped count is now this layer's own natural
+    // count/total (railwayPoints is a real render key, not a sub-ticker of
+    // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
+    // railStations (fix, post-review) is the Finnish station gazetteer.
+    railwayPoints: 0, railLive: 0, railStations: 0,
+    // Task 28: powerPlants is a real render key (split out of osmInfra, same
+    // treatment as railwayPoints above); powerLines is a whole-document line
+    // count, same treatment as railways below.
+    powerPlants: 0, powerLines: 0, airDefense: 0,
+    outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
     czib: 0, czibActive: 0, czibWithdrawn: 0,
     floods: 0, floodsCurrent: 0,
     ports: 0, portsOil: 0, dams: 0, damsLarge: 0,
-    deflock: 0, railways: 0,
+    deflock: 0, railways: 0, shippingLanes: 0, laneDensity: 0,
+    // How many ships/aircraft in the currently-loaded feed match the filter
+    // bar's query -- read together with the matching *Total key (see totals
+    // below) for the "N / total" figure next to each filter bar. Deliberately
+    // not the same thing as e.g. aisCivilian/aisCivilianTotal above: those
+    // are "on screen right now" vs. "in the whole feed", both already
+    // viewport/zoom-scoped in the first case; this is "matches the typed
+    // query" vs. "in the whole feed", neither scoped to the viewport, because
+    // a reader typing a callsign wants to know how much of the fleet matches,
+    // not how much of it happens to be on screen this instant.
+    vesselFilterMatch: 0, aircraftFilterMatch: 0,
   };
   // Total number loaded from the backend for each layer, independent of the
   // current viewport/zoom filtering that `counts` reflects -- shown in the
   // UI as the "(total)" figure next to the live on-screen tick.
   const totals = {
     events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
-    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    satellites: 0,
+    satNavigation: 0, satWeather: 0, satImaging: 0, satScience: 0, satGeo: 0, satStarlink: 0, satOneweb: 0,
+    aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
     hazards: 0, hazardsQuake: 0, hazardsVolcano: 0,
@@ -2476,14 +3606,26 @@ export function createMapController(container, initial, callbacks) {
     aisSanctioned: 0, adsbSanctioned: 0,
     darkVessels: 0, darkGaps: 0, darkSts: 0,
     cables: 0, cableLandings: 0, launches: 0, launchesUpcoming: 0,
-    osmInfra: 0, osmMilitary: 0, osmPower: 0, osmBorder: 0, osmRailway: 0,
-    outagePoints: 0,
+    osmInfra: 0, osmMilitary: 0, osmSubstation: 0, osmBorder: 0, osmEnergyOther: 0,
+    // Task 27: osmRailway's old lumped count is now this layer's own natural
+    // count/total (railwayPoints is a real render key, not a sub-ticker of
+    // osmInfra any more -- see LAYER_ITEM_FILTER's isRailwayPointItem).
+    // railStations (fix, post-review) is the Finnish station gazetteer.
+    railwayPoints: 0, railLive: 0, railStations: 0,
+    powerPlants: 0, powerLines: 0, airDefense: 0,
+    outagePoints: 0, outageRegionPoints: 0,
     eventsVerified: 0, eventsDoubted: 0, eventsUnverified: 0,
     gfwGaps: 0, gfwDetections: 0, gfwDetMatched: 0, gfwDetUnmatched: 0,
     czib: 0, czibActive: 0, czibWithdrawn: 0,
     floods: 0, floodsCurrent: 0,
     ports: 0, portsOil: 0, dams: 0, damsLarge: 0,
-    deflock: 0, railways: 0,
+    deflock: 0, railways: 0, shippingLanes: 0, laneDensity: 0,
+    // Reported as vesselFilterMatchTotal/aircraftFilterMatchTotal (see
+    // reportCounts' *Total suffixing below) -- the denominator for the "N /
+    // total" figure next to each filter bar. This is the whole loaded feed
+    // (raw.ais.length / raw.adsb.length), the same scope counts.*Match above
+    // is measured against.
+    vesselFilterMatch: 0, aircraftFilterMatch: 0,
   };
   // backend/infrastructure.py site "type" -> the counts/totals key it rolls
   // up into, so Critical Infrastructure can show a per-type sub-ticker (see
@@ -2497,7 +3639,11 @@ export function createMapController(container, initial, callbacks) {
     adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
     gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
-    deflock: false,
+    deflock: false, laneDensity: false, railwayPoints: false, powerPlants: false, airDefense: false,
+    // Task 24's three on-by-default, THEATRE-gated groups -- see
+    // SAT_ELEMENT_ZOOM_NOTE_KEYS. The four off-by-default groups are
+    // ungated and never report a note.
+    satNavigation: false, satWeather: false, satImaging: false,
     // czib is deliberately absent: it has no gate, so it can never have a note.
     // Not a zoom gate but a band-dependent thinning, so it travels with the
     // rest: { [layerKey]: howManyKept } for every layer capByRank is currently
@@ -2507,6 +3653,20 @@ export function createMapController(container, initial, callbacks) {
     // useLeafletMap's EMPTY_ZOOM_NOTES read it, and generalising the cap should
     // not drag a UI change into the same commit.
     eventsCapped: 0,
+    // Task 27 fix (post-review): which conflict-theatre keys osm_infra.py's
+    // rail-line sweep hit MAX_RAIL_LINE_WAYS in, per the backend's own
+    // "railways_osm" document (see osm_infra.serialize_rail_lines) -- a
+    // truncated theatre must not read as a complete one, the same principle
+    // `capped` above already carries for a band-thinned point layer.
+    railwaysTruncated: [],
+    // Review fix (Task 28, Minor 1): powerLinesTruncated/pipelinesTruncated
+    // had no default entry here, unlike railwaysTruncated just above --
+    // harmless since every reader guards with `|| []` (LayersSection.jsx,
+    // renderPowerLines/renderPipelines themselves), but inconsistent with
+    // the pattern this table otherwise follows for every other truncation
+    // flag and every other zoom note in it.
+    powerLinesTruncated: [],
+    pipelinesTruncated: [],
   };
 
   // Layers that report a breakdown as well as a total, so the control panel can
@@ -2533,15 +3693,30 @@ export function createMapController(container, initial, callbacks) {
       of: (item) => (item.kind === "sts_pair" ? "darkSts" : "darkGaps"),
     },
     osmInfra: {
-      keys: ["osmMilitary", "osmPower", "osmBorder", "osmRailway"],
+      // Task 28: power_plant moved off this layer entirely (see applyData's
+      // own split, the same treatment railwayPoints already got in Task 27),
+      // so "osmPower" is retired -- it would only ever read zero now, which
+      // is worse than not having the row. power_substation/refinery/
+      // storage_tank/oil_well are new here and get their own buckets rather
+      // than falling into the old military catch-all, which used to be
+      // correct only because military/power/border were the only non-rail
+      // kinds this layer carried.
+      keys: ["osmMilitary", "osmSubstation", "osmBorder", "osmEnergyOther"],
       of: (item) => {
-        if (item.kind === "power_plant") return "osmPower";
+        if (item.kind === "military_airfield" || item.kind === "military_area") return "osmMilitary";
+        if (item.kind === "power_substation") return "osmSubstation";
         if (item.kind === "border_control") return "osmBorder";
-        // The four railway kinds the sweep now also returns (station, halt, yard,
-        // border) get their own tally rather than being folded into the military
-        // count they would otherwise fall through into.
-        if (typeof item.kind === "string" && item.kind.startsWith("railway_")) return "osmRailway";
-        return "osmMilitary"; // airfields and areas roll up together
+        if (item.kind === "refinery" || item.kind === "storage_tank" || item.kind === "oil_well") {
+          return "osmEnergyOther";
+        }
+        // Task 27: the four railway kinds moved to their own layer
+        // (railwayPoints, with its own natural count) rather than a
+        // sub-ticker here -- LAYER_ITEM_FILTER.osmInfra already excludes
+        // them from this layer's *visible* set, and rolling them into
+        // nothing here keeps this layer's own *total* honest too: the
+        // totals loop below reads raw items unfiltered, and a railway
+        // station is not a military site.
+        return null;
       },
     },
     launches: {
@@ -2715,7 +3890,13 @@ export function createMapController(container, initial, callbacks) {
     // Just under conflict events: a dark-vessel pin marks a place something was
     // last seen, which is a real position, but it is an inference about it.
     darkVessels: 95,
-    events: 100, infra: 80, satellites: 70, aisNavy: 65, adsbMilitary: 65,
+    events: 100, infra: 80, satellites: 70,
+    // Task 24's three DOM-marker groups sit just under the server-propagated
+    // pair above -- same class of object, same reasoning, one step lower so
+    // stations/military (this map's own SGP4) never lose their pixel to an
+    // element-set-only object if the two ever land on the same spot.
+    satNavigation: 69, satWeather: 69, satScience: 69,
+    aisNavy: 65, adsbMilitary: 65,
     // Above news: several officials pins sit on a capital's coordinate by
     // construction (a press release has no location of its own), so they are
     // the ones that most need to keep their true point rather than being
@@ -2829,6 +4010,9 @@ export function createMapController(container, initial, callbacks) {
   function redrawLayerGroup(group) {
     if (group === "infra") renderInfra();
     else if (group === "satellites") renderSatellites();
+    else if (group === "satNavigation" || group === "satWeather" || group === "satScience") {
+      renderSatElementLayer(group);
+    }
     else if (group === "cities") renderCities();
     else if (group === "ais") renderAisLayer();
     else if (group === "adsb") renderAdsbLayer();
@@ -3010,6 +4194,63 @@ export function createMapController(container, initial, callbacks) {
     );
   }
 
+  // Dark-ship reachability geometry (Task 21): the went-dark -> resumed line
+  // (ais_gap and gfw_gaps records both carry resumed_lat/resumed_lon once
+  // their gap has closed) and, for ais_gap records only, the 50/80/95%
+  // contour bands backend/sources/dark_vessels.py builds around the
+  // dead-reckoned point -- see that module's docstring for the model.
+  //
+  // Drawn as children of `groups[key]` itself (with `pane: "uncertaintyPane"`
+  // set per-shape, not on a wrapping group of its own) rather than in a
+  // separate layer -- Leaflet resolves each child's pane independently of
+  // which LayerGroup manages its add/remove, so this rides the same
+  // map.addLayer/removeLayer toggle darkVessels/gfwGaps already have for
+  // free, and the last-known pin -- a plain marker in the default pane --
+  // keeps drawing on top of both without anything here having to order that.
+  function reachLineStyle() {
+    return {
+      pane: "uncertaintyPane", interactive: false,
+      color: reachContourColor(), weight: 1, opacity: 0.5, dashArray: "2 4",
+    };
+  }
+  // Faintest for the widest band, so the three overlapping polygons read as
+  // one gradient rather than three flat washes stacked on each other.
+  const REACH_CONTOUR_OPACITY = { 50: [0.6, 0.16], 80: [0.4, 0.09], 95: [0.25, 0.04] };
+  function reachContourStyle(percentile) {
+    const color = reachContourColor();
+    const [stroke, fill] = REACH_CONTOUR_OPACITY[percentile] || REACH_CONTOUR_OPACITY[95];
+    return {
+      pane: "uncertaintyPane", interactive: false,
+      color, weight: 1, opacity: stroke, dashArray: "4 4", fillColor: color, fillOpacity: fill,
+    };
+  }
+  function paintReachShape(group, item, copy) {
+    const ends = reachLineEnds(item);
+    if (ends) L.polyline(drawPath(ends, copy), reachLineStyle()).addTo(group);
+    for (const { percentile, points } of reachContourRings(item)) {
+      L.polygon(drawPath(points, copy), reachContourStyle(percentile)).addTo(group);
+    }
+  }
+  function buildReachShape(item, copy) {
+    const group = L.layerGroup();
+    paintReachShape(group, item, copy);
+    return group;
+  }
+  function updateReachShape(group, item, copy) {
+    group.clearLayers();
+    paintReachShape(group, item, copy);
+  }
+  function renderReachGeometry(key, shapeMap, visible) {
+    syncAcrossWorldCopies(
+      shapeMap,
+      groups[key],
+      visible.filter(reachOnScreen),
+      (item) => item[ID_FIELD[key]],
+      buildReachShape,
+      updateReachShape
+    );
+  }
+
   function renderMarkerLayer(key) {
     if (key === "adsb") {
       renderAdsbLayer();
@@ -3103,6 +4344,8 @@ export function createMapController(container, initial, callbacks) {
     visible = capByRank(key, visible);
     // After the cap, so a circle can never outlive the pin it belongs to.
     if (key === "events") renderEventUncertainty(visible);
+    if (key === "darkVessels") renderReachGeometry(key, darkVesselReachShapes, visible);
+    if (key === "gfwGaps") renderReachGeometry(key, gfwGapReachShapes, visible);
     visible = collapseFor(key, visible, map.getZoom());
     registerPlacement(
       key,
@@ -3164,10 +4407,28 @@ export function createMapController(container, initial, callbacks) {
     const belowTankerPinZoom = zoom < (tokenZoom("ship.tanker") ?? -Infinity);
     const belowCivilianPinZoom = zoom < (tokenZoom("ship.other") ?? -Infinity);
 
+    // The filter bar's free text/prefix and sanctions/watchlist flags (Task
+    // 18), applied before the class split below rather than after: a ship
+    // the filter rejects must never reach any of the three buckets, which is
+    // what "combines with the existing class filters" means -- the class
+    // toggles and the sanction ring still apply to whatever the filter left,
+    // exactly as if the rejected ships were never in the feed. filterVessels
+    // returns a new array (raw.ais itself is never touched), which is the
+    // "shortening the list before it reaches updateEntities" webglLayer.js
+    // needs -- the loop below narrows that list further, by viewport/zoom/
+    // class, but every ship it starts from has already passed the filter.
+    const filteredAis = filterVessels(raw.ais, vesselFilter);
+    // Deliberately not scoped to the viewport or zoom gates below -- see the
+    // note on counts.vesselFilterMatch in its initial-value block: a reader
+    // typing a callsign wants to know how much of the whole feed matches,
+    // not how much of it happens to be on screen this instant.
+    counts.vesselFilterMatch = filteredAis.length;
+    totals.vesselFilterMatch = raw.ais.length;
+
     let civilianVisible = [];
-    const tankerVisible = [];
-    const navyVisible = [];
-    for (const item of raw.ais) {
+    let tankerVisible = [];
+    let navyVisible = [];
+    for (const item of filteredAis) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!inView(item.lat, item.lon)) continue;
       const type = classifyShip(item);
@@ -3183,6 +4444,13 @@ export function createMapController(container, initial, callbacks) {
     // are what this layer is for and neither is dense enough to need it; a
     // sanctioned merchant hull is lifted clear of the cap for the same reason.
     civilianVisible = capByRank("aisCivilian", civilianVisible, nearestToCentreRank(isSanctioned));
+    // Task 31: the Performance section's WebGL sprite cap, on top of the
+    // band-scoped cap above -- a coarse global ceiling for a reader on
+    // weaker hardware, independent of whatever LAYER_MANIFEST's own per-band
+    // cap already thins each bucket to.
+    civilianVisible = capSprites(civilianVisible);
+    tankerVisible = capSprites(tankerVisible);
+    navyVisible = capSprites(navyVisible);
 
     // If the selected ship is no longer in the feed at all (out of AIS
     // range / stopped reporting), drop the selection so the highlight/trail
@@ -3317,6 +4585,15 @@ export function createMapController(container, initial, callbacks) {
     const militaryPerPin = (layerHasTokenZoom("adsbMilitary") || layerHasTokenZoomMax("adsbMilitary"));
     const flaggedPerPin = (layerHasTokenZoom("adsbFlagged") || layerHasTokenZoomMax("adsbFlagged"));
 
+    // Same shape as renderAisLayer's filteredAis above: a real array-level
+    // filter, applied before the flagged/military/civilian split, so every
+    // aircraft the loop below sees has already passed it. Counted over the
+    // whole raw feed regardless of viewport or zoom -- see
+    // counts.aircraftFilterMatch's own note in its initial-value block.
+    const filteredAdsb = filterAircraft(raw.adsb, aircraftFilter);
+    counts.aircraftFilterMatch = filteredAdsb.length;
+    totals.aircraftFilterMatch = raw.adsb.length;
+
     let civilianVisible = [];
     const militaryVisible = [];
     // Aircraft squawking an emergency code, or listed under LADD/PIA, get their
@@ -3326,7 +4603,7 @@ export function createMapController(container, initial, callbacks) {
     // bucket has no zoom gate, because "somewhere in the world an aircraft is
     // squawking 7500" is worth seeing at world zoom.
     const flaggedVisible = [];
-    for (const item of raw.adsb) {
+    for (const item of filteredAdsb) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!inView(item.lat, item.lon)) continue;
       if (flagOf(item)) {
@@ -3348,6 +4625,9 @@ export function createMapController(container, initial, callbacks) {
     // lifted every emergency, display-limited and designated airframe out of
     // here, so nothing that needs keeping is left to a distance rank.
     civilianVisible = capByRank("adsbCivilian", civilianVisible, nearestToCentreRank());
+    // Task 31: same global ceiling renderAisLayer applies to its own
+    // anonymous bucket, on top of the band-scoped cap just above.
+    civilianVisible = capSprites(civilianVisible);
 
     // If the selected aircraft is no longer in the feed at all (out of
     // ADS-B range / stopped reporting), drop the selection so the
@@ -3527,6 +4807,54 @@ export function createMapController(container, initial, callbacks) {
     return satelliteStyle(sat.group).size;
   }
 
+  // ---------- Task 25: ground track / footprint overlay for the open card ----------
+  //
+  // Shared by stations/military (buildSatelliteMarker below, footprint
+  // only -- see decorateSatellite's own note on why there is no ground
+  // track for these two: their orbital elements are never sent to the
+  // browser, only their live position) and the three small client-
+  // propagated marker layers (buildSatElementMarker further down, footprint
+  // and ground track both). The four bulk WebGL layers (satImaging/satGeo/
+  // satStarlink/satOneweb) keep their pre-existing "no click-to-select
+  // model" (see their own entityWebglLayer.updateEntities call's isSelected/
+  // onSelect below) -- footprint and ground track are only ever drawn for a
+  // satellite that already has an actual Leaflet marker and popup to hang
+  // them on, and building a second, WebGL-specific selection path for
+  // several thousand Starlink/OneWeb objects is outside this task's brief.
+
+  function clearSatelliteOverlay() {
+    satelliteOverlayLayer.clearLayers();
+  }
+
+  /** The footprint circle: radius from footprintRadiusKm(altKm) -- see that
+   *  function's own comment for the standard horizon-geometry formula.
+   *  L.circle's radius is metres; footprintRadiusKm answers km. */
+  function drawSatelliteFootprint(lat, lon, altKm) {
+    const radiusKm = footprintRadiusKm(altKm);
+    if (radiusKm <= 0) return;
+    L.circle([lat, lon], {
+      radius: radiusKm * 1000,
+      color: "#6fe3ff",
+      weight: 1,
+      fillOpacity: 0.04,
+      opacity: 0.35,
+      interactive: false,
+    }).addTo(satelliteOverlayLayer);
+  }
+
+  /** The ground track: one L.polyline per antimeridian-split segment (see
+   *  map/groundTrack.js's groundTrackSegments/splitAtAntimeridian), drawn
+   *  on the map's one primary copy of the world -- a short, selection-only
+   *  line has no need for drawLatLng/worldCopies' per-visible-copy
+   *  repetition the way an always-drawn marker layer does. */
+  function drawSatelliteGroundTrack(satrec, centerDate) {
+    for (const segment of groundTrackSegments(satrec, centerDate, { beforeMin: 90, afterMin: 90, stepMin: 1 })) {
+      if (segment.length < 2) continue;
+      L.polyline(segment, { color: "#6fe3ff", weight: 2, opacity: 0.7, dashArray: "4 4", interactive: false })
+        .addTo(satelliteOverlayLayer);
+    }
+  }
+
   function buildSatelliteMarker(sat, copy = 0) {
     const d = decorateSatellite(sat, { offset: offsetFor("satellites", sat.norad_id) });
     const marker = L.marker(drawLatLng(sat, copy), { icon: d.icon });
@@ -3538,6 +4866,14 @@ export function createMapController(container, initial, callbacks) {
       className: "map-tooltip",
       direction: "top",
     });
+    // No orbital elements for stations/military on the client (see
+    // decorateSatellite's own note), so only the footprint -- pure
+    // arithmetic over the live alt_km this marker already has -- is drawn.
+    marker.on("popupopen", () => {
+      clearSatelliteOverlay();
+      drawSatelliteFootprint(marker._item.lat, marker._item.lon, marker._item.alt_km);
+    });
+    marker.on("popupclose", clearSatelliteOverlay);
     return marker;
   }
 
@@ -3623,6 +4959,294 @@ export function createMapController(container, initial, callbacks) {
     }
   }
 
+  // ---------- Task 24: client-propagated satellite layers ----------
+  //
+  // stations/military above are this map's own server-side SGP4, unchanged.
+  // Everything here is propagated in the browser instead, from stored
+  // CelesTrak element sets (see map/satPropagate.js and
+  // backend/sources/satellites.py's ELEMENT_LAYER_GROUPS/cadence_seconds).
+  //
+  // DOM vs WebGL: satNavigation/satWeather/satScience (a few dozen to ~150
+  // objects apiece) draw as ordinary Leaflet markers, the same mechanism
+  // stations/military already use -- individually poppable, individually
+  // tooltippable, and cheap at that count. satImaging/satGeo/satStarlink/
+  // satOneweb (several hundred to several thousand objects, and imaging is
+  // on by default) draw on entityWebglLayer's shared GPU-batched canvas
+  // instead, the same one AIS/ADS-B already use -- that is the one renderer
+  // on this map already proven to carry thousands of moving points without
+  // per-marker DOM cost, and hundreds-to-thousands of markers was never a
+  // reasonable DOM-path number to begin with (see webglLayer.js's own
+  // opening comment on why it exists at all). Declutter offsets and per-pin
+  // zoom gating are deliberately not wired up for either path here -- Task
+  // 24's brief is the propagation and the toggles, not a second pass over
+  // the placement system for seven more layers; a future task can add it
+  // the way it was added for stations/military if it turns out to matter at
+  // these object counts.
+
+  /** GET /api/satellites/elements?groups=<celestrak group>, storing the raw
+   *  OMM element sets for one layer. Never re-fetched automatically after
+   *  the first success -- elements barely change (six hours server-side; see
+   *  ELEMENTS_REFRESH_INTERVAL in backend/sources/satellites.py) -- so, like
+   *  railways/cables/water elsewhere in this file, this is a one-shot fetch
+   *  rather than a poller. */
+  function fetchSatElements(layerKey) {
+    if (satElements[layerKey] != null) return; // already fetched (or in flight)
+    satElements[layerKey] = []; // in flight -- guards a fast double-toggle from double-fetching
+    fetchJson(`/api/satellites/elements?groups=${SAT_ELEMENT_CELESTRAK_GROUP[layerKey]}`)
+      .then((data) => {
+        const elements = Array.isArray(data) ? data : [];
+        satElements[layerKey] = elements;
+        // Task 25: indexed by NORAD id so a marker's popupopen handler (see
+        // buildSatElementMarker below) can find its own OMM record in O(1)
+        // instead of scanning the whole layer -- this can run to several
+        // thousand entries for starlink/oneweb.
+        satElementIndex[layerKey] = new Map(elements.map((omm) => [omm.NORAD_CAT_ID, omm]));
+        tickSatElementLayer(layerKey, true); // first fix immediately, not up to two minutes late
+      })
+      .catch((err) => {
+        satElements[layerKey] = null; // let the next attempt retry rather than pin an empty layer
+        satElementIndex[layerKey] = null;
+        console.warn(`Failed to load satellite elements for ${layerKey}:`, err);
+      });
+  }
+
+  /** A real SGP4 pass (satElementTracker.tick) for one layer's currently-held
+   *  element sets, gated by its own cadence unless `force`. Registers every
+   *  element set with the shared tracker first, tagged with `layerKey` --
+   *  setElements is a no-op for an object whose epoch and group have not
+   *  changed, so this is cheap to call on every redraw tick and only
+   *  actually rebuilds a satrec when the elements themselves refresh.
+   *
+   *  `layerKey` is passed to tick() as its `group` -- not optional. Without
+   *  it tick() would re-propagate every satellite ever registered with the
+   *  shared tracker, on whichever layer's cadence happened to call it first,
+   *  which is exactly the bug that let a 10s-cadence layer's timer
+   *  re-SGP4-propagate a 60s-cadence layer's several thousand objects six
+   *  times more often than intended -- see satPropagate.js's own doc on
+   *  tick() for the full reasoning. */
+  function tickSatElementLayer(layerKey, force = false) {
+    const elements = satElements[layerKey];
+    if (!elements || !elements.length) return;
+    for (const omm of elements) satElementTracker.setElements(omm.NORAD_CAT_ID, omm, layerKey);
+    const now = Date.now();
+    const last = satElementLastTick[layerKey] || 0;
+    if (!force && now - last < satElementCadenceMs(layerKey)) return;
+    satElementLastTick[layerKey] = now;
+    satElementTracker.tick(new Date(now), layerKey);
+  }
+
+  function satElementPositions(layerKey) {
+    const elements = satElements[layerKey];
+    if (!elements || !elements.length) return [];
+    const now = new Date();
+    const out = [];
+    for (const omm of elements) {
+      // `layerKey` as the group: a NORAD id shared between two toggles (e.g.
+      // a GOES satellite under both satWeather and satGeo -- see
+      // satPropagate.js's own note on why) has one tracker entry per group,
+      // so this has to say which one it means.
+      const pos = satElementTracker.positionAt(omm.NORAD_CAT_ID, now, layerKey);
+      if (!pos) continue; // no fix yet (still loading), or the element set doesn't propagate at all
+      out.push({
+        norad_id: omm.NORAD_CAT_ID, name: omm.OBJECT_NAME, lat: pos.lat, lon: pos.lon, alt_km: pos.alt_km,
+        // Task 25: the static orbital fields backend/sources/satellites.py's
+        // _decorate_element already computed once, server-side, at the
+        // six-hourly element refresh (see that module's own
+        // _summary_fields) -- a plain spread, not a second derivation, so
+        // the card can never disagree with the values the collector itself
+        // reported. Cheap to carry on every rendered item (they are static
+        // strings/numbers already sitting on `omm`, not a propagation),
+        // unlike velocity/ground-track/footprint below, which are only
+        // computed for the one card a reader has open.
+        // `omm.epoch` (lowercase) is _summary_fields' own copy of CelesTrak's
+        // EPOCH, not the raw uppercase OMM field of the same name under a
+        // different case -- both exist on the same record (see
+        // backend/sources/satellites.py's _decorate_element, which spreads
+        // the raw OMM and then _summary_fields over it), and this reads the
+        // one decorateSatElement/satelliteOrbitSections actually expects.
+        intl_designator: omm.intl_designator, launch_year: omm.launch_year,
+        inclination_deg: omm.inclination_deg, period_min: omm.period_min,
+        apogee_km: omm.apogee_km, perigee_km: omm.perigee_km, epoch: omm.epoch,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The fresh, on-demand propagation Task 25's card needs and the
+   * always-running redraw loop deliberately does not compute for every
+   * marker: a real SGP4 velocity (from the same satrec the shared tracker
+   * would otherwise interpolate) and the ground track over the
+   * surrounding +-90 minutes. Built once per popup open, not per redraw
+   * tick -- see buildSatElementMarker's own popupopen handler, the only
+   * caller.
+   *
+   * Uses a satrec built fresh from the stored OMM record rather than
+   * reaching into satElementTracker's own (module-private) entries: the
+   * tracker exists to answer "where to draw this, right now, cheaply,
+   * every two seconds" via interpolation between two fixes, and never
+   * kept the velocity either fix carried past positionAt's return value
+   * (see satPropagate.js's interpolateFixes/positionAt) -- there is
+   * nothing in it to reach into. One extra satrec build plus one real
+   * SGP4 propagation is trivial next to how rarely a reader opens a
+   * satellite's card, so this pays that cost fresh rather than growing
+   * the tracker a second, wider return shape only this call site wants.
+   */
+  function liveSatelliteDetail(noradId, layerKey) {
+    const omm = satElementIndex[layerKey]?.get(noradId);
+    const now = new Date();
+    if (!omm) return { velocityKmS: undefined, groundTrackAvailable: false, satrec: null, now };
+    try {
+      const satrec = satrecFromElements(omm);
+      const fix = propagateEci(satrec, now);
+      const v = fix?.velocity;
+      const velocityKmS = v ? Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) : undefined;
+      return { velocityKmS, groundTrackAvailable: true, satrec, now };
+    } catch {
+      // A malformed element set -- decorateSatElement's default (already
+      // rendered before this handler runs) still shows position/altitude;
+      // this only means no live velocity or ground track for this one.
+      return { velocityKmS: undefined, groundTrackAvailable: false, satrec: null, now };
+    }
+  }
+
+  function buildSatElementMarker(item, layerKey, copy = 0) {
+    const d = decorateSatElement(item, layerKey, { offset: offsetFor(layerKey, item.norad_id) });
+    const marker = L.marker(drawLatLng(item, copy), { icon: d.icon });
+    marker._item = item;
+    marker._iconHtml = d.icon.options.html;
+    applyStacking(marker, detailSize(satElementStyle(layerKey).size), layerKey);
+    marker.bindPopup(() => decorateSatElement(marker._item, layerKey).detail, popupOptions(320));
+    marker.bindTooltip(() => decorateSatElement(marker._item, layerKey).tooltip, {
+      className: "map-tooltip",
+      direction: "top",
+    });
+    // Task 25: ground track + footprint + real velocity, computed once on
+    // open (see liveSatelliteDetail above) rather than kept live while the
+    // card stays open -- over the few seconds to minutes a reader actually
+    // looks at one card, a LEO object's true position drifts by a few
+    // kilometres at most, well inside the footprint circle's own radius,
+    // so a snapshot read on open is a reasonable trade against recomputing
+    // a 181-point propagation on every 2s redraw tick for a card that is,
+    // most of the time, not open at all. Closing and reopening the same
+    // popup refreshes it.
+    marker.on("popupopen", () => {
+      clearSatelliteOverlay();
+      const { velocityKmS, groundTrackAvailable, satrec, now } = liveSatelliteDetail(marker._item.norad_id, layerKey);
+      drawSatelliteFootprint(marker._item.lat, marker._item.lon, marker._item.alt_km);
+      if (satrec) drawSatelliteGroundTrack(satrec, now);
+      const popup = marker.getPopup();
+      if (popup?.isOpen()) {
+        popup.setContent(decorateSatElement(marker._item, layerKey, { velocityKmS, groundTrackAvailable }).detail);
+      }
+    });
+    marker.on("popupclose", clearSatelliteOverlay);
+    return marker;
+  }
+
+  function updateSatElementMarker(marker, item, layerKey, copy = 0) {
+    marker._item = item;
+    marker.setLatLng(drawLatLng(item, copy));
+    const d = decorateSatElement(item, layerKey, { offset: offsetFor(layerKey, item.norad_id) });
+    if (marker._iconHtml !== d.icon.options.html) {
+      marker.setIcon(d.icon);
+      marker._iconHtml = d.icon.options.html;
+    }
+  }
+
+  const SAT_ELEMENT_DOM_GROUP = {
+    satNavigation: satNavigationGroup, satWeather: satWeatherGroup, satScience: satScienceGroup,
+  };
+
+  /** DOM-marker render for one of the three small groups. `minZoomFor`
+   *  answers both cases the same way: satNavigation/satWeather are gated at
+   *  THEATRE (see map/scene.js), satScience is ungated (returns null, so
+   *  `belowMinZoom` is always false) -- one code path, no per-layer branch.
+   *  Below the gate this mirrors every other gated marker layer
+   *  (renderCities, renderInfra, ...): zoomNotes[layerKey] is set so the
+   *  panel can say *why* the count reads zero, and nothing is drawn. */
+  function renderSatElementLayer(layerKey) {
+    if (!satElementVisible[layerKey]) return;
+    const zoom = map.getZoom();
+    const belowMinZoom = zoom < (minZoomFor(layerKey) ?? -Infinity);
+    if (SAT_ELEMENT_ZOOM_NOTE_KEYS.has(layerKey)) {
+      zoomNotes[layerKey] = belowMinZoom;
+      scheduleReports({ notes: true });
+    }
+    const inView = viewportFilter();
+    const visible = belowMinZoom
+      ? []
+      : satElementPositions(layerKey).filter((s) => inView(s.lat, s.lon));
+    registerPlacement(
+      layerKey,
+      visible.map((s) => ({ id: s.norad_id, lat: s.lat, lon: s.lon, size: detailSize(satElementStyle(layerKey).size) }))
+    );
+    syncAcrossWorldCopies(
+      markersByKey[layerKey], SAT_ELEMENT_DOM_GROUP[layerKey], visible, (s) => s.norad_id,
+      (item, copy) => buildSatElementMarker(item, layerKey, copy),
+      (marker, item, copy) => updateSatElementMarker(marker, item, layerKey, copy)
+    );
+    counts[layerKey] = visible.length;
+    totals[layerKey] = (satElements[layerKey] || []).length;
+    scheduleReports({ counts: true });
+    settlePlacement();
+  }
+
+  /** WebGL-bucket render for one of the four bulk groups. Same `minZoomFor`
+   *  treatment as renderSatElementLayer above: satImaging is gated at
+   *  THEATRE, satGeo/satStarlink/satOneweb are ungated (null, so the gate
+   *  never trips). No viewport filter and no declutter offsets when at or
+   *  above the gate -- entityWebglLayer already reprojects and culls
+   *  off-screen sprites on its own (see webglLayer.js's _reset/
+   *  _repositionAll), the same unfiltered-feed approach renderAisLayer/
+   *  renderAdsbLayer already take for their own, larger buckets. */
+  function renderSatElementWebgl(layerKey) {
+    if (!satElementVisible[layerKey]) return;
+    const zoom = map.getZoom();
+    const belowMinZoom = zoom < (minZoomFor(layerKey) ?? -Infinity);
+    if (SAT_ELEMENT_ZOOM_NOTE_KEYS.has(layerKey)) {
+      zoomNotes[layerKey] = belowMinZoom;
+      scheduleReports({ notes: true });
+    }
+    const visible = belowMinZoom ? [] : satElementPositions(layerKey);
+    const style = satElementStyle(layerKey);
+    entityWebglLayer.updateEntities(layerKey, visible, {
+      idField: (s) => s.norad_id,
+      heading: () => NaN, // orbital motion has no meaningful "nose" to point a sprite at
+      style: () => style,
+      // Still no click-to-select model for these four bulk WebGL layers --
+      // see the "Task 25: ground track / footprint overlay" comment above
+      // buildSatelliteMarker for why that stayed out of this task's scope
+      // (several thousand Starlink/OneWeb objects is not a WebGL selection
+      // path worth building just for a card popup).
+      isSelected: () => false,
+      onSelect: () => {},
+      getTooltip: (s) => decorateSatElement(s, layerKey).tooltip,
+      offsets: undefined,
+    });
+    counts[layerKey] = visible.length;
+    totals[layerKey] = (satElements[layerKey] || []).length;
+    scheduleReports({ counts: true });
+  }
+
+  function renderSatElement(layerKey) {
+    if (SAT_ELEMENT_LAYERS[layerKey].dom) renderSatElementLayer(layerKey);
+    else renderSatElementWebgl(layerKey);
+  }
+
+  /** The redraw tick: ticks whichever layers are visible and due for a real
+   *  SGP4 pass (see satElementCadenceMs), then redraws every visible layer's
+   *  interpolated positions regardless -- called on its own timer
+   *  (SAT_ELEMENT_REDRAW_MS) rather than from renderAllLayers, since these
+   *  seven have to keep moving even while the camera sits still. */
+  function tickAndRedrawSatElements() {
+    for (const layerKey of Object.keys(SAT_ELEMENT_CELESTRAK_GROUP)) {
+      if (!satElementVisible[layerKey]) continue;
+      tickSatElementLayer(layerKey);
+      renderSatElement(layerKey);
+    }
+  }
+
   // Concentric-rings "sonar ping"/water-drop-ripple marker for an active
   // jamming cell -- distinct from the .infra-hot/.country-hot steady glow.
   // Loops continuously via CSS (animation-iteration-count: infinite, see
@@ -3683,7 +5307,8 @@ export function createMapController(container, initial, callbacks) {
         <div class="meta">${esc(d.date || "")}</div>
         <div>Affected aircraft reports: ${Math.round(d.jam_ratio * 100)}% (${d.bad} of ${d.bad + d.good})</div>
         <p class="meta">Derived from ADS-B aircraft GPS-quality reports, aggregated into a ~1,770km&sup2; hex cell -- a once-daily, regional signal, not a real-time or pinpoint one.</p>
-        <div class="meta">Source: gpsjam.org (ADS-B Exchange)</div>`;
+        <div class="meta">Source: gpsjam.org (ADS-B Exchange)</div>
+        ${jamCellCrosscheckNote(raw.jamCrosscheck, d.hex)}`;
       // Hit radius sized to the *visible* ping ring (up to ~31px at peak
       // scale, see .jamming-ping-ring/@keyframes jamming-ping in style.css),
       // not the old 8px dot -- otherwise the pulsing ring people actually
@@ -3711,6 +5336,83 @@ export function createMapController(container, initial, callbacks) {
     scheduleReports({ counts: true });
   }
 
+  // Task 20a: the AIS traffic grid (GET /api/lanes, backend/refine/
+  // lane_density.py) -- a near-copy of renderJamming just above, same
+  // "heat canvas plus near-invisible click targets" shape. No ping group:
+  // see the comment on createLaneDensityLayers in layers.js for why a
+  // continuously-decaying cell has no "just appeared" moment worth one.
+  //
+  // The honesty framing is the whole point of this layer (Task 20's brief):
+  // this is where *we* have seen ships, over the window the grid actually
+  // covers, and an empty cell means no observation, never no traffic. That
+  // sentence is the backend's own `note` (lane_density.NOTE, served verbatim
+  // as raw.laneDensity.note), repeated on every single popup rather than
+  // summarised, so the wording on the map can never quietly drift from the
+  // one the endpoint promises.
+  function renderLaneDensity() {
+    if (skipHiddenLayer("laneDensity")) return;
+    const inView = viewportFilter();
+    const doc = raw.laneDensity || {};
+    const cells = Array.isArray(doc.cells) ? doc.cells : [];
+    const note = doc.note || "";
+    // Same "heat draws at every zoom, click targets wait for detail" split
+    // jamming uses -- a 0.05deg/0.02deg cell is a smear at world zoom and a
+    // real reading once a reader is looking at one stretch of water.
+    const belowLaneDensityDetailZoom = map.getZoom() < (minZoomFor("laneDensity") ?? -Infinity);
+    zoomNotes.laneDensity = belowLaneDensityDetailZoom;
+    scheduleReports({ notes: true });
+
+    const visible = cells.filter((d) => inView(d.lat, d.lon));
+
+    applyHeatKernel(laneDensityHeat, "laneDensity");
+    const placeLane = worldCopyPlacements();
+    const laneDensityHeatPoints = [];
+    for (const d of visible) {
+      const weight = laneDensityIntensity(d.sightings);
+      placeLane(d.lat, d.lon, (drawLon) => laneDensityHeatPoints.push([d.lat, drawLon, weight]));
+    }
+    safeHeatSetLatLngs(laneDensityHeat, laneDensityHeatPoints);
+    applyWashStack(); // see the note beside the FIRMS call
+
+    laneDensityPointsLayer.clearLayers();
+    if (!belowLaneDensityDetailZoom) {
+      for (const d of visible) {
+        const classEntries = Object.entries(d.by_class || {});
+        const classLine = classEntries.length
+          ? `<div>By class: ${classEntries.map(([cls, n]) => `${esc(cls)} ${fmtNumber(n)}`).join(", ")}</div>`
+          : "";
+        const courseLine = Number.isFinite(d.course_deg)
+          ? `<div>Net course: ${Math.round(d.course_deg)}&deg;</div>`
+          : '<div class="meta">No net directional evidence in this cell.</div>';
+        const tooltip = `<b>${fmtNumber(d.sightings)} sightings</b><br/>not a distinct-vessel count`;
+        const detail = `
+          <h3>AIS traffic density</h3>
+          <div>${fmtNumber(d.sightings)} sightings recorded in this cell</div>
+          ${classLine}
+          ${courseLine}
+          <p class="meta"><b>Not a count of distinct vessels.</b> A hull that sits still keeps adding to this
+          number, so a loitering ship and a busy strait can show the same figure -- see below.</p>
+          <p class="meta">${esc(note)}</p>`;
+        placeLane(d.lat, d.lon, (drawLon) => {
+          const marker = L.circleMarker([d.lat, drawLon], {
+            radius: Math.max(4, Math.round(10 * layerScale("laneDensity"))),
+            fillOpacity: 0.02,
+            opacity: 0,
+            color: laneDensityColor(),
+            renderer: laneDensityCanvasRenderer,
+          });
+          marker.bindTooltip(tooltip, { className: "map-tooltip", direction: "top" });
+          marker.bindPopup(detail, popupOptions(280));
+          laneDensityPointsLayer.addLayer(marker);
+        });
+      }
+    }
+
+    counts.laneDensity = visible.length;
+    totals.laneDensity = cells.length;
+    scheduleReports({ counts: true });
+  }
+
   // Country boundaries only actually change once/day server-side (see
   // countries.py), but the frontend re-polls every 5 minutes and a browser
   // HTTP cache hit still hands back a fresh-looking (but byte-identical)
@@ -3732,6 +5434,10 @@ export function createMapController(container, initial, callbacks) {
   // adding it here would run the pass twice on every boundary refresh.
   const CHOROPLETH_FEEDS = new Set([
     "conflictStats", "humanitarian", "outages", "energyFlows", "foodTrade",
+    // The state-target metric's own feed (Task 26). `subdivisions` is absent
+    // for the same reason `countries` is: drawSubdivisions repaints itself
+    // after rebuilding the state shapes.
+    "outagesRegions",
   ]);
 
   /**
@@ -3793,6 +5499,7 @@ export function createMapController(container, initial, callbacks) {
     // the months are still in flight would otherwise say "no record for this
     // month" -- the archive's one claim that has to mean something.
     districtCountsLoading = true;
+    raw.districtMonthLoading = true;
     let months = [];
     try {
       months = await fetchJson("/api/conflict-district-months");
@@ -3802,7 +5509,8 @@ export function createMapController(container, initial, callbacks) {
     }
     if (!Array.isArray(months) || !months.length) {
       districtCountsLoading = false;
-      refreshDistrictCard();
+      raw.districtMonthLoading = false;
+      refreshFocusedDistrictCard();
       return;
     }
     districtMonths = months;
@@ -3814,7 +5522,8 @@ export function createMapController(container, initial, callbacks) {
   async function loadDistrictMonth(month) {
     if (!month) return;
     districtCountsLoading = true;
-    refreshDistrictCard();
+    raw.districtMonthLoading = true;
+    refreshFocusedDistrictCard();
     let counts = new Map();
     try {
       counts = indexDistrictCounts(await fetchJson(
@@ -3829,8 +5538,40 @@ export function createMapController(container, initial, callbacks) {
     // so an early response could otherwise overwrite a later one.
     if (districtMonth !== month) return;
     districtCounts = counts;
+    raw.districtCounts = districtCounts;
     districtCountsLoading = false;
-    refreshDistrictCard();
+    raw.districtMonthLoading = false;
+    refreshFocusedDistrictCard();
+  }
+
+  /**
+   * One country's own slice of the hapi_conflict archive, up to its 24-month
+   * retention -- what the district card's trend sparkline reads. Fetched at
+   * most once per country, the same claim-then-fetch pattern loadDistrictCountry
+   * uses for boundaries just above, and the same existing /api/conflict-districts
+   * endpoint loadDistrictMonth already calls for one month at a time, just
+   * scoped by country instead of by month -- no new endpoint. `months=24`
+   * rather than the endpoint's own `months=1` default: hapi_conflict.py keeps
+   * at most 24 months per district in the first place (MONTHS_KEPT), so this
+   * asks for everything the archive could possibly hold for this one country,
+   * not the ~23 MB whole-world archive its own docstring warns off.
+   */
+  async function loadDistrictSeries(iso3) {
+    if (!iso3 || districtSeriesByCountry.has(iso3)) return;
+    districtSeriesByCountry.set(iso3, null); // claimed, so a second drill-down does not refetch
+    let records = [];
+    try {
+      records = await fetchJson(`/api/conflict-districts?country=${encodeURIComponent(iso3)}&months=24`);
+    } catch {
+      // No archive reachable for this country -- the trend section is simply
+      // absent, same as every other optional fold with nothing to show.
+    }
+    districtSeriesByCountry.set(iso3, records);
+    raw.districtSeries = { ...raw.districtSeries, [iso3]: records };
+    // A district card in this country may already be open (the boundaries and
+    // the archive load in parallel -- see syncDistrictDrilldown), and its
+    // trend fold has been waiting on exactly this.
+    refreshFocusedDistrictCard();
   }
 
   /** Which month the card reads. Fetches that month's counts. */
@@ -3874,12 +5615,12 @@ export function createMapController(container, initial, callbacks) {
     const selected = subdivisionEntryFor(selectedSubdivisionKey);
     if (selected && !wanted.has(selected.country_code)) {
       selectedSubdivisionKey = null;
-      // Its popup goes too. It describes a shape that is about to stop being
+      // Its card goes too. It describes a shape that is about to stop being
       // drawn, and a card still standing over a state nobody can see any more is
       // worse than no card -- it reads as the answer to the click that just
       // removed it.
-      if (subdivisionPopup && map.hasLayer(subdivisionPopup)) map.closePopup(subdivisionPopup);
-      subdivisionPopup = null;
+      focusedSubdivisionLayer = null;
+      reportSubdivisionSelection();
       // The districts drawn inside that state go with it -- assigned directly
       // rather than through selectSubdivision, so the drill-down is put away
       // here rather than by that function.
@@ -3904,6 +5645,7 @@ export function createMapController(container, initial, callbacks) {
         // Extended rather than rebuilt -- each country arrives on its own
         // request and the ones already indexed are still valid.
         subdivisionIndex = subdivisionIndex.concat(buildSubdivisionIndex(collection.features));
+        raw.subdivisionIndex = subdivisionIndex;
       }
     }));
     drawSubdivisions();
@@ -3924,6 +5666,13 @@ export function createMapController(container, initial, callbacks) {
       drawnSubdivisionCountries = signature;
       subdivisionsLayer.clearLayers();
       for (const iso3 of ready) subdivisionsLayer.addData(subdivisionGeometry.get(iso3));
+      // The badges are positioned against these shapes and the state fill
+      // paints them, so both are stale the instant the shapes themselves are
+      // rebuilt -- same reasoning renderCountries applies to outagePoints and
+      // the country choropleth after a boundary rebuild.
+      rebuildOutageRegionPoints();
+      renderMarkerLayer("outageRegionPoints");
+      refreshChoropleth();
     }
     const any = subdivisionsLayer.getLayers().length > 0;
     // Added and removed rather than left empty on the map: an empty GeoJSON
@@ -3951,12 +5700,67 @@ export function createMapController(container, initial, callbacks) {
   function selectSubdivision(key) {
     if (key === selectedSubdivisionKey) return;
     selectedSubdivisionKey = key;
+    focusedSubdivisionLayer = subdivisionLayerForKey(key);
     updateSubdivisionHighlights();
+    reportSubdivisionSelection();
     // The districts follow the state exactly as the states follow the country.
     // Not awaited: a country being drilled into for the first time has its
     // district geometry fetched here, and the state highlights immediately
     // rather than waiting on it.
     syncDistrictDrilldown();
+  }
+
+  /** The Leaflet layer for one subdivision, or null -- same "scan the layer
+   *  group" approach waterLayerFor uses, since subdivisionsLayer only ever
+   *  holds a few dozen paths at once (the selected countries' own states). */
+  function subdivisionLayerForKey(key) {
+    if (key == null) return null;
+    let found = null;
+    subdivisionsLayer.eachLayer((layer) => {
+      if (!found && subdivisionKeyOf(layer.feature?.properties || {}) === key) found = layer;
+    });
+    return found;
+  }
+
+  /** Viewport-pixel anchor for the subdivision info card -- same arithmetic as
+   *  countryAnchorPoint/waterAnchorPoint. */
+  function subdivisionAnchorPoint(layer) {
+    const center = layer.getBounds().getCenter();
+    const pt = map.latLngToContainerPoint(center);
+    const rect = container.getBoundingClientRect();
+    return { x: rect.left + pt.x, y: rect.top + pt.y };
+  }
+
+  /** The card payload for one subdivision index entry, built from current
+   *  data -- the state counterpart to countryCardFor/waterCardFor. */
+  function subdivisionCardFor(entry) {
+    const bounds = entry.bbox
+      ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
+      : null;
+    const { title, sections } = subdivisionCardSections(entry, raw, bounds);
+    const layer = subdivisionLayerForKey(entry.key);
+    return {
+      key: entry.key,
+      name: title,
+      sections,
+      point: layer ? subdivisionAnchorPoint(layer) : null,
+    };
+  }
+
+  /** Tell React which state's card is open, or that none is -- the
+   *  subdivision counterpart to reportWaterSelection. No selection array
+   *  alongside it, same reasoning as water: no chips, no highlight that
+   *  outlives the card. */
+  function reportSubdivisionSelection() {
+    const entry = subdivisionEntryFor(selectedSubdivisionKey);
+    callbacks.onSubdivisionSelect?.(entry ? subdivisionCardFor(entry) : null);
+  }
+
+  /** Rebuild the open state card against data that has just landed -- the
+   *  subdivision counterpart to refreshFocusedCountryCard/refreshFocusedWaterCard. */
+  function refreshFocusedSubdivisionCard() {
+    if (!selectedSubdivisionKey) return;
+    reportSubdivisionSelection();
   }
 
   function setHoveredSubdivision(key) {
@@ -4026,7 +5830,13 @@ export function createMapController(container, initial, callbacks) {
     }
     assignDistrictStates(state.country_code);
     drawStateDistricts();
-    await loadDistrictCountry(state.country_code);
+    // Boundaries and this country's own slice of the conflict archive load in
+    // parallel -- the outlines must not wait on the archive to be drawn, and
+    // the archive request is exactly as fire-and-forget as loadDistrictCountry
+    // already was on its own. loadDistrictSeries refreshes any open district
+    // card itself once it lands (see its own docstring), so nothing further is
+    // needed here for that half.
+    await Promise.all([loadDistrictCountry(state.country_code), loadDistrictSeries(state.country_code)]);
     assignDistrictStates(state.country_code);
     drawStateDistricts();
   }
@@ -4036,9 +5846,13 @@ export function createMapController(container, initial, callbacks) {
     if (signature !== drawnDistrictState || (signature && !districtOutlineLayer.getLayers().length)) {
       drawnDistrictState = signature;
       // The district singled out belonged to the state being left; carrying it
-      // across would leave a selection nobody can see.
+      // across would leave a selection nobody can see. Its card goes with it,
+      // the same reasoning syncSubdivisions gives for dropping a state's own
+      // card when its country is deselected.
       selectedDistrictPcode = null;
       hoveredDistrictPcode = null;
+      focusedDistrictLayer = null;
+      reportDistrictSelection();
       districtOutlineLayer.clearLayers();
       const pcodes = new Set(districtsOfSelectedState().map((d) => d.pcode));
       const iso3 = subdivisionEntryFor(selectedSubdivisionKey)?.country_code;
@@ -4055,16 +5869,6 @@ export function createMapController(container, initial, callbacks) {
     if (any && !map.hasLayer(districtOutlineLayer)) districtOutlineLayer.addTo(map);
     if (!any && map.hasLayer(districtOutlineLayer)) map.removeLayer(districtOutlineLayer);
     updateDistrictHighlights();
-
-    // The state's own popup is opened by the click that selected it, which is
-    // before its districts have been fetched the first time a country is drilled
-    // into. Rewritten here so the line telling the reader there is another level
-    // to click appears when the districts do, rather than only on the second
-    // visit to that country.
-    if (subdivisionPopup && map.hasLayer(subdivisionPopup)) {
-      const state = subdivisionEntryFor(selectedSubdivisionKey);
-      if (state) subdivisionPopup.setContent(subdivisionPopupHtml(state, districtsOfSelectedState().length));
-    }
   }
 
   function updateDistrictHighlights() {
@@ -4077,10 +5881,16 @@ export function createMapController(container, initial, callbacks) {
     });
   }
 
+  function districtEntryFor(pcode) {
+    return pcode == null ? null : districtIndex.find((d) => d.pcode === pcode) || null;
+  }
+
   function selectDistrict(pcode) {
     if (pcode === selectedDistrictPcode) return;
     selectedDistrictPcode = pcode;
+    focusedDistrictLayer = districtLayerForPcode(pcode);
     updateDistrictHighlights();
+    reportDistrictSelection();
   }
 
   function setHoveredDistrict(pcode) {
@@ -4089,46 +5899,64 @@ export function createMapController(container, initial, callbacks) {
     updateDistrictHighlights();
   }
 
-  // The open district card and the district it is describing, held so the month
-  // selector inside it can rewrite it in place when the counts for a new month
-  // land. Cleared implicitly: every read is guarded on the popup still being on
-  // the map.
-  let districtCard = null;
-  let districtCardEntry = null;
+  /** The Leaflet layer for one district, or null -- same "scan the layer
+   *  group" approach subdivisionLayerForKey/waterLayerFor use, since
+   *  districtOutlineLayer only ever holds one state's worth of districts. */
+  function districtLayerForPcode(pcode) {
+    if (pcode == null) return null;
+    let found = null;
+    districtOutlineLayer.eachLayer((layer) => {
+      if (!found && layer.feature?.properties?.pcode === pcode) found = layer;
+    });
+    return found;
+  }
 
-  function districtCardHtml() {
-    return districtPopupHtml(districtCardEntry, {
-      record: districtCounts.get(districtCardEntry.pcode) || null,
+  /** Viewport-pixel anchor for the district info card -- same arithmetic as
+   *  countryAnchorPoint/waterAnchorPoint/subdivisionAnchorPoint. */
+  function districtAnchorPoint(layer) {
+    const center = layer.getBounds().getCenter();
+    const pt = map.latLngToContainerPoint(center);
+    const rect = container.getBoundingClientRect();
+    return { x: rect.left + pt.x, y: rect.top + pt.y };
+  }
+
+  /**
+   * The card payload for one district index entry, built from current data --
+   * the district counterpart to subdivisionCardFor/countryCardFor/
+   * waterCardFor. `month`/`months` ride along on the payload itself (rather
+   * than being read back out of `raw` by the component) so DistrictInfoCard's
+   * own month `<select>` has something to render without a second prop.
+   */
+  function districtCardFor(entry) {
+    const bounds = entry.bbox
+      ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
+      : null;
+    const { title, sections } = districtCardSections(entry, raw, bounds, districtMonth);
+    const layer = districtLayerForPcode(entry.pcode);
+    return {
+      pcode: entry.pcode,
+      name: title,
+      sections,
+      point: layer ? districtAnchorPoint(layer) : null,
       month: districtMonth,
       months: districtMonths,
-      loading: districtCountsLoading,
-    });
+    };
   }
 
-  function openDistrictPopup(district, latlng) {
-    districtCardEntry = district;
-    districtCard = L.popup({ ...popupOptions(280), autoPan: false })
-      .setLatLng(latlng)
-      .setContent(districtCardHtml())
-      .openOn(map);
-    bindDistrictMonthSelect();
+  /** Tell React which district's card is open, or that none is -- the
+   *  district counterpart to reportSubdivisionSelection/reportWaterSelection. */
+  function reportDistrictSelection() {
+    const entry = districtEntryFor(selectedDistrictPcode);
+    callbacks.onDistrictSelect?.(entry ? districtCardFor(entry) : null);
   }
 
-  /** Rewrite the open card from whatever counts are now held. */
-  function refreshDistrictCard() {
-    if (!districtCard || !districtCardEntry || !map.hasLayer(districtCard)) return;
-    districtCard.setContent(districtCardHtml());
-    bindDistrictMonthSelect();
-  }
-
-  // Bound after every setContent rather than once at open: setContent replaces
-  // the content node, taking any listener on it with it. Leaflet already stops
-  // clicks inside a popup reaching the map, so the select does not need its own
-  // propagation guard.
-  function bindDistrictMonthSelect() {
-    const select = districtCard?.getElement?.()?.querySelector(".district-month-select");
-    if (!select) return;
-    select.addEventListener("change", (e) => setDistrictMonth(e.target.value));
+  /** Rebuild the open district card against data that has just landed --
+   *  called both by applyData's per-feed dispatch (DISTRICT_CARD_FEEDS) and
+   *  directly by loadDistrictMonth/ensureDistrictArchive/loadDistrictSeries,
+   *  whose archive state does not flow through applyData at all. */
+  function refreshFocusedDistrictCard() {
+    if (!selectedDistrictPcode) return;
+    reportDistrictSelection();
   }
 
   /**
@@ -4155,12 +5983,27 @@ export function createMapController(container, initial, callbacks) {
     return { iso3, state, district };
   }
 
+  /** Every currently-*drawn* state's own GeoJSON feature, flattened across
+   *  however many countries are selected right now -- not the whole of
+   *  subdivisionGeometry, which keeps every country ever selected this
+   *  session (see drawSubdivisions) and would paint states no longer on
+   *  screen. */
+  function drawnSubdivisionFeatures() {
+    const ready = drawnSubdivisionCountries ? drawnSubdivisionCountries.split(",") : [];
+    return ready.flatMap((iso3) => subdivisionGeometry.get(iso3)?.features || []);
+  }
+
   function refreshChoropleth() {
-    const features = raw.countries?.features || [];
+    const features = choroplethTarget === "state" ? drawnSubdivisionFeatures() : (raw.countries?.features || []);
     choropleth = buildChoropleth(choroplethMetricId, features, raw);
-    if (features.length) countriesLayer.resetStyle();
+    // Both layers are reset, not only the active target's: switching target
+    // has to clear whichever one just lost the fill, and a resetStyle on an
+    // empty/off layer is a no-op rather than an error.
+    if (raw.countries?.features?.length) countriesLayer.resetStyle();
+    if (subdivisionsLayer.getLayers().length) subdivisionsLayer.resetStyle();
     callbacks.onChoroplethChange?.({
       metricId: choropleth.metric ? choropleth.metric.id : null,
+      target: choroplethTarget,
       covered: choropleth.covered,
       total: choropleth.total,
     });
@@ -4184,6 +6027,7 @@ export function createMapController(container, initial, callbacks) {
       // captured layer reference, so a boundary refresh can't strand the
       // selected country on a detached layer.
       countryIndex = buildCountryIndex(raw.countries);
+      raw.countryIndex = countryIndex;
       layerByCountryKey = new Map();
       countriesLayer.eachLayer((layer) => {
         const props = layer.feature?.properties || {};
@@ -4598,9 +6442,12 @@ export function createMapController(container, initial, callbacks) {
     settlePlacement();
   }
 
-  // Pipeline routes (backend/infrastructure.py's PIPELINE_ROUTES) -- a small
-  // static set fetched once (see useOsintData.js), so this just draws every
-  // route once rather than diff-syncing per-viewport like the point layers.
+  // Pipeline routes -- backend/infrastructure.py's curated PIPELINE_ROUTES,
+  // plus (Task 28) real OSM pipeline geometry, merged server-side by
+  // app.py's infrastructure_list into one `raw.pipelines` array, each entry
+  // stamped `source: "curated" | "osm"`. Fetched once (see useOsintData.js),
+  // so this just draws every route once rather than diff-syncing
+  // per-viewport like the point layers.
   //
   // Drawn on every copy of the world in view, same as the cables below: a route
   // is a line across the globe, not a point, so it has to repeat where the
@@ -4610,21 +6457,39 @@ export function createMapController(container, initial, callbacks) {
     const offsets = worldCopies();
     worldCopyKeys.pipelines = offsets.join(",");
     for (const route of raw.pipelines) {
+      const path = route.path;
+      if (!Array.isArray(path) || path.length < 2) continue;
+      const isOsm = route.source === "osm";
+      const label = route.name ? esc(route.name) : "Pipeline";
+      const popupHtml = isOsm
+        ? `<h3>${label}</h3>` +
+          (route.substance ? `<div>Substance: ${esc(route.substance)}</div>` : "") +
+          (route.operator ? `<div>Operator: ${esc(route.operator)}</div>` : "") +
+          (route.diameter ? `<div class="meta">Diameter: ${esc(route.diameter)} mm</div>` : "") +
+          '<p class="meta">Real geometry from <b>OpenStreetMap</b>, swept daily across this map\'s ' +
+          "eleven conflict theatres only. Outside them, only the curated schematic routes apply.</p>" +
+          '<div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass</div>'
+        : `<h3>${label}</h3><p>${esc(route.note || "")}</p>` +
+          '<p class="meta">A hand-drawn schematic route (backend/infrastructure.py), not surveyed ' +
+          "geometry -- the fallback everywhere OpenStreetMap has not mapped this pipeline.</p>";
       for (const offset of offsets) {
-        const line = L.polyline(shiftPathLon(route.coords, offset), {
-          color: pipelineRouteColor(),
+        const line = L.polyline(shiftPathLon(path, offset), {
+          // Task 28: coloured by substance for the OSM half; the curated
+          // schematic (no substance tag) keeps the single infra.pipeline
+          // colour it has always drawn in.
+          color: pipelineRouteColor(route.substance),
           // Pipelines are drawn as part of the infrastructure layer and share its
           // dials, the same way the pipeline node's colour token is shared -- a
           // node and the line it sits on must not drift apart.
-          weight: scaledWeight(2, "infra"),
-          opacity: 0.65 * layerOpacity("infra"),
-          dashArray: "6 6",
+          weight: scaledWeight(isOsm ? 2.4 : 2, "infra"),
+          opacity: (isOsm ? 0.8 : 0.65) * layerOpacity("infra"),
+          dashArray: isOsm ? null : "6 6",
         });
         // Bound on every copy, not just the primary one. A reader who can see a
         // line can click it; a copy that looks identical but does nothing on
         // click reads as a broken map rather than as a decoration.
-        line.bindTooltip(esc(route.name), { className: "map-tooltip", direction: "top" });
-        line.bindPopup(`<h3>${esc(route.name)}</h3><p>${esc(route.note || "")}</p>`, popupOptions(280));
+        line.bindTooltip(label, { className: "map-tooltip", direction: "top" });
+        line.bindPopup(popupHtml, popupOptions(280));
         pipelinesGroup.addLayer(line);
       }
     }
@@ -4632,7 +6497,13 @@ export function createMapController(container, initial, callbacks) {
     // and a count that triples when the reader zooms out would be a lie.
     counts.pipelineRoutes = raw.pipelines.length;
     totals.pipelineRoutes = raw.pipelines.length;
-    scheduleReports({ counts: true });
+    // Review fix (Task 28, Critical): same "a cap that truncates silently is
+    // a defect" treatment railways'/powerLines' own truncated-region notes
+    // get -- read straight from what the endpoint carried through rather
+    // than inferred, since only the backend knows the raw, pre-parse
+    // Overpass element count.
+    zoomNotes.pipelinesTruncated = Array.isArray(raw.pipelinesTruncatedRegions) ? raw.pipelinesTruncatedRegions : [];
+    scheduleReports({ counts: true, notes: true });
   }
 
   // Cable routes are never bounds-filtered: unlike every marker layer, a polyline
@@ -4685,13 +6556,48 @@ export function createMapController(container, initial, callbacks) {
     scheduleReports({ counts: true });
   }
 
-  // Coarse railway linework, drawn once from the whole document exactly as
+  // Task 27: an OSM line's popup -- name, operator, gauge, electrification,
+  // usage and service where OSM has them, plus the same "swept daily, theatre
+  // only" honesty the Railways layer's own detail fold states. Kept apart
+  // from the Natural Earth popup below because the two are different claims
+  // about different data, not two renderings of one fact.
+  function osmRailwayPopupHtml(line) {
+    const label = line.name ? esc(line.name) : "Unnamed railway";
+    const cls = railwayOsmClass(line);
+    const classLabel = cls === "narrowGauge" ? "Narrow gauge" : cls === "branch" ? "Branch line" : "Main line";
+    const electrified = railwayIsElectrified(line);
+    return (
+      `<h3>${label}</h3>` +
+      `<div class="meta">${esc(classLabel)}${line.railway ? ` &middot; railway=${esc(line.railway)}` : ""}</div>` +
+      (line.operator ? `<div>Operator: ${esc(line.operator)}</div>` : "") +
+      (line.gauge ? `<div>Gauge: ${esc(line.gauge)} mm</div>` : "") +
+      `<div>${electrified ? "Electrified" : "Not electrified (or not stated)"}` +
+      `${line.electrified ? ` &middot; <span class="meta">electrified=${esc(line.electrified)}</span>` : ""}</div>` +
+      (line.usage ? `<div class="meta">Usage: ${esc(line.usage)}</div>` : "") +
+      (line.service ? `<div class="meta">Service: ${esc(line.service)}</div>` : "") +
+      `<p class="meta">From <b>OpenStreetMap</b>, swept daily across this map's conflict theatres only -- ` +
+      "the muted Natural Earth linework beside it is limited to the same eleven theatres, not a " +
+      "wider fallback; outside them this layer has nothing from either source.</p>" +
+      `<div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass</div>`
+    );
+  }
+
+  // Railway linework, drawn once from the whole merged document exactly as
   // renderCables draws the cable routes: a polyline is already clipped by Leaflet
   // and a rail line only makes sense whole, so it is never bounds-filtered.
   //
-  // The honesty this layer carries is not optional -- every popup states that
-  // this is 1:10m Natural Earth basemap linework, static since 2021, unnamed, and
-  // that it will not sit exactly on the OSM station points from osm-infrastructure.
+  // Task 27 layered an attributed OpenStreetMap overlay onto the Natural
+  // Earth linework (see railways.py's own merge), and the honesty this layer
+  // carries now has two halves instead of one -- **neither of them
+  // worldwide**: both are clipped to the same eleven conflict theatres (see
+  // railways.py's own module docstring), and no comment or popup here may
+  // imply otherwise, however coarser or "fallback"-ish Natural Earth reads
+  // by comparison. A Natural Earth line states that it is 1:10m basemap
+  // linework, static since 2021, unnamed, and that it will not sit exactly
+  // on the station points; an OSM line states its own name, operator, gauge
+  // and electrification. `line.source` (stamped at collection -- see
+  // railways.ne_line_records and osm_infra.parse_rail_lines) is what every
+  // per-line decision below reads to tell the two apart; nothing here guesses.
   //
   // Repeated across the visible world copies like the cables and pipelines above,
   // and re-drawn on the same trigger (see renderWorldCopyLayers).
@@ -4701,42 +6607,403 @@ export function createMapController(container, initial, callbacks) {
     worldCopyKeys.railways = offsets.join(",");
     const doc = raw.railways || {};
     const lines = Array.isArray(doc.lines) ? doc.lines : [];
-    const color = railwayRouteColor();
     // Read from the stored document rather than hard-coded, so the note tracks
     // whatever the backend actually served (see railways.py's `provenance`).
     const provenance = doc.provenance || "Natural Earth 1:10m, 2021, coarse basemap linework, unnamed";
-    const attribution = doc.attribution || "Natural Earth";
-    const popupHtml =
+    const nePopupHtml =
       "<h3>Railway (basemap linework)</h3>" +
       `<p class="meta"><b>Coarse basemap linework, 2021.</b> ${esc(provenance)}. It is context, not ` +
-      "survey data, and will <b>not</b> line up exactly with the railway station points on the " +
-      "OpenStreetMap infrastructure layer.</p>" +
-      `<div class="meta">Source: ${esc(attribution)}</div>`;
-    for (const path of lines) {
+      "survey data, and will <b>not</b> line up exactly with the OpenStreetMap railway station points " +
+      "drawn alongside it on this same layer.</p>" +
+      '<div class="meta">Source: Natural Earth</div>';
+    for (const line of lines) {
+      const path = line?.path;
       if (!Array.isArray(path) || path.length < 2) continue;
+      const isOsm = line.source === "osm";
+      const style = {
+        color: railwayLineColor(line),
+        // A hairline for Natural Earth and both dials on it like the cables
+        // layer: weight is what "size" means for a polyline, and the shipped
+        // judgement is that the coarse fallback sits well back behind
+        // everything real. The OSM overlay is heavier and mostly solid (see
+        // railwayLineBaseWeight/railwayLineDash) precisely because it is real
+        // survey data and is meant to read as more assertive than the basemap
+        // it sits over.
+        weight: scaledWeight(railwayLineBaseWeight(line), "railways"),
+        opacity: (isOsm ? 0.85 : 0.55) * layerOpacity("railways"),
+        dashArray: railwayLineDash(line),
+      };
+      const tooltipText = isOsm
+        ? `${line.name ? esc(line.name) : "Railway"} (OpenStreetMap)`
+        : "Railway (coarse basemap linework, 2021)";
+      const popupHtml = isOsm ? osmRailwayPopupHtml(line) : nePopupHtml;
       for (const offset of offsets) {
-        const line = L.polyline(shiftPathLon(path, offset), {
-          color,
-          // A hairline, and both dials on it like the cables layer: weight is what
-          // "size" means for a polyline, and the shipped judgement is that this
-          // sits well back behind everything real. dashed so it never reads as a
-          // surveyed route.
-          weight: scaledWeight(1, "railways"),
-          opacity: 0.55 * layerOpacity("railways"),
-          dashArray: "4 4",
-        });
-        line.bindTooltip("Railway (coarse basemap linework, 2021)", {
-          className: "map-tooltip", direction: "top", sticky: true,
-        });
-        line.bindPopup(popupHtml, popupOptions(280));
-        railwaysGroup.addLayer(line);
+        const poly = L.polyline(shiftPathLon(path, offset), style);
+        poly.bindTooltip(tooltipText, { className: "map-tooltip", direction: "top", sticky: true });
+        poly.bindPopup(popupHtml, popupOptions(280));
+        railwaysGroup.addLayer(poly);
       }
     }
     // Per line in the document, not per drawn line, for the same reason the cable
     // and pipeline counts are.
     counts.railways = lines.length;
     totals.railways = lines.length;
+    // Task 27 fix (post-review): which theatres' OSM rail-line coverage hit
+    // osm_infra.py's own MAX_RAIL_LINE_WAYS cap this sweep -- read straight
+    // from the document rather than inferred, since only the backend knows
+    // the raw (pre-parse) Overpass element count. A capped theatre's lines
+    // are real, just partial, and this is what stops that partial view
+    // reading as a complete one.
+    zoomNotes.railwaysTruncated = Array.isArray(doc.truncated_regions) ? doc.truncated_regions : [];
+    scheduleReports({ counts: true, notes: true });
+  }
+
+  // Task 28: transmission-line geometry, "the same polyline path as
+  // railways" per the brief -- a near-copy of renderRailways just above,
+  // simpler because there is only one source here (OSM), not two to tell
+  // apart per line.
+  function renderPowerLines() {
+    powerLinesGroup.clearLayers();
+    const offsets = worldCopies();
+    worldCopyKeys.powerLines = offsets.join(",");
+    const doc = raw.powerLines || {};
+    const lines = Array.isArray(doc.lines) ? doc.lines : [];
+    const color = gridLineColor();
+    for (const line of lines) {
+      const path = line?.path;
+      if (!Array.isArray(path) || path.length < 2) continue;
+      const label = line.name ? esc(line.name) : "Transmission line";
+      const popupHtml =
+        `<h3>${label}</h3>` +
+        (line.voltage ? `<div>Voltage: ${esc(line.voltage)} V</div>` : "") +
+        (line.cables ? `<div class="meta">Cables: ${esc(line.cables)}</div>` : "") +
+        (line.operator ? `<div>Operator: ${esc(line.operator)}</div>` : "") +
+        '<p class="meta">From <b>OpenStreetMap</b>, swept daily across this map\'s eleven conflict ' +
+        "theatres only, not worldwide -- outside them this layer has nothing to show.</p>" +
+        '<div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass</div>';
+      for (const offset of offsets) {
+        const poly = L.polyline(shiftPathLon(path, offset), {
+          color,
+          weight: scaledWeight(2, "powerLines"),
+          opacity: 0.75 * layerOpacity("powerLines"),
+        });
+        poly.bindTooltip(label, { className: "map-tooltip", direction: "top", sticky: true });
+        poly.bindPopup(popupHtml, popupOptions(280));
+        powerLinesGroup.addLayer(poly);
+      }
+    }
+    // Per line in the document, not per drawn line, same reason the cable and
+    // railway counts are.
+    counts.powerLines = lines.length;
+    totals.powerLines = lines.length;
+    // Same "a cap that truncates silently is a defect" treatment railways'
+    // own truncated-region note gets -- read straight from the document since
+    // only the backend knows the raw, pre-parse Overpass element count.
+    zoomNotes.powerLinesTruncated = Array.isArray(doc.truncated_regions) ? doc.truncated_regions : [];
+    scheduleReports({ counts: true, notes: true });
+  }
+
+  // Task 20b: the ten named corridors (backend/infrastructure.py's
+  // SHIPPING_LANES), a near-copy of renderRailways/renderPipelines just
+  // above -- a small curated set of whole polylines, fetched once and
+  // repeated across every visible world copy rather than viewport-filtered.
+  //
+  // The one thing this popup has to say, on every single corridor and in so
+  // many words, is the brief's own sentence: this is a hand-drawn schematic,
+  // not a surveyed route and not derived from anything this map has
+  // observed -- that claim belongs to the density wash (renderLaneDensity)
+  // instead, and the two are never allowed to blur into each other.
+  function renderShippingLanes() {
+    shippingLanesGroup.clearLayers();
+    const offsets = worldCopies();
+    worldCopyKeys.shippingLanes = offsets.join(",");
+    const color = shippingLaneColor();
+    for (const lane of raw.shippingLanes) {
+      if (!Array.isArray(lane.coords) || lane.coords.length < 2) continue;
+      // A transit figure only ever appears with its citation (see
+      // backend/tests/test_shipping_corridors.py) -- built once per lane
+      // rather than per copy, since it does not depend on the world offset.
+      const transitLine = lane.transits
+        ? `<div class="meta">${fmtNumber(lane.transits)} ${esc(lane.transits_unit || "")} ` +
+          `&mdash; ${esc(lane.transits_publisher || "")}, ${esc(String(lane.transits_year || ""))}</div>`
+        : "";
+      const popupHtml =
+        `<h3>${esc(lane.name)}</h3>` +
+        `<p class="meta"><b>Schematic corridor, not a surveyed route.</b> ${esc(lane.note || "")}</p>` +
+        transitLine +
+        '<div class="meta">Source: backend/infrastructure.py, hand-drawn reference waypoints</div>';
+      for (const offset of offsets) {
+        const line = L.polyline(shiftPathLon(lane.coords, offset), {
+          color,
+          // Same hairline-dashed treatment as railways/pipelines: a dial for
+          // "size" and one for opacity, dashed so it never reads as a
+          // surveyed route even before a reader opens the popup.
+          weight: scaledWeight(1.4, "shippingLanes"),
+          opacity: 0.6 * layerOpacity("shippingLanes"),
+          dashArray: "5 5",
+        });
+        line.bindTooltip(`${esc(lane.name)} (schematic corridor)`, {
+          className: "map-tooltip", direction: "top", sticky: true,
+        });
+        line.bindPopup(popupHtml, popupOptions(280));
+        shippingLanesGroup.addLayer(line);
+      }
+    }
+    // Per corridor in the document, not per drawn line -- the copies are the
+    // same ten corridors seen more than once, same reasoning as cables/
+    // railways/pipelines above.
+    counts.shippingLanes = raw.shippingLanes.length;
+    totals.shippingLanes = raw.shippingLanes.length;
     scheduleReports({ counts: true });
+  }
+
+  // ---------- water: seas, lakes, rivers ----------
+  //
+  // Marine arrives once at boot through applyData (see useOsintData.js's
+  // one-shot fetch). Lakes and rivers are not part of `raw.water` at all --
+  // neither is fetched until a reader switches on its own sub-toggle, so they
+  // are held here instead, where "not yet fetched" (null) and "fetched, but
+  // empty" ([]) can stay two different things without applyData's generic
+  // raw[key]=data assignment ever seeing them.
+  let waterLakesFeatures = null;
+  let waterRiversFeatures = null;
+  let waterLakesVisible = false;
+  let waterRiversVisible = false;
+  let waterIndex = [];
+  let selectedWaterId = null;
+  let hoveredWaterId = null;
+  // The Leaflet layer backing the currently-open water card, tracked the same
+  // way focusedCountryLayer is: renderWater rebuilds the whole layer wholesale
+  // (clearLayers + addData, see its own docstring), which invalidates any
+  // reference to a previous instance, so this is re-resolved by feature id
+  // after every rebuild rather than trusted to survive one.
+  let focusedWaterLayer = null;
+
+  /**
+   * Rebuild the water layer and its hit-test index from whatever is currently
+   * switched on: marine always (once it has arrived), lakes and rivers only
+   * while their own sub-toggle is on. Called whenever any of the three
+   * changes -- a fresh marine poll, a lakes/rivers fetch landing, or either
+   * sub-toggle flipping -- the same "small enough to redraw whole" reasoning
+   * renderCountries and syncWater's own note give: a few thousand features at
+   * most, not the tens of thousands the point layers cap and collapse for.
+   */
+  function renderWater() {
+    const features = [
+      ...(raw.water?.features || []),
+      ...(waterLakesVisible ? waterLakesFeatures || [] : []),
+      ...(waterRiversVisible ? waterRiversFeatures || [] : []),
+    ];
+    syncWater(waterLayer, features);
+    waterIndex = buildWaterIndex(features);
+    // A feature dropped out from under an open selection (its sub-toggle was
+    // switched back off) should not go on claiming to be selected.
+    if (selectedWaterId != null && !waterIndex.some((e) => e.id === selectedWaterId)) {
+      selectedWaterId = null;
+      focusedWaterLayer = null;
+      reportWaterSelection();
+      // Task 25: this path bypasses selectWater entirely (a sub-toggle
+      // dropped the feature out from under an open card), but needs no
+      // overpass cleanup of its own -- the card itself just closed via
+      // reportWaterSelection() above, so its satellitePasses section closed
+      // with it. The stale raw.satellitePasses entry for this id is
+      // harmless and left in place, the same "never evicted" tradeoff the
+      // per-entity fetch caches elsewhere in this file already make.
+    } else if (selectedWaterId != null) {
+      // The card is still open on a feature that is still in the synced
+      // document, but syncWater just tore down and rebuilt every Leaflet layer
+      // instance (clearLayers + addData) -- the old focusedWaterLayer reference
+      // points at a layer no longer on the map, so the on-screen anchor has to
+      // be re-resolved against the new one or the card would drift to wherever
+      // the stale instance's last position was.
+      focusedWaterLayer = waterLayerFor(selectedWaterId);
+      if (focusedWaterLayer) callbacks.onWaterPointChange?.(waterAnchorPoint(focusedWaterLayer));
+    }
+    updateWaterHighlights();
+    // Per feature in the synced document, the same "counts equal totals" rule
+    // countries and railways use -- there is no band cap or collapse for a
+    // polygon layer like this one.
+    counts.water = features.length;
+    totals.water = features.length;
+    scheduleReports({ counts: true });
+  }
+
+  // Same technique updateCountryHighlights/updateSubdivisionHighlights use:
+  // Leaflet applies a path's `className` once, at creation, so hover and
+  // selection are toggled on the already-rendered element rather than by
+  // rebuilding anything -- see water.js's own note on why that also means the
+  // colours these two classes show live in CSS custom properties, not here.
+  function updateWaterHighlights() {
+    waterLayer.eachLayer((layer) => {
+      const id = layer.feature?.properties?.id;
+      const el = layer.getElement?.();
+      if (!el || id == null) return;
+      el.classList.toggle("water-selected", id === selectedWaterId);
+      el.classList.toggle("water-hovered", id === hoveredWaterId);
+    });
+  }
+
+  // Rivers, unlike marine and lakes, are never loaded whole -- kind=rivers
+  // requires a bbox (the unfiltered document is ~5.12 MB, see backend/app.py's
+  // water_endpoint), so what is drawn is only ever whatever extent was last
+  // fetched. That has to be tracked and re-fetched as the reader pans, or a
+  // pan away from the loaded extent reads as "no rivers here" -- indistinguishable
+  // from "we looked and found none", which is exactly the distinction this
+  // project's provenance rules exist to preserve (see the memory note on
+  // trusted sources: every pin says what kind of evidence it is; an empty
+  // layer is itself a claim, and it must be an honest one).
+  //
+  // waterRiversLoadedBounds is the padded box actually asked for last time, an
+  // L.LatLngBounds -- not the viewport at that moment, which is why it is
+  // padded 100% before being stored: an ordinary few-hundred-metre pan inside
+  // an already-loaded city must not immediately re-trigger a fetch for
+  // essentially the same rivers.
+  let waterRiversLoadedBounds = null;
+  let waterRiversFetchInFlight = false;
+
+  /**
+   * Fetch rivers for a padded box around the current viewport and merge the
+   * result in. A failed fetch is logged and otherwise ignored -- deliberately
+   * NOT setting waterRiversFeatures to null or [] here, because a network
+   * hiccup blanking a layer that was showing real rivers a moment ago would
+   * be a worse lie than simply not having refreshed yet.
+   */
+  function fetchRivers() {
+    if (waterRiversFetchInFlight) return;
+    waterRiversFetchInFlight = true;
+    const bounds = map.getBounds().pad(1.0);
+    const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+    fetchJson(`/api/water?kind=rivers&bbox=${encodeURIComponent(bbox)}`)
+      .then((data) => {
+        waterRiversFeatures = data?.features || [];
+        waterRiversLoadedBounds = bounds;
+        renderWater();
+      })
+      .catch((err) => console.warn("Failed to load rivers:", err))
+      .finally(() => { waterRiversFetchInFlight = false; });
+  }
+
+  /**
+   * Fetch rivers if the sub-toggle is on and either nothing has loaded yet or
+   * the viewport has panned outside what was last fetched. Called on toggle-on
+   * and, debounced, from moveend below -- both funnel through the same
+   * "has the viewport actually left the loaded extent" check, so a reader
+   * cannot end up re-fetching the same rivers on every pan inside a city.
+   */
+  function maybeRefetchRivers() {
+    if (!waterRiversVisible) return;
+    if (waterRiversLoadedBounds && waterRiversLoadedBounds.contains(map.getBounds())) return;
+    fetchRivers();
+  }
+
+  /** The Leaflet layer instance currently backing one water feature id, found
+   *  by scanning the live layer group -- there is no persistent per-feature
+   *  map the way layerByCountryKey is, since water has no border editor or
+   *  any other reason to keep one. */
+  function waterLayerFor(id) {
+    if (id == null) return null;
+    let found = null;
+    waterLayer.eachLayer((layer) => {
+      if (!found && layer.feature?.properties?.id === id) found = layer;
+    });
+    return found;
+  }
+
+  /** Viewport-pixel anchor for the water info card -- same arithmetic as
+   *  countryAnchorPoint, over whichever Leaflet layer is currently backing
+   *  the selected feature. */
+  function waterAnchorPoint(layer) {
+    const center = layer.getBounds().getCenter();
+    const pt = map.latLngToContainerPoint(center);
+    const rect = container.getBoundingClientRect();
+    return { x: rect.left + pt.x, y: rect.top + pt.y };
+  }
+
+  function waterEntryFor(id) {
+    return id == null ? null : waterIndex.find((e) => e.id === id) || null;
+  }
+
+  /** The card payload for one water index entry, built from current data --
+   *  the water-body counterpart to countryCardFor above. `bounds` is the
+   *  feature's own client bbox (not the Leaflet layer's), converted to the
+   *  {south,west,north,east} shape waterCardSections' section builders share
+   *  with countryCardSections -- see that function's own docstring on what
+   *  it is for (a cheap pre-filter, not the containment test itself). */
+  function waterCardFor(entry) {
+    const bounds = entry.bbox
+      ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
+      : null;
+    // `title`, not `entry.name` -- an unnamed bay or sound (routine in 1:10m
+    // Natural Earth marine data) has no `entry.name` at all, and
+    // waterCardSections already computed the right fallback (its own class
+    // label) into `title`. Building the header from `entry.name` directly
+    // here would silently throw that fallback away and open with a blank
+    // header on exactly the features Task 7's own tests construct.
+    const { title, sections } = waterCardSections(entry, raw, bounds);
+    const layer = waterLayerFor(entry.id);
+    return {
+      id: entry.id,
+      name: title,
+      sections,
+      point: layer ? waterAnchorPoint(layer) : null,
+      // The raw hit-test geometry and its bbox, alongside the presentational
+      // fields above -- WaterInfoCard.jsx ignores both, but IntelPanel's water
+      // scope (intelPanelLogic.js) needs them to run the same
+      // insideWaterFeature/bboxesOverlap tests this card's own sections do
+      // (map/popups.js), rather than filtering records by a second, possibly-
+      // drifting approximation of "inside this water body".
+      entry,
+      bounds,
+    };
+  }
+
+  /** Tell React which water body's card is open, or that none is -- the
+   *  water-body counterpart to reportCountrySelection above. There is no
+   *  multi-selection to report alongside it: unlike countries, a water body
+   *  has no chips, no highlight that outlives its card, so one id is the
+   *  whole of this layer's selection state. */
+  function reportWaterSelection() {
+    const entry = waterEntryFor(selectedWaterId);
+    callbacks.onWaterSelect?.(entry ? waterCardFor(entry) : null);
+  }
+
+  /** Rebuild the open water card against data that has just landed -- the
+   *  water-body counterpart to refreshFocusedCountryCard, wired from
+   *  applyData the same way through WATER_CARD_FEEDS. Just reportWaterSelection
+   *  again: that already rebuilds the card from whatever `raw` holds right
+   *  now and is a no-op (reports null to a caller that already has null) when
+   *  nothing is selected, but the guard here skips that pointless call on
+   *  every qualifying poll while no water card is open at all. */
+  function refreshFocusedWaterCard() {
+    if (selectedWaterId == null) return;
+    reportWaterSelection();
+  }
+
+  /** Clicking the already-selected water body deselects it -- same gesture
+   *  the district/subdivision drill-down and country selection both use. */
+  function selectWater(id) {
+    if (id === selectedWaterId) return;
+    selectedWaterId = id;
+    focusedWaterLayer = waterLayerFor(id);
+    updateWaterHighlights();
+    reportWaterSelection();
+    // Task 25: water selection does not go through setFocus (see that
+    // function's own note), so its card's overpass section is loaded here
+    // instead, on the same "a water body was picked" event. Deselecting
+    // (id === null) needs no action of its own: waterEntryFor(null) is
+    // null, entry?.bbox is falsy, and the card itself already closed via
+    // reportWaterSelection() above -- there is nothing left to refresh.
+    const entry = waterEntryFor(id);
+    if (entry?.bbox) {
+      const [lat, lon] = boundsCentroid([entry.bbox.minLat, entry.bbox.minLon, entry.bbox.maxLat, entry.bbox.maxLon]);
+      loadSatellitePasses(`water:${id}`, lat, lon);
+    }
+  }
+
+  function setHoveredWater(id) {
+    if (id === hoveredWaterId) return;
+    hoveredWaterId = id;
+    updateWaterHighlights();
   }
 
   // IODA's country-keyed scores -> one marker item per affected country.
@@ -4766,6 +7033,40 @@ export function createMapController(container, initial, callbacks) {
       points.push({ ...record, country: record.country || entry.name, lat: point.lat, lon: point.lon });
     }
     raw.outagePoints = points;
+  }
+
+  // IODA's sub-national scores (backend/sources/outages.py's region pass) ->
+  // one small badge per matched region, at that state's own representative
+  // point -- same technique as rebuildOutagePoints above, one admin level
+  // finer. Restricted to the states actually drawn right now: unlike the
+  // country boundaries, admin-1 geometry is fetched per selection (see
+  // drawSubdivisions), so a badge over a shape that is not on screen would
+  // have nothing to anchor to and no state highlight to sit beside.
+  //
+  // Matched purely on `region_code` against a state's own `code` -- no
+  // ISO2/ISO3 translation needed here, unlike popups.js's regionOutageFor,
+  // because an ISO 3166-2 code already names its country and two different
+  // countries can never collide on one. An unmatched record (region_code is
+  // null) never reaches this loop at all: see outages.py's own docstring on
+  // why it stays in the payload anyway, just not drawn.
+  function rebuildOutageRegionPoints() {
+    const drawnIso3 = drawnSubdivisionCountries ? new Set(drawnSubdivisionCountries.split(",")) : null;
+    const points = [];
+    if (drawnIso3 && drawnIso3.size) {
+      for (const [countryCode, regions] of Object.entries(raw.outagesRegions || {})) {
+        for (const [key, record] of Object.entries(regions || {})) {
+          if (record.matched === "unmatched") continue;
+          const entry = subdivisionIndex.find(
+            (e) => e.code === record.region_code && drawnIso3.has(e.country_code)
+          );
+          if (!entry) continue;
+          const point = representativePointOf(entry);
+          if (!point) continue;
+          points.push({ ...record, id: `${countryCode}:${key}`, name: entry.name, lat: point.lat, lon: point.lon });
+        }
+      }
+    }
+    raw.outageRegionPoints = points;
   }
 
   function renderAll() {
@@ -4813,8 +7114,30 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("darkVessels");
     renderMarkerLayer("cableLandings");
     renderMarkerLayer("outagePoints");
+    // Zoom-gated (unlike outagePoints above), so it needs the same pan/zoom
+    // re-render every bounds-filtered layer here gets -- see its own draw
+    // band in scene.js.
+    renderMarkerLayer("outageRegionPoints");
     renderMarkerLayer("launches");
     renderMarkerLayer("osmInfra");
+    // Task 27: bounds-filtered like osmInfra above (it reads the same raw
+    // sweep, just split -- see applyData's own note), so it needs the same
+    // pan/zoom catch-up.
+    renderMarkerLayer("railwayPoints");
+    // Task 28: bounds-filtered the same way and for the same reason --
+    // reads the same raw sweep as osmInfra/railwayPoints above, just split.
+    renderMarkerLayer("powerPlants");
+    // Task 29: same reasoning again -- reads the same raw sweep, just split.
+    renderMarkerLayer("airDefense");
+    // Live and ungated, but still bounds-filtered like every other marker
+    // layer here -- without this it would render once and sit empty
+    // wherever the map panned to since the last poll, the same reasoning
+    // conflictHistory's own note gives above.
+    renderMarkerLayer("railLive");
+    // Static, but still bounds-filtered the same way -- the gazetteer arrives
+    // once and stays put, but "once" can be before the reader has panned
+    // anywhere near Finland.
+    renderMarkerLayer("railStations");
     // Same reasoning as hazards above -- all six bounds-filter to the viewport
     // and none polls faster than every ten minutes, so without a pan/zoom
     // re-render each would sit empty everywhere the map moved to since its last
@@ -4836,7 +7159,26 @@ export function createMapController(container, initial, callbacks) {
     // at the last poll left them empty until the next one (up to 30min for
     // jamming), which read as "not loading" even though the data was there.
     renderJamming();
+    // Same reasoning as jamming just above: bounds-filtered, and the grid
+    // itself only moves once an hour server-side, so without a pan/zoom
+    // re-render this would sit empty everywhere the map moved to since the
+    // last poll.
+    renderLaneDensity();
     renderSatellites();
+    // Task 24's three DOM-marker groups bounds-filter to the viewport too
+    // (see renderSatElementLayer), so they need the same pan/zoom catch-up
+    // renderSatellites gets just above. Three of the four WebGL ones do not:
+    // they are unfiltered feeds on a canvas that reprojects itself (see
+    // renderSatElementWebgl's own note), kept moving by their own timer
+    // instead (tickAndRedrawSatElements). satImaging is the exception --
+    // it is THEATRE-gated (see map/scene.js), and without a call here
+    // crossing that gate would wait up to SAT_ELEMENT_REDRAW_MS (2s) for the
+    // next tick to notice, instead of responding to the zoom the way every
+    // other gated layer (floods, hazards, ...) does immediately.
+    renderSatElementLayer("satNavigation");
+    renderSatElementLayer("satWeather");
+    renderSatElementLayer("satScience");
+    renderSatElementWebgl("satImaging");
     updateCountryWarFlare();
   }
 
@@ -4937,6 +7279,26 @@ export function createMapController(container, initial, callbacks) {
     map.flyTo([lat, lon], allowedZoom(Math.max(map.getZoom(), minZoom)), { duration: 1.2 });
   }
 
+  // Task 35: putting the camera back exactly where a deep link says it was.
+  // Deliberately not flyTo -- that function takes the *max* of the current
+  // zoom and its argument (it is a locate gesture, "at least this far in"),
+  // which would refuse to zoom back out to a wider link than whatever the
+  // map happened to boot at. This is an immediate setView instead: no
+  // animation (there is nothing to animate from on a fresh load, and
+  // restoring mid-session should not visibly fly either), clamped through
+  // the same allowedZoom every other camera move on this map already is.
+  function setCamera(lat, lon, zoom) {
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(zoom)) return;
+    map.setView([lat, lon], allowedZoom(zoom), { animate: false });
+  }
+
+  /** What a "copy link" button reads to build one -- the map's own answer,
+   *  not a React copy that could fall out of step with it. */
+  function getCamera() {
+    const center = map.getCenter();
+    return { lat: center.lat, lon: center.lng, zoom: map.getZoom() };
+  }
+
   // ---------- event wiring ----------
 
   map.on("moveend", () => {
@@ -4971,6 +7333,12 @@ export function createMapController(container, initial, callbacks) {
     reportZoom();
     clearTimeout(moveEndWindTimer);
     moveEndWindTimer = setTimeout(refreshWindArrows, 500); // debounced: don't hammer Open-Meteo mid-drag
+    // Same debounce idea, for the rivers sub-toggle's loaded extent -- a no-op
+    // call when the toggle is off or the viewport is still inside what was
+    // last fetched (see maybeRefetchRivers), so this costs nothing on every
+    // other pan.
+    clearTimeout(moveEndRiversTimer);
+    moveEndRiversTimer = setTimeout(maybeRefetchRivers, 500);
   });
 
   // Country info card is anchored to a screen pixel, not a DOM position
@@ -4980,6 +7348,12 @@ export function createMapController(container, initial, callbacks) {
   // drag or zoom gesture.
   map.on("move zoom", () => {
     if (focusedCountryLayer) callbacks.onCountryPointChange?.(countryAnchorPoint(focusedCountryLayer));
+    // Water info card, same reasoning: glued to its feature's on-screen
+    // position through a pan or zoom gesture rather than left to drift.
+    if (focusedWaterLayer) callbacks.onWaterPointChange?.(waterAnchorPoint(focusedWaterLayer));
+    // State and district info cards, same reasoning again.
+    if (focusedSubdivisionLayer) callbacks.onSubdivisionPointChange?.(subdivisionAnchorPoint(focusedSubdivisionLayer));
+    if (focusedDistrictLayer) callbacks.onDistrictPointChange?.(districtAnchorPoint(focusedDistrictLayer));
   });
 
   // No separate zoomend handler: Leaflet always fires moveend right after
@@ -5030,22 +7404,14 @@ export function createMapController(container, initial, callbacks) {
       const { state, district } = drill;
       if (district) {
         const wasSelected = district.pcode === selectedDistrictPcode;
+        // selectDistrict reports the open/closed card to React itself (see
+        // reportDistrictSelection) -- the same "select decides, no separate
+        // popup branch" shape selectWater already uses below.
         selectDistrict(wasSelected ? null : district.pcode);
-        if (wasSelected) map.closePopup();
-        else openDistrictPopup(district, e.latlng);
         return;
       }
       const wasSelected = state && state.key === selectedSubdivisionKey;
       selectSubdivision(state && !wasSelected ? state.key : null);
-      if (state && !wasSelected) {
-        subdivisionPopup = L.popup({ ...popupOptions(280), autoPan: false })
-          .setLatLng(e.latlng)
-          .setContent(subdivisionPopupHtml(state, districtsOfSelectedState().length))
-          .openOn(map);
-      } else {
-        subdivisionPopup = null;
-        map.closePopup();
-      }
       return;
     }
 
@@ -5077,6 +7443,24 @@ export function createMapController(container, initial, callbacks) {
       }
     }
 
+    // Water is the next fallback, tried only once the country hit-test above
+    // has already said no -- so a lake sitting entirely inside a country never
+    // steals a click from the country around it, and a click at sea (where
+    // findCountryAt can only ever answer null) reaches here instead.
+    if (waterVisible && waterIndex.length) {
+      const waterEntry = findWaterAt(waterIndex, e.latlng.lat, e.latlng.lng);
+      if (waterEntry) {
+        // Clicking the already-selected water body deselects it, same gesture
+        // as the subdivision drill-down above and country selection below.
+        // selectWater reports the open/closed card to React itself (see
+        // reportWaterSelection) -- this used to also open a plain Leaflet
+        // popup here, superseded by the full card Task 7 adds.
+        const wasSelected = waterEntry.id === selectedWaterId;
+        selectWater(wasSelected ? null : waterEntry.id);
+        return;
+      }
+    }
+
     if (selectedIcao) {
       selectedIcao = null;
       aircraftTrails.clear();
@@ -5097,6 +7481,14 @@ export function createMapController(container, initial, callbacks) {
     // selection to drop; the call below is for the case where there was not --
     // an emphasis set by clicking a pin rather than a country. setFocus is a
     // no-op when the focus already matches, so running both costs nothing.
+    //
+    // Water selection is dropped here too, on the same reasoning: it has no
+    // parent selection to fall out of step with (unlike a subdivision, which
+    // is only ever drawn under a selected country and so is cleared when that
+    // country is), so a genuinely empty click is the only gesture that can
+    // mean "and put the sea away as well". selectWater is a no-op when
+    // nothing is selected, so this costs nothing on the common empty click.
+    selectWater(null);
     clearCountrySelection();
     setFocus(null);
   });
@@ -5116,6 +7508,7 @@ export function createMapController(container, initial, callbacks) {
       setHoveredCountry(null);
       setHoveredSubdivision(null);
       setHoveredDistrict(null);
+      setHoveredWater(null);
       return;
     }
     if (e.sourceTarget && e.sourceTarget !== map) return;
@@ -5124,27 +7517,42 @@ export function createMapController(container, initial, callbacks) {
     hoverFrame = requestAnimationFrame(() => {
       hoverFrame = null;
       const latlng = pendingHoverLatLng;
-      if (!latlng || !countriesVisible) {
+      if (!latlng) {
         setHoveredCountry(null);
         setHoveredSubdivision(null);
         setHoveredDistrict(null);
+        setHoveredWater(null);
         return;
       }
-      setHoveredCountry(findCountryAt(countryIndex, latlng.lat, latlng.lng)?.key ?? null);
-      // Only over a selected country's states, which is the only place any are
-      // drawn -- and only then is the extra scan paid for. It is the same cost
-      // as the country test above (bbox rejects, then one or two ray-casts),
-      // over at most a few hundred shapes.
-      const codes = subdivisionIndex.length ? subdivisionCountryCodes() : null;
-      const state = codes?.size
-        ? findSubdivisionAt(subdivisionIndex, latlng.lat, latlng.lng, codes)
-        : null;
-      setHoveredSubdivision(state?.key ?? null);
-      // And one level in again, over the selected state only -- the few dozen
-      // districts drawn there, rejected on their bounding boxes first.
-      setHoveredDistrict(
-        state && state.key === selectedSubdivisionKey
-          ? findDistrictAt(districtsOfSelectedState(), latlng.lat, latlng.lng)?.pcode ?? null
+      if (!countriesVisible) {
+        setHoveredCountry(null);
+        setHoveredSubdivision(null);
+        setHoveredDistrict(null);
+      } else {
+        setHoveredCountry(findCountryAt(countryIndex, latlng.lat, latlng.lng)?.key ?? null);
+        // Only over a selected country's states, which is the only place any
+        // are drawn -- and only then is the extra scan paid for. It is the
+        // same cost as the country test above (bbox rejects, then one or two
+        // ray-casts), over at most a few hundred shapes.
+        const codes = subdivisionIndex.length ? subdivisionCountryCodes() : null;
+        const state = codes?.size
+          ? findSubdivisionAt(subdivisionIndex, latlng.lat, latlng.lng, codes)
+          : null;
+        setHoveredSubdivision(state?.key ?? null);
+        // And one level in again, over the selected state only -- the few
+        // dozen districts drawn there, rejected on their bounding boxes first.
+        setHoveredDistrict(
+          state && state.key === selectedSubdivisionKey
+            ? findDistrictAt(districtsOfSelectedState(), latlng.lat, latlng.lng)?.pcode ?? null
+            : null
+        );
+      }
+      // Independent of countriesVisible -- water is its own layer with its own
+      // checkbox, so a reader can have it on with countries off (or the other
+      // way round) and hover has to answer for whichever is actually showing.
+      setHoveredWater(
+        waterVisible && waterIndex.length
+          ? findWaterAt(waterIndex, latlng.lat, latlng.lng)?.id ?? null
           : null
       );
     });
@@ -5156,6 +7564,7 @@ export function createMapController(container, initial, callbacks) {
     setHoveredCountry(null);
     setHoveredSubdivision(null);
     setHoveredDistrict(null);
+    setHoveredWater(null);
   });
 
   // "Separate these pins", inside a collapsed group's popup. Delegated from the
@@ -5190,6 +7599,14 @@ export function createMapController(container, initial, callbacks) {
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
   refreshPrecipRadar();
   precipRefreshTimer = setInterval(refreshPrecipRadar, 10 * 60 * 1000); // matches RainViewer's own pass cadence
+  // Task 24: navigation/weather/imaging (on by default -- see map/scene.js)
+  // are fetched by useOsintData.js's own POLL_CONFIG, which lands here
+  // through applyData's "key in SAT_ELEMENT_CELESTRAK_GROUP" branch below,
+  // the same as every other default-on source -- not fetched by this
+  // controller directly. The other four (science/geo/starlink/oneweb) are
+  // off by default and fetch on their own first toggle instead -- see
+  // setLayerVisible and SAT_ELEMENT_ON_DEMAND_LAYERS above.
+  satElementTickTimer = setInterval(tickAndRedrawSatElements, SAT_ELEMENT_REDRAW_MS);
   function onVisibilityChange() {
     if (!document.hidden) refreshWindArrows(); // catch up immediately instead of waiting out the rest of the 5min interval
   }
@@ -5221,7 +7638,49 @@ export function createMapController(container, initial, callbacks) {
         pendingCountries = data;
         return;
       }
-      raw[key] = data;
+      // Task 27: one fetch (backend/sources/osm_infra.py) still returns all
+      // five kinds together, but the four railway ones now belong to a
+      // different layer -- so the split happens here, once per landing,
+      // rather than at render time. Splitting `raw` itself rather than
+      // filtering inside renderMarkerLayer is what keeps every generic
+      // consumer honest with no further changes: each layer's own `total`
+      // (items.length in renderMarkerLayer, and skipHiddenLayer's
+      // totals-when-hidden path) now counts only what actually belongs to
+      // it, and rebuildOsmTwins/COUNTRY_CARD_FEEDS/the data editor all read
+      // raw.osmInfra expecting infrastructure, not stations.
+      if (key === "osmInfra") {
+        const items = Array.isArray(data) ? data : [];
+        // Task 28: power plants get the identical treatment railwayPoints
+        // already does -- split out at landing time, not filtered at render
+        // time, for the same reason applyData's own comment above gives:
+        // every generic consumer (counts, totals, the country card, the data
+        // editor) then reads raw.osmInfra expecting infrastructure, not
+        // plants, with no further changes required of any of them.
+        //
+        // Task 29: airDefense gets the same treatment as a third split, for
+        // the same reason.
+        raw.osmInfra = items.filter(
+          (item) => !isRailwayPointItem(item) && !isPowerPlantItem(item) && !isAirDefenseItem(item)
+        );
+        raw.railwayPoints = items.filter(isRailwayPointItem);
+        raw.powerPlants = items.filter(isPowerPlantItem);
+        raw.airDefense = items.filter(isAirDefenseItem);
+      } else {
+        raw[key] = data;
+      }
+      // Task 33: the alert strip needs the emergency-squawking subset the
+      // moment a fresh ADS-B poll lands, not merely whenever renderAdsbLayer
+      // next repaints -- that function also runs on every pan/zoom with the
+      // same data underneath it, and firing this on every one of those would
+      // re-render the strip (and restart App.jsx's duration tracking) for no
+      // reason. aircraftFlag, not aircraftFlagBucket: the strip is about the
+      // squawk itself, not which of the flagged buckets a sanctioned airframe
+      // also happens to fall into. Unfiltered by aircraftFilter/viewport on
+      // purpose -- a 7500 the reader has filtered out of the map, or panned
+      // away from, is exactly the one this strip exists to still surface.
+      if (key === "adsb") {
+        callbacks.onEmergencySquawkChange?.(raw.adsb.filter((item) => aircraftFlag(item) === "emergency"));
+      }
       // Invalidates nearbyEventsFor's cache -- these are the only two
       // sources it reads, so nothing else needs to bust it.
       if (key === "events" || key === "gdelt") eventsDataVersion += 1;
@@ -5244,6 +7703,15 @@ export function createMapController(container, initial, callbacks) {
           if (layer !== key) renderMarkerLayer(layer);
         }
       }
+      // railwayPoints/powerPlants/airDefense have just been rebuilt above;
+      // redraw all three whenever a fresh OSM sweep lands, the same
+      // "whichever lands gets redrawn" rule the twin-rebuild block just
+      // above already follows.
+      if (key === "osmInfra") {
+        renderMarkerLayer("railwayPoints");
+        renderMarkerLayer("powerPlants");
+        renderMarkerLayer("airDefense");
+      }
       if (key === "countries") renderCountries();
       else if (key === "firms") renderFirms();
       else if (key === "cities") {
@@ -5258,14 +7726,40 @@ export function createMapController(container, initial, callbacks) {
       else if (key === "pipelines") renderPipelines();
     else if (key === "cables") renderCables();
     else if (key === "railways") renderRailways();
+    else if (key === "powerLines") renderPowerLines();
+    else if (key === "shippingLanes") renderShippingLanes();
+    else if (key === "water") renderWater();
     // Served as a country-keyed dict (read as-is by the country card), drawn
     // from the derived point array -- same split as cables/cableLandings.
     else if (key === "outages") {
       rebuildOutagePoints();
       renderMarkerLayer("outagePoints");
     }
+    // Same split, one admin level finer: {ISO2: {code: record}} read as-is by
+    // the state/district cards and the state-target choropleth, drawn from the
+    // derived badge array.
+    else if (key === "outagesRegions") {
+      rebuildOutageRegionPoints();
+      renderMarkerLayer("outageRegionPoints");
+    }
       else if (key === "jamming") renderJamming();
+      else if (key === "laneDensity") renderLaneDensity();
       else if (key === "satellites") renderSatellites();
+      // Task 24: navigation/weather/imaging land here from useOsintData.js's
+      // own POLL_CONFIG (see that file) -- raw[key] was just set above like
+      // every other source, but the element sets themselves are kept in
+      // satElements[key] (see fetchSatElements' own note on why), so this
+      // branch copies the payload across, runs an immediate SGP4 pass
+      // (force=true -- a reader should not wait out however much of the
+      // cadence window is left after a fresh poll), and redraws. The other
+      // four groups (science/geo/starlink/oneweb) never reach this branch --
+      // they are fetched on demand, straight into satElements, by
+      // fetchSatElements itself; see SAT_ELEMENT_ON_DEMAND_LAYERS.
+      else if (key in SAT_ELEMENT_CELESTRAK_GROUP) {
+        satElements[key] = Array.isArray(data) ? data : [];
+        tickSatElementLayer(key, true);
+        renderSatElement(key);
+      }
       // Neither of these is a point array with a layer of its own, so both
       // would otherwise fall through to renderMarkerLayer and blow up on a
       // missing group/marker map. conflictStats is a country->monthly-series
@@ -5277,9 +7771,14 @@ export function createMapController(container, initial, callbacks) {
       // electricity flow is an edge between two countries and a marketing-year
       // balance sheet is a forecast about a whole state, so neither has a point
       // to draw. Both surface as a country-card section and a country fill.
-      else if (key === "conflictStats" || key === "escalation" || key === "conflictDistricts"
-             || key === "humanitarian" || key === "energyFlows" || key === "foodTrade"
-             || key === "foodPriceIndex") {
+      //
+      // Task 36: chokepoints joins for the identical reason -- {boxes: {...}}
+      // keyed by watched-water label, read on demand by buildWaterChokepointTraffic
+      // and ChokepointPanel.jsx, never a point array. navalPresence (Task 29) is
+      // the same shape and was missing here from the day it shipped; see
+      // REFERENCE_ONLY_FEEDS above for what that cost and for the test that now
+      // stops the next one going the same way.
+      else if (REFERENCE_ONLY_FEEDS.has(key)) {
         /* reference data read on demand by popups.js -- no marker layer */
       }
       // Keyed by airfield ident, not a point layer of its own: it re-sizes and
@@ -5300,10 +7799,90 @@ export function createMapController(container, initial, callbacks) {
       // was clicked -- indefinitely, since the card outlives pans and zooms
       // now. See refreshFocusedCountryCard for which feeds qualify.
       if (COUNTRY_CARD_FEEDS.has(key)) refreshFocusedCountryCard();
+      // Same property, same fix, for the water card -- see WATER_CARD_FEEDS
+      // and refreshFocusedWaterCard.
+      if (WATER_CARD_FEEDS.has(key)) refreshFocusedWaterCard();
+      // And again for the state/district cards -- see SUBDIVISION_CARD_FEEDS/
+      // DISTRICT_CARD_FEEDS above for which feeds qualify, and why the
+      // district card's own conflict fold is not among them.
+      if (SUBDIVISION_CARD_FEEDS.has(key)) refreshFocusedSubdivisionCard();
+      if (DISTRICT_CARD_FEEDS.has(key)) refreshFocusedDistrictCard();
     },
 
     flyToRegion,
     flyTo,
+    setCamera,
+    getCamera,
+
+    // Task 35's deep-link restore for the two selection kinds it carries
+    // (see urlState.js for why only these two made the cut). Both look their
+    // target up before touching any state, so a link naming a country/water
+    // id that is not in the currently-loaded feed -- because it has not
+    // landed yet, or no longer exists -- selects nothing rather than
+    // half-applying. The caller (App.jsx) is the one that retries while the
+    // boot fetches are still in flight.
+    selectCountryByKey(key) {
+      const entry = countryEntryFor(key);
+      if (!entry) return false;
+      selectCountryEntry(entry, false);
+      return true;
+    },
+
+    selectWaterById(id) {
+      if (!waterEntryFor(id)) return false;
+      selectWater(id);
+      return true;
+    },
+
+    /**
+     * Task 40's comparison table, for up to three of `keys` (countryIndex
+     * keys, e.g. countrySelection's own `.key`), built fresh against current
+     * `raw` on every call.
+     *
+     * A pull, not a push, unlike the single-country card's own
+     * refreshFocusedCountryCard: the comparison view has no standing
+     * subscription to feed updates, so a caller that wants it current
+     * re-calls this (CountryCompareView.jsx does, on an interval while the
+     * view is open) rather than this controller maintaining a second live
+     * subscription channel for a surface a reader may never open. Bounds
+     * come from the hit-test index's own bbox (entry.bbox), not a Leaflet
+     * layer's rendered bounds the way countryCardFor's `layer.getBounds()`
+     * does -- the index has one for every selected country regardless of
+     * whether its shape is currently on screen, which a comparison of
+     * countries the reader has since panned away from needs.
+     */
+    countryCompareRows(keys) {
+      const entries = (keys || [])
+        .map((key) => countryEntryFor(key))
+        .filter(Boolean)
+        .map((entry) => ({
+          key: entry.key,
+          name: entry.name,
+          props: entry.props,
+          bounds: entry.bbox
+            ? { south: entry.bbox.minLat, west: entry.bbox.minLon, north: entry.bbox.maxLat, east: entry.bbox.maxLon }
+            : null,
+        }));
+      return buildCountryComparison(entries, raw);
+    },
+
+    // Task 33: the alert strip's own "click to fly and select" -- reuses the
+    // same selectAircraft the marker-click path already uses, rather than
+    // opening a second selection mechanism, so the popup/highlight/trail
+    // behave identically however the airframe was chosen. Only calls
+    // selectAircraft when it is not already the selection, since that
+    // function *toggles* -- clicking an alert for the airframe already open
+    // must not close its own popup. Returns false when the airframe has
+    // since left the feed (out of ADS-B range, a poll gap), so the caller can
+    // say so rather than silently flying nowhere. The zoom (8) matches
+    // App.jsx's own generic record-locate (openRecordDetail's onLocate).
+    selectAircraftByIcao(icao24) {
+      const item = raw.adsb.find((a) => a.icao24 === icao24);
+      if (!item) return false;
+      flyTo(item.lat, item.lon, 8);
+      if (selectedIcao !== icao24) selectAircraft(item);
+      return true;
+    },
 
     // The checkbox path. Writes a wish rather than touching the map directly,
     // so the resolver knows it has been overruled for this key and stops
@@ -5320,11 +7899,29 @@ export function createMapController(container, initial, callbacks) {
       renderMarkerLayer("events");
     },
 
-    /** Which country-level number the shapes are painted by; null clears it. */
-    setChoroplethMetric(metricId) {
+    // Merge-patch, same as setEventFilter above -- App.jsx's onVesselFilter/
+    // AircraftFilterChange send only the fields that changed (see
+    // onEventFilterChange for why: React state updaters run during render,
+    // and this method's own redraw has to happen from an effect afterward,
+    // not from inside the updater).
+    setVesselFilter(next) {
+      vesselFilter = { ...vesselFilter, ...(next || {}) };
+      renderAisLayer();
+    },
+
+    setAircraftFilter(next) {
+      aircraftFilter = { ...aircraftFilter, ...(next || {}) };
+      renderAdsbLayer();
+    },
+
+    /** Which number the shapes are painted by (null clears it), and which
+     *  shapes -- "country" or "state" -- that number paints (Task 26). */
+    setChoroplethMetric(metricId, target = "country") {
+      const nextTarget = target === "state" ? "state" : "country";
       const next = metricId || null;
-      if (next === choroplethMetricId) return;
+      if (next === choroplethMetricId && nextTarget === choroplethTarget) return;
       choroplethMetricId = next;
+      choroplethTarget = nextTarget;
       refreshChoropleth();
     },
 
@@ -5344,6 +7941,32 @@ export function createMapController(container, initial, callbacks) {
     // glance: shutting a card is not the same gesture as deselecting.
     closeCountryCard() {
       focusCountry(null);
+    },
+
+    // Water has no separate "selected but not focused" state the way a
+    // country does (no chips, no highlight that outlives its card -- see
+    // reportWaterSelection), so closing its card and deselecting it are the
+    // same gesture, unlike closeCountryCard above.
+    closeWaterCard() {
+      selectWater(null);
+    },
+
+    // Neither a state nor a district has a chip-backed selection that outlives
+    // its card either -- same shape as closeWaterCard, one gesture apiece.
+    closeSubdivisionCard() {
+      selectSubdivision(null);
+    },
+
+    closeDistrictCard() {
+      selectDistrict(null);
+    },
+
+    // The month `<select>` a district card's own header renders (see
+    // DistrictInfoCard.jsx) calls this directly rather than going through a
+    // popup-content rebind, now that the picker is a real React element
+    // instead of a string of HTML.
+    setDistrictMonth(month) {
+      setDistrictMonth(month);
     },
 
     /** Open the card on an already-selected country (the selection chips). */
@@ -5537,7 +8160,13 @@ export function createMapController(container, initial, callbacks) {
       const item = (raw[kind] || []).find((record) => String(record[idField]) === String(id));
       if (!item) return null;
       const d = decorate(item, decorateOptionsFor(kind, item, id));
-      return { title: d.title || null, html: d.detail, lat: item.lat, lon: item.lon };
+      // Fused conflict/violence records get the real card (see map/eventDetail.js):
+      // six blocks built straight off the record's own fields, each with its own
+      // provenance line, instead of the summary decorateEvent wrote for a hover
+      // popup. Every other kind is untouched -- same decorator output as always,
+      // so nothing that already opened through this card regresses.
+      const html = kind === "events" ? buildEventDetailHtml(item, raw) : d.detail;
+      return { title: d.title || null, html, kind, lat: item.lat, lon: item.lon };
     },
 
     /**
@@ -5595,7 +8224,9 @@ export function createMapController(container, initial, callbacks) {
     destroy() {
       clearInterval(windRefreshTimer);
       clearInterval(precipRefreshTimer);
+      clearInterval(satElementTickTimer);
       clearTimeout(moveEndWindTimer);
+      clearTimeout(moveEndRiversTimer);
       clearTimeout(regionFlightTimer);
       if (hoverFrame != null) cancelAnimationFrame(hoverFrame);
       // A live editing session holds its own animation frame and a map listener,
@@ -5606,6 +8237,7 @@ export function createMapController(container, initial, callbacks) {
       // Holds a container listener and possibly a queued frame, and appends an
       // element to the container -- none of which map.remove() knows about.
       detachCursor();
+      detachTileTintMotion();
       document.removeEventListener("visibilitychange", onVisibilityChange);
       // Aborts any pan/zoom animation still in flight. Leaflet's own animation
       // frame keeps running after remove() otherwise, and then reads panes that

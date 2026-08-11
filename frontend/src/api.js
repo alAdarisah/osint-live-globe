@@ -86,3 +86,48 @@ export function urlWithQuery(base, query) {
   const sep = base.includes("?") ? "&" : "?";
   return `${base}${sep}${query}`;
 }
+
+/**
+ * The vessel-card endpoint (Task 17's /api/vessel/{mmsi}): one hull's
+ * identity, inferred cargo/laden profile and recent port calls. A per-entity
+ * route like /api/track, not a filtered source -- there is nothing to share
+ * an ETag with, since it is keyed by a single MMSI a reader just clicked.
+ */
+export function vesselDetailUrl(mmsi) {
+  return `/api/vessel/${encodeURIComponent(mmsi)}`;
+}
+
+/**
+ * The port-card sibling: one port's recent arrivals and departures, read
+ * from the same vessel_port_calls table via storage.port_calls_at rather
+ * than storage.port_calls_for. A separate path from vesselDetailUrl above
+ * because a port_id and an MMSI are different id spaces -- see the report
+ * on Task 17 for why this took its own route instead of a query param.
+ */
+export function portCallsUrl(portId) {
+  return `/api/vessel/port/${encodeURIComponent(portId)}`;
+}
+
+/**
+ * The aircraft-card endpoint (Task 23's /api/aircraft/{icao24}): one
+ * airframe's identity, its last 20 detected flight legs and whatever leg is
+ * currently open. The aviation twin of vesselDetailUrl above, same shape and
+ * same reason -- a per-entity route, keyed by a single icao24 a reader just
+ * clicked, nothing for a second caller to share an ETag with.
+ */
+export function aircraftDetailUrl(icao24) {
+  return `/api/aircraft/${encodeURIComponent(icao24)}`;
+}
+
+/**
+ * Task 34's place search: /api/places?q=&limit=. A distinct URL per
+ * keystroke (like vesselDetailUrl/aircraftDetailUrl above, not a filtered
+ * source), so fetchJson's ETag cache never has anything to reuse between
+ * queries -- there is nothing worth sharing an ETag for here, since the
+ * whole point is a fresh answer for whatever the reader just typed.
+ */
+export function placesSearchUrl(query, limit) {
+  const params = new URLSearchParams({ q: query });
+  if (limit) params.set("limit", String(limit));
+  return `/api/places?${params.toString()}`;
+}

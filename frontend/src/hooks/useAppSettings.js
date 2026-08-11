@@ -29,6 +29,12 @@ import { defaultSettings, mergeSettings, EDITABLE_SOURCES } from "../settings/de
 import { borderStats, sanitizeRing, MAX_TOTAL_POINTS } from "../settings/borderOverrides";
 import { setIconTheme } from "../map/iconTheme";
 import { setCursorOptions } from "../map/cursor";
+import { buildTileFilter, TILE_TINT_PRESETS } from "../map/tileTint";
+import { setTileTintAtRest } from "../map/tileTintMotion";
+import { setInferenceMode } from "../map/inferenceVisibility";
+import { setUnitsPreference } from "../utils/format";
+import { setPerformanceOptions } from "../map/createMapController";
+import { MARINE_CLASSES } from "../map/water";
 
 const STORAGE_KEY = "osint-admin-settings";
 // When STORAGE_KEY was last written, in ms. See localIsNewerThan below.
@@ -291,7 +297,70 @@ export function useAppSettings() {
       stack: settings.layerStack,
       stackFadeFloor: settings.ui.stackFadeFloor,
     });
+    // The water layer's hover/selected states are CSS classes, never a
+    // re-style (see map/water.js) -- so, unlike every other palette token,
+    // these three have to reach the stylesheet itself, the same way --accent
+    // does just below. Without this a colour picked for water.fill would only
+    // ever show up on a shape drawn *after* the change (the next sync), never
+    // on one already hovered or selected when it was made.
+    const root = document.documentElement;
+    root.style.setProperty("--water-fill", settings.icons.colors["water.fill"]);
+    root.style.setProperty("--water-outline", settings.icons.colors["water.outline"]);
+    root.style.setProperty("--water-selected-fill", settings.icons.colors["water.selected"]);
   }, [settings.icons, settings.layers, settings.layerStack, settings.ui.stackFadeFloor]);
+
+  // Task 31's Water section. Same "CSS custom property, not a re-style"
+  // reasoning the colours just above give -- weight, the two fill-opacity
+  // dials and per-class visibility all have to reach an already-drawn shape
+  // immediately, not on the layer's next sync. See style.css's `.water-shape`
+  // rules and map/water.js's MARINE_CLASSES for the classes each
+  // `--water-hide-<class>` property gates.
+  useEffect(() => {
+    const root = document.documentElement;
+    const water = settings.water;
+    root.style.setProperty("--water-weight", String(water.outlineWeight));
+    root.style.setProperty("--water-hover-fill-opacity", String(water.hoverFillOpacity));
+    root.style.setProperty("--water-selected-fill-opacity", String(water.selectedFillOpacity));
+    const hidden = new Set(water.hiddenClasses);
+    for (const cls of MARINE_CLASSES) {
+      const prop = `--water-hide-${cls}`;
+      // Set only when hidden; removed otherwise, so the property falls
+      // through to CSS's own "declaration invalid, property unset" default
+      // (visible) rather than needing an explicit "not none" value written
+      // for every class this map ships.
+      if (hidden.has(cls)) root.style.setProperty(prop, "none");
+      else root.style.removeProperty(prop);
+    }
+  }, [settings.water]);
+
+  // Task 31's Inference section, pushed into decorators.js's module-level
+  // store the same way setIconTheme/setCursorOptions reach their own modules
+  // above -- decorators.js's cargoSection/portCallsSection/routeSection are
+  // plain functions called mid-popup-build, not components this could reach
+  // as a prop. The two products backed by a real layer (dark-ship gaps and
+  // lane density) do not come through here at all -- see InferenceSection.jsx,
+  // which writes their tri-state straight into layerWish, the same as any
+  // other layer checkbox.
+  useEffect(() => {
+    setInferenceMode(settings.inference.mode);
+  }, [settings.inference.mode]);
+
+  // Task 32 item 4, pushed into utils/format.js's own module-level store the
+  // same way just above -- decorators.js's speed/altitude/distance/clock
+  // renderers are plain functions called mid-popup-build too, and read the
+  // preference directly (formatDistanceKm/formatSpeedKmh/formatAltitudeM/
+  // formatClockAt's own default parameter) rather than needing it passed in.
+  useEffect(() => {
+    setUnitsPreference(settings.units);
+  }, [settings.units]);
+
+  // Task 31's Performance section, pushed into createMapController.js's own
+  // module-level `let` bindings -- see that file's own note by
+  // SHIP_TRAIL_MAX_POINTS for why a live reassignment is enough and no
+  // interval needs re-registering for five of these six values.
+  useEffect(() => {
+    setPerformanceOptions(settings.performance);
+  }, [settings.performance]);
 
   // UI settings reach the stylesheet as custom properties on <html>, which is
   // the only way a CSS file can be driven from JS state without restating every
@@ -321,6 +390,21 @@ export function useAppSettings() {
       scale: settings.ui.cursorScale,
       color: settings.ui.cursorColor,
     });
+    // Task 30: one filter value and three tint values per target, the same
+    // "state in, custom property out" shape --accent/--ui-text-scale already
+    // use above -- style.css's own rules for .leaflet-tile-pane/
+    // .leaflet-imagery-pane/.leaflet-weather-pane read these, never this file
+    // reaching into the DOM to restyle a pane directly.
+    for (const target of ["basemap", "imagery", "weather"]) {
+      const dial = settings.ui.tiles[target];
+      root.style.setProperty(`--tile-${target}-filter`, buildTileFilter(dial));
+      root.style.setProperty(`--tile-${target}-tint-color`, dial.tintColor);
+      root.style.setProperty(`--tile-${target}-tint-strength`, String(dial.tintStrength));
+      root.style.setProperty(`--tile-${target}-tint-blend`, dial.blendMode);
+    }
+    // Read from createMapController.js's movestart/moveend handlers -- see
+    // map/tileTintMotion.js for why that is a module flag rather than a prop.
+    setTileTintAtRest(settings.ui.tiles.applyAtRest);
   }, [settings.ui]);
 
   useEffect(() => {
@@ -473,8 +557,201 @@ export function useAppSettings() {
     [update]
   );
 
+  /** One tile-tint target's dial (basemap/imagery/weather), patched in place. */
+  const setTileDial = useCallback(
+    (target, patch) =>
+      update((prev) => ({
+        ...prev,
+        ui: {
+          ...prev.ui,
+          tiles: { ...prev.ui.tiles, [target]: { ...prev.ui.tiles[target], ...patch } },
+        },
+      })),
+    [update]
+  );
+
+  /**
+   * One target's dial, replaced wholesale by a shipped preset.
+   *
+   * A full replacement rather than a patch -- a preset is a complete
+   * statement ("this is what Night looks like"), and patching would leave
+   * behind whatever the reader had set before under fields the preset does
+   * not mention, silently producing a result nobody chose.
+   */
+  const setTilePreset = useCallback(
+    (target, presetKey) =>
+      update((prev) => {
+        const preset = TILE_TINT_PRESETS[presetKey];
+        if (!preset) return prev;
+        return {
+          ...prev,
+          ui: { ...prev.ui, tiles: { ...prev.ui.tiles, [target]: { ...preset.dial } } },
+        };
+      }),
+    [update]
+  );
+
+  const setTilesApplyAtRest = useCallback(
+    (value) => update((prev) => ({ ...prev, ui: { ...prev.ui, tiles: { ...prev.ui.tiles, applyAtRest: value } } })),
+    [update]
+  );
+
   const setCityZones = useCallback(
     (patch) => update((prev) => ({ ...prev, cityZones: { ...prev.cityZones, ...patch } })),
+    [update]
+  );
+
+  // --- Task 31's Water section -------------------------------------------
+
+  const setWater = useCallback(
+    (patch) => update((prev) => ({ ...prev, water: { ...prev.water, ...patch } })),
+    [update]
+  );
+
+  /** One marine class's checkbox in the "which classes to draw" list. */
+  const setWaterClassHidden = useCallback(
+    (cls, hidden) =>
+      update((prev) => {
+        const next = new Set(prev.water.hiddenClasses);
+        if (hidden) next.add(cls);
+        else next.delete(cls);
+        return { ...prev, water: { ...prev.water, hiddenClasses: [...next] } };
+      }),
+    [update]
+  );
+
+  // --- Task 31's Filters section ------------------------------------------
+
+  /**
+   * Capture the reader's current vessel/aircraft/event filters as a named
+   * preset. The three filters themselves are not read from `settings` --
+   * they are App.jsx's own React state (see that file's eventFilter/
+   * vesselFilter/aircraftFilter) -- so FiltersSection.jsx passes the live
+   * values in rather than this reaching for a copy that does not exist here.
+   */
+  const saveFilterPreset = useCallback(
+    (name, snapshot) =>
+      update((prev) => ({
+        ...prev,
+        filters: {
+          ...prev.filters,
+          presets: [
+            ...prev.filters.presets,
+            {
+              id: `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              name,
+              createdAt: Date.now(),
+              vesselFilter: snapshot.vesselFilter,
+              aircraftFilter: snapshot.aircraftFilter,
+              eventFilter: snapshot.eventFilter,
+            },
+          ],
+        },
+      })),
+    [update]
+  );
+
+  const deleteFilterPreset = useCallback(
+    (id) =>
+      update((prev) => ({
+        ...prev,
+        filters: { ...prev.filters, presets: prev.filters.presets.filter((p) => p.id !== id) },
+      })),
+    [update]
+  );
+
+  // --- Task 31's Inference section ----------------------------------------
+
+  /**
+   * One inferred product's tri-state switch. `effect: "layer"` products
+   * (see settings/inferenceProducts.js) write into `layerWish` as well as
+   * `inference.mode`, through the same setLayerWish this function already
+   * exposes -- so InferenceSection.jsx calls this one action rather than
+   * two, and the two settings can never disagree about what a "hide" or
+   * "show" click on a layer-backed product actually did.
+   */
+  const setInferenceProductMode = useCallback(
+    (product, value) =>
+      update((prev) => {
+        const next = {
+          ...prev,
+          inference: { ...prev.inference, mode: { ...prev.inference.mode, [product.key]: value } },
+        };
+        if (product.effect === "layer" && product.layerKey) {
+          const wish = { ...next.layerWish };
+          if (value === "labelled") delete wish[product.layerKey]; // hand back to the scene resolver
+          else wish[product.layerKey] = value === "show";
+          next.layerWish = wish;
+        }
+        return next;
+      }),
+    [update]
+  );
+
+  // --- Task 31's Cards section ---------------------------------------------
+
+  const setCardSectionHidden = useCallback(
+    (cardType, sectionId, hidden) =>
+      update((prev) => {
+        const current = new Set(prev.cards.hidden[cardType] || []);
+        if (hidden) current.add(sectionId);
+        else current.delete(sectionId);
+        return { ...prev, cards: { ...prev.cards, hidden: { ...prev.cards.hidden, [cardType]: [...current] } } };
+      }),
+    [update]
+  );
+
+  /**
+   * Move one section up or down within a card type's order. `shippedOrder`
+   * is the full, already-repaired sequence (orderedCardSections's own
+   * output) rather than whatever happens to be stored -- the same reason
+   * moveLayerInStack needs the caller to have resolved a starting order
+   * before it can compute a swap.
+   */
+  const moveCardSection = useCallback(
+    (cardType, shippedOrder, sectionId, delta) =>
+      update((prev) => {
+        const from = shippedOrder.indexOf(sectionId);
+        const to = from + delta;
+        if (from < 0 || to < 0 || to >= shippedOrder.length) return prev;
+        const next = [...shippedOrder];
+        next.splice(to, 0, next.splice(from, 1)[0]);
+        return { ...prev, cards: { ...prev.cards, order: { ...prev.cards.order, [cardType]: next } } };
+      }),
+    [update]
+  );
+
+  const setCardSectionDefaultOpen = useCallback(
+    (cardType, sectionId, value) =>
+      update((prev) => {
+        const current = { ...prev.cards.defaultOpen[cardType] };
+        if (value === null) delete current[sectionId];
+        else current[sectionId] = value;
+        return {
+          ...prev,
+          cards: { ...prev.cards, defaultOpen: { ...prev.cards.defaultOpen, [cardType]: current } },
+        };
+      }),
+    [update]
+  );
+
+  const resetCardSettings = useCallback(
+    (cardType) =>
+      update((prev) => ({
+        ...prev,
+        cards: {
+          hidden: { ...prev.cards.hidden, [cardType]: [] },
+          order: { ...prev.cards.order, [cardType]: [] },
+          defaultOpen: { ...prev.cards.defaultOpen, [cardType]: {} },
+        },
+      })),
+    [update]
+  );
+
+  // --- Task 31's Performance section ---------------------------------------
+
+  const setPerformance = useCallback(
+    (patch) => update((prev) => ({ ...prev, performance: { ...prev.performance, ...patch } })),
     [update]
   );
 
@@ -654,7 +931,12 @@ export function useAppSettings() {
     () => ({
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
       setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
-      moveLayerInStack, resetLayerStack, setUi, setCityZones,
+      moveLayerInStack, resetLayerStack, setUi, setTileDial, setTilePreset, setTilesApplyAtRest, setCityZones,
+      setWater, setWaterClassHidden,
+      saveFilterPreset, deleteFilterPreset,
+      setInferenceProductMode,
+      setCardSectionHidden, moveCardSection, setCardSectionDefaultOpen, resetCardSettings,
+      setPerformance,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,
@@ -662,7 +944,12 @@ export function useAppSettings() {
     [
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
       setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
-      moveLayerInStack, resetLayerStack, setUi, setCityZones,
+      moveLayerInStack, resetLayerStack, setUi, setTileDial, setTilePreset, setTilesApplyAtRest, setCityZones,
+      setWater, setWaterClassHidden,
+      saveFilterPreset, deleteFilterPreset,
+      setInferenceProductMode,
+      setCardSectionHidden, moveCardSection, setCardSectionDefaultOpen, resetCardSettings,
+      setPerformance,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,
