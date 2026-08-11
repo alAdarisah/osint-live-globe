@@ -184,6 +184,20 @@ _JOBS = (
         health_name="infra_risk",
         health_every=config.INFRA_RISK_INTERVAL,
     ),
+    # Task 38: does a country's IODA outage score spike at the same time as a
+    # conflict event lands near one of its submarine-cable landings. Publishes
+    # no layer of its own -- landings and events both already have coordinates
+    # on their own layers -- so it writes one keyed reference document and
+    # GET /api/cable-outage-risk (backend/app.py) reads it directly.
+    Job(
+        module="backend.refine.cable_outage",
+        entrypoint="derive_forever",
+        publishes=(),
+        # cable_outage.REFERENCE_NAME, copied for the same reason
+        # port_calls.HEALTH_NAME is copied above.
+        health_name="cable_outage",
+        health_every=config.CABLE_OUTAGE_INTERVAL,
+    ),
 )
 
 

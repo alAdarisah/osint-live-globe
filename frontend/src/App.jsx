@@ -30,6 +30,7 @@ import RegionBar from "./components/RegionBar";
 import SquawkAlertStrip from "./components/SquawkAlertStrip";
 import IntelPanel from "./components/IntelPanel";
 import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
+import CableOutagePanel from "./components/CableOutagePanel";
 import ChokepointPanel from "./components/ChokepointPanel";
 import InfraRiskPanel from "./components/InfraRiskPanel";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
@@ -918,6 +919,16 @@ export default function App() {
           style.css's #infraRiskPanel rule); self-contained, so mounting it
           is this one line too. */}
       <InfraRiskPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+
+      {/* Task 38: GET /api/cable-outage-risk has a document (backend/refine/
+          cable_outage.py -- whether a country's IODA outage score spikes at
+          the same time as a fused conflict event lands near one of its
+          submarine-cable landings) and nothing in the frontend called it
+          until this panel -- see CableOutagePanel.jsx's own module note.
+          Stacked above InfraRiskPanel in the same left-hand corner (see
+          style.css's #cableOutagePanel rule); self-contained, so mounting
+          it is this one line too. */}
+      <CableOutagePanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
 
       {/* Opened by picking a theatre in the RegionBar above, which is a public
           control -- so gating this behind Admin Mode meant a reader could make

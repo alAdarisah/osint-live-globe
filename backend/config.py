@@ -413,6 +413,15 @@ NAVAL_PRESENCE_INTERVAL = int(os.getenv("NAVAL_PRESENCE_INTERVAL", str(6 * 3600)
 # for a full conflict_events window scan any faster than that.
 INFRA_RISK_INTERVAL = int(os.getenv("INFRA_RISK_INTERVAL", "3600"))
 
+# How often backend/refine/cable_outage.py both samples backend/sources/
+# outages.py's current IODA composite into its own bounded score history and
+# recomputes the outage/cable-landing correlation. Matched to outages.py's own
+# REFRESH_INTERVAL (15 minutes): that module's document only changes on that
+# cadence, so sampling faster would record the same reading twice, and
+# sampling slower would coarsen the history this job builds for itself (see
+# that module's docstring on why it has to keep one at all).
+CABLE_OUTAGE_INTERVAL = int(os.getenv("CABLE_OUTAGE_INTERVAL", "900"))
+
 # The laden/ballast thresholds themselves -- named constants rather than
 # numbers inline in backend/refine/vessel_profile.py because Task 33's admin
 # panel exposes them in an "Inference" section, where a reader can see exactly

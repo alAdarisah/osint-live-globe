@@ -60,6 +60,11 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # a 30-day window. Publishes no layer either -- one reference_
         # snapshots document, read directly by GET /api/infra-risk.
         "backend.refine.infra_risk",
+        # Whether a country's IODA outage score spikes at the same time as a
+        # conflict event lands near one of its submarine-cable landings.
+        # Publishes no layer either -- one reference_snapshots document, read
+        # directly by GET /api/cable-outage-risk.
+        "backend.refine.cable_outage",
     }
 
 

@@ -21,7 +21,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.refine import flight_legs, infra_risk, lane_density, naval_presence, port_call_thresholds
+from backend.refine import cable_outage, flight_legs, infra_risk, lane_density, naval_presence, port_call_thresholds
 # Aliased: this module already has a route handler literally named
 # `satellites` (see /api/satellites below, unchanged from before this task),
 # and that function def rebinds the bare module-level name `satellites` --
@@ -1918,6 +1918,53 @@ async def infra_risk_endpoint():
     if cached is None:
         cached = await storage.reference(infra_risk.REFERENCE_NAME) or {}
         _INFRA_RISK_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the infra-risk cache just above: one
+# stored document written by the refine process (backend/refine/
+# cable_outage.py, on its own CABLE_OUTAGE_INTERVAL cadence -- 15 minutes by
+# default, matched to outages.py's own poll), read by a frontend on its own
+# slower timer.
+_CABLE_OUTAGE_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("cable_outage", _CABLE_OUTAGE_CACHE)
+
+
+@app.get("/api/cable-outage-risk")
+async def cable_outage_endpoint():
+    """Task 38: which countries with submarine-cable landings have an IODA
+    outage score spiking against their own recent history right now, and
+    whether any conflict event this map has fused landed near one of those
+    landings inside backend/refine/cable_outage.py's own event window.
+
+    An empty object -- not an error -- before the refine process has written
+    a pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document exists,
+    `status_counts`/`statuses` say which of four things is true for every
+    landing-holding country this pass -- spiking, checked and quiet,
+    checked but with too little history to call, or never once seen above
+    IODA's own noise floor -- so an empty `coincidences` list is never on its
+    own evidence that nothing is happening; see the module's own docstring
+    for what each status means.
+
+    **This is a coincidence, not a cause** -- restated in the document's own
+    `note` field, verbatim, and in the same words every time, so a consumer of
+    the raw JSON gets the identical caveat a reader of the panel does. A
+    country appearing in `coincidences` had a spiking score, at least one
+    cable landing, and a fused conflict event inside that landing's own
+    uncertainty radius during the same window -- nothing more, and nothing
+    here draws a connection between the three beyond that shared window.
+
+    Reads storage.reference(cable_outage.REFERENCE_NAME) only -- never
+    conflict_events, entity_latest or entity_history directly. The
+    correlation itself runs in the refine process precisely so this endpoint
+    does not have to (see cable_outage.py's own docstring on why it keeps its
+    own bounded score history rather than recomputing one on every request).
+    """
+    cached = _CABLE_OUTAGE_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(cable_outage.REFERENCE_NAME) or {}
+        _CABLE_OUTAGE_CACHE.set("all", cached)
     return JSONResponse(cached, headers={"Cache-Control": "no-store"})
 
 
