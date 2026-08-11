@@ -1,3 +1,7 @@
+/* Must be first: @import is only legal before any other rule, and every
+   duration below is one of these tokens. */
+@import "./motion.css";
+
 * { box-sizing: border-box; }
 
 /* Thin themed scrollbar for every scrollable panel (control panel, country
@@ -94,7 +98,7 @@ html, body {
   bottom: 0;
   left: 0;
   background: var(--bg-map);
-  transition: left 0.22s ease;
+  transition: left var(--t-panel) var(--e-out);
 }
 
 /* The control panel is opaque and fixed above the map (z-index 1000) -- without
@@ -270,12 +274,12 @@ html, body {
   stroke-width: 1.25;
   /* r and opacity are written per frame by cursor.js; the transition is what
      turns those discrete writes into the tighten/release the reader sees. */
-  transition: r 120ms ease-out, opacity 120ms ease-out;
+  transition: r var(--t-ui) ease-out, opacity var(--t-ui) ease-out;
 }
 .map-reticle-ticks {
   stroke: currentColor;
   stroke-width: 1.25;
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--t-ui) ease-out;
 }
 .map-reticle-dot { fill: currentColor; }
 
@@ -374,7 +378,7 @@ html, body {
    .military-marker above, but animated so it visibly flares rather than just
    glowing steady. */
 .infra-hot .entity-icon-wrap {
-  animation: infra-flare 1.1s ease-in-out infinite;
+  animation: infra-flare var(--tempo-urgent) var(--e-inout) infinite;
 }
 @keyframes infra-flare {
   0%, 100% { filter: drop-shadow(0 0 3px #ff3d3d) drop-shadow(0 0 1px #ff3d3d); }
@@ -390,11 +394,40 @@ html, body {
    whose stated review date passed is drawn in the warning colour and left
    still. Motion on this map means "now" (see decorateCzib). */
 .czib-live .entity-icon-wrap {
-  animation: czib-warn 2.4s ease-in-out infinite;
+  animation: czib-warn var(--tempo-live) var(--e-inout) infinite;
 }
 @keyframes czib-warn {
   0%, 100% { filter: drop-shadow(0 0 2px #ff8c00); }
   50% { filter: drop-shadow(0 0 11px #ff8c00) drop-shadow(0 0 4px #ffcc80); }
+}
+
+/* A record that is new to the feed, flashing once as it lands. One-shot, not a
+   loop: this says "this just arrived", and a pin that kept flashing would be
+   saying "this is urgent", which is severity's job and not arrival's.
+
+   Conflict, news, infrastructure and airspace only. The ship and aircraft
+   layers turn over thousands of markers a refresh and a vessel appearing is
+   not news.
+
+   Targets the inner <svg>, and that is load-bearing. Leaflet positions the
+   outer marker div with an inline translate3d, so animating transform there
+   parks the pin at the pane origin for the whole flash. One element in --
+   .entity-icon-wrap -- is no better: it carries the declutter offset and
+   rotation inline, so a transform animation on it snaps the glyph up to ~87px
+   back to its true point while its leader line keeps pointing where the glyph
+   used to be. A line that exists to say "the glyph is not where the record is"
+   would spend 420ms asserting the opposite. The wrapper also carries inline
+   opacity for age and confidence dimming, so animating opacity there flashes a
+   low-confidence event at full strength -- briefly claiming more certainty
+   than the record has. The <svg> child carries neither. */
+.marker-arrived .entity-icon-wrap > svg {
+  animation: marker-arrived var(--t-settle) var(--e-out);
+}
+
+@keyframes marker-arrived {
+  from { transform: scale(2.1); opacity: 0; }
+  60% { opacity: 1; }
+  to { transform: scale(1); opacity: 1; }
 }
 
 .infra-hot-badge {
@@ -407,7 +440,7 @@ html, body {
   border-radius: 4px;
   padding: 1px 4px;
   vertical-align: middle;
-  animation: infra-badge-pulse 1.1s ease-in-out infinite;
+  animation: infra-badge-pulse var(--tempo-urgent) var(--e-inout) infinite;
 }
 @keyframes infra-badge-pulse {
   0%, 100% { opacity: 1; }
@@ -436,7 +469,7 @@ html, body {
   border: 2px solid #e066ff;
   box-shadow: 0 0 6px #b833e0;
   opacity: 0;
-  animation: jamming-ping 6s ease-out infinite;
+  animation: jamming-ping var(--tempo-ambient) ease-out infinite;
 }
 @keyframes jamming-ping {
   0% { transform: scale(0.3); opacity: 0.9; }
@@ -550,7 +583,7 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 1001;
-  animation: popup-in 0.16s ease;
+  animation: popup-in var(--t-ui) var(--e-out);
 }
 
 .place-search-result {
@@ -559,7 +592,7 @@ html, body {
   padding: 6px 8px;
   border-radius: 5px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background var(--t-ui) var(--e-out);
 }
 .place-search-result:hover,
 .place-search-result.highlighted { background: rgba(var(--accent-rgb), 0.12); }
@@ -620,7 +653,7 @@ html, body {
   letter-spacing: 0.3px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition: background var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out), color var(--t-ui) var(--e-out), transform var(--t-tap) var(--e-out);
 }
 .region-btn:hover { color: var(--text-bright); border-color: var(--accent); }
 .region-btn.active {
@@ -660,7 +693,6 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 1001;
-  animation: popup-in 0.16s ease;
 }
 .region-zone-menu-item {
   border: none;
@@ -672,7 +704,7 @@ html, body {
   font-size: 11px;
   font-family: inherit;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--t-ui) var(--e-out), color var(--t-ui) var(--e-out), transform var(--t-tap) var(--e-out);
 }
 .region-zone-menu-item:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--text-bright); }
 .region-zone-menu-item.active { color: #ff8080; font-weight: 700; }
@@ -690,10 +722,14 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: border-color 0.15s ease, transform 0.15s ease;
+  transition: border-color var(--t-ui) var(--e-out), transform var(--t-ui) var(--e-out);
   padding: 0;
 }
 #themeToggle:hover { border-color: var(--accent); transform: rotate(20deg); }
+/* transform is a single property, so a press while hovered can't have both
+   the hover's rotate and a press scale unless this rule composes them --
+   repeating rotate(20deg) here is that composition, not a copy-paste leftover. */
+#themeToggle:active { transform: rotate(20deg) scale(0.93); }
 
 #panelToggle {
   position: fixed;
@@ -709,7 +745,7 @@ html, body {
   color: var(--accent);
   cursor: pointer;
   font-size: 11px;
-  transition: left 0.22s ease;
+  transition: left var(--t-panel) var(--e-out);
 }
 #panelToggle.open { left: 320px; }
 
@@ -726,7 +762,7 @@ html, body {
   z-index: 1000;
   backdrop-filter: blur(6px);
   transform: translateX(-100%);
-  transition: transform 0.22s ease;
+  transition: transform var(--t-panel) var(--e-out);
 }
 
 #controlPanel.open { transform: translateX(0); }
@@ -772,7 +808,7 @@ html, body {
   list-style: none;
   padding: 4px 2px;
   border-radius: 4px;
-  transition: background 0.15s ease, opacity 0.15s ease;
+  transition: background var(--t-ui) var(--e-out), opacity var(--t-ui) var(--e-out);
 }
 .panel-group > summary::-webkit-details-marker { display: none; }
 .panel-group > summary:hover { background: rgba(var(--accent-rgb), 0.08); opacity: 1; }
@@ -794,7 +830,7 @@ html, body {
   border-left: 4px solid currentColor;
   border-top: 3.5px solid transparent;
   border-bottom: 3.5px solid transparent;
-  transition: transform 0.15s ease;
+  transition: transform var(--t-ui) var(--e-out);
 }
 .panel-group[open] > summary::before { transform: rotate(90deg); }
 
@@ -826,7 +862,7 @@ html, body {
   list-style: none;
   border-radius: 3px;
   opacity: 0.72;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  transition: opacity var(--t-ui) var(--e-out), background var(--t-ui) var(--e-out);
 }
 .layer-details > summary::-webkit-details-marker { display: none; }
 .layer-details > summary:hover { opacity: 1; background: rgba(var(--accent-rgb), 0.08); }
@@ -843,7 +879,7 @@ html, body {
   border-left: 3.5px solid currentColor;
   border-top: 3px solid transparent;
   border-bottom: 3px solid transparent;
-  transition: transform 0.15s ease;
+  transition: transform var(--t-ui) var(--e-out);
 }
 .layer-details[open] > summary::before { transform: rotate(90deg); }
 .layer-details[open] > summary { opacity: 1; }
@@ -857,6 +893,20 @@ html, body {
 }
 .layer-details-body .sublegend { padding-left: 0; }
 
+/* Opening a fold is the reader asking to see something; closing it is them
+   done looking. So the open is animated and the close is instant, which also
+   happens to be the only thing native <details> can do without a height to
+   transition from. */
+details[open] > .panel-group-body,
+details[open] > .layer-details-body {
+  animation: fold-open var(--t-ui) var(--e-out);
+}
+
+@keyframes fold-open {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .layer-row {
   display: flex;
   align-items: center;
@@ -866,7 +916,7 @@ html, body {
   cursor: pointer;
   user-select: none;
   border-radius: 4px;
-  transition: background 0.15s ease;
+  transition: background var(--t-ui) var(--e-out);
 }
 .layer-row:hover { background: rgba(var(--accent-rgb), 0.08); }
 
@@ -1124,7 +1174,7 @@ html, body {
   fill: var(--country-fill);
   stroke: rgba(var(--accent-rgb), 0.45);
   stroke-width: 1;
-  transition: fill 0.15s ease;
+  transition: fill var(--t-ui) var(--e-out);
   /* Paint only -- never an event target. Hover and click are hit-tested
      against the geometry from the map's own mousemove/click (see
      map/countryHitTest.js). The previous `pointer-events: all` arrangement
@@ -1150,7 +1200,7 @@ html, body {
    "alternate a resting/brighter drop-shadow" technique as .infra-hot, just
    applied to a polygon's stroke/glow instead of a marker icon. */
 .country-shape.country-hot {
-  animation: country-flare 1.4s ease-in-out infinite;
+  animation: country-flare var(--tempo-urgent) var(--e-inout) infinite;
 }
 @keyframes country-flare {
   0%, 100% { stroke: #ff3d3d; stroke-width: 1.5; filter: drop-shadow(0 0 2px #ff3d3d); }
@@ -1306,7 +1356,7 @@ html, body {
   /* Reads over both the light and the dark basemap without a second rule. */
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55), 0 1px 3px rgba(0, 0, 0, 0.5);
   cursor: grab;
-  transition: transform 0.08s ease;
+  transition: transform var(--t-tap) var(--e-out);
 }
 .border-handle:hover { transform: scale(1.35); }
 .border-handle:active { cursor: grabbing; transform: scale(1.15); }
@@ -1531,6 +1581,20 @@ html, body {
 #healthList .dot.warn { background: #ff9500; }
 #healthList .dot.err { background: #ff3b30; }
 
+/* A source dot's pulse period is that source's own cadence (see
+   utils/tempo.js), so the row reports how alive it is without anyone reading
+   the "updated 4s ago" beside it. The still case is not a missing feature: a
+   dot that has stopped moving is a source that has stopped arriving, and that
+   is the fastest-reading status on the panel. */
+.dot.breathing {
+  animation: dot-breathe var(--period, var(--tempo-live)) var(--e-inout) infinite;
+}
+
+@keyframes dot-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
 .leaflet-popup-content-wrapper {
   background: var(--popup-bg);
   color: var(--text-primary);
@@ -1539,13 +1603,77 @@ html, body {
   line-height: 1.5;
   max-width: min(320px, calc(100vw - 40px));
 }
-.leaflet-popup {
-  animation: popup-in 0.16s ease;
+/* Every card and panel on this map enters the same way. It used to be five
+   identical copies of one keyframe under one name, which is the state a
+   stylesheet is in right before it acquires a sixth that is subtly different. */
+.panel-enter,
+.leaflet-popup,
+#conflictBriefing,
+#countryInfoCard,
+#eventDetailCard,
+.region-zone-menu {
+  animation: panel-enter var(--t-panel) var(--e-spring);
 }
-@keyframes popup-in {
-  from { opacity: 0; transform: translateY(4px) scale(0.97); }
+
+@keyframes panel-enter {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+
+/* A list arriving as one block reads as a repaint; arriving in sequence reads
+   as the panel filling. Stops at eight because past that the cascade stops
+   being one gesture and becomes a queue -- everything from the ninth child on
+   shares the eighth child's delay rather than getting a later one of its own. */
+.stagger-children > *,
+.news-list > *,
+.notable-list > * {
+  animation: panel-enter var(--t-panel) var(--e-out) both;
+  animation-delay: calc(var(--stagger-step) * 8);
+}
+/* .loading-log gets its own rule rather than joining the one above: `both`
+   holds the keyframe's `to { opacity: 1 }` at the animation origin, which
+   outranks any author declaration -- including .loading-log-line's own
+   opacity ladder (0.55 base, 0.7 warn, 0.85 timeout) that's supposed to keep
+   distinguishing lines after they arrive. `backwards` only holds the `from`
+   state before the delay elapses and releases the property once the
+   animation ends, so the ladder can take over. */
+.loading-log > * {
+  animation: panel-enter var(--t-panel) var(--e-out) backwards;
+  animation-delay: calc(var(--stagger-step) * 8);
+}
+.stagger-children > :nth-child(1),
+.news-list > :nth-child(1),
+.notable-list > :nth-child(1) { animation-delay: 0ms; }
+.loading-log > :nth-child(1) { animation-delay: 0ms; }
+.stagger-children > :nth-child(2),
+.news-list > :nth-child(2),
+.notable-list > :nth-child(2),
+.loading-log > :nth-child(2) { animation-delay: var(--stagger-step); }
+.stagger-children > :nth-child(3),
+.news-list > :nth-child(3),
+.notable-list > :nth-child(3),
+.loading-log > :nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.stagger-children > :nth-child(4),
+.news-list > :nth-child(4),
+.notable-list > :nth-child(4),
+.loading-log > :nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.stagger-children > :nth-child(5),
+.news-list > :nth-child(5),
+.notable-list > :nth-child(5),
+.loading-log > :nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.stagger-children > :nth-child(6),
+.news-list > :nth-child(6),
+.notable-list > :nth-child(6),
+.loading-log > :nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.stagger-children > :nth-child(7),
+.news-list > :nth-child(7),
+.notable-list > :nth-child(7),
+.loading-log > :nth-child(7) { animation-delay: calc(var(--stagger-step) * 6); }
+.stagger-children > :nth-child(8),
+.news-list > :nth-child(8),
+.notable-list > :nth-child(8),
+.loading-log > :nth-child(8) { animation-delay: calc(var(--stagger-step) * 7); }
+
 .leaflet-popup-tip { background: var(--popup-bg); }
 .leaflet-popup-content { margin: 10px 12px; }
 .leaflet-popup-content a { color: var(--accent); }
@@ -1908,7 +2036,6 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
-  animation: popup-in 0.16s ease;
 }
 /* A country, a water body, a state and a district can all be selected at
    once (none of the four clears another's selection -- see
@@ -1985,13 +2112,20 @@ html, body {
   touch-action: none;
 }
 
+/* OSINT-Main's .news-caret-btn / .news-caret / #newsBroadcast.collapsed rules
+   are deliberately not carried across this merge. Task 12 replaced the news
+   broadcast panel with the tabbed IntelPanel, so there is no #newsBroadcast
+   element left for them to match -- "newsBroadcast" survives only as a legacy
+   key in IntelPanel's migratePanelPosition call. `.news-list` is kept (it is
+   still used by ConflictBriefingCard); the caret rules are not.
+   If a later merge reintroduces them, check for the element first. */
 .live-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: #ff3d3d;
   flex: none;
-  animation: news-pulse 1.6s ease-in-out infinite;
+  animation: news-pulse var(--tempo-live) var(--e-inout) infinite;
 }
 
 @keyframes news-pulse {
@@ -2024,14 +2158,8 @@ html, body {
 .news-item {
   padding: 6px 0;
   border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
-  animation: news-item-in 0.35s ease;
 }
 .news-item:last-child { border-bottom: none; }
-
-@keyframes news-item-in {
-  from { opacity: 0; transform: translateY(-3px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 
 .news-item a, .news-item-row > span {
   color: var(--text-primary);
@@ -2079,7 +2207,6 @@ html, body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
   overflow: hidden;
-  animation: popup-in 0.16s ease;
 }
 
 .briefing-header {
@@ -2253,7 +2380,7 @@ html, body {
 .notable-caret {
   font-size: 10px;
   color: var(--accent);
-  transition: transform 0.18s ease;
+  transition: transform var(--t-ui) var(--e-out);
 }
 #intelPanel.collapsed .notable-caret { transform: rotate(-90deg); }
 #intelPanel.collapsed .notable-header { border-bottom: none; }
@@ -2267,7 +2394,7 @@ html, body {
   border-radius: 50%;
   background: #ff5c2a;
   flex: none;
-  animation: notable-pulse 1.8s ease-in-out infinite;
+  animation: notable-pulse var(--period, var(--tempo-live)) var(--e-inout) infinite;
 }
 @keyframes notable-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 92, 42, 0.6); }
@@ -2600,7 +2727,7 @@ html, body {
   gap: 4px;
   padding: 6px 16px;
   background: linear-gradient(rgba(20, 4, 4, 0.55), rgba(20, 4, 4, 0));
-  transition: left 0.22s ease; /* matches #map.panel-open's own transition */
+  transition: left var(--t-panel) var(--e-out); /* matches #map.panel-open's own transition */
 }
 
 /* #controlPanel (Admin Mode's drawer) is 320px wide, opaque, and z-index
@@ -2655,7 +2782,7 @@ html, body {
   border-radius: 6px;
   background: var(--panel-bg);
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color var(--t-ui) var(--e-out), background var(--t-ui) var(--e-out);
 }
 .squawk-alert-item:hover { border-color: #ff3b30; background: rgba(255, 59, 48, 0.08); }
 
@@ -3177,7 +3304,7 @@ html, body {
   align-items: center;
   justify-content: center;
   background: radial-gradient(ellipse at center, #071822 0%, #000308 75%);
-  transition: opacity 0.6s ease;
+  transition: opacity var(--t-boot) var(--e-out);
 }
 #loadingScreen.hidden {
   opacity: 0;
@@ -3212,6 +3339,9 @@ html, body {
   background: conic-gradient(from 0deg, rgba(111, 227, 255, 0.9), rgba(111, 227, 255, 0) 40%);
   -webkit-mask: radial-gradient(circle, transparent 0, transparent 2px, black 3px);
   mask: radial-gradient(circle, transparent 0, transparent 2px, black 3px);
+  /* Exempt from the tempo scale on purpose: this is mechanism, not status. The
+     tempo tokens answer "how urgent is this condition", and a spinner saying
+     work is in progress is not in a position to be asked that. */
   animation: loading-radar-spin 1.7s linear infinite;
 }
 @keyframes loading-radar-spin {
@@ -3250,7 +3380,7 @@ html, body {
   padding: 3px 0;
   color: var(--text-dim);
   opacity: 0.55;
-  transition: opacity 0.3s ease, color 0.3s ease;
+  transition: opacity var(--t-panel) var(--e-out), color var(--t-panel) var(--e-out);
 }
 .loading-log-line.ok { color: #cfe8f2; opacity: 1; }
 .loading-log-line.warn { opacity: 0.7; }
@@ -3263,6 +3393,9 @@ html, body {
   font-weight: 700;
   color: var(--text-dim);
 }
+/* Exempt from the tempo scale on purpose: this is mechanism, not status. The
+   tempo tokens answer "how urgent is this condition", and a spinner saying
+   work is in progress is not in a position to be asked that. */
 .loading-log-line.pending .loading-log-status { animation: loading-ellipsis-pulse 1.2s ease-in-out infinite; }
 .loading-log-line.ok .loading-log-status { color: #34c759; }
 .loading-log-line.warn .loading-log-status { color: #ff9500; }
@@ -3284,7 +3417,7 @@ html, body {
   height: 100%;
   width: 0%;
   background: var(--accent);
-  transition: width 0.4s ease;
+  transition: width var(--t-settle) var(--e-out);
 }
 
 /* ============================================================
@@ -3311,14 +3444,58 @@ html, body {
 
 /* "Reduce motion": kills the decorative loops (pulsing dots, jamming pings,
    hot-zone flares) without touching the transitions that tell you a control
-   responded. */
+   responded.
+
+   The data-driven tempos join it too. A source dot's cadence is real
+   information, but a reader who has asked for stillness has asked for
+   stillness -- the "updated 4s ago" beside the dot says the same thing in
+   words, which is why the information is not lost by switching this off. */
 :root.reduce-motion .live-dot,
 :root.reduce-motion .notable-pulse,
 :root.reduce-motion .jamming-ping-ring,
 :root.reduce-motion .infra-hot .entity-icon-wrap,
 :root.reduce-motion .czib-live .entity-icon-wrap,
-:root.reduce-motion .country-shape.country-hot {
+:root.reduce-motion .country-shape.country-hot,
+:root.reduce-motion .dot.breathing,
+:root.reduce-motion .infra-hot-badge,
+:root.reduce-motion .marker-arrived .entity-icon-wrap > svg,
+:root.reduce-motion .leaflet-popup,
+:root.reduce-motion #conflictBriefing,
+:root.reduce-motion #countryInfoCard,
+:root.reduce-motion #eventDetailCard,
+:root.reduce-motion .region-zone-menu,
+:root.reduce-motion .panel-enter,
+:root.reduce-motion .stagger-children > *,
+:root.reduce-motion .loading-log-line,
+:root.reduce-motion .news-list > *,
+:root.reduce-motion .notable-list > * {
   animation: none !important;
+}
+
+/* The setting above is the app's; this is the operating system's. A reader who
+   set it there should not have to find it here as well. */
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .notable-pulse,
+  .jamming-ping-ring,
+  .infra-hot .entity-icon-wrap,
+  .czib-live .entity-icon-wrap,
+  .country-shape.country-hot,
+  .dot.breathing,
+  .infra-hot-badge,
+  .marker-arrived .entity-icon-wrap > svg,
+  .leaflet-popup,
+  #conflictBriefing,
+  #countryInfoCard,
+  #eventDetailCard,
+  .region-zone-menu,
+  .panel-enter,
+  .stagger-children > *,
+  .loading-log-line,
+  .news-list > *,
+  .notable-list > * {
+    animation: none !important;
+  }
 }
 
 :root.hide-leaders .pin-leader { display: none; }
@@ -3356,6 +3533,29 @@ html, body {
   background: #ff8c3a;
   z-index: 2000;
   pointer-events: none;
+}
+
+/* The difference between "clicked" and "clicked?". Scale rather than colour:
+   several of these already change colour to mean something else (a pinned
+   layer, an active region, Admin Mode being on), and a press must not be
+   confusable with a state. */
+.layer-check,
+.timeline-play,
+.timeline-live-btn,
+.news-locate-btn,
+.news-caret-btn,
+#adminToggle {
+  transition: transform var(--t-tap) var(--e-out);
+}
+.layer-check:not(:disabled):active,
+.region-btn:active,
+.region-zone-menu-item:active,
+.timeline-play:active,
+.timeline-live-btn:not(:disabled):active,
+.news-locate-btn:active,
+.news-caret-btn:active,
+#adminToggle:active {
+  transform: scale(0.93);
 }
 
 /* --- the admin panel --- */
@@ -3740,7 +3940,7 @@ html, body {
   width: 10px;
   color: var(--text-dim);
   font-size: 9px;
-  transition: transform 0.12s ease;
+  transition: transform var(--t-tap) var(--e-out);
 }
 .admin-layer-block[open] > .admin-layer-summary::before { transform: rotate(90deg); }
 .admin-layer-summary:hover { color: var(--text-bright); }
@@ -4139,7 +4339,7 @@ html, body {
   padding: 3px 6px;
   border-radius: 4px;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background var(--t-tap) var(--e-out);
 }
 .event-row-open:hover,
 .event-row-open:focus-visible {
@@ -4168,7 +4368,6 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 22px var(--shadow-color);
   z-index: 1100;
-  animation: popup-in 0.16s ease;
 }
 .event-detail-header {
   display: flex;
@@ -4359,7 +4558,7 @@ html, body {
   content: "\25B8";
   position: absolute;
   left: 2px;
-  transition: transform 0.15s ease;
+  transition: transform var(--t-ui) var(--e-out);
   display: inline-block;
   color: var(--accent);
 }
@@ -4386,7 +4585,7 @@ html, body {
   content: "\25B8";
   position: absolute;
   left: 2px;
-  transition: transform 0.15s ease;
+  transition: transform var(--t-ui) var(--e-out);
   display: inline-block;
 }
 .country-section[open] > summary::before { transform: rotate(90deg); }
@@ -4468,7 +4667,7 @@ html, body {
   border-radius: 10px;
   backdrop-filter: blur(6px);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
-  animation: popup-in 0.16s ease;
+  animation: popup-in var(--t-ui) var(--e-out);
 }
 .compare-header {
   display: flex;
@@ -4680,7 +4879,7 @@ tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
 #map[data-emphasis] .entity-marker,
 #map[data-emphasis] .leaflet-marker-icon {
   opacity: 0.28;
-  transition: opacity 0.18s ease;
+  transition: opacity var(--t-ui) var(--e-out);
 }
 #map[data-emphasis="events"] .entity-marker.layer-events,
 #map[data-emphasis="gdelt"] .entity-marker.layer-gdelt,

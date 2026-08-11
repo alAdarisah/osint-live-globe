@@ -105,6 +105,35 @@ export function useAppSettings() {
     }
   });
 
+  // Whether this page was served by the public listener, which refuses admin
+  // writes (see frontend/nginx.conf). Asked once, at startup: nginx is the only
+  // thing that knows which of its two doors a request came through, so it is the
+  // only thing that can answer.
+  //
+  // Defaults to false -- admin offered -- and stays false if the request fails.
+  // That is deliberate: the write endpoint is already 403 on the public
+  // listener, so this flag only decides whether the button is shown, and failing
+  // closed would hide the panel from the operator over the SSH tunnel because of
+  // one dropped request.
+  const [readOnly, setReadOnly] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/public-mode", { cache: "no-store" });
+        if (!response.ok) return;
+        const body = await response.json();
+        if (!cancelled && body?.readonly === true) setReadOnly(true);
+      } catch {
+        /* offline, or the private listener answering 404 -- either way, admin
+           stays available and the 403 remains the real boundary. */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // What the admin panel reports about the file on disk:
   //   state    "loading" | "saved" | "saving" | "local-only" | "error"
   //   savedAt  unix seconds of the last successful write, or null
@@ -136,7 +165,14 @@ export function useAppSettings() {
     });
   }, []);
 
+  // Admin Mode as the rest of the app sees it. The stored preference survives in
+  // localStorage either way, so an operator who visited the public link and then
+  // opens the SSH tunnel gets their mode back rather than having it silently
+  // switched off.
+  const effectiveAdmin = adminMode && !readOnly;
+
   const toggleAdminMode = useCallback(() => {
+    if (readOnly) return;
     setAdminMode((prev) => {
       const next = !prev;
       try {
@@ -146,7 +182,7 @@ export function useAppSettings() {
       }
       return next;
     });
-  }, []);
+  }, [readOnly]);
 
   // --- the copy on disk -------------------------------------------------
 
@@ -372,8 +408,8 @@ export function useAppSettings() {
   }, [settings.ui]);
 
   useEffect(() => {
-    document.documentElement.classList.toggle("admin-mode", adminMode);
-  }, [adminMode]);
+    document.documentElement.classList.toggle("admin-mode", effectiveAdmin);
+  }, [effectiveAdmin]);
 
   // --- update helpers ---------------------------------------------------
 
@@ -920,7 +956,11 @@ export function useAppSettings() {
     ]
   );
 
-  return { settings, adminMode, toggleAdminMode, actions, sync, borderNotice };
+  // `adminMode` is the effective one, so no caller has to remember to combine it
+  // with readOnly -- App.jsx gates a dozen things on it, and one missed check
+  // would put an editor on the public page. `readOnly` is returned as well
+  // because the title bar needs to hide the button rather than merely disable it.
+  return { settings, adminMode: effectiveAdmin, readOnly, toggleAdminMode, actions, sync, borderNotice };
 }
 
 // "#6fe3ff" -> "111, 227, 255", the form the rgba(var(--accent-rgb), a) rules

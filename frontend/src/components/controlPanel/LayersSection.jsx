@@ -18,6 +18,7 @@ import LayerIcon from "./LayerIcon";
 import LayerCheck from "./LayerCheck";
 import FilterBar from "./FilterBar";
 import { PanelGroup, LayerDetails } from "./Collapsible";
+import CountUp from "../CountUp";
 
 // What each conflict glyph means. Drawn from the same SVG table the map pins
 // use, so a shape can never appear in one place and not the other.
@@ -225,7 +226,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.clash} color="#ff3b30" token="severity.critical" /> Conflict &amp; Violence (ACLED + UCDP + GDELT)
-          <span className="count">{counts.events} ({counts.eventsTotal})</span>
+          <span className="count"><CountUp value={counts.events} /> (<CountUp value={counts.eventsTotal} />)</span>
         </label>
 
         {/* News is the same incidents one step short of being fused into a pin
@@ -241,7 +242,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.news} color="#ffd60a" token="news.pin" /> Show news reports (GDELT)
-          <span className="count">{counts.gdelt} ({counts.gdeltTotal})</span>
+          <span className="count"><CountUp value={counts.gdelt} /> (<CountUp value={counts.gdeltTotal} />)</span>
         </label>
         <div id="gdeltZoomNote" className={`sublegend${zoomNotes.gdelt ? " visible" : ""}`}>
           Zoom in to show news
@@ -362,7 +363,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.recordMark} color="#8f9bb3" token="event.history" /> Verified record (UCDP)
-          <span className="count">{counts.conflictHistory} ({counts.conflictHistoryTotal})</span>
+          <span className="count"><CountUp value={counts.conflictHistory} /> (<CountUp value={counts.conflictHistoryTotal} />)</span>
         </label>
         <div id="historyZoomNote" className={`sublegend${zoomNotes.conflictHistory ? " visible" : ""}`}>
           Zoom in to show the verified record
@@ -383,7 +384,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.handshake} color="#7ee0c9" token="officials.cooperative" /> Officials &amp; Diplomacy
-          <span className="count">{counts.officials} ({counts.officialsTotal})</span>
+          <span className="count"><CountUp value={counts.officials} /> (<CountUp value={counts.officialsTotal} />)</span>
         </label>
         <div id="officialsZoomNote" className={`sublegend${zoomNotes.officials ? " visible" : ""}`}>
           Zoom in to show officials &amp; diplomacy
@@ -475,7 +476,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.warship} color="#ffd60a" token="ship.navy" /> Navy &amp; MSC Ships
-          <span className="count">{counts.aisNavy} ({counts.aisNavyTotal})</span>
+          <span className="count"><CountUp value={counts.aisNavy} /> (<CountUp value={counts.aisNavyTotal} />)</span>
         </label>
         <LayerDetails id="det-aisNavy" open={isOpen("det-aisNavy")} onToggle={setOpen}>
           <div className="sublegend">Identified by AIS ship-type code or USS/USNS naming. Shown at every zoom.</div>
@@ -489,7 +490,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.tanker} color="#ffb347" token="ship.tanker" /> Oil Tankers
-          <span className="count">{counts.aisTanker} ({counts.aisTankerTotal})</span>
+          <span className="count"><CountUp value={counts.aisTanker} /> (<CountUp value={counts.aisTankerTotal} />)</span>
         </label>
         <label className="layer-row sub-row" data-layer="aisTankerTrails">
           <LayerCheck
@@ -512,7 +513,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.ship} color="#35c2ff" token="ship.other" /> Civilian Ships (AIS)
-          <span className="count">{counts.aisCivilian} ({counts.aisCivilianTotal})</span>
+          <span className="count"><CountUp value={counts.aisCivilian} /> (<CountUp value={counts.aisCivilianTotal} />)</span>
         </label>
         <div id="aisZoomNote" className={`sublegend${zoomNotes.ais ? " visible" : ""}`}>
           Zoom in to show civilian ships
@@ -526,7 +527,7 @@ export default function LayersSection({
           <div className="subticker-row">
             <LayerIcon svg={SVG.ship + SVG.sanctionRing} color={SANCTION_COLOR} token="sanctions.designated" />
             OFAC-designated vessels
-            <span className="count">{counts.aisSanctioned} ({counts.aisSanctionedTotal})</span>
+            <span className="count"><CountUp value={counts.aisSanctioned} /> (<CountUp value={counts.aisSanctionedTotal} />)</span>
           </div>
         </div>
         <LayerDetails id="det-aisSanctioned" open={isOpen("det-aisSanctioned")} onToggle={setOpen}>
@@ -552,7 +553,7 @@ export default function LayersSection({
           />
           <LayerIcon svg={SVG.darkShip} color={DARK_VESSEL_STYLE.ais_gap.color} token={DARK_VESSEL_STYLE.ais_gap.token} />
           {" "}Dark Vessels &amp; Transfers <span className="inferred-tag">inferred</span>
-          <span className="count">{counts.darkVessels} ({counts.darkVesselsTotal})</span>
+          <span className="count"><CountUp value={counts.darkVessels} /> (<CountUp value={counts.darkVesselsTotal} />)</span>
         </label>
         <div className="subticker-list">
           {DARK_VESSEL_ORDER.map((kind) => (
@@ -560,8 +561,8 @@ export default function LayersSection({
               <LayerIcon svg={DARK_VESSEL_STYLE[kind].svg} color={DARK_VESSEL_STYLE[kind].color} token={DARK_VESSEL_STYLE[kind].token} />
               {DARK_VESSEL_STYLE[kind].label}
               <span className="count">
-                {counts[kind === "sts_pair" ? "darkSts" : "darkGaps"]}{" "}
-                ({counts[kind === "sts_pair" ? "darkStsTotal" : "darkGapsTotal"]})
+                <CountUp value={counts[kind === "sts_pair" ? "darkSts" : "darkGaps"]} />{" "}
+                (<CountUp value={counts[kind === "sts_pair" ? "darkStsTotal" : "darkGapsTotal"]} />)
               </span>
             </div>
           ))}
@@ -597,7 +598,7 @@ export default function LayersSection({
           />
           <LayerIcon svg={GFW_GAP_STYLE.svg} color={GFW_GAP_STYLE.color} token={GFW_GAP_STYLE.token} />
           {" "}AIS Disabling (Global Fishing Watch) <span className="inferred-tag">GFW&apos;s finding</span>
-          <span className="count">{counts.gfwGaps} ({counts.gfwGapsTotal})</span>
+          <span className="count"><CountUp value={counts.gfwGaps} /> (<CountUp value={counts.gfwGapsTotal} />)</span>
         </label>
         <div id="gfwGapsZoomNote" className={`sublegend${zoomNotes.gfwGaps ? " visible" : ""}`}>
           Zoom in to show AIS disabling events
@@ -634,7 +635,7 @@ export default function LayersSection({
           />
           <LayerIcon svg={SVG.hullDetection} color={GFW_DETECTION_STYLE.unmatched.color} token={GFW_DETECTION_STYLE.unmatched.token} />
           {" "}Satellite Vessel Detections (GFW)
-          <span className="count">{counts.gfwDetections} ({counts.gfwDetectionsTotal})</span>
+          <span className="count"><CountUp value={counts.gfwDetections} /> (<CountUp value={counts.gfwDetectionsTotal} />)</span>
         </label>
         <div className="subticker-list">
           {GFW_DETECTION_ORDER.map((kind) => (
@@ -642,8 +643,8 @@ export default function LayersSection({
               <LayerIcon svg={SVG.hullDetection} color={GFW_DETECTION_STYLE[kind].color} token={GFW_DETECTION_STYLE[kind].token} />
               {GFW_DETECTION_STYLE[kind].label}
               <span className="count">
-                {counts[kind === "matched" ? "gfwDetMatched" : "gfwDetUnmatched"]}{" "}
-                ({counts[kind === "matched" ? "gfwDetMatchedTotal" : "gfwDetUnmatchedTotal"]})
+                <CountUp value={counts[kind === "matched" ? "gfwDetMatched" : "gfwDetUnmatched"]} />{" "}
+                (<CountUp value={counts[kind === "matched" ? "gfwDetMatchedTotal" : "gfwDetUnmatchedTotal"]} />)
               </span>
             </div>
           ))}
@@ -716,7 +717,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.planeMilitary} color="#ff4d4d" token="aircraft.military" /> Military Aircraft
-          <span className="count">{counts.adsbMilitary} ({counts.adsbMilitaryTotal})</span>
+          <span className="count"><CountUp value={counts.adsbMilitary} /> (<CountUp value={counts.adsbMilitaryTotal} />)</span>
         </label>
         <label className="layer-row sub-row" data-layer="adsbMilitaryTrails">
           <LayerCheck
@@ -755,7 +756,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.planeMilitary + SVG.alertRing} color="#ff1a1a" /> Emergency &amp; Hidden Aircraft
-          <span className="count">{counts.adsbFlagged} ({counts.adsbFlaggedTotal})</span>
+          <span className="count"><CountUp value={counts.adsbFlagged} /> (<CountUp value={counts.adsbFlaggedTotal} />)</span>
         </label>
         <div className="subticker-list">
           {AIRCRAFT_FLAG_ORDER.map((flag) => (
@@ -766,8 +767,8 @@ export default function LayersSection({
               />
               {AIRCRAFT_FLAG_STYLE[flag].label}
               <span className="count">
-                {counts[AIRCRAFT_FLAG_STYLE[flag].countKey]}{" "}
-                ({counts[`${AIRCRAFT_FLAG_STYLE[flag].countKey}Total`]})
+                <CountUp value={counts[AIRCRAFT_FLAG_STYLE[flag].countKey]} />{" "}
+                (<CountUp value={counts[`${AIRCRAFT_FLAG_STYLE[flag].countKey}Total`]} />)
               </span>
             </div>
           ))}
@@ -806,7 +807,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.planeCommercial} color="#d8b9ff" token="aircraft.commercial" /> Civilian Aircraft (ADS-B)
-          <span className="count">{counts.adsbCivilian} ({counts.adsbCivilianTotal})</span>
+          <span className="count"><CountUp value={counts.adsbCivilian} /> (<CountUp value={counts.adsbCivilianTotal} />)</span>
         </label>
         <div id="adsbZoomNote" className={`sublegend${zoomNotes.adsb ? " visible" : ""}`}>
           Zoom in to show civilian aircraft
@@ -836,7 +837,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.refinery} color="#ff9500" token="infra.refinery" /> Critical Infrastructure
-          <span className="count">{counts.infra} ({counts.infraTotal})</span>
+          <span className="count"><CountUp value={counts.infra} /> (<CountUp value={counts.infraTotal} />)</span>
         </label>
         {/* Search box and the live per-type counts stay outside the fold --
             both are things a reader operates and watches, not reference. */}
@@ -851,7 +852,7 @@ export default function LayersSection({
           {INFRA_ROWS.map((row) => (
             <div className="subticker-row" key={row.key}>
               <LayerIcon svg={row.svg} color={row.color} token={row.token} /> {row.label}
-              <span className="count">{counts[row.key]} ({counts[`${row.key}Total`]})</span>
+              <span className="count"><CountUp value={counts[row.key]} /> (<CountUp value={counts[`${row.key}Total`]} />)</span>
             </div>
           ))}
         </div>
@@ -903,31 +904,38 @@ export default function LayersSection({
               this layer's single largest remaining class. */}
           <LayerIcon svg={OSM_INFRA_STYLE.military_area.svg} color={OSM_INFRA_STYLE.military_area.color} token={OSM_INFRA_STYLE.military_area.token} />
           {" "}Infrastructure (OpenStreetMap)
-          <span className="count">{counts.osmInfra} ({counts.osmInfraTotal})</span>
+          <span className="count"><CountUp value={counts.osmInfra} /> (<CountUp value={counts.osmInfraTotal} />)</span>
         </label>
         <div className="subticker-list">
           <div className="subticker-row">
             <LayerIcon svg={OSM_INFRA_STYLE.military_area.svg} color={OSM_INFRA_STYLE.military_area.color} token={OSM_INFRA_STYLE.military_area.token} />
             Military sites &amp; airfields
-            <span className="count">{counts.osmMilitary} ({counts.osmMilitaryTotal})</span>
+            <span className="count"><CountUp value={counts.osmMilitary} /> (<CountUp value={counts.osmMilitaryTotal} />)</span>
           </div>
           <div className="subticker-row">
+            {/* Power plants used to sit here; Task 28 moved them to their own
+                layer (see the note below and the powerPlants row). Substations
+                stayed behind, so this slot is theirs -- with main's CountUp,
+                which the rows either side of it already use. */}
             <LayerIcon svg={OSM_INFRA_STYLE.power_substation.svg} color={OSM_INFRA_STYLE.power_substation.color} token={OSM_INFRA_STYLE.power_substation.token} />
             Substations
-            <span className="count">{counts.osmSubstation} ({counts.osmSubstationTotal})</span>
+            <span className="count"><CountUp value={counts.osmSubstation} /> (<CountUp value={counts.osmSubstationTotal} />)</span>
           </div>
           <div className="subticker-row">
             <LayerIcon svg={OSM_INFRA_STYLE.border_control.svg} color={OSM_INFRA_STYLE.border_control.color} token={OSM_INFRA_STYLE.border_control.token} />
             Border crossings
-            <span className="count">{counts.osmBorder} ({counts.osmBorderTotal})</span>
+            <span className="count"><CountUp value={counts.osmBorder} /> (<CountUp value={counts.osmBorderTotal} />)</span>
           </div>
           {/* Task 28: refineries/storage tanks/wellheads, one bucket -- see
               buildEnergyInfrastructure in popups.js for where they are
               presented beside the curated refineries/terminals count. */}
           <div className="subticker-row">
+            {/* Railway points used to sit here; Task 27 moved them to the
+                Railways layer (see the note below). This slot is Task 28's
+                energy bucket -- with main's CountUp, as above. */}
             <LayerIcon svg={OSM_INFRA_STYLE.refinery.svg} color={OSM_INFRA_STYLE.refinery.color} token={OSM_INFRA_STYLE.refinery.token} />
             Refineries, storage &amp; wells
-            <span className="count">{counts.osmEnergyOther} ({counts.osmEnergyOtherTotal})</span>
+            <span className="count"><CountUp value={counts.osmEnergyOther} /> (<CountUp value={counts.osmEnergyOtherTotal} />)</span>
           </div>
         </div>
         <div id="osmInfraZoomNote" className={`sublegend${zoomNotes.osmInfra ? " visible" : ""}`}>
@@ -1053,7 +1061,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.airfield} color="#7f93a8" token="airfield.medium" /> Airfields (OurAirports)
-          <span className="count">{counts.airports} ({counts.airportsTotal})</span>
+          <span className="count"><CountUp value={counts.airports} /> (<CountUp value={counts.airportsTotal} />)</span>
         </label>
         <div id="airportsZoomNote" className={`sublegend${zoomNotes.airports ? " visible" : ""}`}>
           Zoom in to show airfields
@@ -1091,13 +1099,13 @@ export default function LayersSection({
           />
           <LayerIcon svg={PORT_STYLE.svg} color={PORT_STYLE.color} token={PORT_STYLE.token} />
           {" "}Ports (NGA World Port Index)
-          <span className="count">{counts.ports} ({counts.portsTotal})</span>
+          <span className="count"><CountUp value={counts.ports} /> (<CountUp value={counts.portsTotal} />)</span>
         </label>
         <div className="subticker-list">
           <div className="subticker-row">
             <LayerIcon svg={PORT_STYLE.svg} color={PORT_STYLE.color} token={PORT_STYLE.token} />
             With an oil terminal
-            <span className="count">{counts.portsOil} ({counts.portsOilTotal})</span>
+            <span className="count"><CountUp value={counts.portsOil} /> (<CountUp value={counts.portsOilTotal} />)</span>
           </div>
         </div>
         <div id="portsZoomNote" className={`sublegend${zoomNotes.ports ? " visible" : ""}`}>
@@ -1135,13 +1143,13 @@ export default function LayersSection({
           />
           <LayerIcon svg={DAM_STYLE.svg} color={DAM_STYLE.color} token={DAM_STYLE.token} />
           {" "}Dams &amp; Reservoirs (Global Dam Watch)
-          <span className="count">{counts.dams} ({counts.damsTotal})</span>
+          <span className="count"><CountUp value={counts.dams} /> (<CountUp value={counts.damsTotal} />)</span>
         </label>
         <div className="subticker-list">
           <div className="subticker-row">
             <LayerIcon svg={DAM_STYLE.svg} color={DAM_STYLE.color} token={DAM_STYLE.token} />
             Holding 100 million m&sup3; or more
-            <span className="count">{counts.damsLarge} ({counts.damsLargeTotal})</span>
+            <span className="count"><CountUp value={counts.damsLarge} /> (<CountUp value={counts.damsLargeTotal} />)</span>
           </div>
         </div>
         <div id="damsZoomNote" className={`sublegend${zoomNotes.dams ? " visible" : ""}`}>
@@ -1183,7 +1191,7 @@ export default function LayersSection({
           />
           <LayerIcon svg={DEFLOCK_STYLE.svg} color={DEFLOCK_STYLE.color} token={DEFLOCK_STYLE.token} />
           {" "}ALPR Cameras (DeFlock)
-          <span className="count">{counts.deflock} ({counts.deflockTotal})</span>
+          <span className="count"><CountUp value={counts.deflock} /> (<CountUp value={counts.deflockTotal} />)</span>
         </label>
         <div id="deflockZoomNote" className={`sublegend${zoomNotes.deflock ? " visible" : ""}`}>
           Zoom in to show ALPR cameras &mdash; a worldwide layer held back until you are over a town,
@@ -1216,8 +1224,11 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={RAILWAY_STYLE.svg} color={RAILWAY_STYLE.color} token={RAILWAY_STYLE.token} />
+          {/* "Natural Earth + OpenStreetMap", not main's "Natural Earth":
+              Task 27 gave this layer its second source, so naming only the
+              first would now understate what is drawn. CountUp is main's. */}
           {" "}Railways (Natural Earth + OpenStreetMap)
-          <span className="count">{counts.railways} ({counts.railwaysTotal})</span>
+          <span className="count"><CountUp value={counts.railways} /> (<CountUp value={counts.railwaysTotal} />)</span>
         </label>
         {/* Task 27: the station/halt/yard/border points, moved here from OSM
             infrastructure above -- a readout, not a toggle of its own, the
@@ -1408,13 +1419,13 @@ export default function LayersSection({
           />
           <LayerIcon svg={SVG.cableLanding} color={CABLE_LANDING_STYLE.color} token={CABLE_LANDING_STYLE.token} />
           {" "}Submarine Cables
-          <span className="count">{counts.cables} ({counts.cablesTotal})</span>
+          <span className="count"><CountUp value={counts.cables} /> (<CountUp value={counts.cablesTotal} />)</span>
         </label>
         <div className="subticker-list">
           <div className="subticker-row">
             <LayerIcon svg={SVG.cableLanding} color={CABLE_LANDING_STYLE.color} token={CABLE_LANDING_STYLE.token} />
             {CABLE_LANDING_STYLE.label}
-            <span className="count">{counts.cableLandings} ({counts.cableLandingsTotal})</span>
+            <span className="count"><CountUp value={counts.cableLandings} /> (<CountUp value={counts.cableLandingsTotal} />)</span>
           </div>
         </div>
         <div id="cableLandingsZoomNote" className={`sublegend${zoomNotes.cableLandings ? " visible" : ""}`}>
@@ -1448,7 +1459,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.fire} color="#ff9500" /> Fires / Thermal Anomalies (FIRMS)
-          <span className="count">{counts.firms} ({counts.firmsTotal})</span>
+          <span className="count"><CountUp value={counts.firms} /> (<CountUp value={counts.firmsTotal} />)</span>
         </label>
         <div id="firmsZoomNote" className={`sublegend${zoomNotes.firms ? " visible" : ""}`}>
           Zoom in to inspect individual fire points
@@ -1465,7 +1476,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.jammingSignal} color="#b833e0" /> GPS/Radio Jamming (GPSJam)
-          <span className="count">{counts.jamming} ({counts.jammingTotal})</span>
+          <span className="count"><CountUp value={counts.jamming} /> (<CountUp value={counts.jammingTotal} />)</span>
         </label>
         <div id="jammingZoomNote" className={`sublegend${zoomNotes.jamming ? " visible" : ""}`}>
           Zoom in to inspect individual cells
@@ -1519,7 +1530,7 @@ export default function LayersSection({
           />
           <LayerIcon svg={CZIB_STYLE.active.svg} color={CZIB_STYLE.active.color} token={CZIB_STYLE.active.token} />
           {" "}Airspace Warnings (EASA)
-          <span className="count">{counts.czib} ({counts.czibTotal})</span>
+          <span className="count"><CountUp value={counts.czib} /> (<CountUp value={counts.czibTotal} />)</span>
         </label>
         <div className="subticker-list">
           {CZIB_ORDER.map((kind) => (
@@ -1527,8 +1538,8 @@ export default function LayersSection({
               <LayerIcon svg={CZIB_STYLE[kind].svg} color={CZIB_STYLE[kind].color} token={CZIB_STYLE[kind].token} />
               {CZIB_STYLE[kind].label}
               <span className="count">
-                {counts[kind === "active" ? "czibActive" : "czibWithdrawn"]}{" "}
-                ({counts[kind === "active" ? "czibActiveTotal" : "czibWithdrawnTotal"]})
+                <CountUp value={counts[kind === "active" ? "czibActive" : "czibWithdrawn"]} />{" "}
+                (<CountUp value={counts[kind === "active" ? "czibActiveTotal" : "czibWithdrawnTotal"]} />)
               </span>
             </div>
           ))}
@@ -1570,13 +1581,13 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.earthquake} color="currentColor" /> Earthquakes &amp; Volcanoes
-          <span className="count">{counts.hazards} ({counts.hazardsTotal})</span>
+          <span className="count"><CountUp value={counts.hazards} /> (<CountUp value={counts.hazardsTotal} />)</span>
         </label>
         <div className="subticker-list">
           {HAZARD_ROWS.map((row) => (
             <div className="subticker-row" key={row.key}>
               <LayerIcon svg={row.svg} color="currentColor" /> {row.label}
-              <span className="count">{counts[row.countKey]} ({counts[`${row.countKey}Total`]})</span>
+              <span className="count"><CountUp value={counts[row.countKey]} /> (<CountUp value={counts[`${row.countKey}Total`]} />)</span>
             </div>
           ))}
         </div>
@@ -1611,13 +1622,13 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={FLOOD_STYLE.svg} color="currentColor" /> Floods (GDACS)
-          <span className="count">{counts.floods} ({counts.floodsTotal})</span>
+          <span className="count"><CountUp value={counts.floods} /> (<CountUp value={counts.floodsTotal} />)</span>
         </label>
         <div className="subticker-list">
           <div className="subticker-row">
             <LayerIcon svg={FLOOD_STYLE.svg} color="currentColor" />
             Still open
-            <span className="count">{counts.floodsCurrent} ({counts.floodsCurrentTotal})</span>
+            <span className="count"><CountUp value={counts.floodsCurrent} /> (<CountUp value={counts.floodsCurrentTotal} />)</span>
           </div>
         </div>
         <div id="floodsZoomNote" className={`sublegend${zoomNotes.floods ? " visible" : ""}`}>
@@ -1660,7 +1671,7 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={SVG.satellite} color="#6fe3ff" token="satellite.stations" /> Satellites (stations + military)
-          <span className="count">{counts.satellites} ({counts.satellitesTotal})</span>
+          <span className="count"><CountUp value={counts.satellites} /> (<CountUp value={counts.satellitesTotal} />)</span>
         </label>
         <label className="layer-row sub-row" data-layer="satellitesMilitary">
           <LayerCheck
@@ -1736,13 +1747,13 @@ export default function LayersSection({
           />
           <LayerIcon svg={SVG.launchPad} color={LAUNCH_STYLE.upcoming.color} token={LAUNCH_STYLE.upcoming.token} />
           {" "}Orbital Launches
-          <span className="count">{counts.launches} ({counts.launchesTotal})</span>
+          <span className="count"><CountUp value={counts.launches} /> (<CountUp value={counts.launchesTotal} />)</span>
         </label>
         <div className="subticker-list">
           <div className="subticker-row">
             <LayerIcon svg={SVG.launchPad} color={LAUNCH_STYLE.upcoming.color} token={LAUNCH_STYLE.upcoming.token} />
             Still to come
-            <span className="count">{counts.launchesUpcoming} ({counts.launchesUpcomingTotal})</span>
+            <span className="count"><CountUp value={counts.launchesUpcoming} /> (<CountUp value={counts.launchesUpcomingTotal} />)</span>
           </div>
         </div>
         <LayerDetails id="det-launches" open={isOpen("det-launches")} onToggle={setOpen}>

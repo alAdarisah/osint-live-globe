@@ -1,3 +1,5 @@
+import { dotPeriod, STALE_AFTER_SECONDS } from "../../utils/tempo";
+
 export default function SourceStatusSection({ health }) {
   // /api/health carries the per-source states plus an `alerts` array from the
   // cache worker (see backend/cacheworker). Filtering on shape rather than on a
@@ -29,11 +31,16 @@ export default function SourceStatusSection({ health }) {
         {rows.map(([name, info]) => {
           let cls = "err";
           if (!info.key_configured && info.last_error) cls = "warn";
-          if (info.last_success && info.seconds_since_success < 1800) cls = "ok";
+          if (info.last_success && info.seconds_since_success < STALE_AFTER_SECONDS) cls = "ok";
           const age = info.seconds_since_success != null ? `${info.seconds_since_success}s ago` : "never";
+          const period = dotPeriod(info.seconds_since_success);
           return (
             <li key={name}>
-              <span className={`dot ${cls}`} /> {name.toUpperCase()}: {info.item_count} items, updated {age}
+              <span
+                className={`dot ${cls}${period ? " breathing" : ""}`}
+                style={period ? { "--period": period } : undefined}
+              />{" "}
+              {name.toUpperCase()}: {info.item_count} items, updated {age}
               {info.last_error ? ` — ${info.last_error}` : ""}
             </li>
           );

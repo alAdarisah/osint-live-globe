@@ -4,6 +4,7 @@ import { metricById, metricsForTarget, rampSwatches } from "../../map/choropleth
 import LayerIcon from "./LayerIcon";
 import LayerCheck from "./LayerCheck";
 import { LayerDetails } from "./Collapsible";
+import CountUp from "../CountUp";
 
 export default function PlacesSection({
   counts, zoomNotes, layerVisibility, layerWish, onToggleLayer,
@@ -29,7 +30,7 @@ export default function PlacesSection({
             onToggle={onToggleLayer}
           />
         <LayerIcon svg={SVG.globe} color="#6fe3ff" /> Countries
-        <span className="count">{counts.countries} ({counts.countriesTotal})</span>
+        <span className="count"><CountUp value={counts.countries} /> (<CountUp value={counts.countriesTotal} />)</span>
       </label>
 
       {/* Started as country-only: several country-keyed datasets were already
@@ -104,7 +105,7 @@ export default function PlacesSection({
             onToggle={onToggleLayer}
           />
         <LayerIcon svg={SVG.city} color={CITY_COLOR} token="city.mega" /> Cities (100k+)
-        <span className="count">{counts.cities} ({counts.citiesTotal})</span>
+        <span className="count"><CountUp value={counts.cities} /> (<CountUp value={counts.citiesTotal} />)</span>
       </label>
       <div id="citiesZoomNote" className={`sublegend${zoomNotes.cities ? " visible" : ""}`}>
         {zoomNotes.citiesScoped ? "Zoom in to show cities" : "Select a country or conflict zone to show cities"}

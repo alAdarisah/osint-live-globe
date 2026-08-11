@@ -139,6 +139,19 @@ _JOBS = (
         publishes=(Published("gfw_gaps", "gfw_gaps", "AIS disabling (GFW)"),),
         interval=lambda: config.GFW_GAPS_POLL_INTERVAL,
     ),
+    # The ships layer's second supplier (see backend/sources/marinesia.py). A
+    # scheduled job rather than a stream, and registered as its own kind rather
+    # than as another producer of "ais": the two feeds have very different
+    # density, and merging them would make that layer mean something different
+    # depending on which supplier happened to be up -- including to
+    # dark_vessels.py, which reads the AIS movement log to decide whether a hull
+    # went quiet.
+    Job(
+        module="marinesia",
+        entrypoint="ingest_once",
+        publishes=(Published("marinesia", "marinesia", "Ships (Marinesia)"),),
+        interval=lambda: config.MARINESIA_POLL_INTERVAL,
+    ),
     # Both of these pace themselves and are run as long-lived tasks, not on an
     # interval. AIS is a persistent websocket subscription whose reconnect
     # backoff (BACKOFF_CAP=900, jittered) exists precisely to avoid hammering

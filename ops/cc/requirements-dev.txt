@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest==8.3.3
+# Renders a widget to a terminal snapshot and diffs it. Dev-only: the server
+# never needs it, and it pulls in a browser-based diff viewer.
+pytest-textual-snapshot==1.1.0
