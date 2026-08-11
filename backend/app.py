@@ -1611,7 +1611,11 @@ async def aircraft_detail(icao24: str):
     clean" -- it is "this airframe has never sat inside one of gpsjam's
     currently-tracked worst-hundred cells", a different fact the card has to
     render differently (see jam_crosscheck.py's own docstring on why only
-    cell-relevant airframes get an entry at all).
+    cell-relevant airframes get an entry at all). `jam_crosscheck_window_
+    seconds` rides alongside it -- Task 39 review, Important 1: `sample_count`/
+    `flag_count` are a true rolling-window total, not a since-first-seen one,
+    and the card has to say what window it is quoting rather than print a
+    bare, unqualified number.
     """
     identity, legs, current_leg, jam_doc = await asyncio.gather(
         storage.entity_latest_one("adsb", icao24),
@@ -1642,6 +1646,7 @@ async def aircraft_detail(icao24: str):
         "cargo_hint": cargo_hint,
         "jam_crosscheck": (jam_doc.get("aircraft") or {}).get(icao24),
         "jam_crosscheck_note": jam_crosscheck.NOTE if jam_doc else None,
+        "jam_crosscheck_window_seconds": jam_doc.get("window_seconds") if jam_doc else None,
     }
 
 

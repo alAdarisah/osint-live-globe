@@ -65,22 +65,36 @@ ever seeing it printed as an observation.
 
 **"Found nothing" vs "did not look", four ways apart, matching the brief's
 own list.** A cell with `status: "no_traffic"` (aircraft_observed == 0) is
-not the same fact as one with `status: "clean"` (aircraft observed, none
-flagged) -- the first is an absence of ADS-B coverage or traffic, the second
-is coverage that found nothing wrong. `tracked_seconds` on every cell is
-this module's own honesty check on either verdict: gpsjam's top-100 turns
-over daily, so a cell that only entered it a few minutes before this pass
-would read as "no_traffic" for a reason that has nothing to do with real
-traffic -- this job simply has not watched it long enough yet. A whole
-missing document (GET /api/jam-crosscheck's own "{}" before this job's first
-pass) is the fourth: this map has not computed anything at all, never a
-zero. And on the aircraft side, `insufficient_samples` (fewer than
+not the same fact as one with `status: "clean"` (aircraft observed, none or
+too few flagged to clear JAM_CROSSCHECK_MIN_FLAG_RATIO) -- the first is an
+absence of ADS-B coverage or traffic, the second is coverage that found
+nothing (or nothing proportionally convincing) wrong. `tracked_seconds` on
+every cell is this module's own honesty check on either verdict: gpsjam's
+top-100 turns over daily, so a cell that only entered it a few minutes
+before this pass would read as "no_traffic" for a reason that has nothing to
+do with real traffic -- this job simply has not watched it long enough yet.
+A whole missing document (GET /api/jam-crosscheck's own "{}" before this
+job's first pass) is the fourth: this map has not computed anything at all,
+never a zero. And on the aircraft side, `insufficient_samples` (fewer than
 config.JAM_CROSSCHECK_MIN_SAMPLES qualifying position-delta pairs recorded
-for this airframe while it sat inside a tracked cell) is kept apart from
-`checked_clean` (enough samples, none flagged) for the same reason
-port_calls.py's PORT_SEARCH_RADIUS_KM rejection is counted rather than
-silently dropped: a `0` standing in for "did not look" is the one class of
-defect this whole plan keeps re-finding.
+for this airframe, within the rolling window, while it sat inside a tracked
+cell) is kept apart from `checked_clean` (enough samples, none flagged) for
+the same reason port_calls.py's PORT_SEARCH_RADIUS_KM rejection is counted
+rather than silently dropped: a `0` standing in for "did not look" is the
+one class of defect this whole plan keeps re-finding.
+
+**A cell's own `status` is a fraction, not a count (Task 39 review,
+Important 2).** `aircraft_flagged` is a real, unhidden count regardless of
+`status` -- the frontend's jamCellCrosscheckNote always prints "N of M
+aircraft", whichever word `status` carries -- but the word itself only ever
+reads "flagged" once `aircraft_flagged / aircraft_observed` clears
+config.JAM_CROSSCHECK_MIN_FLAG_RATIO. A bare count >= 1 would let a single
+noisy aircraft trip the same word for a cell with a hundred aircraft through
+it as for a cell with exactly one, which is precisely backwards given the
+module's own measured rate: over 98% of raw flags anywhere on the map are
+unrelated to jamming, so a busier cell has proportionally more chances to
+produce one purely by chance. See JAM_CROSSCHECK_MIN_FLAG_RATIO's own
+comment in backend/config.py for where the number comes from.
 
 **Why this only tracks aircraft that have actually touched a tracked cell.**
 This map's own ADS-B coverage runs to roughly seventeen thousand airframes at
@@ -276,15 +290,18 @@ def apply_batch(rows: list[dict], jam_cells: dict[str, dict], state: dict, now: 
                 cell_hex = _cell_for(lat, lon)
                 cell_entry = cells_state.get(cell_hex) if cell_hex else None
                 if cell_entry is not None:
-                    aircraft_entry = cell_entry["aircraft"].setdefault(
-                        icao, {"count": 0, "flag_count": 0, "last_ts": ts, "flags": []}
-                    )
-                    aircraft_entry["count"] += 1
-                    aircraft_entry["last_ts"] = ts
+                    # `samples`/`flags` are both raw, timestamped events, not
+                    # running totals -- see the module docstring's "the
+                    # window means what it says" section on why: a running
+                    # counter has no way to let an old event age back out
+                    # again, and config.JAM_CROSSCHECK_WINDOW_SECONDS is
+                    # documented (and pruned, below) as a true rolling
+                    # window, not merely an inactivity timeout.
+                    aircraft_entry = cell_entry["aircraft"].setdefault(icao, {"samples": [], "flags": []})
+                    aircraft_entry["samples"].append(ts)
                     if flag is not None:
                         flag["jam_cell"] = cell_hex
-                        aircraft_entry["flag_count"] += 1
-                        aircraft_entry["flags"] = (aircraft_entry["flags"] + [flag])[-FLAGS_PER_AIRCRAFT:]
+                        aircraft_entry["flags"].append(flag)
                 # cell_entry is None (no cell currently tracks this fix) ->
                 # deliberately nothing recorded, flagged or not; see the
                 # docstring above.
@@ -297,11 +314,23 @@ def apply_batch(rows: list[dict], jam_cells: dict[str, dict], state: dict, now: 
         if last_map[icao]["ts"] < cutoff_prune:
             del last_map[icao]
 
+    # The true rolling window: a sample or flag older than
+    # JAM_CROSSCHECK_WINDOW_SECONDS is dropped from the list outright, not
+    # merely left alone once the aircraft goes quiet -- an airframe that
+    # keeps transiting the same cell every day must not accumulate an
+    # ever-growing count, which is exactly what a last-seen-based prune
+    # would have let happen (Task 39 review, Important 1). An aircraft with
+    # nothing left in either list is dropped from the cell entirely, the
+    # same "gone, not zero" treatment cells themselves get when they drop out
+    # of jam_cells above.
     cutoff_window = now - config.JAM_CROSSCHECK_WINDOW_SECONDS
     for cell_entry in cells_state.values():
         aircraft = cell_entry["aircraft"]
         for icao in list(aircraft.keys()):
-            if aircraft[icao]["last_ts"] < cutoff_window:
+            entry = aircraft[icao]
+            entry["samples"] = [t for t in entry["samples"] if t >= cutoff_window]
+            entry["flags"] = [f for f in entry["flags"] if (f.get("ts") or 0) >= cutoff_window]
+            if not entry["samples"] and not entry["flags"]:
                 del aircraft[icao]
 
     return new_state
@@ -324,8 +353,22 @@ def build_document(state: dict, jam_cells: dict[str, dict], now: float) -> dict:
     for hex_id, meta in jam_cells.items():
         entry = cells_state.get(hex_id, {"tracked_since": now, "aircraft": {}})
         aircraft = entry.get("aircraft", {})
-        flagged_count = sum(1 for a in aircraft.values() if a.get("flag_count"))
-        if flagged_count:
+        flagged_count = sum(1 for a in aircraft.values() if a.get("flags"))
+        observed_count = len(aircraft)
+        # A single flagged aircraft among many observed is exactly the shape
+        # the raw noise rate produces on its own (see the module docstring's
+        # own measured rate: well over 98% of raw flags never coincide with
+        # any tracked cell at all, and a busy cell simply has more chances
+        # for one of its many aircraft to be that noise). Requiring a
+        # fraction, not merely a count >= 1, is what keeps a busy cell from
+        # tripping "flagged" on background noise the same way a single
+        # aircraft's own cell would -- see JAM_CROSSCHECK_MIN_FLAG_RATIO's
+        # own comment in backend/config.py (Task 39 review, Important 2).
+        # `aircraft_flagged` itself is never hidden or rounded away by this,
+        # whichever way `status` lands -- see the frontend's own
+        # jamCellCrosscheckNote, which prints the ratio unconditionally.
+        ratio = (flagged_count / observed_count) if observed_count else 0.0
+        if observed_count and ratio >= config.JAM_CROSSCHECK_MIN_FLAG_RATIO:
             status = STATUS_FLAGGED
         elif aircraft:
             status = STATUS_CLEAN
@@ -337,15 +380,15 @@ def build_document(state: dict, jam_cells: dict[str, dict], now: float) -> dict:
             "lon": meta.get("lon"),
             "jam_ratio": meta.get("jam_ratio"),
             "date": meta.get("date"),
-            "aircraft_observed": len(aircraft),
+            "aircraft_observed": observed_count,
             "aircraft_flagged": flagged_count,
             "status": status,
             "tracked_seconds": max(0, round(now - entry.get("tracked_since", now))),
         }
         for icao, a in aircraft.items():
             idx = aircraft_index.setdefault(icao, {"sample_count": 0, "flag_count": 0, "cells": [], "flags": []})
-            idx["sample_count"] += a.get("count", 0)
-            idx["flag_count"] += a.get("flag_count", 0)
+            idx["sample_count"] += len(a.get("samples", []))
+            idx["flag_count"] += len(a.get("flags", []))
             idx["cells"].append(hex_id)
             idx["flags"].extend(a.get("flags", []))
 
@@ -436,6 +479,33 @@ async def run_once() -> dict:
     reflected rather than a document frozen at whichever pass last happened
     to see a new row. `now` falls back to wall-clock time in that case --
     there is no row timestamp to anchor pruning to instead.
+
+    **Write order, and why it is not the obvious one (Task 39 review,
+    Critical).** `doc` is written before `new_state`, deliberately the
+    reverse of the order this module shipped with. `doc` is a pure function
+    of `new_state`, recomputed fresh on every attempt from whatever `state`
+    is *still durably on disk* -- so writing (and retrying) it costs
+    nothing: a retry that starts from the same untouched `state` recomputes
+    an identical `new_state` and therefore an identical `doc`. `new_state`
+    is not safe the same way. apply_batch walks each aircraft's rows forward
+    from `state`'s own "last" pointer, comparing this batch's own rows
+    against it -- so if `new_state` had already been persisted the first
+    time through (the original ordering), a retry would call apply_batch
+    again with a `state` that already reflects this exact batch, and the
+    first row's negative `dt` against that already-advanced pointer would
+    silently reset `last` to that row rather than skip it, letting every
+    following transition in the batch be counted a second time. The old
+    ordering let that daylight open between "wrote the durable state" and
+    "wrote the document that state was computed for or advanced the cursor
+    past the rows that produced it" -- if the *second* write failed, the
+    first was already unrecoverably wrong for the next attempt. Writing the
+    idempotent one first and gating the non-idempotent one on its own
+    durable success is the same principle backend/refine/lane_density.py's
+    own run_once uses for chokepoints (idempotent, first) versus
+    upsert_lane_cells (accumulates, not idempotent, gated last) -- here
+    `new_state` plays lane_cells' role, and the cursor is the outermost gate
+    of all: it only advances once both writes for this batch have landed.
+    See test_a_failed_reference_write_does_not_double_count_on_retry.
     """
     cursor = await _load_cursor()
     rows = await storage.entity_history_since("adsb", cursor, BATCH_LIMIT)
@@ -446,9 +516,9 @@ async def run_once() -> dict:
     new_state = apply_batch(rows, jam_cells, state, now)
     doc = build_document(new_state, jam_cells, now)
 
-    state_ok = await storage.record_reference(STATE_NAME, new_state)
-    doc_ok = state_ok and await storage.record_reference(REFERENCE_NAME, doc)
-    if not doc_ok:
+    doc_ok = await storage.record_reference(REFERENCE_NAME, doc)
+    state_ok = doc_ok and await storage.record_reference(STATE_NAME, new_state)
+    if not state_ok:
         return {"read": len(rows), "cells": len(jam_cells), "flags": 0, "ok": False}
 
     if rows:

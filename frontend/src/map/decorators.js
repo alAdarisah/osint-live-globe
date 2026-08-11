@@ -3882,6 +3882,20 @@ function jamFlagLine(flag) {
   return `<li>${esc(utcClockFromUnix(flag.ts))} &mdash; <b>${esc(label)}</b>: ${detail}</li>`;
 }
 
+/** Seconds -> "24h"/"90m"/"45s", for the rolling-window qualifier every
+ * jam-crosscheck count now carries (Task 39 review, Important 1: a count
+ * with no stated window is exactly the kind of unqualified number this plan
+ * keeps catching). Deliberately coarse -- this labels *which* number the
+ * reader is looking at, not a precise duration; contrast timeAgoFromUnix,
+ * which answers a different question ("how long has this cell been
+ * watched at all") for jamCellCrosscheckNote's own `trackedFor`. */
+function windowDurationText(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  if (seconds >= 3600) return `${Math.round(seconds / 3600)}h`;
+  if (seconds >= 60) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds)}s`;
+}
+
 /**
  * The jamming *cell*'s own half of the cross-check, for renderJamming's
  * popup (createMapController.js) -- the mirror of jamCrosscheckSection just
@@ -3897,6 +3911,15 @@ function jamFlagLine(flag) {
  * own top hundred changed since this document was built, or a snapshot
  * predates Task 39's own `hex` field), and the cell's own three-way
  * `status` once it is present.
+ *
+ * Task 39 review, Important 2: the backend only calls a cell's own status
+ * "flagged" once the flagged fraction clears JAM_CROSSCHECK_MIN_FLAG_RATIO,
+ * not merely `aircraft_flagged >= 1` -- but `aircraft_flagged` itself is
+ * never hidden either way, so a cell that stayed "clean" despite one noisy
+ * aircraft still shows that aircraft's own count here, not a silent zero. A
+ * reader who sees "flagged" must not have to go looking for the
+ * denominator, so the "N of M" ratio is printed in every branch that has
+ * any aircraft at all, whichever word carries it.
  */
 export function jamCellCrosscheckNote(doc, hex) {
   if (!doc || !doc.cells) {
@@ -3910,18 +3933,31 @@ export function jamCellCrosscheckNote(doc, hex) {
     ? doc.as_of - cell.tracked_seconds
     : null;
   const trackedFor = trackedSince !== null ? timeAgoFromUnix(trackedSince).replace(/ ago$/, "") : null;
-  const trackedNote = trackedFor ? ` (tracked for ${esc(trackedFor)})` : "";
+  const trackedNote = trackedFor ? ` (cell tracked for ${esc(trackedFor)})` : "";
+  const windowText = windowDurationText(doc.window_seconds);
+  const windowNote = windowText ? ` in the last ${esc(windowText)}` : "";
   if (cell.status === "no_traffic") {
     return `<p class="meta">Aircraft cross-check: no aircraft recorded here by this map's own ADS-B ` +
-      `coverage${trackedNote} &mdash; not evidence either way, only that this map saw no traffic to check.</p>`;
+      `coverage${windowNote}${trackedNote} &mdash; not evidence either way, only that this map saw no traffic ` +
+      `to check.</p>`;
   }
-  if (cell.status === "clean") {
-    return `<p class="meta">Aircraft cross-check: <b>${cell.aircraft_observed} aircraft</b> observed here, ` +
-      `none showed a position anomaly${trackedNote}.</p>`;
+  const ratioLine = `<b>${cell.aircraft_flagged} of ${cell.aircraft_observed} aircraft</b> showed a position ` +
+    `anomaly here${windowNote}${trackedNote}`;
+  if (cell.status === "flagged") {
+    return `<p class="meta">Aircraft cross-check: ${ratioLine}. That the anomaly coincided with this cell is ` +
+      `derived; that jamming explains it is an inference, never an observation.</p>`;
   }
-  return `<p class="meta">Aircraft cross-check: <b>${cell.aircraft_flagged} of ${cell.aircraft_observed} ` +
-    `aircraft</b> showed a position anomaly here${trackedNote}. That the anomaly coincided with this cell ` +
-    `is derived; that jamming explains it is an inference, never an observation.</p>`;
+  if (cell.aircraft_flagged > 0) {
+    // "clean", but not a bare zero -- see the module-level note above: the
+    // word "clean" must not quietly erase a real, if statistically weak,
+    // signal just because it fell under the ratio this map requires before
+    // calling a whole cell flagged.
+    return `<p class="meta">Aircraft cross-check: ${ratioLine} -- below this map's own noise-vs-signal ratio to ` +
+      `call the cell itself flagged; most flagged jumps anywhere on this map turn out to be ordinary tracking ` +
+      `noise (see the source note below).</p>`;
+  }
+  return `<p class="meta">Aircraft cross-check: <b>${cell.aircraft_observed} aircraft</b> observed here` +
+    `${windowNote}${trackedNote}, none showed a position anomaly.</p>`;
 }
 
 /** The jamming cross-check fold. Opens with the same honesty caveat every
@@ -3952,19 +3988,24 @@ function jamCrosscheckSection(flightDetail) {
       `tracked worst-hundred cells &mdash; not evidence of anything either way, since that list covers only ` +
       `a tiny fraction of the globe.</p><p class="meta">${esc(note)}</p>`;
   }
+  // Task 39 review, Important 1: sample_count/flag_count are a true rolling
+  // window, not a since-first-seen total, so every rendered count below
+  // carries the window it covers rather than an unqualified number.
+  const windowText = windowDurationText(data.jam_crosscheck_window_seconds);
+  const windowNote = windowText ? ` in the last ${esc(windowText)}` : "";
   let body;
   if (jc.status === "flagged") {
     body = `<p class="meta">${jc.flag_count} position anomal${jc.flag_count === 1 ? "y" : "ies"} recorded while ` +
-      `this airframe sat inside a tracked jamming cell (${jc.sample_count} sample${jc.sample_count === 1 ? "" : "s"} ` +
-      `checked). That the jump coincided with the cell is derived; that jamming explains it is an inference, ` +
-      `not an observation.</p>` +
+      `this airframe sat inside a tracked jamming cell${windowNote} (${jc.sample_count} ` +
+      `sample${jc.sample_count === 1 ? "" : "s"} checked). That the jump coincided with the cell is derived; ` +
+      `that jamming explains it is an inference, not an observation.</p>` +
       `<ul class="meta">${jc.flags.slice(0, 10).map(jamFlagLine).join("")}</ul>`;
   } else if (jc.status === "checked_clean") {
-    body = `<p class="meta">Checked while inside a tracked jamming cell (${jc.sample_count} samples) &mdash; ` +
-      `no position anomaly found.</p>`;
+    body = `<p class="meta">Checked while inside a tracked jamming cell${windowNote} ` +
+      `(${jc.sample_count} sample${jc.sample_count === 1 ? "" : "s"}) &mdash; no position anomaly found.</p>`;
   } else {
-    body = `<p class="meta">Positioned inside a tracked jamming cell, but too few samples ` +
-      `(${jc.sample_count}) yet to call this airframe's track clean or anomalous.</p>`;
+    body = `<p class="meta">Positioned inside a tracked jamming cell, but too few samples` +
+      `${windowNote} (${jc.sample_count}) yet to call this airframe's track clean or anomalous.</p>`;
   }
   return `${head}${body}<p class="meta">${esc(note)}</p>`;
 }

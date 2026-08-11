@@ -232,6 +232,87 @@ def test_insufficient_samples_becomes_checked_clean_once_min_samples_is_met():
     assert doc2["aircraft"][ICAO]["status"] == jc.AIRCRAFT_CHECKED_CLEAN
 
 
+def test_a_sample_older_than_the_window_rolls_off_the_count():
+    """Task 39 review, Important 1: JAM_CROSSCHECK_WINDOW_SECONDS is
+    documented as bounding how long a sample stays counted -- a true rolling
+    window, not merely how long an idle aircraft's own state entry survives.
+    An airframe that keeps transiting the same cell must not accumulate an
+    ever-growing count; each sample ages out on its own."""
+    lat1, lon1 = destination_point(_CENTER_LAT, _CENTER_LON, 180.0, 2.0)
+    first_pass = [row(1, 0.0, lat1, lon1), row(2, 300.0, _CENTER_LAT, _CENTER_LON)]
+    state = jc.apply_batch(first_pass, _JAM_CELLS, {}, now=300.0)
+    assert jc.build_document(state, _JAM_CELLS, now=300.0)["aircraft"][ICAO]["sample_count"] == 1
+
+    # No new rows, but far enough later that the one sample above has aged
+    # out of the window -- the cell is still tracked (still in _JAM_CELLS),
+    # so this is a real prune, not a cell dropout (see the dropout test
+    # just below, which is a different mechanism).
+    much_later = 300.0 + config.JAM_CROSSCHECK_WINDOW_SECONDS + 1.0
+    aged_state = jc.apply_batch([], _JAM_CELLS, state, now=much_later)
+    doc = jc.build_document(aged_state, _JAM_CELLS, now=much_later)
+    assert _HEX in doc["cells"]
+    assert doc["cells"][_HEX]["status"] == jc.STATUS_NO_TRAFFIC
+    assert ICAO not in doc["aircraft"]
+
+
+def test_a_flag_older_than_the_window_rolls_off_the_cells_own_flagged_count():
+    """The flags list is pruned the same way samples are -- a cell must not
+    keep reading 'flagged' forever because of one anomaly outside the
+    window this document itself claims to cover."""
+    far_lat, far_lon = destination_point(_CENTER_LAT, _CENTER_LON, 180.0, 60.0)
+    rows = [row(1, 0.0, far_lat, far_lon), row(2, 60.0, _CENTER_LAT, _CENTER_LON)]
+    state = jc.apply_batch(rows, _JAM_CELLS, {}, now=60.0)
+    assert jc.build_document(state, _JAM_CELLS, now=60.0)["cells"][_HEX]["status"] == jc.STATUS_FLAGGED
+
+    much_later = 60.0 + config.JAM_CROSSCHECK_WINDOW_SECONDS + 1.0
+    aged_state = jc.apply_batch([], _JAM_CELLS, state, now=much_later)
+    doc = jc.build_document(aged_state, _JAM_CELLS, now=much_later)
+    assert doc["cells"][_HEX]["status"] == jc.STATUS_NO_TRAFFIC
+    assert doc["cells"][_HEX]["aircraft_flagged"] == 0
+
+
+def test_cell_status_requires_more_than_a_lone_flag_in_a_busy_cell():
+    """Task 39 review, Important 2. The module's own measured rate puts raw
+    flag noise above 98% unrelated to jamming (see the module docstring) --
+    a single flagged aircraft among many observed must not trip the same
+    "flagged" word a quiet cell gets from that same one flag, because a
+    busy cell has proportionally more chances to produce one by chance.
+    aircraft_flagged itself is never hidden either way -- see the frontend's
+    own jamCellCrosscheckNote for the "N of M" wording that always shows it."""
+    state = {}
+    lat1, lon1 = destination_point(_CENTER_LAT, _CENTER_LON, 180.0, 2.0)
+    for i in range(20):
+        clean_rows = [
+            row(1, 0.0, lat1, lon1, icao24=f"clean{i:02d}"),
+            row(2, 300.0, _CENTER_LAT, _CENTER_LON, icao24=f"clean{i:02d}"),
+        ]
+        state = jc.apply_batch(clean_rows, _JAM_CELLS, state, now=300.0)
+
+    far_lat, far_lon = destination_point(_CENTER_LAT, _CENTER_LON, 180.0, 60.0)
+    flagged_rows = [row(3, 0.0, far_lat, far_lon, icao24="loud"), row(4, 60.0, _CENTER_LAT, _CENTER_LON, icao24="loud")]
+    state = jc.apply_batch(flagged_rows, _JAM_CELLS, state, now=300.0)
+
+    cell = jc.build_document(state, _JAM_CELLS, now=300.0)["cells"][_HEX]
+    assert cell["aircraft_observed"] == 21
+    assert cell["aircraft_flagged"] == 1  # the count is never hidden or rounded away
+    assert cell["status"] == jc.STATUS_CLEAN  # but the ratio (1/21) is well under the bar
+
+
+def test_a_lone_flag_still_flags_a_quiet_cell():
+    """The other half of the same rule: a cell with only one aircraft ever
+    observed still reads "flagged" if that one aircraft is -- there is no
+    larger sample for a single anomaly to be diluted by, and requiring more
+    than one aircraft outright would make a genuinely quiet, genuinely
+    corroborated cell impossible to ever call flagged at all."""
+    far_lat, far_lon = destination_point(_CENTER_LAT, _CENTER_LON, 180.0, 60.0)
+    rows = [row(1, 0.0, far_lat, far_lon), row(2, 60.0, _CENTER_LAT, _CENTER_LON)]
+    state = jc.apply_batch(rows, _JAM_CELLS, {}, now=60.0)
+    cell = jc.build_document(state, _JAM_CELLS, now=60.0)["cells"][_HEX]
+    assert cell["aircraft_observed"] == 1
+    assert cell["aircraft_flagged"] == 1
+    assert cell["status"] == jc.STATUS_FLAGGED
+
+
 def test_a_cell_dropping_out_of_the_current_top_hundred_drops_its_state_too():
     """gpsjam's own feed is daily and MAX_CELLS-capped (see jamming.py) -- a
     cell that falls out of the current read is no longer a jam cell by this
@@ -262,17 +343,26 @@ class _FakeStorage:
     """Just enough of backend.storage to drive run_once() without Postgres --
     same shape as test_port_calls.py's own _FakeStorage/test_flight_legs.py's
     equivalent, for the same reason: entity_history_since() answers strictly
-    id > after_id, and `write_ok` plays back the one failure mode run_once
-    has to survive without losing data (a write that logs-and-returns-False
-    must never be read as "succeeded" and advance the cursor past rows
-    entity_history's own 3-day retention will never offer again)."""
+    id > after_id, and `write_ok`/`fail_names` play back the failure modes
+    run_once has to survive without losing data (a write that logs-and-
+    returns-False must never be read as "succeeded" and advance the cursor
+    past rows entity_history's own 3-day retention will never offer again).
 
-    def __init__(self, rows, jamming=(), write_ok=True):
+    `fail_names` fails only the named reference_snapshots writes (Task 39
+    review, Critical: the earlier test only ever failed both writes
+    together via `write_ok`, which never exercised the one interleaving that
+    actually broke -- see test_a_failed_reference_write_does_not_double_
+    count_on_retry below), while `write_ok=False` still fails everything, as
+    every other refine job's own fake storage does.
+    """
+
+    def __init__(self, rows, jamming=(), write_ok=True, fail_names=frozenset()):
         self.history = rows
         self.jamming = list(jamming)
         self.docs = {}
         self.calls = []
         self.write_ok = write_ok
+        self.fail_names = set(fail_names)
 
     async def entity_history_since(self, kind, after_id, limit):
         self.calls.append(after_id)
@@ -285,7 +375,7 @@ class _FakeStorage:
         return self.docs.get(name)
 
     async def record_reference(self, name, payload):
-        if not self.write_ok:
+        if not self.write_ok or name in self.fail_names:
             return False
         self.docs[name] = payload
         return True
@@ -324,6 +414,56 @@ def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     assert retry["ok"] is True
     assert fake.calls == [0, 0]  # both passes started from the same cursor
     assert fake.docs["jam_crosscheck_cursor"] == {"last_id": 2}
+
+
+def test_a_failed_reference_write_does_not_double_count_on_retry(monkeypatch):
+    """Task 39 review, Critical. The first cut wrote the state document
+    before the (possibly failing) reference document -- so when only the
+    reference write failed, the cursor correctly held back, but the state
+    had already advanced. On retry, apply_batch walked the same batch's rows
+    forward from that already-advanced state: the first row's dt went
+    negative against it (correctly not counted) but was then treated as a
+    fresh "last" pointer, letting every following transition in the batch be
+    counted a second time.
+
+    Three rows -- two transitions, both landing inside the tracked cell --
+    should produce exactly the same sample_count whether the reference
+    write fails once and is retried, or never fails at all.
+    """
+    lat1, lon1 = destination_point(_CENTER_LAT, _CENTER_LON, 180.0, 2.0)
+    rows = [
+        row(1, 0.0, lat1, lon1),
+        row(2, 300.0, _CENTER_LAT, _CENTER_LON),
+        row(3, 600.0, lat1, lon1),
+    ]
+    jamming = [{"hex": _HEX, "lat": _CENTER_LAT, "lon": _CENTER_LON, "jam_ratio": 0.4, "date": "2026-08-10"}]
+
+    # Baseline: the same batch, no failure at all -- what a single clean
+    # pass produces.
+    clean_fake = _FakeStorage(rows, jamming=jamming)
+    monkeypatch.setattr(jc, "storage", clean_fake)
+    baseline = _run(jc.run_once())
+    assert baseline["ok"] is True
+    baseline_count = clean_fake.docs[jc.REFERENCE_NAME]["aircraft"][ICAO]["sample_count"]
+    assert baseline_count == 2  # one per transition, not per row
+
+    # The reference write fails once; the state write must not land either,
+    # so the retry starts from scratch rather than from a half-advanced
+    # state.
+    fake = _FakeStorage(rows, jamming=jamming, fail_names={jc.REFERENCE_NAME})
+    monkeypatch.setattr(jc, "storage", fake)
+
+    first = _run(jc.run_once())
+    assert first["ok"] is False
+    assert fake.docs == {}  # neither write landed -- doc failed first, state was never attempted
+
+    fake.fail_names.clear()
+    retry = _run(jc.run_once())
+    assert retry["ok"] is True
+    assert fake.calls == [0, 0]  # both attempts started from the same cursor -- the same batch, not a new one
+
+    assert fake.docs[jc.REFERENCE_NAME]["aircraft"][ICAO]["sample_count"] == baseline_count
+    assert fake.docs[jc.REFERENCE_NAME]["cells"][_HEX]["aircraft_observed"] == 1
 
 
 def test_run_once_still_republishes_on_an_empty_batch(monkeypatch):

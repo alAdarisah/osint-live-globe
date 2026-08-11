@@ -516,13 +516,35 @@ JAM_CROSSCHECK_MIN_SAMPLES = int(os.getenv("JAM_CROSSCHECK_MIN_SAMPLES", "2"))
 # soon after it happens than left for a slower sweep, and this is the pace a
 # job that has fallen behind catches up at.
 JAM_CROSSCHECK_INTERVAL = int(os.getenv("JAM_CROSSCHECK_INTERVAL", "900"))
-# How long a flagged or sampled aircraft stays counted against a jam cell in
-# the served document, i.e. what "N aircraft showed a position anomaly here"
-# actually covers. gpsjam's own feed is daily (see jamming.py's own
-# REFRESH_INTERVAL comment) and the brief's own suggested wording was "in the
-# last 24h" -- both line up with keeping a rolling day here, even though this
-# job's own read cadence (JAM_CROSSCHECK_INTERVAL above) is far faster.
+# A true rolling window, not merely how long an idle aircraft's state entry
+# survives -- a sample or flag older than this is dropped from the count
+# outright (see jam_crosscheck.apply_batch's own pruning), so an airframe
+# that keeps transiting the same cell every day accumulates only what
+# happened in the trailing window, never an ever-growing total (Task 39
+# review, Important 1: the first cut only pruned on inactivity, which let
+# the count grow without bound for a recurring airframe). This is what "N
+# aircraft showed a position anomaly here" actually covers, and both the
+# jamming-cell popup and the aircraft card say so explicitly in the
+# rendered text, not just here. gpsjam's own feed is daily (see jamming.py's
+# own REFRESH_INTERVAL comment) and the brief's own suggested wording was
+# "in the last 24h" -- both line up with keeping a rolling day here, even
+# though this job's own read cadence (JAM_CROSSCHECK_INTERVAL above) is far
+# faster.
 JAM_CROSSCHECK_WINDOW_SECONDS = int(os.getenv("JAM_CROSSCHECK_WINDOW_SECONDS", str(24 * 3600)))
+# What fraction of a cell's own observed aircraft must be flagged before the
+# cell's own `status` reads "flagged" rather than "clean" -- Task 39 review,
+# Important 2. A bare count >= 1 would let a single noisy aircraft trip the
+# same word for a cell a hundred aircraft passed through as for a cell only
+# one ever did, backwards given the module's own measured rate (over 98% of
+# raw flags anywhere are unrelated to jamming, so a busier cell has
+# proportionally more chances to produce one by chance alone). Set to
+# jamming.py's own MIN_JAM_RATIO -- gpsjam's own "background noise vs real
+# interference" cutoff for a *cell's* good/bad ratio -- reused rather than
+# inventing a second, unrelated number for what is structurally the same
+# judgement call: below this fraction, a signal reads as noise. This never
+# hides `aircraft_flagged` itself, which is always the real, unrounded count
+# regardless of which word `status` carries -- see build_document.
+JAM_CROSSCHECK_MIN_FLAG_RATIO = float(os.getenv("JAM_CROSSCHECK_MIN_FLAG_RATIO", "0.25"))
 
 # The waters this map *claims* as watched, as "lat_min,lon_min,lat_max,lon_max"
 # boxes separated by ";". High-interest maritime chokepoints and conflict water.
