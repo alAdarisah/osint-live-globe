@@ -491,7 +491,6 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 1001;
-  animation: popup-in var(--t-ui) var(--e-out);
 }
 .region-zone-menu-item {
   border: none;
@@ -1196,13 +1195,45 @@ html, body {
   line-height: 1.5;
   max-width: min(320px, calc(100vw - 40px));
 }
-.leaflet-popup {
-  animation: popup-in var(--t-ui) var(--e-out);
+/* Every card and panel on this map enters the same way. It used to be five
+   identical copies of one keyframe under one name, which is the state a
+   stylesheet is in right before it acquires a sixth that is subtly different. */
+.panel-enter,
+.leaflet-popup,
+#conflictBriefing,
+#countryInfoCard,
+#eventDetailCard,
+.region-zone-menu {
+  animation: panel-enter var(--t-panel) var(--e-spring);
 }
-@keyframes popup-in {
-  from { opacity: 0; transform: translateY(4px) scale(0.97); }
+
+@keyframes panel-enter {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+
+/* A list arriving as one block reads as a repaint; arriving in sequence reads
+   as the panel filling. Stops at eight because past that the cascade stops
+   being one gesture and becomes a queue -- the ninth item onward simply shares
+   the eighth's delay. */
+.stagger-children > * {
+  animation: panel-enter var(--t-panel) var(--e-out) both;
+  animation-delay: calc(var(--stagger-step) * 8);
+}
+.stagger-children > :nth-child(1) { animation-delay: 0ms; }
+.stagger-children > :nth-child(2) { animation-delay: var(--stagger-step); }
+.stagger-children > :nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.stagger-children > :nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.stagger-children > :nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.stagger-children > :nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.stagger-children > :nth-child(7) { animation-delay: calc(var(--stagger-step) * 6); }
+.stagger-children > :nth-child(8) { animation-delay: calc(var(--stagger-step) * 7); }
+
+.news-list > *,
+.notable-list > * {
+  animation: panel-enter var(--t-panel) var(--e-out) both;
+}
+
 .leaflet-popup-tip { background: var(--popup-bg); }
 .leaflet-popup-content { margin: 10px 12px; }
 .leaflet-popup-content a { color: var(--accent); }
@@ -1422,7 +1453,6 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
-  animation: popup-in var(--t-ui) var(--e-out);
 }
 .country-info-body {
   overflow-y: auto;
@@ -1549,14 +1579,8 @@ html, body {
 .news-item {
   padding: 6px 0;
   border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
-  animation: news-item-in var(--t-settle) var(--e-out);
 }
 .news-item:last-child { border-bottom: none; }
-
-@keyframes news-item-in {
-  from { opacity: 0; transform: translateY(-3px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 
 .news-item a, .news-item-row > span {
   color: var(--text-primary);
@@ -1602,7 +1626,6 @@ html, body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
   overflow: hidden;
-  animation: popup-in var(--t-ui) var(--e-out);
 }
 
 .briefing-header {
@@ -3291,7 +3314,6 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 22px var(--shadow-color);
   z-index: 1100;
-  animation: popup-in var(--t-ui) var(--e-out);
 }
 .event-detail-header {
   display: flex;
