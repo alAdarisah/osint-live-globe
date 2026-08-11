@@ -13,7 +13,11 @@ an orange block, so a stopped container reads as a solid bar rather than one
 more coloured word among coloured words.
 """
 
+import re
+
 from textual.theme import Theme
+
+from ops.cc.motion import spinner
 
 # Straight from the brand palette.
 _DARK = "#141413"
@@ -87,6 +91,28 @@ THEMES = {theme.name: theme for theme in (CLAUDE_DARK, CLAUDE_LIGHT)}
 # Shape as well as colour, so the screen still parses in monochrome.
 GLYPH = {"ok": "●", "starting": "◐", "warn": "▲", "down": "■"}
 
+
+def glyph_for(severity: str, now: float | None = None) -> str:
+    """The mark a row of this severity shows at `now`.
+
+    `now` of None means a still screen, and the row builders default to it, so a
+    caller with no clock -- and every test written before there was one -- gets
+    exactly the glyph GLYPH defines.
+
+    Only `starting` has a moving form, because it is the only severity that
+    means "not yet" rather than "this is how it is". A container pulling an
+    image and a source registered but never polled are both doing something,
+    and a still mark claims otherwise. Its frames are rotations of GLYPH's own
+    ◐, so nothing changes width when it begins or stops.
+
+    Raises on an unknown severity for the same reason severity_style does: a
+    typo that renders as healthy is the worst bug a status display can have.
+    """
+    static = GLYPH[severity]
+    if severity != "starting" or now is None:
+        return static
+    return spinner(now)
+
 _STYLES = {
     "ok": "$cc-ok",
     "starting": "$cc-muted",
@@ -94,9 +120,33 @@ _STYLES = {
     "down": "bold $cc-down-fg on $cc-down",
 }
 
+_TOKEN = re.compile(r"\$([a-z0-9-]+)")
 
-def severity_style(severity: str) -> str:
-    """Rich style for a severity. Raises on an unknown one, rather than
-    defaulting -- a typo that renders as healthy is the worst possible bug in
-    a status display."""
-    return _STYLES[severity]
+
+def resolve(style: str, theme_name: str) -> str:
+    """Substitute the $tokens in a style for `theme_name`'s hex values.
+
+    Textual's CSS understands `$cc-ok`; Rich does not, and every pane's rows go
+    through Rich. Worse than ignored: Rich's markup parser requires a tag to
+    open with a letter, `#`, `/` or `@`, so `[$cc-ok]●[/]` is read as literal
+    text followed by an unmatched closing tag and raises MarkupError -- which
+    surfaces as the whole app dying on the first frame that has a row in it,
+    not as one mis-coloured glyph.
+
+    Raises KeyError on a token neither theme defines, for the same reason
+    severity_style does: silence here is a wrong colour on a status screen.
+    """
+    variables = THEMES[theme_name].variables
+    return _TOKEN.sub(lambda match: variables[match.group(1)], style)
+
+
+def severity_style(severity: str, theme_name: str) -> str:
+    """Rich style for a severity, resolved against a theme. Raises on an
+    unknown severity, rather than defaulting -- a typo that renders as healthy
+    is the worst possible bug in a status display.
+
+    The theme is an argument rather than a default because `cc-muted` is one of
+    the two tokens the themes disagree about, so a caller that forgot it would
+    render light-theme rows in the dark theme's grey and never be told.
+    """
+    return resolve(_STYLES[severity], theme_name)

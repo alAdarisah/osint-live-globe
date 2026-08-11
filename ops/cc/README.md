@@ -62,6 +62,27 @@ A collector that fails leaves its pane holding the last good values, dimmed.
 It never blanks, and never shows a zero it did not measure — during an outage
 those two are the whole question.
 
+## What moves
+
+Three things, and nothing else. Movement in the corner of the eye is a claim on
+attention, and a dashboard that spends it on decoration teaches you to stop
+looking.
+
+| Motion | Means |
+| --- | --- |
+| A pane title's `◆`/`◇` beating | that pane's collector is running to schedule, at that collector's own interval — so SOURCES visibly beats slower than SERVICES |
+| A pane title showing `·`, still | that collector has not run in twice its interval. **Stillness is the alarm** |
+| A row's mark rotating `◐◓◑◒` | a transitional state: a container whose healthcheck is still starting, a source registered but never polled |
+| A number briefly bold and blue | it changed within the last 2.5 s — an item count climbing, a restart count ticking up |
+
+All of it runs off one 2 Hz timer, and a pane with nothing moving is skipped
+rather than redrawn: this is normally watched over SSH to a box that is having
+a bad day. Nothing flashes on the first frame, because a screen being drawn for
+the first time has not *changed*.
+
+The arithmetic is in `motion.py`, which imports nothing of this program's — so
+`pytest` covers it without Textual installed.
+
 Source health is *not* recomputed here. `backend/mirror.py` decides staleness
 per source from that job's `expected_every`, and publishes it as `last_error`;
 a threshold invented in this tool would disagree with the map the first time a
