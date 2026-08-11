@@ -102,17 +102,58 @@ test("the exempt animations say why they are exempt", () => {
   }
 });
 
+// Pulls the selector list out of a "selector, selector, ... { animation: none"
+// block and returns it as a normalised, sorted array -- comma-split, the
+// ":root.reduce-motion" ancestor stripped off, and the opening brace (and
+// whatever follows it, since callers slice up to but not including
+// "animation: none") trimmed away. Two lists that mean the same thing produce
+// the same array regardless of which one carries the :root prefix or how the
+// two are indented.
+function normalizeSelectorList(text) {
+  return text
+    .replace(/:root\.reduce-motion\s*/g, "")
+    .split(",")
+    .map((selector) => selector.split("{")[0].trim())
+    .filter(Boolean)
+    .sort();
+}
+
 test("every looping animation can be switched off", () => {
   const css = read("../src/style.css");
   // Anchored on the block's comment, not on ":root.reduce-motion" -- that
   // selector also opens the unrelated map-reticle rule further up the file
   // (transition: none, no loop involved), and indexOf would land there first.
-  const blockStart = css.indexOf('"Reduce motion":');
-  assert.notEqual(blockStart, -1, "the reduce-motion block's comment has gone missing");
+  const commentAt = css.indexOf('"Reduce motion":');
+  assert.notEqual(commentAt, -1, "the reduce-motion block's comment has gone missing");
+  // The selector list itself starts after the comment, not at the comment --
+  // the comment's own prose is full of commas ("pulsing dots, jamming pings,
+  // hot-zone flares") that would otherwise get parsed as selectors.
+  const blockStart = css.indexOf(":root.reduce-motion", commentAt);
+  assert.notEqual(blockStart, -1, "the reduce-motion selector list has gone missing");
   const reduceBlock = css.slice(blockStart);
   const stop = reduceBlock.indexOf("animation: none");
   assert.notEqual(stop, -1, "the reduce-motion block has gone missing");
   const selectors = reduceBlock.slice(0, stop);
+
+  // The app's own setting and the operating system's are two independently
+  // hand-maintained lists that are supposed to say the same thing (see the
+  // media query's own comment in style.css). Nothing enforces that but this --
+  // a selector added to one and forgotten in the other would leave a reader
+  // who relies on the other signal moving when they asked not to be, and nothing
+  // above would notice.
+  const mediaMarker = "@media (prefers-reduced-motion: reduce) {";
+  const mediaAt = css.indexOf(mediaMarker);
+  assert.notEqual(mediaAt, -1, "the prefers-reduced-motion mirror has gone missing");
+  const mediaBlock = css.slice(mediaAt + mediaMarker.length);
+  const mediaStop = mediaBlock.indexOf("animation: none");
+  assert.notEqual(mediaStop, -1, "the prefers-reduced-motion block has gone missing");
+  const mediaSelectors = mediaBlock.slice(0, mediaStop);
+
+  assert.deepEqual(
+    normalizeSelectorList(mediaSelectors),
+    normalizeSelectorList(selectors),
+    "the :root.reduce-motion list and the prefers-reduced-motion media query have drifted apart",
+  );
 
   // Every rule that loops. A looping animation nobody can switch off is the one
   // accessibility failure this feature can actually cause, and it is invisible
