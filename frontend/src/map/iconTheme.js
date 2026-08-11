@@ -347,6 +347,7 @@ export const WASH_STACK = ["vehicles", "jamming", "firms"];
  */
 export const STACK_ALIAS = Object.freeze({
   aisNavy: "vehicles", aisTanker: "vehicles", aisCivilian: "vehicles",
+  aisDigitraffic: "vehicles",
   adsbMilitary: "vehicles", adsbCivilian: "vehicles", adsbFlagged: "vehicles",
   cableLandings: "cables",
   firmsPoints: "firms",

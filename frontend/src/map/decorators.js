@@ -6,7 +6,7 @@
 
 import { L } from "./leafletGlobal";
 import { SVG, OFFICIALS_KIND_ICON, buildDivIcon } from "./svgIcons";
-import { esc, fmtNumber, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix } from "../utils/format";
+import { esc, fmtNumber, safeUrl, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix } from "../utils/format";
 import {
   severityBand, severityColor, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
   placementDoubtful, positionUncertain, VERDICT_NOTE,
@@ -15,6 +15,7 @@ import {
   ageHoursFromDateAdded, newsAgeOpacity, newsAgeScale,
 } from "./severity";
 import { paletteColor, paletteGlyph, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
+import { aisNetwork, shipPingSeconds } from "./aisNetwork";
 
 // --- level of detail -------------------------------------------------------
 //
@@ -481,7 +482,7 @@ function coverageBlock(d) {
     const meta = [c.outlet, when].filter(Boolean).map(esc).join(" &middot; ");
     const title = esc(c.title || "");
     const link = c.url
-      ? `<a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${title}</a>`
+      ? `<a href="${esc(safeUrl(c.url))}" target="_blank" rel="noopener noreferrer">${title}</a>`
       : title;
     return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
   }).join("");
@@ -667,7 +668,7 @@ export function decorateEvent(d, { offset, dimmed } = {}) {
     </div>
     ${editedNote(d)}
     ${coverageBlock(d)}
-    ${!d.coverage?.length && d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
+    ${!d.coverage?.length && d.source_url ? `<div><a href="${esc(safeUrl(d.source_url))}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     ${!d.notes && d.summary ? '<p class="meta">Sentence above is assembled from the event’s coded fields, not quoted from an article.</p>' : ""}
     ${provenance ? `<p class="meta">${esc(provenance)}</p>` : ""}
     ${intensity ? `<div class="meta" title="CAMEO Goldstein scale, ${d.goldstein}">Coded intensity: ${esc(intensity)}</div>` : ""}
@@ -802,7 +803,7 @@ function decorateEarthquake(d) {
     ${Number.isFinite(d.felt) ? `<div>${fmtNumber(d.felt)} "Did You Feel It?" reports</div>` : ""}
     <p class="meta">${HAZARD_SEVERITY_BASIS[d.severity_basis] || ""}</p>
     <div class="meta">Source: ${esc(d.publisher || "USGS")}${
-      d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">event page</a>` : ""
+      d.url ? ` &middot; <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">event page</a>` : ""
     }</div>`;
   return { tooltip, detail };
 }
@@ -824,7 +825,7 @@ function decorateVolcano(d) {
         : ""
     }
     <div class="meta">Source: ${esc(d.publisher || "Smithsonian GVP / USGS")}${
-      d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">weekly report</a>` : ""
+      d.url ? ` &middot; <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">weekly report</a>` : ""
     }</div>`;
   return { tooltip, detail };
 }
@@ -915,10 +916,10 @@ export function decorateFlood(d, { offset } = {}) {
     <div class="meta">Source: ${esc(d.publisher || "GDACS")} &mdash; a modelled alert from
       ${esc(d.model_source || "GLOFAS")}, a curated hydrological model run rather than an observed
       water level.${
-        d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">event report</a>` : ""
+        d.url ? ` &middot; <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">event report</a>` : ""
       }${
         d.footprint_url
-          ? ` &middot; <a href="${esc(d.footprint_url)}" target="_blank" rel="noopener noreferrer">affected-area polygon</a>`
+          ? ` &middot; <a href="${esc(safeUrl(d.footprint_url))}" target="_blank" rel="noopener noreferrer">affected-area polygon</a>`
           : ""
       }</div>`;
   return {
@@ -964,7 +965,7 @@ function newsLine(item) {
   }
   const meta = bits.join(" &middot; ");
   const link = item.source_url
-    ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener noreferrer">${headline}</a>`
+    ? `<a href="${esc(safeUrl(item.source_url))}" target="_blank" rel="noopener noreferrer">${headline}</a>`
     : headline;
   return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
 }
@@ -1021,7 +1022,7 @@ export function decorateGdelt(d, { offset } = {}) {
     </div>`
     : `
     <h3>${esc(headline)}</h3>
-    ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
+    ${d.source_url ? `<div><a href="${esc(safeUrl(d.source_url))}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     ${editedNote(d)}
     <div class="meta">Source: ${agency ? esc(agency) : "GDELT"} &middot; ${esc(when)}${corroboratedNote}</div>
     ${reliabilityBlock(d)}`;
@@ -1160,7 +1161,7 @@ function officialsLine(item) {
     item.origin === "official_feed" ? "official source" : null,
   ].filter(Boolean).map(esc).join(" &middot; ");
   const link = item.url
-    ? `<a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${lead}</a>`
+    ? `<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">${lead}</a>`
     : lead;
   return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
 }
@@ -1202,7 +1203,7 @@ export function decorateOfficials(d, { offset } = {}) {
       ? `<div class="meta">Carried by ${d.outlet_count} independent outlets</div>` : ""}
     ${d.corroborated_by_primary_source
       ? '<div class="meta evidence">Also published by the government itself — primary source and news reporting agree.</div>' : ""}
-    ${d.url ? `<div><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${primary ? "Read the statement" : "Open source article"}</a></div>` : ""}
+    ${d.url ? `<div><a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">${primary ? "Read the statement" : "Open source article"}</a></div>` : ""}
     ${editedNote(d)}
     <p class="meta">${esc(officialsProvenance(d))}</p>
     <div class="meta">${esc(officialsPlacement(d))}</div>`;
@@ -1375,7 +1376,7 @@ function watchlistDetail(d) {
   const rows = listings.map((l) => {
     const cls = WATCHLIST_CLASS_LABEL[l.evidence] || WATCHLIST_CLASS_LABEL.unclassified;
     const who = (l.publishers || []).filter(Boolean);
-    const link = l.url ? ` <a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">source</a>` : "";
+    const link = l.url ? ` <a href="${esc(safeUrl(l.url))}" target="_blank" rel="noopener noreferrer">source</a>` : "";
     return `<li><b>${esc(cls)}</b>${who.length ? ` &mdash; ${esc(who.join("; "))}` : ""}${link}</li>`;
   }).join("");
   return `
@@ -1396,7 +1397,7 @@ function watchlistDetail(d) {
         w.licence ? ` (${esc(w.licence)})` : ""
       }${
         w.source_url
-          ? ` &middot; <a href="${esc(w.source_url)}" target="_blank" rel="noopener noreferrer">dataset</a>`
+          ? ` &middot; <a href="${esc(safeUrl(w.source_url))}" target="_blank" rel="noopener noreferrer">dataset</a>`
           : ""
       }</div>
     </div>`;
@@ -1493,8 +1494,13 @@ export const SHIP_STYLE = {
 /** Which layer key a ship class belongs to -- its opacity/scale settings. */
 export const SHIP_LAYER_KEY = { navy: "aisNavy", tanker: "aisTanker", other: "aisCivilian" };
 
-export function decorateAis(d, { selectedMmsi } = {}) {
+// Which network heard a hull, and when it last reported, both live in
+// map/aisNetwork.js -- see the note at the top of that file for why they are
+// not in here.
+export function decorateAis(d, { selectedMmsi, layerKey } = {}) {
   const type = classifyShip(d);
+  const network = aisNetwork(d);
+  const pinged = shipPingSeconds(d);
   const navy = type === "navy";
   const tanker = type === "tanker";
   const typeLabel = navy ? " &middot; US Navy / MSC" : tanker ? " &middot; Oil/chemical tanker" : "";
@@ -1506,7 +1512,11 @@ export function decorateAis(d, { selectedMmsi } = {}) {
     // an allegation are three different claims (see watchlistDetail).
     `${watchlisted ? `<br/><span class="watchlist-flag">Watchlist: ${esc(WATCHLIST_CLASS_LABEL[watchlisted.evidence] || "listed")}</span>` : ""}` +
     `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn` +
-    lastPingTooltip(d.updated);
+    // On the hover tooltip, not only in the popup: which network heard a hull
+    // is part of reading the pin, and a reader scanning a coastline should not
+    // have to click to find out that one layer stops at the Baltic.
+    `<br/><span class="meta">via ${esc(network.label)}</span>` +
+    lastPingTooltip(pinged);
   const detail = `
     <h3>${esc(d.name || "Unknown vessel")}</h3>
     <div class="meta">MMSI ${esc(d.mmsi)}${d.imo ? ` &middot; IMO ${esc(d.imo)}` : ""}${
@@ -1524,10 +1534,17 @@ export function decorateAis(d, { selectedMmsi } = {}) {
       ? `<div>Reported draught: ${esc(d.draught)} m <span class="meta">&mdash; crew-set in AIS static
         data, not a measurement</span></div>`
       : ""}
-    ${lastPingDetail(d.updated)}
+    ${lastPingDetail(pinged)}
     ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS ship-type code (or USS/USNS naming when static data hasn\'t arrived yet). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
     ${tanker ? '<p class="meta">Identified as an oil/chemical tanker from its AIS ship-type code.</p>' : ""}
-    <div class="meta">Source: aisstream.io (AIS)${designated ? " &middot; designations: US Treasury OFAC" : ""}</div>`;
+    ${network.coverage ? `<p class="meta">${esc(network.coverage)}</p>` : ""}
+    <div class="meta">Source: ${esc(network.label)} (AIS)${
+      // The licence the record carries, not one restated here: Digitraffic's
+      // CC-BY attribution string travels on every row and has to be shown
+      // verbatim, and a second copy in this file would be a second thing to
+      // keep in step with the feed.
+      d.license ? ` &middot; ${esc(d.license)}` : ""
+    }${designated ? " &middot; designations: US Treasury OFAC" : ""}</div>`;
   const heading = Number.isFinite(d.heading) && d.heading !== 511 ? d.heading : d.course;
   let cls = "ship-marker";
   if (navy) cls += " navy-marker";
@@ -1537,7 +1554,11 @@ export function decorateAis(d, { selectedMmsi } = {}) {
   // One table rather than three parallel ternaries -- the previous form
   // restated SHIP_STYLE's colours and sizes inline, which is how a themed
   // colour would have reached the sprites and not this icon.
-  const base = themedStyle(SHIP_STYLE[type], SHIP_LAYER_KEY[type]);
+  // The glyph is picked by ship class either way, but the opacity/scale dials
+  // are read from whichever layer this pin actually belongs to -- a Digitraffic
+  // hull is drawn on its own layer and must answer to that layer's settings,
+  // not to the aisstream bucket its class would otherwise name.
+  const base = themedStyle(SHIP_STYLE[type], layerKey || SHIP_LAYER_KEY[type]);
   const style = designated ? withSanctionRing(base) : base;
   return { icon: icon(style, style.color, style.size, heading, cls, style.opacity), tooltip, detail };
 }
@@ -1707,7 +1728,7 @@ export function decorateCzib(d, { offset } = {}) {
       is deliberately not read.</p>
     <div class="meta">Source: ${esc(d.publisher || "EASA")} Conflict Zone Information Bulletin
       &mdash; a primary source, a named regulator's own document with a quotable reference.${
-        d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Read the bulletin</a>.` : ""
+        d.url ? ` <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">Read the bulletin</a>.` : ""
       }</div>`;
   return {
     icon: icon(
@@ -1866,7 +1887,7 @@ export function decorateDam(d, { offset, twin } = {}) {
       d.license ? `, ${esc(d.license)}` : ""
     }.${d.orig_src ? ` Absorbed from ${esc(d.orig_src)}.` : ""}${
       d.grand_id ? ` GRanD ${esc(d.grand_id)}.` : ""
-    }${d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Record</a>.` : ""}${
+    }${d.url ? ` <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">Record</a>.` : ""}${
       d.attribution ? `<br/>${esc(d.attribution)}` : ""
     }</div>`;
   return {
@@ -1948,7 +1969,7 @@ export function decorateDeflock(d, { offset } = {}) {
       d.licence ? ` (${esc(d.licence)})` : ""
     }${
       d.source_url
-        ? ` &middot; <a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">view the raw feature</a>`
+        ? ` &middot; <a href="${esc(safeUrl(d.source_url))}" target="_blank" rel="noopener noreferrer">view the raw feature</a>`
         : ""
     }</div>`;
   return {
@@ -2447,7 +2468,7 @@ export function decorateGfwDetection(d, { offset } = {}) {
         d.attribution ? ` ${esc(d.attribution)}` : ""
       }${
         d.source_url
-          ? ` <a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Methodology</a>.`
+          ? ` <a href="${esc(safeUrl(d.source_url))}" target="_blank" rel="noopener noreferrer">Methodology</a>.`
           : ""
       }</div>`;
   return {
@@ -3055,6 +3076,11 @@ export const TOKEN_FOR = {
   aisNavy: () => "ship.navy",
   aisTanker: () => "ship.tanker",
   aisCivilian: () => "ship.other",
+  // One layer, three pin types. The Digitraffic layer is not split by class the
+  // way the aisstream buckets are -- it is a single network with a single
+  // toggle -- but a hull inside it is still drawn as a warship, a tanker or a
+  // merchantman, so it is gated by whichever pin type it is actually drawn as.
+  aisDigitraffic: (d) => SHIP_STYLE[classifyShip(d)].token,
   adsbMilitary: aircraftToken,
   adsbCivilian: aircraftToken,
   adsbFlagged: aircraftToken,

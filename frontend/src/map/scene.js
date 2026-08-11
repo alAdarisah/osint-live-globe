@@ -277,6 +277,22 @@ export const LAYER_MANIFEST = {
     cap: { THEATRE: 800 },
     disposition: AUTO,
   },
+  aisDigitraffic: {
+    // Fintraffic's own receiver network (Finnish and Baltic waters), which is a
+    // different network from the aisstream buckets above and therefore a layer
+    // of its own rather than a fourth bucket inside theirs. Merging them would
+    // make "the ships layer" mean a different extent depending on which
+    // supplier happened to be up -- the same objection backend/sources/
+    // digitraffic_ais.py raises against sharing a storage kind.
+    //
+    // Same THEATRE band as aisCivilian, for the same reason: ~900 hulls packed
+    // into one sea is a smear at world zoom, not a layer. Its cap is lower
+    // because the whole feed is smaller than one region's worth of aisstream.
+    draw: { band: "THEATRE" },
+    fetch: FETCH_ALWAYS,
+    cap: { THEATRE: 600 },
+    disposition: AUTO,
+  },
   darkVessels: {
     // No zoom gate, and that is deliberate: there are only ever a handful
     // worldwide, and "somewhere a designated tanker went dark" is exactly the
@@ -665,7 +681,7 @@ export const LAYER_KEYS = Object.keys(LAYER_MANIFEST);
 // ground layers are not, and demoting them is nearly free but takes them out of
 // the render pass entirely.
 const MARITIME_PROMOTE = [
-  "aisCivilian", "aisTanker", "ports", "cables", "cableLandings",
+  "aisCivilian", "aisTanker", "aisDigitraffic", "ports", "cables", "cableLandings",
   "gfwDetections", "gfwGaps", "darkVessels",
 ];
 const MARITIME_DEMOTE = ["cities", "infra", "osmInfra", "airports", "dams"];

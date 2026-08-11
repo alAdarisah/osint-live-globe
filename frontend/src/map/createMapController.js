@@ -217,7 +217,7 @@ const BASE_MIN_ZOOM = 2;
 const WORLD_COPY_LON_PAD_MAX_DEG = 15;
 
 const ID_FIELD = {
-  events: "id", gdelt: "event_id", ais: "mmsi", adsb: "icao24", conflictHistory: "id",
+  events: "id", gdelt: "event_id", ais: "mmsi", aisDigitraffic: "mmsi", adsb: "icao24", conflictHistory: "id",
   officials: "id", hazards: "id", airports: "id", darkVessels: "id", cableLandings: "id",
   launches: "id", osmInfra: "id",
   gfwGaps: "id", gfwDetections: "id", czib: "id", floods: "id", ports: "id", dams: "id",
@@ -522,6 +522,12 @@ export function createMapController(container, initial, callbacks) {
     // wider set answers "nearest airfield" inside ADS-B popups and never
     // reaches the browser.
     airports: [],
+    // The second AIS network -- Fintraffic's coastal receivers, Finnish and
+    // Baltic waters (backend/sources/digitraffic_ais.py). Its own slot rather
+    // than appended to `ais` above, for the reason that module's docstring
+    // gives: two networks of different extent under one name would make the
+    // ships layer mean whatever its supplier happened to be that day.
+    aisDigitraffic: [],
     // Derived from our own recorded AIS history, not fetched (see
     // backend/sources/dark_vessels.py). Every row is an inference.
     darkVessels: [],
@@ -1878,6 +1884,7 @@ export function createMapController(container, initial, callbacks) {
   // comment where entityWebglLayer is created above.
   const WEBGL_BUCKET_KEYS = new Set([
     "adsbCivilian", "adsbMilitary", "adsbFlagged", "aisCivilian", "aisNavy", "aisTanker",
+    "aisDigitraffic",
   ]);
 
   // Each entry: the trail flag it drives, the trail layer to add/remove, the
@@ -2082,22 +2089,58 @@ export function createMapController(container, initial, callbacks) {
     renderAdsbLayer(); // re-decorate every visible aircraft so the highlight moves
   }
 
-  function selectShip(item) {
-    selectedMmsi = selectedMmsi === item.mmsi ? null : item.mmsi;
+  // Two AIS layers share one selection, one trail map and one trail layer,
+  // because only one ship can be selected at a time and only one popup can be
+  // open. What they must NOT share is which layer the selection belongs to: the
+  // same hull can appear in both networks under the same MMSI, and without this
+  // flag selecting it in one layer would light up its twin in the other and
+  // draw a trail assembled from both networks' fixes at once -- a track no
+  // single receiver ever observed.
+  let selectedShipSource = "ais";
+
+  // Where each ships layer reads its live array and its recorded history from.
+  // The storage kinds are the backend's, not invented here: aisstream writes
+  // kind="ais" and Digitraffic kind="ais_digitraffic" (see the docstring in
+  // backend/sources/digitraffic_ais.py on why they are never merged).
+  const SHIP_SOURCES = {
+    ais: { items: () => raw.ais, storageKind: "ais", redraw: () => renderMarkerLayer("ais") },
+    aisDigitraffic: {
+      items: () => raw.aisDigitraffic,
+      storageKind: "ais_digitraffic",
+      redraw: () => renderAisDigitraffic(),
+    },
+  };
+
+  /** True when `item` is the selected hull *in this layer*, not merely its MMSI. */
+  function isSelectedShip(item, sourceKey) {
+    return item.mmsi === selectedMmsi && selectedShipSource === sourceKey;
+  }
+
+  function selectShip(item, sourceKey = "ais") {
+    const source = SHIP_SOURCES[sourceKey];
+    const already = isSelectedShip(item, sourceKey);
+    selectedMmsi = already ? null : item.mmsi;
+    // Reset to the aisstream layer on deselect so a stale source name can never
+    // outlive the selection it described.
+    selectedShipSource = already ? "ais" : sourceKey;
     if (selectedMmsi) {
-      updateTrails(shipTrails, raw.ais, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
+      // Cleared first, not appended to: switching the selection straight from a
+      // hull in one network to a hull in the other would otherwise leave the
+      // previous track in the map and draw both.
+      shipTrails.clear();
+      updateTrails(shipTrails, source.items(), "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
       const chosen = selectedMmsi;
       loadRecordedTrack(
-        "ais", chosen, shipTrails, SHIP_TRAIL_MAX_POINTS,
-        () => selectedMmsi === chosen, () => renderMarkerLayer("ais")
+        source.storageKind, chosen, shipTrails, SHIP_TRAIL_MAX_POINTS,
+        () => selectedMmsi === chosen && selectedShipSource === sourceKey, source.redraw
       );
-      const d = decorateAis(item, { selectedMmsi });
+      const d = decorateAis(item, { selectedMmsi, layerKey: sourceKey === "ais" ? undefined : sourceKey });
       L.popup(popupOptions(320)).setLatLng([item.lat, item.lon]).setContent(d.detail).openOn(map);
     } else {
       shipTrails.clear();
       map.closePopup();
     }
-    renderMarkerLayer("ais");
+    source.redraw();
   }
 
   // Popup/tooltip content is bound as a *function*, not a string, so Leaflet
@@ -2446,7 +2489,8 @@ export function createMapController(container, initial, callbacks) {
 
   const counts = {
     events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
-    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, aisDigitraffic: 0,
+    adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
     hazards: 0, hazardsQuake: 0, hazardsVolcano: 0,
@@ -2468,7 +2512,8 @@ export function createMapController(container, initial, callbacks) {
   // UI as the "(total)" figure next to the live on-screen tick.
   const totals = {
     events: 0, firms: 0, gdelt: 0, officials: 0, countries: 0, cities: 0, infra: 0, jamming: 0,
-    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, adsbCivilian: 0, adsbMilitary: 0,
+    satellites: 0, aisCivilian: 0, aisNavy: 0, aisTanker: 0, aisDigitraffic: 0,
+    adsbCivilian: 0, adsbMilitary: 0,
     infraMilitary: 0, infraRefinery: 0, infraLng: 0, infraPort: 0, infraDesalination: 0,
     infraNuclear: 0, infraFab: 0, infraPipelineNode: 0, pipelineRoutes: 0,
     hazards: 0, hazardsQuake: 0, hazardsVolcano: 0,
@@ -2494,7 +2539,8 @@ export function createMapController(container, initial, callbacks) {
     fab: "infraFab", pipeline: "infraPipelineNode",
   };
   const zoomNotes = {
-    adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false, jamming: false,
+    adsb: false, cities: false, firms: false, events: false, gdelt: false, ais: false,
+    aisDigitraffic: false, jamming: false,
     officials: false, hazards: false, airports: false, cableLandings: false, osmInfra: false,
     gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false,
     deflock: false,
@@ -2725,6 +2771,10 @@ export function createMapController(container, initial, callbacks) {
     // editorial one -- above news and the historical record, below the live
     // conflict layer this map is primarily for.
     aisTanker: 50, officials: 45, hazards: 42, gdelt: 40, conflictHistory: 30, aisCivilian: 20,
+    // Level with aisCivilian: a position off a Fintraffic receiver is the same
+    // class of coordinate as one off aisstream -- a transponder broadcast --
+    // and neither network's copy of a hull deserves to shove the other's pixel.
+    aisDigitraffic: 20,
     // Below cities: an airfield is background context for the aircraft above
     // it, and it is the one layer here that is allowed to be nudged by anything.
     // Below the curated infrastructure it sits alongside: where the two
@@ -2777,6 +2827,10 @@ export function createMapController(container, initial, callbacks) {
   const REDRAW_GROUP = {
     aisCivilian: "ais", aisTanker: "ais", aisNavy: "ais",
     adsbCivilian: "adsb", adsbMilitary: "adsb", adsbFlagged: "adsb",
+    // One bucket, one payload, so bucket and group are the same name here --
+    // listed anyway rather than left to fall through, because a settle pass
+    // that cannot find a group for a bucket silently never repaints it.
+    aisDigitraffic: "aisDigitraffic",
   };
 
   // Layer keys are plain identifiers, so splitting a uid on its FIRST "::"
@@ -2831,6 +2885,7 @@ export function createMapController(container, initial, callbacks) {
     else if (group === "satellites") renderSatellites();
     else if (group === "cities") renderCities();
     else if (group === "ais") renderAisLayer();
+    else if (group === "aisDigitraffic") renderAisDigitraffic();
     else if (group === "adsb") renderAdsbLayer();
     else renderMarkerLayer(group);
   }
@@ -3019,6 +3074,13 @@ export function createMapController(container, initial, callbacks) {
       renderAisLayer();
       return;
     }
+    // Same reason as the two above: this key has no layerGroup and no marker
+    // map of its own -- its pins live in entityWebglLayer's bucket -- so the
+    // generic path below would look up an undefined group and throw.
+    if (key === "aisDigitraffic") {
+      renderAisDigitraffic();
+      return;
+    }
     if (skipHiddenLayer(key)) return;
     const group = groups[key];
     const decorate = DECORATORS[key];
@@ -3186,8 +3248,10 @@ export function createMapController(container, initial, callbacks) {
 
     // If the selected ship is no longer in the feed at all (out of AIS
     // range / stopped reporting), drop the selection so the highlight/trail
-    // don't linger on a marker that no longer exists -- same as ADS-B.
-    if (selectedMmsi && !raw.ais.some((s) => s.mmsi === selectedMmsi)) {
+    // don't linger on a marker that no longer exists -- same as ADS-B. Only
+    // when the selection is this layer's: a hull selected in the Digitraffic
+    // layer is not expected to be in raw.ais and must not be dropped for it.
+    if (selectedMmsi && selectedShipSource === "ais" && !raw.ais.some((s) => s.mmsi === selectedMmsi)) {
       selectedMmsi = null;
       shipTrails.clear();
     }
@@ -3195,7 +3259,8 @@ export function createMapController(container, initial, callbacks) {
     const idFn = (item) => item.mmsi;
     const headingFn = (item) => (Number.isFinite(item.heading) && item.heading !== 511 ? item.heading : item.course);
     const tooltipFn = (item) => decorate(item, { selectedMmsi }).tooltip;
-    const isSelectedFn = (item) => item.mmsi === selectedMmsi;
+    const isSelectedFn = (item) => isSelectedShip(item, "ais");
+    const onSelectFn = (item) => selectShip(item, "ais");
     // Resolved once per render rather than per ship: the theme cannot change
     // mid-pass, and these three objects are handed to every sprite in their
     // bucket (see map/iconTheme.js on why the shipped constants are not read
@@ -3217,17 +3282,17 @@ export function createMapController(container, initial, callbacks) {
     registerVehiclePlacement("aisNavy", navyVisible, idFn, (item) => navyStyleFn(item).size);
     entityWebglLayer.updateEntities("aisCivilian", civilianVisible, {
       idField: idFn, heading: headingFn, style: civilianStyleFn,
-      isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+      isSelected: isSelectedFn, onSelect: onSelectFn, getTooltip: tooltipFn,
       offsets: offsetsForBucket("aisCivilian"),
     });
     entityWebglLayer.updateEntities("aisTanker", tankerVisible, {
       idField: idFn, heading: headingFn, style: tankerStyleFn,
-      isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+      isSelected: isSelectedFn, onSelect: onSelectFn, getTooltip: tooltipFn,
       offsets: offsetsForBucket("aisTanker"),
     });
     entityWebglLayer.updateEntities("aisNavy", navyVisible, {
       idField: idFn, heading: headingFn, style: navyStyleFn,
-      isSelected: isSelectedFn, onSelect: selectShip, getTooltip: tooltipFn,
+      isSelected: isSelectedFn, onSelect: onSelectFn, getTooltip: tooltipFn,
       offsets: offsetsForBucket("aisNavy"),
     });
 
@@ -3256,7 +3321,12 @@ export function createMapController(container, initial, callbacks) {
     // call, so seeding it once in selectShip() left the trail permanently
     // one point long -- and renderTrailLayer skips anything under two
     // points, so a selected ship's trail could never draw at all.
-    if (selectedMmsi) updateTrails(shipTrails, raw.ais, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
+    if (selectedMmsi && selectedShipSource === "ais") {
+      updateTrails(shipTrails, raw.ais, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
+    }
+    // Drawn here whichever layer owns the selection, because this is the only
+    // ship trail layer and renderAisDigitraffic feeds the same Map. Extending
+    // it is the half that has to stay with the owning layer's own array.
     renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", selectedMmsi ? new Set([selectedMmsi]) : new Set(), { refLon: map.getCenter().lng, copies: worldCopies(), layerKey: "aisCivilian" });
 
     // Every on-screen tanker gets a trail, not just a selected one -- same
@@ -3277,6 +3347,97 @@ export function createMapController(container, initial, callbacks) {
         layerKey: "aisTanker",
         maxOpacity: 0.35,
         dashArray: "2 5",
+      });
+    }
+  }
+
+  // The Digitraffic ships layer: one network, one bucket, one toggle.
+  //
+  // Deliberately not folded into renderAisLayer's three-way split, and the
+  // reason is about what a toggle says rather than about the code. Those three
+  // say "navy / tanker / civilian", which are claims about a hull. This one
+  // says which receivers heard it, which is a claim about the map's coverage --
+  // and it is the claim a reader needs, because this network stops at the
+  // Baltic and an absence outside it means nothing at all.
+  //
+  // A hull here is still drawn by class: same glyphs, same classifyShip. The
+  // shape tells you what it is, the layer tells you where the listening was.
+  function renderAisDigitraffic() {
+    const inView = viewportFilter();
+    const zoom = map.getZoom();
+    const belowMinZoom = zoom < (minZoomFor("aisDigitraffic") ?? -Infinity);
+    zoomNotes.aisDigitraffic = belowMinZoom;
+    scheduleReports({ notes: true });
+
+    // Read once per pass rather than per hull, exactly as renderAisLayer does:
+    // the classification below has already done the work a per-pin gate would
+    // otherwise repeat a thousand times.
+    const belowPinZoom = {
+      navy: zoom < (tokenZoom("ship.navy") ?? -Infinity),
+      tanker: zoom < (tokenZoom("ship.tanker") ?? -Infinity),
+      other: zoom < (tokenZoom("ship.other") ?? -Infinity),
+    };
+
+    let visible = [];
+    for (const item of raw.aisDigitraffic) {
+      if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
+      if (!inView(item.lat, item.lon)) continue;
+      const type = classifyShip(item);
+      if (belowPinZoom[type]) continue;
+      // Warships keep the same exemption from the layer gate that renderAisLayer
+      // gives them, for the same reason: a naval hull broadcasting AIS at all is
+      // the rare thing on this layer, and it is worth seeing before you have
+      // zoomed in far enough to be looking for it.
+      if (type !== "navy" && belowMinZoom) continue;
+      visible.push(item);
+    }
+    visible = capByRank("aisDigitraffic", visible, nearestToCentreRank(isSanctioned));
+
+    // Same stale-selection guard as the aisstream layer, scoped to selections
+    // this layer owns (see selectedShipSource).
+    if (selectedMmsi && selectedShipSource === "aisDigitraffic"
+        && !raw.aisDigitraffic.some((s) => s.mmsi === selectedMmsi)) {
+      selectedMmsi = null;
+      selectedShipSource = "ais";
+      shipTrails.clear();
+    }
+
+    const idFn = (item) => item.mmsi;
+    const headingFn = (item) => (Number.isFinite(item.heading) && item.heading !== 511 ? item.heading : item.course);
+    const tooltipFn = (item) => decorateAis(item, { selectedMmsi, layerKey: "aisDigitraffic" }).tooltip;
+    const isSelectedFn = (item) => isSelectedShip(item, "aisDigitraffic");
+    const onSelectFn = (item) => selectShip(item, "aisDigitraffic");
+    // Three resolved styles, one per pin type, all themed against *this* layer's
+    // dials rather than the aisstream buckets': the glyph vocabulary is shared,
+    // the opacity and scale settings are not.
+    const styleByType = {
+      navy: themedStyle(SHIP_STYLE.navy, "aisDigitraffic"),
+      tanker: themedStyle(SHIP_STYLE.tanker, "aisDigitraffic"),
+      other: themedStyle(SHIP_STYLE.other, "aisDigitraffic"),
+    };
+    const styleFn = (item) => {
+      const base = styleByType[classifyShip(item)];
+      return isSanctioned(item) ? withSanctionRing(base) : base;
+    };
+    registerVehiclePlacement("aisDigitraffic", visible, idFn, (item) => styleFn(item).size);
+    entityWebglLayer.updateEntities("aisDigitraffic", visible, {
+      idField: idFn, heading: headingFn, style: styleFn,
+      isSelected: isSelectedFn, onSelect: onSelectFn, getTooltip: tooltipFn,
+      offsets: offsetsForBucket("aisDigitraffic"),
+    });
+
+    counts.aisDigitraffic = visible.length;
+    totals.aisDigitraffic = raw.aisDigitraffic.length;
+    scheduleReports({ counts: true });
+    settlePlacement();
+
+    // The trail half. Only ever runs for a selection this layer owns, so the
+    // one shared shipTrails Map can never end up holding two networks' fixes
+    // for the same hull -- see selectShip.
+    if (selectedMmsi && selectedShipSource === "aisDigitraffic") {
+      updateTrails(shipTrails, raw.aisDigitraffic, "mmsi", SHIP_TRAIL_MAX_POINTS, selectedMmsi);
+      renderTrailLayer(shipTrailsLayer, shipTrails, "#35c2ff", new Set([selectedMmsi]), {
+        refLon: map.getCenter().lng, copies: worldCopies(), layerKey: "aisDigitraffic",
       });
     }
   }
@@ -4826,6 +4987,7 @@ export function createMapController(container, initial, callbacks) {
     renderMarkerLayer("ports");
     renderMarkerLayer("dams");
     renderMarkerLayer("ais");
+    renderMarkerLayer("aisDigitraffic");
     renderMarkerLayer("adsb");
     renderFirms();
     renderCities();
@@ -5286,6 +5448,7 @@ export function createMapController(container, initial, callbacks) {
       // re-describes pins the airports layer already draws, so a fresh document
       // means re-rendering that layer rather than adding anything.
       else if (key === "airfieldActivity") renderMarkerLayer("airports");
+      else if (key === "aisDigitraffic") renderAisDigitraffic();
       else if (key === "conflictHistory") renderMarkerLayer("conflictHistory");
       else renderMarkerLayer(key);
       if (key === "events") updateCountryWarFlare();
