@@ -216,3 +216,37 @@ def test_each_region_carries_its_own_bounds():
     escalation.py's own document."""
     doc = naval_presence.build_document([], full_coverage(), NOW)
     assert doc["regions"]["test_theatre"]["bounds"] == list(HORMUZ_BOUNDS)
+
+
+def test_the_baseline_window_stays_inside_what_history_retention_actually_keeps():
+    """The regression that made this job's trend dead on arrival.
+
+    The baseline used to end WINDOW_DAYS=7 before now, so its far edge sat at
+    (7 days + 24h) back while entity_history is pruned at
+    config.HISTORY_RETENTION_SECONDS (3 days). Every query for it came back
+    empty, trend_computable was False on every pass forever, and the job still
+    paid two range scans to produce nothing -- a whole feature quietly dead,
+    with the document honest about it and nobody looking.
+
+    The rest of this file is parameterised on naval_presence.WINDOW_DAYS, so a
+    regression to 7 would leave every other test green. This is the one that
+    pins the constant against the retention it has to fit inside, rather than
+    against itself.
+    """
+    from backend import config
+
+    retention_hours = config.HISTORY_RETENTION_SECONDS / 3600.0
+    # The oldest instant the baseline query reaches back to.
+    oldest_needed_hours = naval_presence.WINDOW_DAYS * 24 + naval_presence.CURRENT_WINDOW_HOURS
+
+    assert oldest_needed_hours < retention_hours, (
+        f"the baseline reaches {oldest_needed_hours}h back but entity_history only keeps "
+        f"{retention_hours}h -- baseline_rows would be empty on every pass and the trend "
+        f"could never be computed"
+    )
+    # Not merely inside it: far enough inside that a late-running pass, or a
+    # prune that fires early, does not silently start returning nothing.
+    assert retention_hours - oldest_needed_hours >= naval_presence.CURRENT_WINDOW_HOURS, (
+        "the baseline fits inside retention but with less than one full window of margin; "
+        "a delayed pass could start reading a partially pruned baseline without any signal"
+    )
