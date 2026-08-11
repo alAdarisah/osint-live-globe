@@ -1868,7 +1868,7 @@ html, body {
   border-radius: 50%;
   background: #ff5c2a;
   flex: none;
-  animation: notable-pulse var(--tempo-live) var(--e-inout) infinite;
+  animation: notable-pulse var(--period, var(--tempo-live)) var(--e-inout) infinite;
 }
 @keyframes notable-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 92, 42, 0.6); }

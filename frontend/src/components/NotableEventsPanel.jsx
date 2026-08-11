@@ -13,6 +13,7 @@ import {
 } from "../map/severity";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import CountUp from "./CountUp";
+import { ratePeriod } from "../utils/tempo";
 
 const MAX_ITEMS = 6;
 // A country view has one country's worth of events to draw on, so it can
@@ -167,7 +168,7 @@ export default function NotableEventsPanel({
         }}
         onClick={isMobile ? toggleCollapsed : undefined}
       >
-        <span className="notable-pulse" />
+        <span className="notable-pulse" style={{ "--period": ratePeriod((eventsRaw || []).length) }} />
         <span className="notable-title">NOTABLE ACTIVITY</span>
         {/* Names the filter in the header, so a short list reads as "scoped to
             Sudan" rather than "the world went quiet". */}

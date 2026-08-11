@@ -33,3 +33,26 @@ export function dotPeriod(secondsSinceSuccess) {
   const period = URGENT + (AMBIENT - URGENT) * t;
   return `${Math.min(AMBIENT, Math.max(URGENT, period)).toFixed(2)}s`;
 }
+
+// Where the world stops being quiet. Not a claim about severity -- the panel's
+// own MIN_SEVERITY floor has already made that judgement, so anything counted
+// here already cleared the bar for being worth interrupting someone over.
+const BUSY_EVENTS = 60;
+
+/**
+ * How often the notable-activity header should pulse, given how much is on the
+ * board.
+ *
+ * Never null: a header that stopped moving would read as a broken panel rather
+ * than as a quiet world, which is the opposite of what a quiet world deserves.
+ *
+ * @param {number} eventsInWindow
+ * @returns {string} a CSS duration
+ */
+export function ratePeriod(eventsInWindow) {
+  const count = Number(eventsInWindow);
+  if (!Number.isFinite(count) || count <= 0) return `${AMBIENT}s`;
+  const t = Math.min(1, count / BUSY_EVENTS);
+  const period = AMBIENT - (AMBIENT - URGENT) * t;
+  return `${Math.min(AMBIENT, Math.max(URGENT, period)).toFixed(2)}s`;
+}
