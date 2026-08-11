@@ -51,7 +51,7 @@ const BUSY_EVENTS = 60;
  */
 export function ratePeriod(eventsInWindow) {
   const count = Number(eventsInWindow);
-  if (!Number.isFinite(count) || count <= 0) return `${AMBIENT}s`;
+  if (!Number.isFinite(count) || count <= 0) return `${AMBIENT.toFixed(2)}s`;
   const t = Math.min(1, count / BUSY_EVENTS);
   const period = AMBIENT - (AMBIENT - URGENT) * t;
   return `${Math.min(AMBIENT, Math.max(URGENT, period)).toFixed(2)}s`;

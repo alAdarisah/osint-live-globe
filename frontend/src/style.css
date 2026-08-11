@@ -1275,18 +1275,28 @@ details[open] > .layer-details-body {
 
 /* A list arriving as one block reads as a repaint; arriving in sequence reads
    as the panel filling. Stops at eight because past that the cascade stops
-   being one gesture and becomes a queue -- child 9 onward gets one step later
-   than child 8, not the same delay. */
+   being one gesture and becomes a queue -- everything from the ninth child on
+   shares the eighth child's delay rather than getting a later one of its own. */
 .stagger-children > *,
 .news-list > *,
-.notable-list > *,
-.loading-log > * {
+.notable-list > * {
   animation: panel-enter var(--t-panel) var(--e-out) both;
+  animation-delay: calc(var(--stagger-step) * 8);
+}
+/* .loading-log gets its own rule rather than joining the one above: `both`
+   holds the keyframe's `to { opacity: 1 }` at the animation origin, which
+   outranks any author declaration -- including .loading-log-line's own
+   opacity ladder (0.55 base, 0.7 warn, 0.85 timeout) that's supposed to keep
+   distinguishing lines after they arrive. `backwards` only holds the `from`
+   state before the delay elapses and releases the property once the
+   animation ends, so the ladder can take over. */
+.loading-log > * {
+  animation: panel-enter var(--t-panel) var(--e-out) backwards;
   animation-delay: calc(var(--stagger-step) * 8);
 }
 .stagger-children > :nth-child(1),
 .news-list > :nth-child(1),
-.notable-list > :nth-child(1),
+.notable-list > :nth-child(1) { animation-delay: 0ms; }
 .loading-log > :nth-child(1) { animation-delay: 0ms; }
 .stagger-children > :nth-child(2),
 .news-list > :nth-child(2),
@@ -2803,7 +2813,7 @@ details[open] > .layer-details-body {
 #adminToggle {
   transition: transform var(--t-tap) var(--e-out);
 }
-.layer-check:active,
+.layer-check:not(:disabled):active,
 .region-btn:active,
 .region-zone-menu-item:active,
 .timeline-play:active,

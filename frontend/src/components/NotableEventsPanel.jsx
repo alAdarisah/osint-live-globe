@@ -107,7 +107,7 @@ export default function NotableEventsPanel({
     if (scopeKeys) setCollapsed(false);
   }, [scopeKeys]);
 
-  const items = useMemo(() => {
+  const { items, scoredCount } = useMemo(() => {
     const floor = scoped ? MIN_SEVERITY_SCOPED : MIN_SEVERITY;
     const scored = [];
     for (const e of eventsRaw || []) {
@@ -127,7 +127,15 @@ export default function NotableEventsPanel({
     // id is the tiebreak so equal-scoring events can't swap places between
     // polls -- a list that reshuffles on its own is unreadable.
     scored.sort((a, b) => b.score - a.score || String(a.event.id).localeCompare(String(b.event.id)));
-    return scored.slice(0, scoped ? MAX_ITEMS_SCOPED : MAX_ITEMS).map((s) => s.event);
+    return {
+      items: scored.slice(0, scoped ? MAX_ITEMS_SCOPED : MAX_ITEMS).map((s) => s.event),
+      // The scoped, filtered, uncapped count -- what BUSY_EVENTS in tempo.js is
+      // calibrated against. eventsRaw.length would count everything the server
+      // sent regardless of severity, filter or scope, which is why the header
+      // used to read "maximum" on a quiet board: it was measuring the feed, not
+      // what this panel actually decided was worth showing.
+      scoredCount: scored.length,
+    };
   }, [eventsRaw, eventFilter, scoped, countryScope]);
 
   // Zones are regions, not countries, so they're kept on overlap rather than
@@ -168,7 +176,7 @@ export default function NotableEventsPanel({
         }}
         onClick={isMobile ? toggleCollapsed : undefined}
       >
-        <span className="notable-pulse" style={{ "--period": ratePeriod((eventsRaw || []).length) }} />
+        <span className="notable-pulse" style={{ "--period": ratePeriod(scoredCount) }} />
         <span className="notable-title">NOTABLE ACTIVITY</span>
         {/* Names the filter in the header, so a short list reads as "scoped to
             Sudan" rather than "the world went quiet". */}
