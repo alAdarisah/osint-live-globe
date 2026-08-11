@@ -166,6 +166,25 @@ export const OFAC_CLAIM_NOTE = "A formal designation by the US Treasury's Office
   + "The list is refreshed daily and re-published whole; a match is against the list as published, not a "
   + "claim about what this vessel or aircraft is doing now.";
 
+// Review fix: a listing's own date is unknown for *both* sources, not only
+// OpenSanctions'. sanctions.py's parsed SDN entries (see parse_sdn) carry no
+// date field of any kind through this pipeline -- OFAC's own publication may
+// well timestamp a revision somewhere, but nothing this map collected says
+// so, and this board must not claim to know what it was never given. That is
+// a different fact from OpenSanctions' own file, which states outright (see
+// maritime_watchlists.py's own header, "It carries no dates") that it never
+// carried one to begin with. Both land on "unknown," for two different
+// reasons, and a reader is entitled to which -- see undatedNote below, which
+// prints one of these two sentences rather than a single shared one.
+// Deliberately does not say "old" or "stale" either way: an unknown date is
+// not evidence of age, only of an absent fact.
+export const DATE_UNKNOWN_REASON = {
+  ofac: "OFAC's SDN list carries no per-entry date through this pipeline, so when this entry was added or "
+    + "last revised is not known here.",
+  opensanctions: "This dataset carries no dates at all, by its own account -- a listing from years ago and one "
+    + "made this week are indistinguishable rows in it.",
+};
+
 // ---------- row aggregation --------------------------------------------
 
 function kindLabel(kind) {
@@ -224,7 +243,10 @@ function vesselRows(v) {
       program: v.sanctions.program || null,
       sourceFullLabel: OFAC_SOURCE.name,
       sourceUrl: OFAC_SOURCE.url,
-      undated: false,
+      // Review fix: OFAC's parsed entries carry no date either -- see
+      // DATE_UNKNOWN_REASON's own note above for why this used to read
+      // `false` and why that was misleading (silence read as currency).
+      undated: true,
     });
   }
   if (v?.watchlist) {
@@ -276,7 +298,9 @@ function aircraftRows(a) {
     program: a.sanctions.program || null,
     sourceFullLabel: OFAC_SOURCE.name,
     sourceUrl: OFAC_SOURCE.url,
-    undated: false,
+    // See DATE_UNKNOWN_REASON's own note -- OFAC's parsed entries carry no
+    // date through this pipeline either, the same as the vessel row above.
+    undated: true,
   }];
 }
 
@@ -348,18 +372,27 @@ export function positionLine(row) {
   return canLocate(row) ? `${row.lat.toFixed(2)}, ${row.lon.toFixed(2)}` : "position not stated";
 }
 
-/** The undated caveat, worded like maritime_watchlists.py's own popup text
- * (decorators.js's watchlistDetail) -- "" for a row that carries no such
- * caveat (every OFAC row; a watchlist row is undated:true unconditionally
- * today, but this reads the flag rather than assuming). Deliberately never
- * conflated with lastSeenLine above: "last seen" is this entity's own most
- * recent position report, a fact about the AIS/ADS-B feed; "undated" is
- * about the *listing*, a fact about the sanctions/watchlist source, and the
- * two answer different questions about different things. */
+/**
+ * The undated caveat, one sentence per source (DATE_UNKNOWN_REASON) -- ""
+ * only if a row is somehow not `undated` at all (today, every row this
+ * module builds is: see the review-fix notes on OFAC_CLAIM_NOTE and both
+ * `undated: true` sites above). Review fix: this used to fire only for a
+ * watchlist row, because OFAC rows were built with `undated: false` --
+ * silence that read as "this one has a known date" purely by omission, when
+ * OFAC's parsed entries carry no date either. Both sources land on
+ * "unknown" now, worded per source rather than with one borrowed sentence,
+ * and neither wording says or implies "old"/"stale" -- unknown is unknown,
+ * not evidence of age either way.
+ *
+ * Deliberately never conflated with lastSeenLine above: "last seen" is this
+ * entity's own most recent position report, a fact about the AIS/ADS-B
+ * feed; "undated" is about the *listing*, a fact about the sanctions/
+ * watchlist source, and the two answer different questions about different
+ * things.
+ */
 export function undatedNote(row) {
-  return row?.undated
-    ? "This list carries no dates -- a listing from years ago and one made this week are indistinguishable rows in it."
-    : "";
+  if (!row?.undated) return "";
+  return DATE_UNKNOWN_REASON[row?.source] || DATE_UNKNOWN_REASON.opensanctions;
 }
 
 // ---------- sorting ----------------------------------------------------

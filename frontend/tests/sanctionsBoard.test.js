@@ -275,11 +275,60 @@ test("a watchlist row's claim note is the backend's own evidence_note, verbatim 
   assert.equal(row.claimNote, note);
 });
 
-test("undatedNote states the caveat only for a row whose source actually flagged undated:true", () => {
-  const wlRow = buildSanctionsBoardRows([vessel({ watchlist: watchlistHit({ undated: true }) })], [])[0];
-  assert.match(undatedNote(wlRow), /no dates/);
+// Review fix: OFAC rows used to carry `undated: false`, so undatedNote()
+// never fired for them -- an OFAC row read as more current than it is,
+// purely by the absence of the caveat a watchlist row always carried. Both
+// sources' listings are undated in this pipeline; the reason differs per
+// source, and both wordings below are pinned so neither can silently drift
+// back into implying one source is dated and the other is not, or into
+// implying "old"/"stale" instead of merely "unknown."
+
+test("an OFAC vessel row is undated, same as a watchlist row -- the asymmetry this was fixed for", () => {
   const ofacRow = buildSanctionsBoardRows([vessel({ sanctions: ofacVesselHit() })], [])[0];
-  assert.equal(undatedNote(ofacRow), "");
+  assert.equal(ofacRow.undated, true);
+  const wlRow = buildSanctionsBoardRows([vessel({ watchlist: watchlistHit() })], [])[0];
+  assert.equal(wlRow.undated, true);
+});
+
+test("an OFAC aircraft row is undated too", () => {
+  const row = buildSanctionsBoardRows([], [aircraft({ sanctions: ofacAircraftHit() })])[0];
+  assert.equal(row.undated, true);
+});
+
+test("undatedNote pins the exact OFAC unknown-date sentence, distinct from OpenSanctions' own", () => {
+  const ofacRow = buildSanctionsBoardRows([vessel({ sanctions: ofacVesselHit() })], [])[0];
+  assert.equal(
+    undatedNote(ofacRow),
+    "OFAC's SDN list carries no per-entry date through this pipeline, so when this entry was added or "
+      + "last revised is not known here."
+  );
+
+  const wlRow = buildSanctionsBoardRows([vessel({ watchlist: watchlistHit({ undated: true }) })], [])[0];
+  assert.equal(
+    undatedNote(wlRow),
+    "This dataset carries no dates at all, by its own account -- a listing from years ago and one "
+      + "made this week are indistinguishable rows in it."
+  );
+
+  // The two reasons are worded differently -- OFAC's pipeline simply carries
+  // no date field, OpenSanctions' own file states outright it dates nothing
+  // -- so a reader is never given one borrowed sentence for both.
+  assert.notEqual(undatedNote(ofacRow), undatedNote(wlRow));
+});
+
+test("neither unknown-date sentence says or implies the listing is old or stale", () => {
+  const ofacRow = buildSanctionsBoardRows([vessel({ sanctions: ofacVesselHit() })], [])[0];
+  const wlRow = buildSanctionsBoardRows([vessel({ watchlist: watchlistHit({ undated: true }) })], [])[0];
+  for (const text of [undatedNote(ofacRow), undatedNote(wlRow)]) {
+    assert.doesNotMatch(text, /\bstale\b/i);
+    assert.doesNotMatch(text, /\bold\b/i);
+    assert.doesNotMatch(text, /out of date/i);
+  }
+});
+
+test("undatedNote is empty only for a row that is not undated at all", () => {
+  const row = { ...buildSanctionsBoardRows([vessel({ sanctions: ofacVesselHit() })], [])[0], undated: false };
+  assert.equal(undatedNote(row), "");
 });
 
 // --- listedAsLine / lastSeenLine / positionLine / canLocate ---------------
