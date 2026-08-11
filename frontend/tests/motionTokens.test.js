@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import { COUNT_DURATION_MS } from "../src/hooks/useCountUp.js";
+
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
 
 // A duration literal: 0.15s, .2s, 90ms, 1.1s. Not a percentage, not a colour.
@@ -45,6 +47,16 @@ test("style.css states no duration of its own", () => {
     .filter(([, line]) => DURATION.test(line.replace(/var\([^)]*\)/g, "")))
     .map(([number, line]) => `style.css:${number}: ${line.trim()}`);
   assert.deepEqual(offenders, [], `raw durations outside motion.css:\n${offenders.join("\n")}`);
+});
+
+test("the counting hook's duration matches --t-settle", () => {
+  // useCountUp cannot read the token at runtime -- that would mean a
+  // getComputedStyle call inside a requestAnimationFrame loop, which is the
+  // layout read the whole feature is forbidden from doing. So the two are kept
+  // in step here instead of by hope.
+  const settle = read("../src/motion.css").match(/--t-settle:\s*(\d+)ms/);
+  assert.ok(settle, "--t-settle is missing from motion.css");
+  assert.equal(Number(settle[1]), COUNT_DURATION_MS);
 });
 
 test("the exempt animations say why they are exempt", () => {

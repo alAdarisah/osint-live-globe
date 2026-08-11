@@ -37,10 +37,13 @@ test("refuses to tween toward nonsense", () => {
   assert.equal(tweenValue(10, NaN, 210, 420), 10);
   assert.equal(tweenValue(10, Infinity, 210, 420), 10);
   assert.equal(tweenValue(NaN, 90, 210, 420), 90);
+  // Both ends nonsense: there is no value to hold and none to move toward, so
+  // the only honest answer is zero.
+  assert.equal(tweenValue(NaN, NaN, 210, 420), 0);
 });
 
 test("a zero duration lands immediately", () => {
-  // Reduced motion sets the duration to zero rather than taking a second code
-  // path, so this case has to be division-by-zero-safe.
+  // tweenValue has to be division-by-zero-safe on its own terms, independent
+  // of how the hook reaches it -- elapsed / duration is otherwise NaN / 0.
   assert.equal(tweenValue(10, 90, 0, 0), 90);
 });

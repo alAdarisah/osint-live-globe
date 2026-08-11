@@ -8,8 +8,7 @@ import { useEffect, useRef, useState } from "react";
 // Matches --t-settle. Stated here rather than read from the stylesheet because
 // reading a custom property means a getComputedStyle call per tween, which is a
 // layout read in a requestAnimationFrame loop -- the exact thing this feature
-// is not allowed to do. The token test does not cover this; the comment is the
-// only thing keeping the two in step, so change both or neither.
+// is not allowed to do. motionTokens.test.js checks the two stay in step.
 export const COUNT_DURATION_MS = 420;
 
 /**
@@ -46,13 +45,24 @@ function motionIsReduced() {
 export function useCountUp(target) {
   const [shown, setShown] = useState(target);
   const from = useRef(target);
-  // First load hands these counters their first real value at once -- a source
-  // going from 0 to 150,000 must not spend 420ms visibly spinning through six
-  // digits, which reads as a loading state rather than as an update.
   const seeded = useRef(false);
 
   useEffect(() => {
-    if (!seeded.current) {
+    // Two cases snap rather than tween, and they are the same case wearing two
+    // hats: a counter that has nothing to count up from.
+    //
+    // The mount run is the obvious one. The second is not: every counts object
+    // in this app starts as EMPTY_COUNTS, every key literally zero (see
+    // map/useLeafletMap.js), and the control panel mounts before the first poll
+    // lands. So the mount run seeds zero and the *first real value* arrives as
+    // an ordinary update -- which is how a source going from 0 to 150,000 spends
+    // 420ms visibly spinning through six digits and reads as a loading state
+    // rather than as an update.
+    //
+    // Hence: counting up from nothing is a load. The cost is that a layer
+    // genuinely going 0 -> 3 snaps too, which is a fair price for never
+    // spinning the odometer on page load.
+    if (!seeded.current || from.current === 0) {
       seeded.current = true;
       from.current = target;
       setShown(target);
@@ -70,19 +80,19 @@ export function useCountUp(target) {
     const startedAt = from.current;
     let frame = requestAnimationFrame(function step(now) {
       const value = tweenValue(startedAt, target, now - start, COUNT_DURATION_MS);
+      // Written here rather than in the cleanup, which is the subtle part.
+      // React keeps the destroy function from the run that created it and does
+      // not refresh it on renders where the deps did not change -- and setShown
+      // re-renders this component ~25 times without `target` moving. A cleanup
+      // that read `shown` would therefore read the value from before the tween
+      // started, so a counts update arriving mid-tween would visibly jump the
+      // number backwards before rolling up again. Counts change several times
+      // inside 420ms during a pan, so that is the common path, not the corner.
+      from.current = value;
       setShown(value);
       if (value !== target) frame = requestAnimationFrame(step);
-      else from.current = target;
     });
-    return () => {
-      cancelAnimationFrame(frame);
-      // Whatever was on screen is where the next tween starts, so a target that
-      // changes mid-tween continues from here instead of snapping back.
-      from.current = shown;
-    };
-    // `shown` is deliberately not a dependency: it changes every frame, and
-    // depending on it would restart the tween on each one.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => cancelAnimationFrame(frame);
   }, [target]);
 
   return shown;
