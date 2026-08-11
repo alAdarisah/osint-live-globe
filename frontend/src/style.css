@@ -1187,6 +1187,20 @@ html, body {
 #healthList .dot.warn { background: #ff9500; }
 #healthList .dot.err { background: #ff3b30; }
 
+/* A source dot's pulse period is that source's own cadence (see
+   utils/tempo.js), so the row reports how alive it is without anyone reading
+   the "updated 4s ago" beside it. The still case is not a missing feature: a
+   dot that has stopped moving is a source that has stopped arriving, and that
+   is the fastest-reading status on the panel. */
+.dot.breathing {
+  animation: dot-breathe var(--period, var(--tempo-live)) var(--e-inout) infinite;
+}
+
+@keyframes dot-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
 .leaflet-popup-content-wrapper {
   background: var(--popup-bg);
   color: var(--text-primary);
