@@ -304,12 +304,13 @@ class _FakeStorage:
     """Just enough of backend.storage to drive run_once() without Postgres,
     matching the shape of port_calls.py's own test double."""
 
-    def __init__(self, rows, ports=None, port_calls=None):
+    def __init__(self, rows, ports=None, port_calls=None, fail_names=frozenset()):
         self.history = rows
         self.docs = {}
         self.calls = []
         self.ports = ports or []
         self.port_calls = port_calls or {}
+        self.fail_names = set(fail_names)
 
     async def entity_history_since(self, kind, after_id, limit):
         self.calls.append(after_id)
@@ -319,7 +320,10 @@ class _FakeStorage:
         return self.docs.get(name)
 
     async def record_reference(self, name, payload):
+        if name in self.fail_names:
+            return False
         self.docs[name] = payload
+        return True
 
     async def entity_latest(self, kind):
         return self.ports if kind == "ports" else []
@@ -345,6 +349,26 @@ def test_run_once_advances_the_cursor_and_writes_a_profile(monkeypatch):
     second = _run(vp.run_once())
     assert second == {"read": 0, "touched": 0, "profiles": 0, "ok": True}
     assert fake.calls == [0, 2]
+
+
+def test_run_once_reports_not_ok_when_only_the_cursor_write_fails(monkeypatch):
+    """Pre-merge review, Also fix 1: the cursor write's own bool used to be
+    discarded here, so a database hiccup on just that one write still
+    reported "ok": True and a healthy source_health row -- the module's own
+    docstring says the state/profile writes are deliberately unverified
+    (they are idempotent under replay), but the cursor write failing is not
+    something a caller should be able to mistake for a normal pass: it means
+    this job is about to silently re-read the same batch forever without
+    ever advancing, which source_health has to be able to show."""
+    rows = [row(1, 0.0, draught=10.0, ship_type=80)]
+    fake = _FakeStorage(rows, fail_names={vp.CURSOR_NAME})
+    monkeypatch.setattr(vp, "storage", fake)
+
+    result = _run(vp.run_once())
+    assert result["ok"] is False
+    # The profile/state writes are unaffected -- only the cursor failed.
+    assert vp.CURSOR_NAME not in fake.docs
+    assert fake.docs["vessel_profiles"][MMSI]["cargo_class"] == "tanker"
 
 
 def test_run_once_resolves_the_last_port_calls_country_into_the_sentence(monkeypatch):
