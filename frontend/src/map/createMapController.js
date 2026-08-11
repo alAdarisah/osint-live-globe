@@ -6871,7 +6871,24 @@ export function createMapController(container, initial, callbacks) {
   function fetchRivers() {
     if (waterRiversFetchInFlight) return;
     waterRiversFetchInFlight = true;
-    const bounds = map.getBounds().pad(1.0);
+    // pad(1.0) doubles the viewport on every side, and at WORLD/THEATRE zoom
+    // that overshoots the coordinate range entirely -- a bbox like
+    // "-207.57,-322.56,220.16,352.44" -- which backend/regions.py's
+    // parse_bbox cannot parse (it rejects anything outside +-90/+-180) and
+    // water_endpoint then 400s, since kind=rivers refuses to serve unbounded.
+    // A 400 means fetchRivers' own .catch swallows it, waterRiversLoadedBounds
+    // never gets set, and maybeRefetchRivers retries on every moveend forever
+    // -- rivers simply never load below zoom ~4, which per this function's
+    // own docstring reads to a reader as "we looked and there are no rivers
+    // here" rather than "we never actually asked". useOsintData.js's own
+    // bboxCell clamps south/north to +-90 and west/east to +-180 for exactly
+    // this reason; this is the one bbox producer that had not been brought
+    // into line with it.
+    const padded = map.getBounds().pad(1.0);
+    const bounds = L.latLngBounds(
+      [Math.max(-90, padded.getSouth()), Math.max(-180, padded.getWest())],
+      [Math.min(90, padded.getNorth()), Math.min(180, padded.getEast())]
+    );
     const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
     fetchJson(`/api/water?kind=rivers&bbox=${encodeURIComponent(bbox)}`)
       .then((data) => {
