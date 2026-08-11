@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useLeafletMap } from "./map/useLeafletMap";
 import { useOsintData } from "./hooks/useOsintData";
-import { useReplay } from "./hooks/useReplay";
+import { useReplay, shouldExitReplayOnAdminModeChange } from "./hooks/useReplay";
 import { useTheme } from "./hooks/useTheme";
 import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
@@ -16,25 +16,39 @@ import { applyOverrides } from "./settings/applyOverrides";
 import { EDITABLE_SOURCES } from "./settings/defaults";
 import { applyBorderOverrides, staleBorderKeys } from "./settings/borderOverrides";
 import { DEFAULT_EVENT_FILTER } from "./map/severity";
+import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "./utils/entityFilter";
 import { makeCountryScope } from "./map/countryScope";
 import { boundsContainsPoint } from "./utils/geo";
+import {
+  decodeViewState, encodeViewState, applyLayerOverrideChange, omittedSelectionNote, describeUrlStateNotice,
+} from "./urlState";
 
 import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
 import TitleBar from "./components/TitleBar";
 import RegionBar from "./components/RegionBar";
-import NewsBroadcastPanel from "./components/NewsBroadcastPanel";
-import NotableEventsPanel from "./components/NotableEventsPanel";
+import SquawkAlertStrip from "./components/SquawkAlertStrip";
+import IntelPanel from "./components/IntelPanel";
+import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
+import CableOutagePanel from "./components/CableOutagePanel";
+import ChokepointPanel from "./components/ChokepointPanel";
+import InfraRiskPanel from "./components/InfraRiskPanel";
+import SanctionsBoard from "./components/SanctionsBoard";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
 import TimelineBar from "./components/TimelineBar";
 import Attribution from "./components/Attribution";
 import CountryInfoCard from "./components/CountryInfoCard";
+import WaterInfoCard from "./components/WaterInfoCard";
+import SubdivisionInfoCard from "./components/SubdivisionInfoCard";
+import DistrictInfoCard from "./components/DistrictInfoCard";
 import EventDetailCard from "./components/EventDetailCard";
 import CountrySelectionBar from "./components/CountrySelectionBar";
+import CountryCompareView from "./components/CountryCompareView";
 import BorderEditBar from "./components/BorderEditBar";
 import AdminPanel from "./components/admin/AdminPanel";
+import UrlStateNotice from "./components/UrlStateNotice";
 
 // What a layer's checkbox starts as used to be decided here, by a table of
 // forty booleans with a paragraph of justification each. Those arguments were
@@ -53,10 +67,56 @@ const DEFAULT_LAYER_VISIBILITY = {
   aisTankerTrails: true, adsbMilitaryTrails: true, satellitesTrails: true,
 };
 
+// Task 35: how long a restored deep link's country/water selection keeps
+// trying before giving up. Countries are a boot source (LoadingScreen waits
+// on them) but water is a one-shot fetch off that list -- a link opened on a
+// slow connection can genuinely land before either has arrived, so this
+// retries rather than making one attempt at mount and calling it done. Not
+// indefinite: a key that is never going to resolve (a stale link, a body the
+// source has since dropped) should stop trying rather than poll forever.
+const SELECTION_RESTORE_ATTEMPTS = 8;
+const SELECTION_RESTORE_INTERVAL_MS = 500;
+
 export default function App() {
   const mapContainerRef = useRef(null);
   const { theme, toggleTheme } = useTheme();
   const isMobileViewport = useIsMobileViewport();
+
+  // Task 35: decoded once, synchronously, from whatever hash the page loaded
+  // with -- a state initializer rather than an effect, so every piece of
+  // state below that a link can seed (the filters, the layer wishes fed to
+  // useLeafletMap's construction, useReplay's own initial replayAt) already
+  // reflects it on the very first render, instead of painting the default
+  // view for one frame and then snapping to the linked one. The camera and
+  // the country/water selection restore later, from effects further down,
+  // because both need something that does not exist yet at this point in the
+  // render (the map itself; loaded reference data) -- see the two effects
+  // near mapApi's construction below.
+  const [urlState] = useState(() => decodeViewState(window.location.hash));
+  // decodeViewState never throws and always hands back a usable default view
+  // -- which is exactly the silent-failure mode the brief warns against if
+  // nothing says so out loud. UrlStateNotice (rendered below) is that
+  // something; this just tracks whether the reader has dismissed it.
+  const [urlNoticeDismissed, setUrlNoticeDismissed] = useState(false);
+  // What UrlStateNotice actually says -- urlState.js's own decision (an
+  // error message, a one-time "this link has known limits" reminder for a
+  // real followed link, or nothing at all for a plain hash-less visit). See
+  // describeUrlStateNotice's own note for the Important 2 review fix this is
+  // half of.
+  const urlNoticeContent = useMemo(() => describeUrlStateNotice(urlState), [urlState]);
+
+  // Review fix (Criticals 1 and 3): the layer overrides a reader has
+  // actually chosen, seeded once from whatever link opened this tab and from
+  // then on updated only by onToggleLayer -- never by re-deriving from
+  // urlState.state.layers on every render, and never by spreading the whole
+  // of settings.layerWish. The first was a stale-forever bug (tick a layer
+  // the link had turned off, and the frozen link value kept winning every
+  // render after); the second was a privacy leak ("Copy link" republishing
+  // the deployment's admin-pinned layer set to a reader who never touched a
+  // checkbox). See applyLayerOverrideChange in urlState.js for the reducer
+  // and the full reasoning, and the layerWishes memo / onToggleLayer /
+  // buildShareUrl below for where this is read and written.
+  const [layerOverride, setLayerOverride] = useState(() => ({ ...urlState.state.layers }));
 
   // Admin Mode's configuration. Read here rather than in a context because
   // three separate consumers need it in three different forms -- the map wants
@@ -87,9 +147,21 @@ export default function App() {
   // effect that replays it -- because the controller tracks which keys it is
   // answerable for, and handing it a shorter table on the second call would read
   // as "the reader has withdrawn these" rather than as "these are unchanged".
+  // Task 35's own layer overrides ride last -- a restored link's layer state
+  // (or the reader's own explicit toggle since -- see layerOverride above)
+  // outranks whatever this browser's Admin Mode settings say for this
+  // session, the same way a URL parameter usually outranks a saved
+  // preference elsewhere. They are folded in here, at the merge every other
+  // consumer already reads, rather than pushed through actions.setLayerWish:
+  // that function persists to the shared admin_config.json, and a link a
+  // reader opens must never rewrite this deployment's configuration for
+  // everyone else who visits it. `layerOverride` (not urlState.state.layers
+  // directly) is what rides last, so a checkbox click updates the very key
+  // this memo re-spreads instead of being permanently overruled by a frozen
+  // link value -- see applyLayerOverrideChange's own note in urlState.js.
   const layerWishes = useMemo(
-    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish }),
-    [settings.layerWish]
+    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish, ...layerOverride }),
+    [settings.layerWish, layerOverride]
   );
   const mapApi = useLeafletMap(mapContainerRef, {
     theme,
@@ -162,6 +234,12 @@ export default function App() {
     // rather than the zoom, because the same zoom over the Pacific and over
     // Ukraine are different questions.
     mapBounds: mapApi.mapBounds,
+    // Task 31's Performance section -- see useOsintData.js's own intervalNow
+    // for where the multiplier is applied and its "backgrounded tab" branch
+    // for where pausePollingWhenHidden replaces what used to be an
+    // unconditional skip.
+    pollIntervalMultiplier: settings.performance.pollIntervalMultiplier,
+    pausePollingWhenHidden: settings.performance.pausePollingWhenHidden,
   });
   regionAutoResetRef.current = dataApi.resetRegionToWorld;
 
@@ -169,12 +247,17 @@ export default function App() {
     applyData: mapApi.applyData,
     currentRegionKey: dataApi.currentRegionKey,
     onExitReplay: dataApi.refetchAllNow,
+    // Task 35: a restored deep link opens already scrubbed back, not live.
+    initialReplayAt: urlState.state.replayAt,
   });
   replayActiveRef.current = replayApi.isReplaying;
 
-  // Source-health polling is for the panel that displays it, and that panel is
-  // now admin-only -- so a reader's session stops making the request entirely
-  // rather than fetching a status nothing will render.
+  // Task 32 item 1: polls unconditionally now -- every layer row's freshness
+  // badge (LayerCheck.jsx, via HealthContext just below) reads this, not
+  // only the Source status fold, which stays Admin Mode-only. `adminMode`
+  // still controls the cadence: 15s while that fold is actually on screen
+  // wanting to feel live, 60s ("cheaply", per this task's own brief)
+  // otherwise -- see useHealth's own note.
   const { health, owmConfigured } = useHealth(adminMode);
 
   // Entering or leaving Admin Mode moves the map's left edge by 320px, and
@@ -334,6 +417,12 @@ export default function App() {
     (key, visible) => {
       mapApi.setLayerVisible(key, visible);
       actions.setLayerWish(key, visible);
+      // Review fix: this is the reader's own explicit choice for this key,
+      // now -- it wins over whatever a followed link asked for, for the rest
+      // of this tab, and it is what a later "Copy link" click should carry
+      // instead of the link's original value. See applyLayerOverrideChange's
+      // own note in urlState.js.
+      setLayerOverride((prev) => applyLayerOverrideChange(prev, key, visible));
     },
     [mapApi.setLayerVisible, actions]
   );
@@ -426,7 +515,12 @@ export default function App() {
   // the zone briefing read the same feed and have to agree with the map about
   // what is in scope; the predicate they all apply lives in map/severity.js.
 
-  const [eventFilter, setEventFilter] = useState(DEFAULT_EVENT_FILTER);
+  // Task 35: seeded from the decoded link's sparse diff on top of the
+  // shipped default, the same "base, then only what differs" shape
+  // urlState.js itself stores these as.
+  const [eventFilter, setEventFilter] = useState(
+    () => ({ ...DEFAULT_EVENT_FILTER, ...urlState.state.filters.event })
+  );
   // The map is told in an effect rather than from inside the state updater.
   // An updater runs during render, and mapApi.setEventFilter redraws the layer
   // synchronously, which reaches reportCounts/reportZoomNotes and so sets state
@@ -440,6 +534,37 @@ export default function App() {
   useEffect(() => {
     mapApi.setEventFilter(eventFilter);
   }, [eventFilter, mapApi.setEventFilter]);
+
+  // The vessel and aircraft filter bars (Task 18, LayersSection.jsx). Same
+  // shape as eventFilter just above, and for the same reason: the map
+  // controller is the only thing that can actually decide which ships/
+  // aircraft draw, but the state has to live in exactly one place or a
+  // second copy could disagree with it -- the failure Task 12 spent two
+  // review rounds fixing for the conflict-event filters. Held here, synced
+  // to the map from an effect (not from inside the setter -- see the
+  // eventFilter effect above for why), and read back for the filter bar's
+  // own "N / total" figure from mapApi.counts.vesselFilterMatch/
+  // aircraftFilterMatch.
+  const [vesselFilter, setVesselFilter] = useState(
+    () => ({ ...DEFAULT_VESSEL_FILTER, ...urlState.state.filters.vessel })
+  );
+  const [aircraftFilter, setAircraftFilter] = useState(
+    () => ({ ...DEFAULT_AIRCRAFT_FILTER, ...urlState.state.filters.aircraft })
+  );
+  const onVesselFilterChange = useCallback(
+    (patch) => setVesselFilter((prev) => ({ ...prev, ...patch })),
+    []
+  );
+  const onAircraftFilterChange = useCallback(
+    (patch) => setAircraftFilter((prev) => ({ ...prev, ...patch })),
+    []
+  );
+  useEffect(() => {
+    mapApi.setVesselFilter(vesselFilter);
+  }, [vesselFilter, mapApi.setVesselFilter]);
+  useEffect(() => {
+    mapApi.setAircraftFilter(aircraftFilter);
+  }, [aircraftFilter, mapApi.setAircraftFilter]);
 
   const onInfraFilterChange = useCallback(
     (text) => {
@@ -459,6 +584,15 @@ export default function App() {
 
   const onLocateNewsItem = useCallback(
     (lat, lon) => mapApi.flyTo(lat, lon, 7),
+    [mapApi.flyTo]
+  );
+
+  // Task 34's place search picks its own zoom per result (a town versus an
+  // administrative division -- see PlaceSearch.jsx's pick()), unlike
+  // onLocateNewsItem above which always flies to the same fixed zoom, so
+  // this passes it through rather than hard-coding a second value here.
+  const onLocatePlace = useCallback(
+    (lat, lon, zoom) => mapApi.flyTo(lat, lon, zoom),
     [mapApi.flyTo]
   );
 
@@ -548,9 +682,148 @@ export default function App() {
   // while the map stayed frozen on a snapshot from hours ago, with every live
   // feed still suppressed and nothing left to press to get back. The map goes
   // live with the control that drives it.
+  //
+  // Review fix (Critical 2): guarded on a genuine true-to-false transition
+  // now, not merely "adminMode is currently false" -- see
+  // shouldExitReplayOnAdminModeChange's own note in useReplay.js. Without the
+  // guard, a deep link that seeds useReplay's initial replayAt made
+  // isReplaying true on the very first render while adminMode was (its
+  // default, for the great majority of visitors this share button exists
+  // for) already false, and this effect read that as "Admin Mode was just
+  // switched off mid-replay" on mount and called goLive() -- silently
+  // snapping a freshly-restored replay link straight back to live before the
+  // reader who opened it ever saw the moment it pointed to.
+  const prevAdminModeRef = useRef(adminMode);
   useEffect(() => {
-    if (!adminMode && replayApi.isReplaying) replayApi.goLive();
+    const prevAdminMode = prevAdminModeRef.current;
+    prevAdminModeRef.current = adminMode;
+    if (shouldExitReplayOnAdminModeChange(prevAdminMode, adminMode, replayApi.isReplaying)) {
+      replayApi.goLive();
+    }
   }, [adminMode, replayApi.isReplaying, replayApi.goLive]);
+
+  // --- Task 35: deep-linkable views --------------------------------------
+  //
+  // Layers, filters and replay were folded into their own state's initial
+  // value above (layerWishes, eventFilter/vesselFilter/aircraftFilter,
+  // useReplay's initialReplayAt) -- they need no effect of their own. Camera
+  // and selection do, because each needs something that only exists after
+  // mount: the map itself, and (for selection) reference data that is still
+  // arriving.
+
+  // The camera restores exactly once, the instant the map is ready to accept
+  // it -- not on every mapApi.ready re-render (it only ever flips false to
+  // true once) and not repeated the way selection is below, since the map
+  // itself is not something that "hasn't arrived yet": mapApi.ready already
+  // means it is sitting there waiting for a setView call.
+  const cameraRestoredRef = useRef(false);
+  useEffect(() => {
+    if (cameraRestoredRef.current || !mapApi.ready) return;
+    cameraRestoredRef.current = true;
+    const camera = urlState.state.camera;
+    if (camera) mapApi.setCamera(camera.lat, camera.lon, camera.zoom);
+  }, [mapApi.ready, mapApi.setCamera, urlState.state.camera]);
+
+  // The one selection a link carries (see urlState.js for why only country
+  // and water qualify). Both are reference layers, but neither is guaranteed
+  // to have landed the instant the map reports ready -- countries are a boot
+  // source LoadingScreen waits on, water is a one-shot fetch that is not --
+  // so this retries a handful of times rather than making one attempt and
+  // giving up. A key that never resolves (a stale link, a body the source
+  // has since dropped) stops trying after SELECTION_RESTORE_ATTEMPTS rather
+  // than polling forever.
+  useEffect(() => {
+    const selection = urlState.state.selection;
+    if (!mapApi.ready || !selection) return undefined;
+    let cancelled = false;
+    let attempts = 0;
+    let timer = null;
+    const attempt = () => {
+      if (cancelled) return;
+      attempts += 1;
+      const found = selection.kind === "country"
+        ? mapApi.selectCountryByKey(selection.id)
+        : mapApi.selectWaterById(selection.id);
+      if (found || attempts >= SELECTION_RESTORE_ATTEMPTS) return;
+      timer = setTimeout(attempt, SELECTION_RESTORE_INTERVAL_MS);
+    };
+    attempt();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // Mount-once (gated on mapApi.ready flipping true): urlState.state.selection
+    // is a fixed object for the life of this session, and the callbacks are
+    // stable useCallbacks -- re-running this on their identity would be a
+    // no-op at best and a restarted retry sequence at worst.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapApi.ready]);
+
+  // What every "Copy link" button (the title bar, every info/detail card)
+  // actually copies -- read live at click time, not memoised, so the link
+  // always matches whatever is on screen the moment the button is pressed.
+  // See urlState.js's own module doc for exactly what this does and does not
+  // capture, and why.
+  // Review fix (Critical 1): reads `layerOverride`, not
+  // `{...settings.layerWish, ...urlState.state.layers}` -- the old
+  // construction spread the *whole* of settings.layerWish, which is exactly
+  // what useAppSettings persists to the shared admin_config.json, into every
+  // link. A reader who never touched a layer checkbox still shipped this
+  // deployment's admin-pinned layer set to whoever they handed the link to.
+  // `layerOverride` holds only keys a reader has actually made a choice
+  // about -- inherited from the link that opened this tab, updated only by
+  // onToggleLayer since -- see applyLayerOverrideChange's own note.
+  //
+  // Review fix (Important 2): also returns `note`, a plain-language list of
+  // what this link will not carry (from urlState.js's own
+  // omittedSelectionNote) -- a multi-country selection narrowed to one, or
+  // an open subdivision/district/record card that has no field in this
+  // format at all. CopyLinkButton surfaces it alongside "Copied" so the
+  // person building the link is not left assuming it captured everything on
+  // their screen.
+  const buildShareUrl = useCallback(() => {
+    // A country and a nearby water body can be selected at once (see
+    // PlaceInfoCard's own note on why); country wins when both are open,
+    // since a click on a country is the more deliberate of the two gestures
+    // and this only carries one selection at all -- see urlState.js.
+    const selection = mapApi.selectedCountry
+      ? { kind: "country", id: mapApi.selectedCountry.key }
+      : mapApi.selectedWater
+        ? { kind: "water", id: mapApi.selectedWater.id }
+        : null;
+    const hash = encodeViewState({
+      camera: mapApi.getCamera(),
+      layers: layerOverride,
+      filters: { event: eventFilter, vessel: vesselFilter, aircraft: aircraftFilter },
+      selection,
+      replayAt: replayApi.isReplaying ? replayApi.replayAt : null,
+    });
+    const url = `${window.location.origin}${window.location.pathname}${window.location.search}#${hash}`;
+    const note = omittedSelectionNote({
+      countrySelectionCount: mapApi.countrySelection.length,
+      hasSubdivision: !!mapApi.selectedSubdivision,
+      hasDistrict: !!mapApi.selectedDistrict,
+      hasOpenRecord: !!recordDetail,
+    });
+    return { url, note };
+  }, [
+    layerOverride, mapApi, eventFilter, vesselFilter, aircraftFilter,
+    replayApi.isReplaying, replayApi.replayAt, recordDetail,
+  ]);
+
+  // Task 40: opened by CountrySelectionBar's own Compare button, closed by its
+  // own close button/backdrop click, or -- automatically -- once the
+  // selection it was comparing empties entirely (Clear, or removing the last
+  // chip one at a time), since a comparison of nothing has nothing left to
+  // show. Dropping to exactly one selected country is deliberately not an
+  // auto-close: CountryCompareView's own "select at least one more" message
+  // covers that case in place, so a reader who removed one of three still
+  // sees the view they had open rather than having it vanish out from under
+  // them mid-read.
+  const [compareOpen, setCompareOpen] = useState(false);
+  useEffect(() => {
+    if (compareOpen && mapApi.countrySelection.length === 0) setCompareOpen(false);
+  }, [compareOpen, mapApi.countrySelection.length]);
 
   return (
     <>
@@ -558,11 +831,23 @@ export default function App() {
 
       <MapView containerRef={mapContainerRef} panelOpen={panelOpen} />
 
+      {/* Task 35: says so, once, if the link this page loaded with could not
+          be read -- see decodeViewState's own contract for why that needs a
+          visible signal rather than just quietly falling back -- or, for a
+          link that *did* read, that this format has known limits (review
+          fix, Important 2). */}
+      <UrlStateNotice
+        content={urlNoticeDismissed ? null : urlNoticeContent}
+        onDismiss={() => setUrlNoticeDismissed(true)}
+      />
+
       <TitleBar
         theme={theme}
         onToggleTheme={toggleTheme}
         adminMode={adminMode}
         onToggleAdminMode={toggleAdminMode}
+        onLocatePlace={onLocatePlace}
+        getShareUrl={buildShareUrl}
         readOnly={readOnly}
       />
 
@@ -577,43 +862,102 @@ export default function App() {
         regionActivity={regionActivity}
       />
 
-      {/* The two reading panels, and they are the reader's rather than the
-          operator's.
+      {/* Task 33: a live strip of every aircraft currently squawking an
+          emergency code. Sits below RegionBar, above the map and every panel
+          below -- it renders nothing at all when no aircraft is squawking
+          (see SquawkAlertStrip's own note), so it never competes with
+          IntelPanel/AirfieldActivityPanel for space on an ordinary day.
+          Clicking an entry reuses the same selection path a marker click
+          already uses (mapApi.selectAircraftByIcao -> createMapController's
+          selectAircraft), so the popup/highlight/trail behave identically. */}
+      <SquawkAlertStrip
+        aircraft={mapApi.emergencySquawks}
+        onSelect={mapApi.selectAircraftByIcao}
+        panelOpen={panelOpen}
+      />
 
-          They were gated with the instruments for a while, on the argument that
-          each is a second reading of data the map is already drawing and so
+      {/* The reading panel, and it is the reader's rather than the operator's.
+
+          It was gated with the instruments for a while, on the argument that
+          it is a second reading of data the map is already drawing and so
           costs a first look its clarity. That argument was wrong about which
-          question they answer. The control drawer, the replay scrubber and the
+          question it answers. The control drawer, the replay scrubber and the
           configuration panel are all about *the map* -- what is drawn, from what
-          zoom, out of which recorded moment. These two are about the world: what
-          is happening in view right now, and which of it matters most. A reader
+          zoom, out of which recorded moment. This is about the world: what is
+          happening in view right now, and which of it matters most. A reader
           who has come to a conflict map wants exactly that, and the map alone
           cannot say "this is the worst thing on screen" -- it can only draw the
           pin brighter and hope the eye lands on it.
 
-          Both stay honest without a control around them. The ticker names its
-          outlet and its age on every line, and the board ranks the same
-          /api/events data through the same filter the map draws, so the two
-          cannot disagree. Both collapse to their header, and the board renders
-          nothing at all when no event clears its severity floor -- so on a quiet
-          day they take no room rather than asserting significance that is not
-          there. */}
-      <NewsBroadcastPanel
-        gdeltRaw={dataApi.gdeltRaw}
-        mapBounds={mapApi.mapBounds}
-        regionLabel={dataApi.currentRegionLabel}
-        countryScope={countryScope}
-        onLocate={onLocateNewsItem}
-      />
-
-      <NotableEventsPanel
+          Task 12 merged what used to be two panels (a news ticker and a
+          notable-activity board) into this one, four-tab panel -- Escalation,
+          Events, News, Officials -- so there is one place to look, one set of
+          scope/window/severity/group-by controls, and one Minimum
+          severity/verification floor that this panel and the map both read off
+          `eventFilter` rather than two independent copies that could drift
+          apart. See IntelPanel.jsx for the rest. */}
+      <IntelPanel
         eventsRaw={dataApi.eventsRaw}
-        eventFilter={eventFilter}
+        gdeltRaw={dataApi.gdeltRaw}
+        officialsRaw={dataApi.officialsRaw}
         escalation={dataApi.escalation}
+        eventFilter={eventFilter}
+        onEventFilterChange={onEventFilterChange}
+        mapBounds={mapApi.mapBounds}
+        regions={dataApi.regions}
+        currentRegionKey={dataApi.currentRegionKey}
         countryScope={countryScope}
+        water={mapApi.selectedWater}
         onLocate={onLocateNewsItem}
         isMobile={isMobileViewport}
       />
+
+      {/* Task 29: /api/airfield-activity has existed since before this plan
+          and nothing in the frontend called it -- see AirfieldActivityPanel.jsx's
+          own module note. Self-contained (fetches its own two documents rather
+          than riding useOsintData's poller table), so mounting it is this one
+          line. */}
+      <AirfieldActivityPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+
+      {/* Task 36: GET /api/chokepoints has a document (backend/refine/
+          lane_density.py's chokepoint accounting) and nothing in the
+          frontend called it until this panel -- see ChokepointPanel.jsx's
+          own module note. Self-contained (its own fetch/interval, like
+          AirfieldActivityPanel just above), so mounting it is this one
+          line too. */}
+      <ChokepointPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+
+      {/* Task 37: GET /api/infra-risk has a document (backend/refine/
+          infra_risk.py -- which dams, power plants, cable landings,
+          airfields and ports have the most conflict events inside their own
+          uncertainty radius) and nothing in the frontend called it until
+          this panel -- see InfraRiskPanel.jsx's own module note. Stacked
+          above ChokepointPanel in the same left-hand corner (see
+          style.css's #infraRiskPanel rule); self-contained, so mounting it
+          is this one line too. */}
+      <InfraRiskPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+
+      {/* Task 38: GET /api/cable-outage-risk has a document (backend/refine/
+          cable_outage.py -- whether a country's IODA outage score spikes at
+          the same time as a fused conflict event lands near one of its
+          submarine-cable landings) and nothing in the frontend called it
+          until this panel -- see CableOutagePanel.jsx's own module note.
+          Stacked above InfraRiskPanel in the same left-hand corner (see
+          style.css's #cableOutagePanel rule); self-contained, so mounting
+          it is this one line too. */}
+      <CableOutagePanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+
+      {/* Task 41: every OFAC- and OpenSanctions-matched vessel and aircraft
+          this map's live AIS/ADS-B feed currently carries, aggregated into
+          one scannable board -- see SanctionsBoard.jsx's own module note.
+          Stacked above CableOutagePanel in the same left-hand corner; unlike
+          the four panels above it, this one reads live entity records via
+          mapApi.recordsFor (the same accessor AdminPanel's DataEditor uses)
+          rather than fetching its own document, and needs `health` to tell
+          "checked and found nothing" apart from "the reference lists or the
+          entity feed have not loaded" -- see that component's own note on
+          why an empty board is not always the same empty board. */}
+      <SanctionsBoard recordsFor={mapApi.recordsFor} health={health} onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
 
       {/* Opened by picking a theatre in the RegionBar above, which is a public
           control -- so gating this behind Admin Mode meant a reader could make
@@ -637,15 +981,21 @@ export default function App() {
           of those answers a question about how the map is behaving rather than
           about the world, which is why they go together and why they go here.
 
-          The event filter goes with them for a subtler reason. Severity,
-          verification state and age are claim-*quality* dimensions, and no
-          camera position can infer "show me only the corroborated ones" -- so
-          it is the one control zoom and clicks genuinely cannot replace. A
-          reader still gets all of it, because the map already says it without a
-          control: severity sets the colour, an imprecise event is drawn smaller
-          and ringed, low confidence dims the pin, and the uncertainty circle is
-          drawn at its real radius. Filtering the doubtful ones *away* is an
-          analyst's act, and that is what belongs behind this gate. */}
+          Show approximate locations is what is left of the event filter here:
+          it changes what the *map* draws, which is this drawer's business.
+          Window, Minimum severity and the verification floor used to be here
+          too, on the argument that age/severity/verification state are claim-
+          *quality* dimensions an analyst opts into filtering. Task 12 moved
+          all three up into IntelPanel's own header -- they are exactly the
+          axes a reader curating "what matters" wants without first finding
+          Admin Mode -- and they still write into this same `eventFilter`
+          object, not a second copy: Window in particular used to be a genuine
+          second control (this drawer's own select set `maxAgeDays` directly,
+          independently of IntelPanel's), which is exactly the two-copies
+          problem this paragraph's last sentence warns about, and is why it
+          moved rather than merely being duplicated up there too. See
+          LayersSection.jsx's own note at the spot the three controls used to
+          sit. */}
       {adminMode && (
         <>
           <PanelToggle open={panelOpen} onToggle={togglePanel} />
@@ -666,6 +1016,10 @@ export default function App() {
             historyAsOf={historyAsOf}
             onEventFilterChange={onEventFilterChange}
             onInfraFilterChange={onInfraFilterChange}
+            vesselFilter={vesselFilter}
+            onVesselFilterChange={onVesselFilterChange}
+            aircraftFilter={aircraftFilter}
+            onAircraftFilterChange={onAircraftFilterChange}
             imageryKey={imageryKey}
             imageryDate={imageryDate}
             onImageryChange={setImageryKey}
@@ -698,9 +1052,40 @@ export default function App() {
         onClose={mapApi.closeCountryCard}
         borderEdit={borderEditProps}
         onOpenRecord={openRecordDetail}
+        cardSettings={settings.cards}
+        getShareUrl={buildShareUrl}
       />
 
-      <EventDetailCard detail={recordDetail} onClose={() => setRecordDetail(null)} />
+      <WaterInfoCard
+        water={mapApi.selectedWater}
+        onClose={mapApi.closeWaterCard}
+        onOpenRecord={openRecordDetail}
+        cardSettings={settings.cards}
+        getShareUrl={buildShareUrl}
+      />
+
+      <SubdivisionInfoCard
+        subdivision={mapApi.selectedSubdivision}
+        onClose={mapApi.closeSubdivisionCard}
+        onOpenRecord={openRecordDetail}
+        cardSettings={settings.cards}
+        getShareUrl={buildShareUrl}
+      />
+
+      <DistrictInfoCard
+        district={mapApi.selectedDistrict}
+        onClose={mapApi.closeDistrictCard}
+        onOpenRecord={openRecordDetail}
+        onMonthChange={mapApi.setDistrictMonth}
+        cardSettings={settings.cards}
+        getShareUrl={buildShareUrl}
+      />
+
+      <EventDetailCard
+        detail={recordDetail}
+        onClose={() => setRecordDetail(null)}
+        getShareUrl={buildShareUrl}
+      />
 
       <BorderEditBar
         state={mapApi.borderEdit}
@@ -720,7 +1105,22 @@ export default function App() {
         onFocus={mapApi.focusCountry}
         onRemove={mapApi.deselectCountry}
         onClear={mapApi.clearCountrySelection}
+        onCompare={() => setCompareOpen(true)}
       />
+
+      {/* Task 40: a wide, centred modal rather than another anchored card --
+          see CountryCompareView.jsx's own header note. Mounted only while
+          open, same as every other overlay here, so its 30s refresh interval
+          (see that component) is not ticking in the background for a reader
+          who has never opened it. */}
+      {compareOpen && (
+        <CountryCompareView
+          selection={mapApi.countrySelection}
+          getRows={mapApi.countryCompareRows}
+          onClose={() => setCompareOpen(false)}
+          onFocusCountry={mapApi.focusCountry}
+        />
+      )}
 
       {/* The only place any of this is editable, and it exists only while Admin
           Mode is on -- see AdminPanel.jsx on why that is the whole guard. */}
@@ -732,6 +1132,12 @@ export default function App() {
           recordsFor={mapApi.recordsFor}
           staleBorders={staleBorders}
           onClose={toggleAdminMode}
+          eventFilter={eventFilter}
+          onEventFilterChange={onEventFilterChange}
+          vesselFilter={vesselFilter}
+          onVesselFilterChange={onVesselFilterChange}
+          aircraftFilter={aircraftFilter}
+          onAircraftFilterChange={onAircraftFilterChange}
         />
       )}
     </>

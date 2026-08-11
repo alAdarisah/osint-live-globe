@@ -108,14 +108,24 @@ export function gibsUrlFor(layerKey, date) {
   return `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layer.id}/default/${day}/${layer.matrix}/{z}/{y}/{x}.${layer.format}`;
 }
 
+// Task 30: its own pane, not the shared 'tilePane' the base layer draws into.
+// Admin Mode tints basemap/imagery/weather independently (see map/tileTint.js
+// and BasemapSection.jsx), and a CSS filter or ::after applies to a whole
+// pane at once -- so three independent dial sets need three separate panes to
+// land on, or tinting the basemap would tint GIBS and the weather rasters
+// right along with it. zIndex 205 keeps it exactly where it always visually
+// sat: above the basemap's default tilePane (200) and below the weather pane
+// this file creates next (210), both still well under the countries pane
+// (350) so nothing here starts painting over vector overlays.
 export function createImageryLayer(map) {
+  if (!map.getPane("imageryPane")) {
+    map.createPane("imageryPane").style.zIndex = 205;
+  }
   // Starts with no URL and unattached: the layer only exists once a reader
   // picks one, same "the real URL arrives later" shape the precip layer has.
   return L.tileLayer("", {
     opacity: 0.85,
-    // Above the vector basemap (which has no explicit zIndex, so 1) and below
-    // the weather rasters at 5, so imagery never covers precipitation or cloud.
-    zIndex: 3,
+    pane: "imageryPane",
     maxNativeZoom: 9,
     noWrap: true, // see createBaseLayer above
     bounds: WORLD_TILE_BOUNDS,
@@ -124,7 +134,18 @@ export function createImageryLayer(map) {
   });
 }
 
+// Task 30: precip and clouds share one pane (rather than each getting their
+// own) because the brief's three dial sets are basemap/imagery/weather, not
+// four -- a reader tinting "weather" expects the radar and the cloud layer to
+// move together, not to have to find and match two separate colour pickers
+// for what is, on screen, one kind of thing. zIndex 210 keeps it above the
+// imagery pane (205) the same way `zIndex: 5` used to keep it above imagery's
+// old `zIndex: 3` inside the shared tile pane -- see createImageryLayer above
+// for the rest of that ordering.
 export function createWeatherLayers(map) {
+  if (!map.getPane("weatherPane")) {
+    map.createPane("weatherPane").style.zIndex = 210;
+  }
   // URL starts empty -- RainViewer has no fixed tile path, it's a frame
   // timestamp that changes every ~10min, so the real URL is filled in by
   // refreshPrecipRadar() in createMapController.js right after this layer is
@@ -132,7 +153,7 @@ export function createWeatherLayers(map) {
   // Leaflet has nothing to request, which is expected, not a bug.
   const precipLayer = L.tileLayer("", {
     opacity: 0.55,
-    zIndex: 5,
+    pane: "weatherPane",
     noWrap: true, // see createBaseLayer above
     bounds: WORLD_TILE_BOUNDS,
     maxNativeZoom: 7, // RainViewer's radar tiles don't exist past z7 -- beyond that
@@ -143,7 +164,7 @@ export function createWeatherLayers(map) {
 
   const cloudsLayer = L.tileLayer("/api/weather/tile/clouds_new/{z}/{x}/{y}.png", {
     opacity: 0.45,
-    zIndex: 5,
+    pane: "weatherPane",
     noWrap: true, // see createBaseLayer above
     bounds: WORLD_TILE_BOUNDS,
     // OWM's clouds_new tiles are only meaningfully distinct up to about z9 --
@@ -203,6 +224,11 @@ function makeHeatResilient(heatLayer) {
  */
 export const FIRMS_HEAT_OPACITY = 0.3;
 export const JAMMING_HEAT_OPACITY = 1;
+// Task 20a: full strength, like jamming. This is a few hundred cells of this
+// map's own recorded AIS coverage, not a quarter-million-point background
+// feed like FIRMS -- a finding rather than a texture, so it earns the same
+// footing jamming has rather than FIRMS' deliberately faint one.
+export const LANE_DENSITY_HEAT_OPACITY = 1;
 
 export function createFirmsLayers(map) {
   // FIRMS runs to 100k+ points globally, which as individual icons is just
@@ -257,6 +283,41 @@ export function createJammingLayers(map) {
   return { jammingHeat, jammingPointsLayer, jammingLayer, jammingCanvasRenderer };
 }
 
+// Task 20a: the AIS density grid (GET /api/lanes, backend/refine/
+// lane_density.py) -- the same "too many cells to be individual icons, show
+// density instead" shape as FIRMS/jamming above, and for the same reason: a
+// cell is a 0.05deg/0.02deg bin, not a point a reader would want a pin for.
+// No ping group here, unlike jamming: a jamming cell's ping marks a *new*
+// reading arriving, which means something for a signal that can start or
+// stop; a traffic cell decays continuously rather than switching on, so
+// there is no "just appeared" moment worth a ripple for.
+export function createLaneDensityLayers(map) {
+  const laneDensityHeat = makeHeatResilient(L.heatLayer([], {
+    radius: 18,
+    blur: 24,
+    maxZoom: 9,
+    minOpacity: 0.25,
+    // A cool blue-to-white ramp, deliberately distinct from FIRMS' orange/red
+    // (fire) and jamming's purple/pink (interference) -- this is neither, and
+    // borrowing either palette would read as a claim of kinship with what
+    // that colour already means on this map.
+    gradient: { 0.2: "#0a2e4d", 0.4: "#0d5c8c", 0.6: "#1f8fd6", 0.8: "#5cc4f2", 1: "#c9ecff" },
+  }));
+  const laneDensityCanvasRenderer = L.canvas({ padding: 0.25 });
+  const laneDensityPointsLayer = L.layerGroup();
+  const laneDensityLayer = L.layerGroup([laneDensityHeat, laneDensityPointsLayer]);
+  return { laneDensityHeat, laneDensityPointsLayer, laneDensityLayer, laneDensityCanvasRenderer };
+}
+
+// Task 20b: the ten named corridors (backend/infrastructure.py's
+// SHIPPING_LANES) -- lines, not points, the same "small curated set, drawn
+// once" treatment createPipelinesGroup/createRailwaysGroup get above. Not
+// added to the map here: MANUAL and off by default (see its entry in
+// map/scene.js), toggled on from the panel.
+export function createShippingLanesGroup() {
+  return L.layerGroup();
+}
+
 // Civilian/military (and, in createNavyAisGroup below, civilian/Navy) each
 // get their own independently toggleable layerGroup rather than one combined
 // "adsb"/"ais" layer -- military aircraft and Navy ships default to visible
@@ -303,11 +364,29 @@ export function createEntityClusterGroups(map) {
     // OpenStreetMap-derived infrastructure, off by default and kept strictly
     // apart from the curated infra layer (see backend/sources/osm_infra.py).
     osmInfra: L.layerGroup(),
+    // Task 28: power plants, split out of osmInfra above at render time (same
+    // mechanism Task 27 used for railwayPoints -- see createMapController.js's
+    // applyData) and given a checkbox of their own rather than mirroring
+    // another layer's, since nothing else on the map already carries a "the
+    // whole power picture" toggle for them to ride.
+    powerPlants: L.layerGroup(),
+    // Task 29: radar_station/military_bunker/military_checkpoint, split out
+    // of osmInfra above the same way powerPlants is -- its own checkbox,
+    // default off (see LAYER_MANIFEST's own note on why this one in
+    // particular defaults off rather than being a corroborating layer).
+    airDefense: L.layerGroup(),
     // One pin per country IODA currently reports offline, at that country's
     // representative interior point. Added here, i.e. on by default, because
     // the country tint it replaced was unconditional too -- a national blackout
     // is not something a reader should have to switch on to find out about.
     outagePoints: L.layerGroup().addTo(map),
+    // One badge per matched sub-national region IODA currently reports (see
+    // backend/sources/outages.py's region pass), at that state's own
+    // representative point. Also on by default, same reasoning as
+    // outagePoints above -- it is zoom-gated instead (see LAYER_MANIFEST in
+    // map/scene.js), which is what keeps it off the world view rather than a
+    // checkbox.
+    outageRegionPoints: L.layerGroup().addTo(map),
     // Global Fishing Watch's own record of AIS disabling (gfw_gaps.py). Off by
     // default for the same reason darkVessels is: every record is an inference
     // about intent. That the inference is somebody else's does not change what
@@ -334,6 +413,23 @@ export function createEntityClusterGroups(map) {
     // by zoom -- ~125k points worldwide, almost all US, only meaningfully
     // visible on the unfiltered World view, so a reader reaches it deliberately.
     deflock: L.layerGroup(),
+    // Task 27: the station/halt/yard/border points osm_infra.py already
+    // sweeps, pulled out of the osmInfra group above and given to the
+    // railways layer instead -- see LAYER_MANIFEST's own note on why. Not
+    // added to the map here: wrapped together with the rail linework into
+    // one combined "railways" layer in createMapController.js, same pattern
+    // infraGroup+pipelinesGroup and cablesGroup+cableLandings already use.
+    railwayPoints: L.layerGroup(),
+    // Task 27: Digitraffic's live Finnish train positions. Off by default
+    // (see LAYER_MANIFEST) and its own independent toggle, not wrapped into
+    // the combined railways layer above -- a reader may want the (static)
+    // network without the (live, Finland-only) trains riding along with it.
+    railLive: L.layerGroup(),
+    // Task 27 fix: the Finnish station gazetteer railLive needs to mean
+    // anything -- see LAYER_MANIFEST's own note. Not added to the map here:
+    // wrapped together with railLive into one combined layer in
+    // createMapController.js, same pattern railwaysGroup+railwayPoints uses.
+    railStations: L.layerGroup(),
   };
   return { groups };
 }
@@ -490,6 +586,15 @@ export function createCablesGroup() {
 // treatment as the cable routes above. Not added to the map here: off by default
 // (see its MANUAL disposition in map/scene.js).
 export function createRailwaysGroup() {
+  return L.layerGroup();
+}
+
+// Task 28: transmission-line geometry (backend/sources/power_lines.py) --
+// "render through the same polyline path as railways" per the brief, and
+// this factory is that path's own precedent, copied rather than reinvented.
+// Not added to the map here: off by default (see its MANUAL disposition in
+// map/scene.js).
+export function createPowerLinesGroup() {
   return L.layerGroup();
 }
 

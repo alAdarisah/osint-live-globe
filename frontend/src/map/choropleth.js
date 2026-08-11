@@ -18,7 +18,7 @@
 // severity bands live in severity.js: the map paints from it, the panel builds
 // its selector and legend from it, and a second copy is how those two drift.
 
-import { normalizeCountryName, energyRecordFor, foodRecordFor } from "./popups";
+import { normalizeCountryName, energyRecordFor, foodRecordFor, regionOutageFor } from "./popups";
 import { paletteColor } from "./iconTheme";
 
 // --- value extraction --------------------------------------------------
@@ -188,7 +188,26 @@ function featureNumber(key) {
   return (props) => numberOrNull(props[key]);
 }
 
+// --- sub-national outages (backend/sources/outages.py's region pass) ----
+//
+// regionOutageFor lives in popups.js beside outageFor/energyRecordFor, for the
+// same reason energyRecordFor's own note above gives: one join, so a state the
+// fill skips is the same state whose card stays silent.
+
+function stateOutageScore(props, raw) {
+  const record = regionOutageFor(props, raw);
+  return record ? numberOrNull(record.score) : null;
+}
+
 // --- the metrics -------------------------------------------------------
+//
+// `target` says which shapes a metric can paint: "country" (the default, left
+// implicit on every metric below that doesn't set it) or "state". The two sets
+// of features carry different properties -- iso_a2/iso_a3/name for a country,
+// code/country_code/name for a state -- so a metric written for one target's
+// props would silently paint nothing, or worse, coincidentally paint the wrong
+// thing, if it were ever handed the other's features. metricsForTarget is how
+// the panel's own selector stays inside that boundary.
 
 export const CHOROPLETH_METRICS = [
   {
@@ -317,10 +336,35 @@ export const CHOROPLETH_METRICS = [
       + " which is exactly when a map of it is worth having. Ranked rather than scaled, and"
       + " painted only where at least two of the three published a figure.",
   },
+  {
+    id: "state_outages",
+    target: "state",
+    label: "Internet outage (state)",
+    // Same unbounded-composite reasoning as the country-level "outages" metric
+    // above -- rank, never a linear ramp.
+    scale: "rank",
+    valueOf: stateOutageScore,
+    format: (v) => `IODA score ${v.toExponential(2)}`,
+    note: "IODA's composite outage score for this state or province over a trailing 24 hours,"
+      + " matched to this admin-1 boundary by name (see backend/sources/outages.py) — only an"
+      + " exact or fuzzy name match is painted; a region IODA reported but this map could not"
+      + " place stays in the raw feed and is simply not drawn here. Ranked, not scaled: the"
+      + " score is unbounded, so only the ordering is meaningful. Painted only for states whose"
+      + " country is currently selected — see the state layer's own note in the panel.",
+  },
 ];
 
 export function metricById(id) {
   return CHOROPLETH_METRICS.find((m) => m.id === id) || null;
+}
+
+/** CHOROPLETH_METRICS filtered to one target ("country" or "state") -- what
+ *  the panel's own metric selector offers once a target is chosen. A metric
+ *  with no explicit `target` is a country metric; every one of them predates
+ *  Task 26's state target and none is written to read state props. */
+export function metricsForTarget(target) {
+  const wanted = target === "state" ? "state" : "country";
+  return CHOROPLETH_METRICS.filter((m) => (m.target || "country") === wanted);
 }
 
 // --- colour ------------------------------------------------------------

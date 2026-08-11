@@ -4,6 +4,7 @@ import WeatherSection from "./WeatherSection";
 import ImagerySection from "./ImagerySection";
 import SourceStatusSection from "./SourceStatusSection";
 import { useAccordion } from "../../hooks/useAccordion";
+import { HealthProvider } from "./HealthContext";
 
 // What is expanded the first time someone opens the panel.
 //
@@ -17,12 +18,18 @@ const DEFAULT_OPEN = { "grp-conflict": true };
 export default function ControlPanel({
   open, counts, zoomNotes, layerVisibility, layerWish, sceneBypass, onSceneBypassChange,
   onToggleLayer, health, owmConfigured, windStatus, infraFilterText, onInfraFilterChange, eventFilter, onEventFilterChange, historyAsOf,
+  vesselFilter, onVesselFilterChange, aircraftFilter, onAircraftFilterChange,
   imageryKey, imageryDate, onImageryChange,
   choropleth, onChoroplethChange,
 }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN);
 
   return (
+    // Task 32 item 1: every LayerCheck row underneath reads source_health
+    // through this one provider rather than a prop threaded down through
+    // LayersSection and its ~40 individual rows -- see HealthContext.js's
+    // own note on why a context is the deliberate exception here.
+    <HealthProvider value={health}>
     <aside id="controlPanel" className={open ? "open" : ""}>
       {/* Top of the panel, above everything, because it changes what every
           row below it means.
@@ -61,6 +68,10 @@ export default function ControlPanel({
         onEventFilterChange={onEventFilterChange}
         historyAsOf={historyAsOf}
         onInfraFilterChange={onInfraFilterChange}
+        vesselFilter={vesselFilter}
+        onVesselFilterChange={onVesselFilterChange}
+        aircraftFilter={aircraftFilter}
+        onAircraftFilterChange={onAircraftFilterChange}
         isOpen={isOpen}
         setOpen={setOpen}
       />
@@ -79,5 +90,6 @@ export default function ControlPanel({
       <WeatherSection layerVisibility={layerVisibility} layerWish={layerWish} onToggleLayer={onToggleLayer} owmConfigured={owmConfigured} windStatus={windStatus} />
       <SourceStatusSection health={health} />
     </aside>
+    </HealthProvider>
   );
 }

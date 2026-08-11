@@ -129,6 +129,25 @@ class Candidate:
     radius_km: float
 
 
+@dataclass(frozen=True, slots=True)
+class SearchHit:
+    """One place a person typing into the /api/places search box was shown.
+
+    Separate from Candidate above on purpose: resolve() answers "what does an
+    already-written place name refer to" for the automatic geocoding path, one
+    exact normalized match at a time. This is the opposite direction -- "what
+    could someone mean by a few characters they have typed so far" -- so it
+    ranks partial matches instead of requiring a complete one, and it never
+    needs a country/admin1 hint because there is no upstream text to check
+    against, only a reader's own query.
+    """
+
+    place: Place
+    matched_name: str
+    is_alternate: bool
+    is_prefix: bool
+
+
 # --- how big is a place, really -------------------------------------------
 #
 # These are the numbers the map's uncertainty ring is drawn from, so they are
@@ -278,7 +297,7 @@ class Gazetteer:
     can build a three-row gazetteer without touching the network.
     """
 
-    __slots__ = ("_places", "_by_name", "_by_id")
+    __slots__ = ("_places", "_by_name", "_by_id", "_admin1_names")
 
     def __init__(self, places: list[Place], alternates: dict[int, list[str]] | None = None):
         self._places: list[Place] = places
@@ -290,6 +309,19 @@ class Gazetteer:
         for geonameid, names in (alternates or {}).items():
             for alt in names:
                 self._add_name(geonameid, alt, primary=False)
+        # (country_code, admin1 code) -> the ADM1 division's own name
+        # ("Kyiv City", "Zaporizhia Oblast'"), so a caller holding a place's
+        # raw admin1 *code* (all any populated-place row carries -- see
+        # parse_cities) can show the name a reader actually recognises
+        # instead. The ADM1 division rows this reads from are already in
+        # `places` -- build_index's _locate_divisions adds them -- so this is
+        # one more dict built from a list already being walked above, not a
+        # second load. Empty wherever admin1CodesASCII.txt wasn't loaded
+        # (e.g. every hand-built test index), which admin1_name() below
+        # reports as None rather than guessing.
+        self._admin1_names: dict[tuple[str, str], str] = {
+            (p.country_code, p.admin1): p.name for p in places if p.feature_code == "ADM1"
+        }
 
     def _add_name(self, geonameid: int, surface: str, primary: bool) -> None:
         key = normalize(surface)
@@ -330,6 +362,15 @@ class Gazetteer:
 
     def get(self, geonameid: int) -> Place | None:
         return self._by_id.get(geonameid)
+
+    def admin1_name(self, country_code: str, admin1: str) -> str | None:
+        """The human name for a (country_code, admin1 code) pair -- e.g.
+        ("UA", "30") -> "Kyiv City" -- or None if this gazetteer has no ADM1
+        row for it. Task 34's /api/places uses this so a search result shows
+        an admin-1 name instead of GeoNames' bare code."""
+        if not country_code or not admin1:
+            return None
+        return self._admin1_names.get((country_code, admin1))
 
     def resolve(
         self,
@@ -394,6 +435,83 @@ class Gazetteer:
             return False
         return (candidates[0].score - candidates[1].score) < margin
 
+    def search(self, query: str, limit: int = 20) -> tuple[list[SearchHit], int]:
+        """Every place whose primary name or a stored alternate contains
+        `query`, best first, plus how many distinct places matched in total
+        (before `limit` truncates the list) -- the number /api/places reports
+        so a capped response says so instead of quietly looking complete.
+
+        This is the interactive search box's engine (Task 34): a person typing
+        "kher" wants Kherson before they finish the word, and "cherson" (an
+        alternate transliteration) to also find it. resolve() above cannot do
+        either -- it only matches a *complete*, exact normalized name.
+
+        Runs entirely against this object's own in-memory `_by_name` index
+        (see the module docstring's "served entirely from memory" -- the same
+        argument applies here: 270k places is too much to query fresh, with
+        diacritic folding, on every keystroke, and this index already exists,
+        already warm, already folded). `_by_name` carries every alternate name
+        gazetteer_alternates holds too (see __init__), so one pass over it
+        covers both the brief's "on name" and "on the stored alternates".
+
+        Cost is one pass over `_by_name` (a `key in name_key` check per
+        distinct normalized name -- primary names and alternates together,
+        roughly 1.5-2x the place count) rather than one pass per place, so a
+        common name colliding across many places (twelve alternates each) is
+        not twelve separate scans. Measured against a synthetic index sized
+        like the live table (270k places, ~466k distinct normalized keys):
+        10-70ms for a typical 3+ character query, up to roughly 100-220ms for
+        a very common 2-character prefix ("sa"), under 15ms for a query with
+        no matches. `limit` and app.py's MIN_PLACE_QUERY_LENGTH are what keep
+        the worst case bounded -- this method enforces the former itself but
+        not the latter; see /api/places in app.py for that query-length floor.
+        """
+        key = normalize(query)
+        if not key:
+            return [], 0
+
+        # Best match per place: rank 0 = prefix match on the primary name, 1 =
+        # prefix match on an alternate, 2 = substring match on the primary
+        # name, 3 = substring match on an alternate. Lower is better. A place
+        # matched by more than one of its names (its primary name and an
+        # alternate both containing the query) keeps only its best one -- a
+        # reader picking a result cares which city it is, not how many of its
+        # names happened to match.
+        best: dict[int, tuple[int, str]] = {}
+        for name_key, bucket in self._by_name.items():
+            if key not in name_key:
+                continue
+            is_prefix = name_key.startswith(key)
+            for geonameid, surface, primary in bucket:
+                rank = (0 if is_prefix else 2) + (0 if primary else 1)
+                current = best.get(geonameid)
+                if current is None or rank < current[0]:
+                    best[geonameid] = (rank, surface)
+
+        hits: list[SearchHit] = []
+        for geonameid, (rank, surface) in best.items():
+            place = self._by_id.get(geonameid)
+            if place is None:
+                continue
+            hits.append(SearchHit(
+                place=place, matched_name=surface,
+                is_alternate=rank in (1, 3), is_prefix=rank in (0, 1),
+            ))
+        # Match quality first (a prefix match, on the primary name, beats
+        # everything else), population as the tiebreak -- the same order
+        # resolve()'s own sort uses score before population for. Population
+        # rather than name length or alphabetical order: for "type any town on
+        # Earth and go there", the reader is far more often looking for the
+        # large, well-known place than an obscure hamlet that happens to match
+        # equally well.
+        hits.sort(key=lambda h: (
+            0 if h.is_prefix else 1,
+            1 if h.is_alternate else 0,
+            -h.place.population,
+            h.place.geonameid,
+        ))
+        return hits[:limit], len(hits)
+
 
 # The live index. Empty until the first successful refresh; every caller must
 # cope with that, exactly as capitals.py's cold-start path does -- a cold
@@ -426,6 +544,16 @@ def resolve(
 ) -> list[Candidate]:
     """Module-level convenience over the live index."""
     return _index.resolve(name, country_code=country_code, admin1=admin1, limit=limit)
+
+
+def search(query: str, limit: int = 20) -> tuple[list[SearchHit], int]:
+    """Module-level convenience over the live index, for /api/places."""
+    return _index.search(query, limit=limit)
+
+
+def admin1_name(country_code: str, admin1: str) -> str | None:
+    """Module-level convenience over the live index, for /api/places."""
+    return _index.admin1_name(country_code, admin1)
 
 
 # --- parsing ---------------------------------------------------------------

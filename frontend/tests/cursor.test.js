@@ -22,10 +22,11 @@ test("the cursor style list", async (t) => {
   });
 
   await t.test("is what settings/defaults.js validates a stored style against", () => {
-    // The <select> in AdminPanel.jsx, the fallback in mergeSettings and the
-    // builder in cursor.js all have to agree on this list. Two of them import
-    // it; this asserts the third has not drifted, since a style the builder
-    // does not know would render an empty cursor rather than fall back.
+    // The <select> in admin/sections/InterfaceSection.jsx, the fallback in
+    // mergeSettings and the builder in cursor.js all have to agree on this
+    // list. Two of them import it; this asserts the third has not drifted,
+    // since a style the builder does not know would render an empty cursor
+    // rather than fall back.
     assert.equal(CURSOR_STYLES.includes("reticle"), true, "the default must be in the list");
   });
 });

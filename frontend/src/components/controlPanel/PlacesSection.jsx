@@ -1,6 +1,6 @@
 import { SVG } from "../../map/svgIcons";
 import { CAPITAL_TIER, CITY_COLOR, CITY_TIERS } from "../../map/decorators";
-import { CHOROPLETH_METRICS, metricById, rampSwatches } from "../../map/choropleth";
+import { metricById, metricsForTarget, rampSwatches } from "../../map/choropleth";
 import LayerIcon from "./LayerIcon";
 import LayerCheck from "./LayerCheck";
 import { LayerDetails } from "./Collapsible";
@@ -8,11 +8,17 @@ import CountUp from "../CountUp";
 
 export default function PlacesSection({
   counts, zoomNotes, layerVisibility, layerWish, onToggleLayer,
-  choropleth = { metricId: null, covered: 0, total: 0 }, onChoroplethChange,
+  choropleth = { metricId: null, target: "country", covered: 0, total: 0 }, onChoroplethChange,
   // Defaulted for the same reason LayersSection's are -- see Collapsible.jsx.
   isOpen = () => false, setOpen = () => {},
 }) {
+  // "country" whenever the controller has not reported a target yet (e.g. the
+  // very first render, before onChoroplethChange has fired once) -- the
+  // shipped default, same as choroplethTarget's own initial value in
+  // createMapController.js.
+  const target = choropleth.target === "state" ? "state" : "country";
   const metric = metricById(choropleth.metricId);
+  const metrics = metricsForTarget(target);
   return (
     <>
       <h2>Places</h2>
@@ -27,21 +33,36 @@ export default function PlacesSection({
         <span className="count"><CountUp value={counts.countries} /> (<CountUp value={counts.countriesTotal} />)</span>
       </label>
 
-      {/* Four country-keyed datasets were already being fetched and then shown
-          only as sentences inside the country card. All of them are national
-          aggregates, which is what a shape can express and a pin cannot.
-          Off by default: a permanently tinted world would compete with every
+      {/* Started as country-only: several country-keyed datasets were already
+          being fetched and shown only as sentences inside the country card,
+          which is what a shape can express and a pin cannot. Task 26 added a
+          target selector -- states paint from admin-1 boundaries the same
+          way, once a country with subdivisions is selected. Off by default in
+          either target: a permanently tinted world would compete with every
           pin drawn on top of it. */}
       <div className="event-filters choropleth-picker">
         <label>
-          Paint countries by
+          Paint by
+          <select
+            value={target}
+            onChange={(e) => onChoroplethChange(null, e.target.value)}
+          >
+            <option value="country">Countries</option>
+            <option value="state">States</option>
+          </select>
+        </label>
+        <label>
+          {/* No visibility flag gates the state option: unlike the countries
+              layer, admin-1 shapes have no checkbox of their own -- selecting
+              a country with subdivisions *is* the request for them (see
+              subdivisions.js) -- so there is nothing here to disable against. */}
           <select
             value={choropleth.metricId || "none"}
-            disabled={!layerVisibility.countries}
-            onChange={(e) => onChoroplethChange(e.target.value === "none" ? null : e.target.value)}
+            disabled={target === "country" && !layerVisibility.countries}
+            onChange={(e) => onChoroplethChange(e.target.value === "none" ? null : e.target.value, target)}
           >
             <option value="none">Nothing</option>
-            {CHOROPLETH_METRICS.map((m) => (
+            {metrics.map((m) => (
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
           </select>
@@ -58,11 +79,13 @@ export default function PlacesSection({
             more
           </span>
           {/* The two numbers that decide whether a blank map means "nothing
-              here" or "nobody looked". Four of the six metrics cover only part
-              of the world, and an unpainted country is deliberately drawn the
+              here" or "nobody looked". Most metrics cover only part of the
+              world (or, for the state target, only the countries currently
+              selected), and an unpainted shape is deliberately drawn the
               same as it always was -- distinct from one measured at zero. */}
           <span className="choropleth-coverage">
-            {`${choropleth.covered} of ${choropleth.total} countries have a value; the rest are unpainted`}
+            {`${choropleth.covered} of ${choropleth.total} ${target === "state" ? "states" : "countries"} `
+              + "have a value; the rest are unpainted"}
           </span>
           <span className="choropleth-note">{metric.note}</span>
         </div>

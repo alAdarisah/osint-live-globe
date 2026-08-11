@@ -44,6 +44,15 @@
   --shadow-color: rgba(0, 0, 0, 0.95);
   --country-fill: rgba(111, 227, 255, 0.03);
   --country-hover-fill: rgba(111, 227, 255, 0.18);
+  /* Fallbacks only -- hooks/useAppSettings.js overwrites these from the
+     water.fill/water.outline/water.selected palette tokens (see map/water.js
+     and map/iconTheme.js) as soon as it mounts, the same way --accent is a
+     shipped default that a custom accent colour overwrites. Not theme-split
+     like --country-fill above: these are plain admin-pickable colours, not a
+     translucency tuned per theme. */
+  --water-fill: #4fd1ff;
+  --water-outline: #8be9ff;
+  --water-selected-fill: #0ea5e9;
   --basemap-tiles: "dark_all";
 }
 
@@ -101,6 +110,92 @@ html, body {
 .leaflet-container {
   background: var(--bg-map);
   font-family: "Segoe UI", Consolas, monospace;
+}
+
+/* Task 30: tile tint (see map/tileTint.js and BasemapSection.jsx).
+   --tile-<target>-* are set on <html> by useAppSettings.js, the same
+   "settings in, custom property out" path --accent/--ui-text-scale already
+   use -- this file never re-reads settings, it only ever reads the
+   properties.
+
+   Leaflet's own stylesheet gives every pane `position: absolute; left: 0;
+   top: 0;` and nothing else, which leaves width/height to shrink-to-fit --
+   and a pane whose only children are themselves absolutely positioned tiles
+   shrinks to zero. That costs the *filter* nothing (it paints an element's
+   composited output, overflowing descendants included, regardless of the
+   element's own box), but it means a `::after` sized with `inset: 0` has no
+   box to inset into and collapses to nothing. Adding the missing right/bottom
+   edge -- all the way up through .leaflet-map-pane, since that is every
+   pane's own containing block -- is what gives the ::after overlays below a
+   real box, without changing anything about how panning/zooming already
+   worked (that is still the pane's own transform; overflow: hidden on
+   .leaflet-container still clips it to the visible viewport exactly as
+   before). Nothing in this codebase reads these panes' own
+   getBoundingClientRect, so widening their box has no other effect. */
+.leaflet-map-pane,
+.leaflet-tile-pane,
+.leaflet-imagery-pane,
+.leaflet-weather-pane {
+  right: 0;
+  bottom: 0;
+}
+
+/* The filter dial: saturate/brightness/contrast/invert/blur, pre-joined into
+   one value by map/tileTint.js's buildTileFilter (so this file never has to
+   know the function order or which ones are at their identity value and can
+   be dropped). `none` -- the shipped default -- costs nothing to paint. */
+.leaflet-tile-pane { filter: var(--tile-basemap-filter, none); }
+.leaflet-imagery-pane { filter: var(--tile-imagery-filter, none); }
+.leaflet-weather-pane { filter: var(--tile-weather-filter, none); }
+
+/* The colour tint: a full-pane wash in `tintColor` at `tintStrength` opacity,
+   composited with `blendMode` -- deliberately a blended overlay rather than
+   `hue-rotate` (see tileTint.js's own note on why: hue-rotate spins every hue
+   in the tile by the same angle, so the sea turns the same off-colour as the
+   land; a blended tint pushes everything toward one target colour instead,
+   which is what "tinted red for night ops" actually means). `pointer-events:
+   none` keeps a fully-opaque tint from swallowing map drags and clicks --
+   the overlay is decoration, never a hit target. */
+.leaflet-tile-pane::after,
+.leaflet-imagery-pane::after,
+.leaflet-weather-pane::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.leaflet-tile-pane::after {
+  background: var(--tile-basemap-tint-color, transparent);
+  opacity: var(--tile-basemap-tint-strength, 0);
+  mix-blend-mode: var(--tile-basemap-tint-blend, multiply);
+}
+.leaflet-imagery-pane::after {
+  background: var(--tile-imagery-tint-color, transparent);
+  opacity: var(--tile-imagery-tint-strength, 0);
+  mix-blend-mode: var(--tile-imagery-tint-blend, multiply);
+}
+.leaflet-weather-pane::after {
+  background: var(--tile-weather-tint-color, transparent);
+  opacity: var(--tile-weather-tint-strength, 0);
+  mix-blend-mode: var(--tile-weather-tint-blend, multiply);
+}
+
+/* The "apply tint only at rest" escape hatch (settings.ui.tiles.applyAtRest,
+   off by default -- see map/tileTintMotion.js for what it trades away and
+   why it is opt-in). tileTintMotion.js toggles this class on the map's own
+   container from movestart/zoomstart to moveend/zoomend; while it is
+   present, every pane above paints as if untinted, which is what stops a
+   continuously-changing filter competing with the pan/zoom animation itself
+   for the same frame budget. */
+.leaflet-container.tile-tint-panning .leaflet-tile-pane,
+.leaflet-container.tile-tint-panning .leaflet-imagery-pane,
+.leaflet-container.tile-tint-panning .leaflet-weather-pane {
+  filter: none;
+}
+.leaflet-container.tile-tint-panning .leaflet-tile-pane::after,
+.leaflet-container.tile-tint-panning .leaflet-imagery-pane::after,
+.leaflet-container.tile-tint-panning .leaflet-weather-pane::after {
+  opacity: 0;
 }
 
 /* The reticle (see map/cursor.js). `cursor: none` is scoped to the map and
@@ -440,6 +535,84 @@ html, body {
   align-items: center;
   gap: 10px;
   pointer-events: auto;
+}
+
+/* Task 34: place search. A flex item of its own between the title and the
+   admin/theme controls (see TitleBar.jsx) -- it needs pointer-events back on
+   since #titleBar itself is none, same reason .titleBar-right needs it. */
+.place-search {
+  position: relative;
+  flex: 1 1 auto;
+  max-width: 320px;
+  min-width: 120px;
+  pointer-events: auto;
+}
+
+.place-search-input {
+  width: 100%;
+  padding: 5px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-bright);
+  font-family: inherit;
+  font-size: 11.5px;
+}
+.place-search-input::placeholder { color: var(--text-dim); }
+.place-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.place-search-results {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  margin: 0;
+  list-style: none;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 1001;
+  animation: popup-in var(--t-ui) var(--e-out);
+}
+
+.place-search-result {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background var(--t-ui) var(--e-out);
+}
+.place-search-result:hover,
+.place-search-result.highlighted { background: rgba(var(--accent-rgb), 0.12); }
+
+.place-search-title {
+  font-size: 11.5px;
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.place-search-subtitle {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: capitalize;
+}
+
+.place-search-status {
+  padding: 6px 8px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 #clock {
@@ -876,6 +1049,48 @@ details[open] > .layer-details-body {
 }
 .infra-filter-input:focus { outline: none; border-color: var(--accent); }
 
+/* Vessel/aircraft filter bars (Task 18). Same input styling as
+   .infra-filter-input directly above, plus the two things that box doesn't
+   need: a one-click clear (shown only once there is something to clear) and
+   the match/total readout every filter bar in the brief has to show. */
+.entity-filter-bar { margin: 0 0 10px 20px; }
+.entity-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.entity-filter-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  background: var(--control-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  color: var(--text-primary);
+}
+.entity-filter-input:focus { outline: none; border-color: var(--accent); }
+.entity-filter-clear {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 1;
+  font-size: 13px;
+  background: var(--control-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.entity-filter-clear:hover { color: var(--text-primary); border-color: var(--accent); }
+.entity-filter-count {
+  padding: 4px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+.entity-filter-prefix { padding: 2px 0 0; color: var(--text-secondary); }
+
 /* ---------- country card: live situational snapshot ----------
    Built by popups.js's countryPopupHtml and hosted in #countryInfoCard.
    Compact by design: the card is 320px wide and pops out of the clicked
@@ -1041,6 +1256,67 @@ details[open] > .layer-details-body {
   stroke-width: 1.8;
 }
 
+/* Seas, lakes and rivers (see map/water.js). A marine or lake polygon is drawn
+   with fill-opacity/stroke-opacity at 0 by default -- invisible until hovered
+   or selected, the same "boundaries only appear via classes" rule
+   .country-shape uses, and for the same reason: 306 named marine polygons
+   painted unconditionally at world zoom is exactly the clutter that rule
+   exists to avoid. A river is a line rather than a fill and gets a lower but
+   non-zero opacity baked in by water.js's own style function instead, so it
+   reads as a hairline even though it can never carry .water-hovered or
+   .water-selected (see findWaterAt's docstring for why a line is never a hit
+   in this index).
+
+   The colours themselves are CSS custom properties everywhere, not the hex
+   literals .country-shape's hover/selected rules use, because water's fill/
+   outline/selected colours are admin-configurable palette tokens (see
+   map/iconTheme.js's "water" PALETTE_GROUPS entry) and a re-style is never
+   used to apply a colour change to a shape already drawn -- see
+   hooks/useAppSettings.js for where --water-fill/--water-outline/
+   --water-selected-fill are kept in step with those tokens. The base rule's
+   stroke matters for exactly one case: a river, which is visible at rest (see
+   water.js's waterStyle) and carries no hover/selected class to override it,
+   so its colour has to live here rather than be baked into the JS style the
+   way it once was -- an operator's colour change reaches an already-drawn
+   river immediately, not on the next sync. */
+/* Task 31's Water admin section: outline weight and the two fill-opacity
+   dials, threaded through as custom properties the same way the colours
+   just above are -- see hooks/useAppSettings.js for where --water-weight/
+   --water-hover-fill-opacity/--water-selected-fill-opacity are kept in step
+   with settings.water. Defaults match this rule's own shipped numbers (1,
+   0.22, 0.32) so an unconfigured deployment draws exactly as it always has. */
+.water-shape {
+  stroke: var(--water-outline);
+  stroke-width: var(--water-weight, 1);
+}
+.water-shape.water-hovered {
+  fill: var(--water-fill);
+  fill-opacity: var(--water-hover-fill-opacity, 0.22);
+  stroke-opacity: 1;
+  stroke-width: calc(var(--water-weight, 1) + 1);
+}
+.water-shape.water-selected {
+  fill: var(--water-selected-fill);
+  fill-opacity: var(--water-selected-fill-opacity, 0.32);
+  stroke-opacity: 1;
+  stroke-width: calc(var(--water-weight, 1) + 0.8);
+}
+/* Task 31's "which classes to draw" dial. Each --water-hide-<class> is set
+   to "none" only for a class the reader has switched off (see
+   hooks/useAppSettings.js); every other class' property is simply never
+   written, so `display` falls through to its own default (unset, i.e.
+   drawn) rather than needing an explicit "block" for every class this map
+   ships. See map/water.js's waterStyle for the className each ring carries
+   and MARINE_CLASSES for the full list a checkbox exists for. */
+.water-class-ocean { display: var(--water-hide-ocean); }
+.water-class-sea { display: var(--water-hide-sea); }
+.water-class-gulf { display: var(--water-hide-gulf); }
+.water-class-bay { display: var(--water-hide-bay); }
+.water-class-strait { display: var(--water-hide-strait); }
+.water-class-channel { display: var(--water-hide-channel); }
+.water-class-sound { display: var(--water-hide-sound); }
+.water-class-other { display: var(--water-hide-other); }
+
 /* Districts of the one selected state (see the drill-down in
    createMapController.js). Dashed and dimmer than the state lines above them:
    they sit inside a shape that is already filled by its own selection, and a
@@ -1167,6 +1443,77 @@ details[open] > .layer-details-body {
 .country-info-edit:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.16); }
 .country-info-edit:disabled { opacity: 0.42; cursor: not-allowed; }
 .country-info-edit.active { background: var(--accent); color: #04121a; font-weight: 600; }
+
+/* Task 35: "copy a link to this view" -- CopyLinkButton.jsx, shared by every
+   info/detail card's header (through headerExtra) and the title bar. Same
+   look as .country-info-edit just above, the button it stands next to on the
+   country and district cards, but with no margin-left: auto of its own --
+   .country-info-name's/.event-detail-title's own flex-grow already pushes
+   the whole headerExtra group to the right, so a second auto margin here
+   would only split that white space with the one already claiming it. */
+.copy-link-button {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.82em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.copy-link-button:hover { background: rgba(var(--accent-rgb), 0.16); }
+
+/* The title bar's own copy, sized to sit next to #adminToggle/#themeToggle
+   rather than the smaller card-header buttons above. */
+#titleBar .copy-link-button {
+  font-size: 9.5px;
+  letter-spacing: 0.6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+#titleBar .copy-link-button:hover { color: var(--text-bright); border-color: var(--accent); }
+
+/* UrlStateNotice.jsx. Sits under the title bar, centred, the same "fixed,
+   translateX(-50%)" placement #borderEditBar uses for its own notice -- but
+   standalone (this can appear whether or not a border edit session, or
+   anything else, is open). Two tones (review fix, Important 2): .tone-warn
+   for a link this app could not read at all, the same amber
+   .border-edit-warning uses for "something needs your attention" (not the
+   red reserved for a border edit's own outright refusal); .tone-info for a
+   link that *did* read but has known limits worth a one-time mention, in the
+   accent colour every other informational surface in this app already uses. */
+#urlStateNotice {
+  position: fixed;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, 92vw);
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--panel-bg);
+  font-size: 11.5px;
+  line-height: 1.4;
+  box-shadow: 0 4px 16px var(--shadow-color);
+}
+#urlStateNotice.tone-warn { border: 1px solid rgba(255, 196, 107, 0.5); color: #ffc46b; }
+#urlStateNotice.tone-info { border: 1px solid rgba(var(--accent-rgb), 0.45); color: var(--text-secondary); }
+#urlStateNotice button {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
 
 /* Says a boundary is not what the source serves -- the country-card twin of
    the edited-record note on a pin. */
@@ -1489,13 +1836,20 @@ details[open] > .layer-details-body {
   margin: 0 0 6px;
 }
 
-#newsBroadcast {
+/* ---------- IntelPanel (Task 12) ----------
+   One panel, four tabs (Escalation/Events/News/Officials), replacing what
+   used to be two separate floating panels -- #newsBroadcast (a ticker) and
+   #notableEvents (a board). Same fixed bottom-right placement and the same
+   "background/padding would swallow a click meant for the map marker
+   underneath" fix as #regionBar: pointer-events is off on the panel itself
+   and opted back in below on the parts that are actually interactive. */
+#intelPanel {
   position: fixed;
-  top: 80px;
   right: 14px;
-  width: 340px;
+  bottom: 78px;
+  width: 360px;
   max-width: calc(100vw - 28px);
-  max-height: 42vh;
+  max-height: 50vh;
   display: flex;
   flex-direction: column;
   background: var(--panel-bg);
@@ -1505,16 +1859,147 @@ details[open] > .layer-details-body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
   overflow: hidden;
-  /* The panel's own background/padding/whitespace used to swallow clicks
-     meant for whatever map marker sits underneath it (most often a GDELT
-     pin, since that's what this panel lists) -- same fix as #regionBar:
-     opt the actually-interactive parts back in below. */
   pointer-events: none;
 }
 
 .news-header, .news-list {
   pointer-events: auto;
 }
+
+/* Task 29: AirfieldActivityPanel.jsx -- the mirror-image corner from
+   #intelPanel, so the two do not fight over the same one by default (a
+   reader who drags either is free to put them wherever, same as every other
+   floating HUD panel; see useDraggablePanel.js). Reuses .notable-header/
+   .notable-list/.notable-item's own generic styling wholesale rather than a
+   parallel set of classes -- this is the same board shape as IntelPanel's own
+   tabs, just one list instead of four. */
+#airfieldPanel {
+  position: fixed;
+  left: 14px;
+  bottom: 78px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#airfieldPanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#airfieldPanel.collapsed .notable-header { border-bottom: none; }
+
+/* Task 36: ChokepointPanel.jsx -- stacked above #airfieldPanel in the same
+   left-hand corner rather than given a fourth corner of its own: both start
+   collapsed (see the component's own note), so by default this sits just
+   above #airfieldPanel's collapsed header with a small gap, and only
+   overlaps it if a reader expands #airfieldPanel without first dragging
+   either one -- exactly the kind of thing useDraggablePanel.js's own stored
+   positions exist to let a reader fix once and keep. Same generic
+   .notable-header/.notable-list/.notable-item styling as both panels above. */
+#chokepointPanel {
+  position: fixed;
+  left: 14px;
+  bottom: 130px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#chokepointPanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#chokepointPanel.collapsed .notable-header { border-bottom: none; }
+
+/* Task 37: InfraRiskPanel.jsx -- stacked above #chokepointPanel in the same
+   left-hand corner, for the same reason #chokepointPanel stacks above
+   #airfieldPanel: all three start collapsed, so by default this sits just
+   above #chokepointPanel's collapsed header with a small gap. Same generic
+   .notable-header/.notable-list/.notable-item styling as the other two. */
+#infraRiskPanel {
+  position: fixed;
+  left: 14px;
+  bottom: 182px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#infraRiskPanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#infraRiskPanel.collapsed .notable-header { border-bottom: none; }
+
+/* Task 38: CableOutagePanel.jsx -- stacked above #infraRiskPanel in the same
+   left-hand corner, for the same reason #infraRiskPanel stacks above
+   #chokepointPanel: all four start collapsed, so by default this sits just
+   above #infraRiskPanel's collapsed header with a small gap. Same generic
+   .notable-header/.notable-list/.notable-item styling as the other three. */
+#cableOutagePanel {
+  position: fixed;
+  left: 14px;
+  bottom: 234px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#cableOutagePanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#cableOutagePanel.collapsed .notable-header { border-bottom: none; }
+
+/* Task 41: SanctionsBoard.jsx -- stacked above #cableOutagePanel in the same
+   left-hand corner, for the same reason #cableOutagePanel stacks above
+   #infraRiskPanel: all five start collapsed, so by default this sits just
+   above #cableOutagePanel's collapsed header with a small gap. Same generic
+   .notable-header/.notable-list/.notable-item styling as the other four. */
+#sanctionsBoard {
+  position: fixed;
+  left: 14px;
+  bottom: 286px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#sanctionsBoard.collapsed .notable-caret { transform: rotate(-90deg); }
+#sanctionsBoard.collapsed .notable-header { border-bottom: none; }
 
 /* Persistent country details widget (CountryInfoCard.jsx) -- replaces the
    old Leaflet popup on country click so pan/zoom keep working while it's
@@ -1528,11 +2013,16 @@ details[open] > .layer-details-body {
    (anchored by `bottom`, tail on the bottom edge); `.flip` opens downward
    near the top of the screen instead (anchored by `top`, tail on top). */
 /* Header pinned, body scrolls -- the same flex-column shape #adminPanel and
-   #newsBroadcast already use. This card used to scroll as a whole, which took
+   #intelPanel already use. This card used to scroll as a whole, which took
    the country's name and its close button off the top of a 44vh box the moment
    anyone read past the second fold: the one line telling you *which* country
    you were reading was the first thing to go. */
-#countryInfoCard {
+/* #waterInfoCard/#subdivisionInfoCard/#districtInfoCard ride along on every
+   rule below: PlaceInfoCard.jsx's `panelId` prop is what tells the four apart
+   (own DOM id, own drag-position storage key), but they are the same
+   floating-card look, so nothing here needed forking -- see PlaceInfoCard.jsx's
+   own note on why panelId exists. */
+#countryInfoCard, #waterInfoCard, #subdivisionInfoCard, #districtInfoCard {
   position: fixed;
   width: 320px;
   max-width: calc(100vw - 28px);
@@ -1547,6 +2037,21 @@ details[open] > .layer-details-body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
 }
+/* A country, a water body, a state and a district can all be selected at
+   once (none of the four clears another's selection -- see
+   createMapController.js's click handler), and any two of their cards can
+   anchor near the same screen point. Given no cheap way to track which was
+   focused most recently, this is a static tie-break rather than one: deeper
+   in the drill-down wins. Reaching a water selection at all means the click
+   fell where the country hit-test already said no (water is the fallback
+   tried only after it), and reaching a state or district means the click
+   landed inside a selected country and, for a district, inside its selected
+   state too -- so each step in that chain is at least as fresh as the one
+   before it. The reverse (an outer card genuinely fresher than a standing
+   inner one) is the case this ordering gets wrong, and is rarer in practice. */
+#waterInfoCard { z-index: 951; }
+#subdivisionInfoCard { z-index: 952; }
+#districtInfoCard { z-index: 953; }
 .country-info-body {
   overflow-y: auto;
   padding: 8px 16px 14px;
@@ -1563,12 +2068,18 @@ details[open] > .layer-details-body {
 /* Default (opens upward): tail sits on the bottom edge, pointing down at
    the country. Only the bottom-right two edges get a border so it reads as
    part of the card's outline rather than a floating diamond. */
-#countryInfoCard:not(.flip) .country-info-tail {
+#countryInfoCard:not(.flip) .country-info-tail,
+#waterInfoCard:not(.flip) .country-info-tail,
+#subdivisionInfoCard:not(.flip) .country-info-tail,
+#districtInfoCard:not(.flip) .country-info-tail {
   bottom: -7.5px;
   border-top: none;
   border-left: none;
 }
-#countryInfoCard.flip .country-info-tail {
+#countryInfoCard.flip .country-info-tail,
+#waterInfoCard.flip .country-info-tail,
+#subdivisionInfoCard.flip .country-info-tail,
+#districtInfoCard.flip .country-info-tail {
   top: -7.5px;
   border-bottom: none;
   border-right: none;
@@ -1601,37 +2112,13 @@ details[open] > .layer-details-body {
   touch-action: none;
 }
 
-.news-caret-btn {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 1px solid var(--accent);
-  background: rgba(var(--accent-rgb), 0.18);
-  color: var(--accent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  cursor: pointer;
-  touch-action: auto;
-}
-.news-caret-btn:hover {
-  background: var(--accent);
-  color: var(--panel-bg);
-}
-
-.news-caret {
-  flex: none;
-  font-size: 13px;
-  line-height: 1;
-  transition: transform var(--t-ui) var(--e-out);
-}
-
-#newsBroadcast.collapsed .news-caret { transform: rotate(-90deg); }
-#newsBroadcast.collapsed .news-header { border-bottom: none; }
-#newsBroadcast.collapsed .news-list { display: none; }
-
+/* OSINT-Main's .news-caret-btn / .news-caret / #newsBroadcast.collapsed rules
+   are deliberately not carried across this merge. Task 12 replaced the news
+   broadcast panel with the tabbed IntelPanel, so there is no #newsBroadcast
+   element left for them to match -- "newsBroadcast" survives only as a legacy
+   key in IntelPanel's migratePanelPosition call. `.news-list` is kept (it is
+   still used by ConflictBriefingCard); the caret rules are not.
+   If a later merge reintroduces them, check for the element first. */
 .live-dot {
   width: 8px;
   height: 8px;
@@ -1646,23 +2133,22 @@ details[open] > .layer-details-body {
   50% { opacity: 0.55; box-shadow: 0 0 0 4px rgba(255, 61, 61, 0); }
 }
 
-.news-title {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  color: var(--text-bright);
-  text-transform: uppercase;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .news-updated {
   margin-left: auto;
   font-size: 9.5px;
   color: var(--text-dim);
   white-space: nowrap;
 }
+/* Task 37 review (Minor, escalated): ChokepointPanel/InfraRiskPanel's header
+   badge for "the fetch failed" vs "not computed yet" -- two different
+   reasons there is nothing to show, and a reader should be able to tell
+   which one from the collapsed header alone, without opening the panel.
+   Amber for a genuine fault (the same amber the event card's own
+   .moved-note and the map's placement-doubted note use for "something is
+   off"); dimmer italic for "working as designed, just not run yet" -- not a
+   fault, so it does not get the fault colour. */
+.news-updated.panel-status-error { color: #ffb454; }
+.news-updated.panel-status-missing { font-style: italic; }
 
 .news-list {
   overflow-y: auto;
@@ -1698,11 +2184,13 @@ details[open] > .layer-details-body {
   min-width: 0;
 }
 
-/* Conflict-zone briefing widget (ConflictBriefingCard.jsx) -- pops up next
-   to the news ticker's corner (not on top of it) whenever a conflict zone
-   is picked from RegionBar, same fixed-corner-card treatment as
-   #newsBroadcast/#countryInfoCard. Reuses .news-item/.news-list wholesale
-   for its headline rows instead of duplicating that styling. */
+/* Conflict-zone briefing widget (ConflictBriefingCard.jsx) -- pops up at the
+   top-right whenever a conflict zone is picked from RegionBar, same
+   fixed-corner-card treatment as #countryInfoCard. IntelPanel now lives at
+   the bottom-right (see #intelPanel), so the two no longer compete for the
+   same corner the way this card and the old #newsBroadcast ticker once did.
+   Reuses .news-item/.news-list wholesale for its headline rows instead of
+   duplicating that styling. */
 #conflictBriefing {
   position: fixed;
   top: 80px;
@@ -1833,32 +2321,11 @@ details[open] > .layer-details-body {
   border-color: var(--accent);
 }
 
-/* ---------- notable activity board (NotableEventsPanel.jsx) ----------
-   Ranked "what matters right now", sitting bottom-right above the timeline
-   bar (46px) and clear of #attribution (bottom: 46px). Same panel language
-   as #newsBroadcast, but not draggable: it's a short, fixed-length board
-   rather than a scrolling feed, so there's nothing to get out of the way
-   of. Like #newsBroadcast it stays click-through except for its own
-   interactive parts, so map markers underneath remain reachable. */
-#notableEvents {
-  position: fixed;
-  right: 14px;
-  bottom: 78px;
-  width: 340px;
-  max-width: calc(100vw - 28px);
-  max-height: 38vh;
-  display: flex;
-  flex-direction: column;
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  backdrop-filter: blur(6px);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
-  overflow: hidden;
-  pointer-events: none;
-}
-
+/* ---------- IntelPanel's body: tabs, per-row lists (IntelPanel.jsx) ----------
+   Sits bottom-right above the timeline bar (46px) and clear of #attribution
+   (bottom: 46px) -- see #intelPanel above for the panel's own fixed
+   position/size, which used to belong to #notableEvents/#newsBroadcast before
+   Task 12 merged them into one draggable panel. */
 .notable-header, .notable-list { pointer-events: auto; }
 
 .notable-header {
@@ -1900,15 +2367,9 @@ details[open] > .layer-details-body {
   white-space: nowrap;
 }
 
-.notable-count {
-  margin-left: auto;
-  font-size: 10px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-
-/* Only ever shown for a country selection -- the world board renders nothing
-   at all when it is empty. See NotableEventsPanel.jsx. */
+/* Only ever shown for a deliberately-scoped tab (country/region/water) with
+   nothing to show -- the World/Current-view board renders nothing at all
+   rather than an empty widget. See intelPanelIsEmpty in intelPanelLogic.js. */
 .notable-empty {
   padding: 10px;
   font-size: 11px;
@@ -1921,9 +2382,8 @@ details[open] > .layer-details-body {
   color: var(--accent);
   transition: transform var(--t-ui) var(--e-out);
 }
-#notableEvents.collapsed .notable-caret { transform: rotate(-90deg); }
-#notableEvents.collapsed .notable-header { border-bottom: none; }
-#notableEvents.collapsed .notable-list { display: none; }
+#intelPanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#intelPanel.collapsed .notable-header { border-bottom: none; }
 
 /* Distinct from .live-dot's steady pulse -- this one only exists when
    something is actually on the board, so it reads as an alert rather than a
@@ -1982,8 +2442,21 @@ details[open] > .layer-details-body {
   color: #0b0d10;
   font-weight: 700;
 }
-/* Section dividers, present only when the panel is showing both an
-   escalation list and an event list. */
+/* The Events tab's second chip -- source reliability (severity.js's
+   RELIABILITY_BANDS: Reliable/Mixed/Weak/Unreliable), a different question
+   from the severity chip's "how bad", scored by backend/sources/
+   reliability.py. Left in the row's own Title Case rather than uppercased
+   like the severity chip (EventRow deliberately does not call
+   .toUpperCase() on this one) and slightly lighter-weight, so two chips
+   sitting side by side read as two different kinds of signal rather than as
+   one repeated. */
+.reliability-chip {
+  font-weight: 600;
+}
+/* Section dividers -- used both as group-by headers (IntelPanel.jsx's
+   TabList, when a reader groups a tab by country/type/actor/outlet) and,
+   historically, to separate an escalation list from an event list in the
+   panel this replaced. */
 .notable-section {
   padding: 6px 10px 3px;
   font-size: 8.5px;
@@ -2008,6 +2481,122 @@ details[open] > .layer-details-body {
   font-variant-numeric: tabular-nums;
   min-width: 38px;
 }
+
+/* A synthesised 7-day sparkline (EscalationMiniBar in IntelPanel.jsx): six
+   bars at the region's own flat baseline, then a seventh, taller/shorter one
+   for today. There is no real day-by-day series behind this -- see that
+   component's own note on why -- so the bars are deliberately plain blocks
+   with no axis or gridlines that would claim a precision this does not have. */
+.escalation-minibar {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 20px;
+  flex: none;
+}
+/* Six of these seven bars are arithmetic, not a reading (see
+   EscalationMiniBar's own note in IntelPanel.jsx) -- a hatch pattern is the
+   persistent, no-hover-required half of disclosing that (the other half is
+   the caption IntelPanel.jsx prints once above the whole list). Widened from
+   3px so the diagonal stripe is actually legible at this size rather than
+   reading as a slightly-lighter solid fill. */
+.escalation-minibar-bar {
+  width: 4px;
+  min-height: 2px;
+  border-radius: 1px;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(var(--accent-rgb), 0.55) 0px,
+    rgba(var(--accent-rgb), 0.55) 1.5px,
+    rgba(var(--accent-rgb), 0.12) 1.5px,
+    rgba(var(--accent-rgb), 0.12) 3px
+  );
+}
+/* The one real number in the group: solid fill, distinct hue, no hatch. */
+.escalation-minibar-bar.today {
+  background: #ff5c2a;
+}
+
+/* Officials & Diplomacy rows: the CAMEO/press-release label sits where the
+   severity chip does in an Events row, but it names the *kind* of act
+   ("Demand, criticism or rejection") rather than a one-word severity band, so
+   it needs more room and does not force uppercase like .notable-chip does. */
+.officials-chip {
+  flex: none;
+  font-size: 9px;
+  letter-spacing: 0.2px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--text-bright);
+  background: rgba(var(--accent-rgb), 0.18);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The tab strip and the header-control row sit between IntelPanel's header
+   and its list, both pointer-events: auto for the same reason
+   .notable-header/.notable-list are (see #intelPanel above). */
+.intel-tabs {
+  display: flex;
+  pointer-events: auto;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+.intel-tab {
+  flex: 1 1 auto;
+  padding: 6px 4px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.intel-tab:hover { color: var(--text-primary); }
+.intel-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.intel-tab-count {
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+  opacity: 0.75;
+}
+
+.intel-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  pointer-events: auto;
+  flex: none;
+}
+.intel-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 9px;
+  letter-spacing: 0.3px;
+  color: var(--text-dim);
+}
+.intel-controls select {
+  font-size: 11px;
+}
+.intel-controls label.event-filter-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  grid-column: span 2;
+}
+
+/* Group-by headers reuse .notable-section (see that rule's own note); this
+   only adds the vertical rhythm between one group's rows and the next. */
+.intel-group + .intel-group { margin-top: 2px; }
 
 /* Chip background is set inline from map/severity.js's SEVERITY_BANDS -- CSS
    cannot import JS, so this is the only way one definition can be
@@ -2102,6 +2691,131 @@ details[open] > .layer-details-body {
   color: #ff3b30;
   font-weight: 600;
 }
+
+/* Visually hidden but still reachable by assistive tech -- the standard
+   clip-based pattern (not display:none/visibility:hidden, both of which
+   remove a node from the accessibility tree along with the screen). Used by
+   the squawk alert strip's always-mounted live-region announcer; add more
+   users here rather than inventing a second one. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- emergency squawk alert strip (Task 33, SquawkAlertStrip.jsx) ---
+   Sits below #regionBar, at the same top:80px/left:0/right:0 band
+   #controlPanel already uses (see that rule's own comment on why the fixed
+   offset holds even though #regionBar itself can wrap to a second row).
+   Renders nothing at all -- no element, no reserved space -- while no
+   aircraft is squawking, so an ordinary session never sees this band. */
+#squawkAlertStrip {
+  position: fixed;
+  top: 80px;
+  left: 0;
+  right: 0;
+  z-index: 970; /* under #regionBar (1001)/#controlPanel, over the map and its own panes */
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 16px;
+  background: linear-gradient(rgba(20, 4, 4, 0.55), rgba(20, 4, 4, 0));
+  transition: left var(--t-panel) var(--e-out); /* matches #map.panel-open's own transition */
+}
+
+/* #controlPanel (Admin Mode's drawer) is 320px wide, opaque, and z-index
+   1000 -- above this strip's own 970 -- and open by default on desktop
+   (App.jsx's panelOpenPref). Without this, the strip's header, caveat and
+   leftmost cards render underneath the drawer for exactly the reader most
+   likely to have it open. Same fixed 320px shift #map.panel-open already
+   uses, for the same reason: it holds regardless of what the drawer's own
+   content happens to be doing. No mobile override needed beyond the one
+   below -- see #map.panel-open's own mobile rule, which this mirrors. */
+#squawkAlertStrip.panel-open { left: 320px; }
+
+.squawk-alert-header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.squawk-alert-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: #ff3b30;
+}
+
+/* The caveat appears exactly once per strip, here in the header -- see
+   SquawkAlertStrip.jsx's own module note on why this is not repeated per row. */
+.squawk-alert-caveat {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--text-dim, #8f9bb3);
+}
+
+.squawk-alert-list {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 8px;
+  pointer-events: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.squawk-alert-list::-webkit-scrollbar { display: none; }
+
+.squawk-alert-item {
+  flex: none;
+  width: 240px;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 59, 48, 0.55);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  cursor: pointer;
+  transition: border-color var(--t-ui) var(--e-out), background var(--t-ui) var(--e-out);
+}
+.squawk-alert-item:hover { border-color: #ff3b30; background: rgba(255, 59, 48, 0.08); }
+
+.squawk-alert-item-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.squawk-alert-item-row.meta { justify-content: space-between; font-size: 10px; margin-top: 2px; }
+
+.squawk-alert-callsign {
+  font-weight: 700;
+  color: var(--text-bright);
+}
+
+.squawk-alert-meaning {
+  font-size: 10.5px;
+  color: #ff3b30;
+  margin-top: 2px;
+}
+
+.squawk-alert-dismiss {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #8f9bb3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.squawk-alert-dismiss:hover { color: var(--text-bright); }
 
 /* How long ago a ship or aircraft last reported its position (see
    lastPingDetail in map/decorators.js). Dim by default -- on a healthy feed it
@@ -2208,17 +2922,20 @@ details[open] > .layer-details-body {
 
 /* --- admin-2 district record -------------------------------------------- */
 
-/* The whole archive control, now that this card is the only place the record is
-   read: which month, with all four counts shown under it at once. */
-.popup .district-month {
+/* The whole archive control: which month, with all four counts shown under it
+   at once. Lives in #districtInfoCard's own header now (DistrictInfoCard.jsx's
+   `headerExtra`, a real React <select> rather than a string of HTML), so this
+   targets the header directly rather than `.popup` -- kept alongside it since
+   nothing else in this app still builds a Leaflet popup with this class. */
+.popup .district-month, .country-info-header .district-month {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 6px 0 2px;
+  margin: 0 6px;
   font-size: 11px;
   color: var(--text-dim);
 }
-.popup .district-month select {
+.popup .district-month select, .country-info-header .district-month select {
   flex: 1;
   min-width: 0;
   padding: 2px 4px;
@@ -2229,12 +2946,14 @@ details[open] > .layer-details-body {
   font: inherit;
 }
 
-/* All four counts, every time -- see districtPopupHtml. */
-.popup .district-rows {
+/* All four counts, every time -- see buildDistrictConflict in map/popups.js.
+   `.country-info-body` covers the district card's own conflict fold, the same
+   dual-targeting the rules above use. */
+.popup .district-rows, .country-info-body .district-rows {
   margin: 6px 0;
   border-top: 1px solid var(--panel-border);
 }
-.popup .district-row {
+.popup .district-row, .country-info-body .district-row {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -2246,8 +2965,8 @@ details[open] > .layer-details-body {
    rests on that difference -- so it is said in words rather than left to a
    blank space to imply. A month still loading is a third state and must not be
    drawn as either. */
-.popup .meta.district-nodata,
-.popup .meta.district-loading { color: var(--text-dim); }
+.popup .meta.district-nodata, .country-info-body .meta.district-nodata,
+.popup .meta.district-loading, .country-info-body .meta.district-loading { color: var(--text-dim); }
 
 /* --- country fill (choropleth) ------------------------------------------ */
 
@@ -2481,6 +3200,7 @@ details[open] > .layer-details-body {
    sitting in a narrow top-right column, and tap targets grow a bit. */
 @media (max-width: 700px) {
   #map.panel-open { left: 0; }
+  #squawkAlertStrip.panel-open { left: 0; } /* same reasoning as #map.panel-open above */
 
   #controlPanel {
     top: 88px;
@@ -2500,6 +3220,9 @@ details[open] > .layer-details-body {
   #titleBar .title { font-size: 11px; letter-spacing: 1.5px; }
   #clock { font-size: 9.5px; }
   #themeToggle { width: 30px; height: 30px; }
+  /* The title's letters and the admin/theme controls need to keep their
+     room on a narrow screen -- the search box is what gives, not them. */
+  .place-search { min-width: 60px; max-width: 120px; }
 
   #regionBar {
     top: 46px;
@@ -2517,16 +3240,12 @@ details[open] > .layer-details-body {
     font-size: 11.5px;
   }
 
-  .leaflet-top { top: 88px; }
+  /* Same 88px band .leaflet-top's own mobile override sits at, just below the
+     single-row #regionBar above. */
+  #squawkAlertStrip { top: 88px; padding: 6px 10px; }
+  .squawk-alert-item { width: 210px; }
 
-  #newsBroadcast {
-    top: 88px;
-    left: 10px;
-    right: 10px;
-    width: auto;
-    max-width: none;
-    max-height: 30vh;
-  }
+  .leaflet-top { top: 88px; }
 
   .layer-row {
     padding: 10px 2px;
@@ -2543,16 +3262,31 @@ details[open] > .layer-details-body {
   #attribution { bottom: 50px; }
 
   /* Full width and clear of the taller mobile timeline. Starts collapsed
-     (see NotableEventsPanel.jsx), so this is a single header bar until
-     tapped. */
-  #notableEvents {
+     (see IntelPanel.jsx), so this is a single header bar until tapped, and
+     undraggable on mobile (a full-width overlay has nowhere to drag to). */
+  #intelPanel {
     left: 10px;
     right: 10px;
     bottom: 84px;
     width: auto;
     max-width: none;
-    max-height: 34vh;
+    max-height: 46vh;
   }
+
+  /* Same full-width/collapsed-by-default treatment as #intelPanel just
+     above, stacked above it rather than sharing its row -- a collapsed
+     header bar is short, but two of them side by side on a phone-width
+     screen would not both fit. */
+  #airfieldPanel {
+    left: 10px;
+    right: 10px;
+    bottom: 130px;
+    width: auto;
+    max-width: none;
+    max-height: 40vh;
+  }
+
+  .intel-controls { grid-template-columns: 1fr 1fr; }
 }
 
 /* ---------- boot-sequence loading screen ----------
@@ -3219,6 +3953,19 @@ details[open] > .layer-details-body {
   font-size: calc(11.5px * var(--ui-text-scale));
 }
 .admin-layer-swatches { flex: none; display: flex; gap: 3px; }
+/* Task 31 review, Minor 2: a visible-without-opening-the-row cue for an
+   Inference product whose "Show" state is a no-op (InferenceSection.jsx's
+   own showIsNoOp) -- muted rather than alarmed, since nothing is broken,
+   only one of three states does not do anything for this particular row. */
+.admin-layer-badge {
+  flex: none;
+  font-size: calc(9px * var(--ui-text-scale));
+  color: var(--text-dim);
+  border: 1px solid rgba(var(--accent-rgb), 0.25);
+  border-radius: 3px;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
 .admin-swatch {
   width: 9px;
   height: 9px;
@@ -3227,6 +3974,17 @@ details[open] > .layer-details-body {
 }
 .admin-layer-body { padding: 2px 2px 8px 12px; }
 .admin-shared-colours { padding: 6px 2px 8px; }
+
+/* Task 30: one target's whole tile-tint dial (basemap/imagery/weather),
+   separated the same visual way .admin-layer-block separates one layer's row
+   -- but a plain div, not a <details>. There is nothing here to collapse
+   (three blocks, not twenty-seven), so unlike .admin-layer-block this is
+   never a disclosure widget and carries no summary/caret/[open] state. */
+.admin-tile-block {
+  padding: 6px 2px 10px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
+}
+.admin-tile-block:last-of-type { border-bottom: none; }
 
 .admin-row {
   display: flex;
@@ -3253,6 +4011,124 @@ details[open] > .layer-details-body {
 .admin-wide-btn, .admin-add-btn { width: 100%; margin-top: 6px; }
 .admin-wide-btn.danger { border-color: rgba(255, 61, 61, 0.5); color: #ff8080; }
 .admin-wide-btn.danger:hover { border-color: #ff3d3d; color: #ffb3b3; }
+
+/* Task 30: the six preset buttons wrap rather than overflow -- .admin-row's
+   own `nowrap` default is right for a pair of buttons (Export/Import) but
+   six names ("High contrast", "Soft light"'s neighbours) do not fit one line
+   at panel width. */
+.admin-preset-row { flex-wrap: wrap; }
+
+/* Task 31's Filters section: one saved vessel/aircraft/event-filter preset
+   per row -- named `.admin-filter-preset-*` rather than reusing
+   `.admin-preset-row` above, which is a different thing (Task 30's tile-tint
+   preset *buttons*, not a list of saved rows). */
+.admin-filter-preset-list {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+}
+.admin-filter-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+.admin-filter-preset-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--ui-text-scale));
+}
+
+/* Task 31's Inference section: the hide/labelled/show tri-state, as a strip
+   of three buttons rather than a <select> -- three named, permanent states
+   read better as three always-visible labels than as one collapsed value a
+   reader has to open to see the other two. */
+.admin-tri-state {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0 8px;
+}
+.admin-tri-state-btn {
+  flex: 1 1 0;
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: calc(10.5px * var(--ui-text-scale));
+  cursor: pointer;
+}
+.admin-tri-state-btn:hover { color: var(--text-bright); border-color: var(--accent); }
+.admin-tri-state-btn.selected {
+  color: var(--text-bright);
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.18);
+}
+
+/* Task 31's Inference section: the read-only threshold table under each
+   product's tri-state -- a plain two-column key/value list, deliberately
+   inert-looking (no hover state, no border) since nothing in it is a
+   control. */
+.admin-threshold-table {
+  width: 100%;
+  margin: 4px 0 8px;
+  border-collapse: collapse;
+  font-size: calc(10.5px * var(--ui-text-scale));
+}
+.admin-threshold-table td {
+  padding: 2px 4px;
+  color: var(--text-dim);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+}
+.admin-threshold-table td:first-child { color: var(--text-secondary); }
+.admin-threshold-table td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Task 31's Cards section: one row per section, with its own shown/order/
+   default-open controls -- the same three-dial-per-row shape LayerBlock's
+   body uses for a layer, in table form since a card section has no colour
+   swatch to give the row its own visual weight the way a layer's does. */
+.admin-cards-table {
+  width: 100%;
+  margin: 4px 0;
+  border-collapse: collapse;
+  font-size: calc(10.5px * var(--ui-text-scale));
+}
+.admin-cards-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 400;
+  padding: 2px 4px;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.14);
+}
+.admin-cards-table td {
+  padding: 2px 4px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+  vertical-align: middle;
+}
+.admin-cards-order-cell {
+  display: flex;
+  gap: 2px;
+}
+.admin-cards-order-cell button {
+  border: 1px solid var(--panel-border);
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font: inherit;
+  cursor: pointer;
+}
+.admin-cards-order-cell button:hover { color: var(--text-bright); border-color: var(--accent); }
+.admin-cards-order-cell button:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* --- data editor --- */
 .admin-record-list {
@@ -3385,6 +4261,22 @@ details[open] > .layer-details-body {
 }
 .country-chip-remove { padding: 3px 7px 3px 3px; font-size: 12px; line-height: 1; }
 .country-chip-name:hover, .country-chip-remove:hover { color: var(--text-bright); }
+/* Accented rather than the same neutral chrome as Clear -- this is the one
+   button on the bar that opens something rather than discarding something,
+   and it reads that way at a glance. */
+.country-selection-compare {
+  flex: none;
+  border: 1px solid rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent);
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 600;
+  font-size: calc(10px * var(--ui-text-scale));
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.country-selection-compare:hover { background: rgba(var(--accent-rgb), 0.24); }
 .country-selection-clear {
   flex: none;
   border: 1px solid var(--panel-border);
@@ -3434,8 +4326,10 @@ details[open] > .layer-details-body {
   white-space: nowrap;
 }
 /* Once dragged the card is its own window: no tail, and it no longer tracks
-   the country's screen position (see CountryInfoCard.jsx). */
-#countryInfoCard.detached { animation: none; }
+   the country's (or water body's) screen position (see CountryInfoCard.jsx
+   and WaterInfoCard.jsx). */
+#countryInfoCard.detached, #waterInfoCard.detached,
+#subdivisionInfoCard.detached, #districtInfoCard.detached { animation: none; }
 
 /* A row in the country card that opens the record behind it. Only the rows that
    carry an id get this (see openableRow in map/popups.js) -- the rest stay inert
@@ -3519,10 +4413,157 @@ details[open] > .layer-details-body {
 }
 /* The body is the map's own popup HTML, so it needs the rules that are scoped
    to .leaflet-popup-content restated for this container -- the same thing
-   #newsBroadcast already does for the news list. */
+   #intelPanel already does for its own lists. */
 .event-detail-body h3 { margin: 0 0 6px; font-size: 13px; color: var(--text-heading); }
 .event-detail-body .meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
 .event-detail-body a { color: var(--accent); }
+
+/* Task 13: the six-block fused-event card (map/eventDetail.js), rendered
+   into the same .event-detail-body container as every other kind but with
+   its own class so the blocks get visible separation -- unlike the map's own
+   hover popup, this card is opened specifically to look something up, and a
+   wall of unbroken text is the wrong shape for that. Restates the popup's own
+   .sev-bar/.sev-reasons/.coverage-list/.rel-block rules for this container,
+   same reasoning as the h3/meta/a restatement immediately above. */
+.event-detail-body-rich .event-detail-block {
+  margin: 8px 0;
+  padding: 7px 8px;
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.12));
+  border-radius: 4px;
+}
+.event-detail-body-rich .event-detail-block:first-child { margin-top: 0; }
+.event-detail-body-rich .event-detail-block > h4 {
+  margin: 0 0 5px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.event-detail-body-rich .sev-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.25);
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+.event-detail-body-rich .sev-bar span { display: block; height: 100%; }
+.event-detail-body-rich .sev-reasons {
+  margin: 4px 0 0;
+  padding-left: 15px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.event-detail-body-rich .sev-reasons li { margin-bottom: 1px; }
+/* Same tint rule the popup's reliability block uses (style.css's own
+   .leaflet-popup-content .rel-block.rel-low/.rel-very_low): a reader who
+   opens this card should see within a glance whether a newsroom stands
+   behind it, before reading a word. */
+.event-detail-body-rich .rel-block.rel-low { border-color: rgba(255, 149, 0, 0.55); }
+.event-detail-body-rich .rel-block.rel-very_low {
+  border-color: rgba(255, 77, 77, 0.65);
+  background: rgba(255, 77, 77, 0.06);
+}
+.event-detail-body-rich .coverage-list { margin: 4px 0 0; padding: 0; list-style: none; max-height: 168px; overflow-y: auto; }
+.event-detail-body-rich .coverage-list li { margin: 0 0 6px; line-height: 1.35; }
+.event-detail-body-rich .coverage-list li:last-child { margin-bottom: 0; }
+.event-detail-body-rich .coverage-meta { display: block; font-size: 10px; color: var(--text-dim); }
+.event-detail-body-rich .event-nearby-list { margin: 4px 0 0; padding-left: 15px; font-size: 11px; color: var(--text-secondary); }
+.event-detail-body-rich .event-nearby-list li { margin-bottom: 2px; }
+/* Task 37 review (Important): a category never loaded this session, so its
+   absence proves nothing, must not read as a fainter version of the plain
+   "searched, found nothing" line just above it -- italic is the one thing
+   that treatment cannot be mistaken for at a glance, the same "different
+   treatment, not a different shade of the same one" rule ChokepointPanel's
+   own BAR_FILL applies to a missing vs a real day. */
+.event-detail-body-rich .nearby-coverage-note { font-style: italic; }
+/* The one line every block ends on: which of the app's four provenance words
+   applies. Dashed rule to read as a footnote to the block above it, not as
+   another fact in the same list -- same visual register as the popup's own
+   .placement-reason (style.css, near the geolocation rules). */
+.event-detail-body-rich .provenance-line {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--panel-border, rgba(255, 255, 255, 0.14));
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.event-detail-body-rich .provenance-line b { text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
+/* The one thing that can make the pin's own position wrong, said in the same
+   amber the map's placement-doubted note and imprecise-note use elsewhere. */
+.event-detail-body-rich .moved-note { color: #ffb454; }
+
+/* Task 10: the summary strip -- seven compact stat tiles above the folds
+   (summaryTiles, map/popups.js), the reader's first read of a country
+   before opening anything. Wraps rather than scrolling: the card is 320px
+   wide, and a horizontal scrollbar inside a floating panel is worse than a
+   second row of tiles. */
+.country-info-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.csummary-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 62px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(var(--accent-rgb), 0.06);
+}
+.csummary-v {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.csummary-l {
+  font-size: calc(9px * var(--ui-text-scale));
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+/* A dash standing in for a value this map has not checked, never a
+   fabricated zero (see summaryTiles' own note on the project rule this
+   follows) -- dimmer than a real figure, with the reason in the tile's own
+   `title` attribute (a native tooltip) rather than spent as card space. */
+.csummary-tile.unavailable { cursor: help; opacity: 0.55; }
+.csummary-tile.unavailable .csummary-v { color: var(--text-dim); font-weight: 400; }
+
+/* Task 10: super-folds -- PlaceInfoCard's optional `groups` prop nests
+   several .country-section folds inside one outer <details>, grouping
+   fifteen-plus sections into the three questions a reader actually asks
+   (see COUNTRY_CARD_GROUPS in map/popups.js). Same collapse mechanics as
+   .country-section below, styled a size up so the two nesting levels read
+   as nesting rather than as one flat list with odd indentation. */
+.country-super-fold { border-bottom: 1px solid var(--panel-border); }
+.country-super-fold:last-child { border-bottom: none; }
+.country-super-fold > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 2px 6px 16px;
+  position: relative;
+  font-size: calc(11.5px * var(--ui-text-scale));
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-heading);
+}
+.country-super-fold > summary::-webkit-details-marker { display: none; }
+.country-super-fold > summary:hover { background: rgba(var(--accent-rgb), 0.08); }
+.country-super-fold > summary:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.country-super-fold > summary::before {
+  content: "\25B8";
+  position: absolute;
+  left: 2px;
+  transition: transform var(--t-ui) var(--e-out);
+  display: inline-block;
+  color: var(--accent);
+}
+.country-super-fold[open] > summary::before { transform: rotate(90deg); }
+.country-super-fold-body { padding-left: 8px; }
 
 .country-section { border-bottom: 1px solid rgba(var(--accent-rgb), 0.12); }
 .country-section:last-child { border-bottom: none; }
@@ -3582,6 +4623,210 @@ details[open] > .layer-details-body {
 .food-estimates th:first-child,
 .food-estimates td:first-child { text-align: left; padding-left: 0; }
 .food-estimates td:first-child { color: var(--text-secondary); }
+
+/* Task 17's port-call tables (ship card's Port calls, port card's Recent
+   arrivals and departures) reuse .food-estimates above -- comparing rows is
+   the same shape of table -- but every column here is a date, a name or a
+   confidence note, not a number to right-align against its neighbours the
+   way the food estimates are, so this puts alignment and wrapping back to
+   normal rather than food-estimates' right/nowrap defaults. */
+.port-calls-table th,
+.port-calls-table td { text-align: left; white-space: normal; }
+
+/* Task 23's flight-legs table (aircraft card's Route section) is the same
+   shape again -- dates, airport codes, a confidence word -- so it gets the
+   same override rather than food-estimates' right/nowrap defaults. */
+.flight-legs-table th,
+.flight-legs-table td { text-align: left; white-space: normal; }
+
+/* --- Task 40: country comparison table ---------------------------------
+   Deliberately not a fourth #countryInfoCard-style anchored 320px column --
+   CountryCompareView.jsx's own header note explains why: three of those side
+   by side cannot hold an aligned numeric column at all. This is a centred
+   modal instead, the one shape in this stylesheet built for "stop what you
+   are doing and read this table", which is exactly what comparing two or
+   three countries' figures is. */
+.compare-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+#countryCompare {
+  width: min(94vw, 880px);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  animation: popup-in var(--t-ui) var(--e-out);
+}
+.compare-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+.compare-title {
+  flex: 1 1 auto;
+  font-size: calc(11px * var(--ui-text-scale));
+  letter-spacing: 1.2px;
+  color: var(--text-bright);
+  text-transform: uppercase;
+}
+.compare-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.compare-close:hover { color: var(--text-bright); }
+.compare-body {
+  overflow-y: auto;
+  padding: 10px 14px 16px;
+}
+.compare-need-more { color: var(--text-secondary); }
+/* The standing coverage caveat (COMPARE_COVERAGE_CAVEAT, countryCompareLogic.js)
+   -- always visible, never a tooltip, per this task's own brief: a reader
+   comparing two aligned numbers has no other way to tell "these countries
+   differ" from "this map knows more about one of them". Boxed rather than a
+   plain .meta line so it cannot be mistaken for one more table footnote. */
+.compare-caveat {
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: rgba(var(--accent-rgb), 0.06);
+  color: var(--text-secondary);
+}
+.compare-truncation {
+  margin: 0 0 10px;
+  color: #ff9500;
+}
+.compare-table-scroll { overflow-x: auto; }
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: calc(11.5px * var(--ui-text-scale));
+}
+.compare-table th,
+.compare-table td { padding: 6px 10px; border-bottom: 1px solid var(--panel-border); }
+.compare-table thead th {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: calc(10px * var(--ui-text-scale));
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Metric names stay put while the reader scrolls the country columns
+   sideways on a narrow viewport -- the one column every row needs to keep
+   meaning without it. */
+.compare-row-label {
+  text-align: left;
+  min-width: 190px;
+  position: sticky;
+  left: 0;
+  background: var(--panel-bg);
+}
+.compare-table thead th.compare-row-label { position: sticky; left: 0; z-index: 1; }
+.compare-row-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-bright);
+  font-size: calc(11.5px * var(--ui-text-scale));
+}
+.compare-row-differs-mark {
+  color: var(--accent);
+  font-weight: 700;
+}
+.compare-row-meta {
+  color: var(--text-dim);
+  font-size: calc(9.5px * var(--ui-text-scale));
+  margin-top: 1px;
+}
+.compare-col-country { min-width: 130px; }
+.compare-country-link {
+  border: none;
+  background: transparent;
+  color: var(--text-bright);
+  font: inherit;
+  font-size: calc(11px * var(--ui-text-scale));
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.compare-country-link:hover { color: var(--accent); }
+.compare-cell { text-align: center; white-space: nowrap; }
+.compare-cell-v {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* The row-wide tint that marks "these figures differ" -- applied to every
+   cell in the row equally, never to just the higher or lower one, so it
+   cannot be read as pointing at a "winner". See CompareRow's own note. */
+tr.compare-row-differs td,
+tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
+/* Three empty states, three different treatments -- so "not covered", "not
+   checked yet" and "does not apply" can never be mistaken for shades of the
+   same dash, the identical discipline the country card's own coverage table
+   follows (see buildCoverage's own note in map/popups.js). */
+.compare-cell-dash {
+  color: var(--text-dim);
+  font-size: calc(10px * var(--ui-text-scale));
+  cursor: help;
+}
+.compare-cell-not-loaded .compare-cell-dash { color: #ff9500; }
+.compare-cell-not-applicable .compare-cell-dash { font-style: italic; opacity: 0.7; }
+/* Task 40 review (Minor): not-collected used to fall back to the same plain
+   .compare-cell-dash treatment not-loaded/not-applicable were given their
+   own colour/style for, which left the one state a reader could only tell
+   apart by reading the word. #d8b9ff is not a new colour introduced for this
+   -- it is the same soft lavender AIRCRAFT_STYLE.commercial and the port/
+   joint-base infrastructure glyphs already use (map/decorators.js), reused
+   here rather than invented so it reads as "a real, if muted, part of this
+   app's palette" instead of a colour picked at random for one table. */
+.compare-cell-not-collected .compare-cell-dash {
+  color: #d8b9ff;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+/* Task 40 review (Important 2): the sensor-coverage caveat two metrics carry
+   (militaryAircraft, navyVessels -- see countryCompareLogic.js's
+   sensorCoverageCaveat), rendered as a full-width row directly under the
+   metric it warns about rather than left to the table-wide banner alone.
+   No top/bottom border of its own -- it reads as an extension of the row
+   above it, not a new row with its own numbers. */
+.compare-table td.compare-row-caveat {
+  text-align: left;
+  white-space: normal;
+  color: var(--text-dim);
+  font-size: calc(9.5px * var(--ui-text-scale));
+  font-style: italic;
+  padding-top: 0;
+}
+
+@media (max-width: 720px) {
+  .compare-backdrop { padding: 0; }
+  #countryCompare { width: 100%; height: 100%; max-height: none; border-radius: 0; }
+  .compare-row-label { min-width: 140px; }
+  .compare-col-country { min-width: 96px; }
+}
 
 /* --- text size -------------------------------------------------------
    Admin Mode's text scale, applied to the HUD's own type.

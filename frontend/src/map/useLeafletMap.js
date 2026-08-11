@@ -2,18 +2,21 @@
 // the controller once (on mount), mirrors the small slice of its state React
 // needs to display into real React state (counts, zoom-gate notes, viewport
 // bounds), and exposes an imperative handle (flyToRegion/flyTo/etc.) for
-// components like RegionBar and NewsBroadcastPanel to call.
+// components like RegionBar and IntelPanel to call.
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createMapController } from "./createMapController";
 
 const COUNT_KEYS = [
   "events", "firms", "gdelt", "officials", "countries", "cities", "infra", "jamming", "satellites",
+  // Task 24: the seven client-propagated satellite layers.
+  "satNavigation", "satWeather", "satImaging", "satScience", "satGeo", "satStarlink", "satOneweb",
   "aisCivilian", "aisNavy", "aisTanker", "adsbCivilian", "adsbMilitary",
   "infraMilitary", "infraRefinery", "infraLng", "infraPort", "infraDesalination",
   "infraNuclear", "infraFab", "infraPipelineNode", "pipelineRoutes",
   "gfwGaps", "gfwDetections", "gfwDetMatched", "gfwDetUnmatched",
   "czib", "czibActive", "czibWithdrawn", "floods", "floodsCurrent",
-  "ports", "portsOil", "dams", "damsLarge", "deflock", "railways",
+  "ports", "portsOil", "dams", "damsLarge", "deflock", "railways", "water",
+  "shippingLanes", "laneDensity",
 ];
 const EMPTY_COUNTS = Object.fromEntries(
   COUNT_KEYS.flatMap((key) => [[key, 0], [`${key}Total`, 0]])
@@ -26,6 +29,15 @@ const EMPTY_ZOOM_NOTES = {
   adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false,
   ais: false, jamming: false, officials: false, capped: {}, eventsCapped: 0,
   gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false, deflock: false,
+  laneDensity: false,
+  // Task 24: navigation/weather/imaging are THEATRE-gated (see map/scene.js
+  // and createMapController.js's SAT_ELEMENT_ZOOM_NOTE_KEYS); the other four
+  // client-propagated groups are ungated and never report a note.
+  satNavigation: false, satWeather: false, satImaging: false,
+  // Task 27 fix: which theatre keys osm_infra.py's rail-line sweep hit its
+  // own MAX_RAIL_LINE_WAYS cap in this pass -- a list, not a boolean, so it
+  // is empty rather than false before the first render.
+  railwaysTruncated: [],
 };
 
 const NO_BORDER_EDIT = { active: false, countryKey: null, linkMode: true, canUndo: false };
@@ -59,6 +71,18 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // other. See createMapController's selectCountryEntry.
   const [selectedCountry, setSelectedCountry] = useState(null);
   const [countrySelection, setCountrySelection] = useState([]);
+  // The water body whose card is open, or null -- the water-body counterpart
+  // to selectedCountry above. No selection array alongside it: unlike a
+  // country, a water body has no chips and no highlight that outlives its
+  // card (see createMapController's reportWaterSelection), so one piece of
+  // state is the whole of it.
+  const [selectedWater, setSelectedWater] = useState(null);
+  // The state/district whose card is open, or null -- same shape as
+  // selectedWater above (one piece of state apiece, no chip array: neither
+  // has a highlight that outlives its card). See createMapController's
+  // reportSubdivisionSelection/reportDistrictSelection.
+  const [selectedSubdivision, setSelectedSubdivision] = useState(null);
+  const [selectedDistrict, setSelectedDistrict] = useState(null);
   // What the boundary editor is doing, for the controls that drive it: whether
   // a session is open, on which country, how many handles are drawn and whether
   // there is anything to undo. See map/borderEdit.js.
@@ -67,12 +91,19 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // so the admin panel can tell a stored edit that still fits from one made
   // against a geometry the source has since changed.
   const [countryFingerprints, setCountryFingerprints] = useState({});
-  // Which metric the country shapes are painted by, and how many of them the
-  // metric actually has a value for. The coverage half is not decoration: four
-  // of the six metrics know about only part of the world, and a reader looking
-  // at a mostly-blank map needs to be told whether that means "no harm here" or
+  // Which metric the shapes are painted by, which shapes -- "country" or
+  // "state" (Task 26) -- that metric applies to, and how many of them the
+  // metric actually has a value for. The coverage half is not decoration:
+  // most metrics know about only part of the world, and a reader looking at a
+  // mostly-blank map needs to be told whether that means "no harm here" or
   // "nobody has measured here".
-  const [choropleth, setChoropleth] = useState({ metricId: null, covered: 0, total: 0 });
+  const [choropleth, setChoropleth] = useState({ metricId: null, target: "country", covered: 0, total: 0 });
+  // The current emergency-squawking subset of raw.adsb (Task 33), mirrored
+  // out the same way the other on*Change callbacks are -- the controller
+  // reports a fresh array only when a new ADS-B poll actually lands (see
+  // applyData's own note), not on every pan/zoom repaint, so this does not
+  // thrash SquawkAlertStrip's own duration tracking.
+  const [emergencySquawks, setEmergencySquawks] = useState([]);
 
   // onRegionAutoReset changes identity across renders (it closes over
   // region state) -- keep the latest one in a ref so the controller (created
@@ -100,11 +131,18 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
         onCountrySelect: setSelectedCountry,
         onCountrySelectionChange: setCountrySelection,
         onCountryPointChange: (point) => setSelectedCountry((prev) => (prev ? { ...prev, point } : prev)),
+        onWaterSelect: setSelectedWater,
+        onWaterPointChange: (point) => setSelectedWater((prev) => (prev ? { ...prev, point } : prev)),
+        onSubdivisionSelect: setSelectedSubdivision,
+        onSubdivisionPointChange: (point) => setSelectedSubdivision((prev) => (prev ? { ...prev, point } : prev)),
+        onDistrictSelect: setSelectedDistrict,
+        onDistrictPointChange: (point) => setSelectedDistrict((prev) => (prev ? { ...prev, point } : prev)),
         onBorderEditChange: (state) => setBorderEdit(state?.active ? state : NO_BORDER_EDIT),
         onCountryFingerprints: setCountryFingerprints,
         onChoroplethChange: setChoropleth,
         onLayerStateChange: setLayerState,
         onFocusChange: setFocus,
+        onEmergencySquawkChange: setEmergencySquawks,
         onBorderRingCommit: (commits) => onBorderRingCommitRef.current?.(commits),
       }
     );
@@ -137,6 +175,47 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     controllerRef.current?.flyTo(lat, lon, minZoom);
   }, []);
 
+  // Task 35: exact camera restore/read for a deep link -- see setCamera's
+  // own note in createMapController.js for why this is not flyTo.
+  const setCamera = useCallback((lat, lon, zoom) => {
+    controllerRef.current?.setCamera(lat, lon, zoom);
+  }, []);
+
+  const getCamera = useCallback(() => controllerRef.current?.getCamera() ?? null, []);
+
+  // Both look their target up before selecting anything and say whether they
+  // found it, so a restore effect that runs before the countries/water feed
+  // has landed can retry rather than silently doing nothing forever.
+  const selectCountryByKey = useCallback(
+    (key) => controllerRef.current?.selectCountryByKey(key) ?? false,
+    []
+  );
+
+  const selectWaterById = useCallback(
+    (id) => controllerRef.current?.selectWaterById(id) ?? false,
+    []
+  );
+
+  // Task 40: an on-demand pull, not mirrored state -- see
+  // countryCompareRows in createMapController.js for why the comparison view
+  // re-calls this itself rather than the controller pushing updates the way
+  // onCountrySelect does for the single-country card. `null` before the map
+  // is ready, same as recordDetail's own "nothing to show yet" contract.
+  const countryCompareRows = useCallback(
+    (keys) => controllerRef.current?.countryCompareRows(keys) ?? null,
+    []
+  );
+
+  // Task 33: SquawkAlertStrip's "click to fly and select". Returns false when
+  // the airframe is no longer in the feed (a rare race: it dropped out
+  // between the strip's last render and the click), which is a no-op rather
+  // than flying nowhere -- the entry itself disappears on the strip's own
+  // next re-render once the controller reports the updated feed.
+  const selectAircraftByIcao = useCallback(
+    (icao24) => controllerRef.current?.selectAircraftByIcao(icao24) ?? false,
+    []
+  );
+
   // `visible === null` clears the reader's pin and hands the key back to the
   // scene resolver -- see setLayerWish in createMapController.js.
   const setLayerVisible = useCallback((key, visible) => {
@@ -165,6 +244,14 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     controllerRef.current?.setEventFilter(next);
   }, []);
 
+  const setVesselFilter = useCallback((next) => {
+    controllerRef.current?.setVesselFilter(next);
+  }, []);
+
+  const setAircraftFilter = useCallback((next) => {
+    controllerRef.current?.setAircraftFilter(next);
+  }, []);
+
   const setAgeReference = useCallback((ts) => {
     controllerRef.current?.setAgeReference(ts);
   }, []);
@@ -179,6 +266,34 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   const closeCountryCard = useCallback(() => {
     controllerRef.current?.closeCountryCard();
     setSelectedCountry(null);
+  }, []);
+
+  // Same shape as closeCountryCard, but closing a water body's card also
+  // deselects it -- see createMapController's closeWaterCard for why the two
+  // gestures are one here where they are two for a country.
+  const closeWaterCard = useCallback(() => {
+    controllerRef.current?.closeWaterCard();
+    setSelectedWater(null);
+  }, []);
+
+  // Same shape again, for the state and district cards -- neither has a
+  // selection that outlives its card, so closing is deselecting, same as water.
+  const closeSubdivisionCard = useCallback(() => {
+    controllerRef.current?.closeSubdivisionCard();
+    setSelectedSubdivision(null);
+  }, []);
+
+  const closeDistrictCard = useCallback(() => {
+    controllerRef.current?.closeDistrictCard();
+    setSelectedDistrict(null);
+  }, []);
+
+  // The district card's own month <select> (DistrictInfoCard.jsx) calls this;
+  // the controller fetches the new month's counts and reports the rebuilt
+  // card back through onDistrictSelect itself, so there is nothing to set
+  // here beyond forwarding the call.
+  const setDistrictMonth = useCallback((month) => {
+    controllerRef.current?.setDistrictMonth(month);
   }, []);
 
   const focusCountry = useCallback((key) => {
@@ -251,8 +366,13 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
 
   return {
     ready, counts, zoomNotes, mapBounds, zoom, windStatus, selectedCountry, countrySelection,
+    selectedWater, closeWaterCard,
+    selectedSubdivision, closeSubdivisionCard, selectedDistrict, closeDistrictCard, setDistrictMonth,
     layerState, setSceneBypass, invalidateSize, focus,
-    applyData, flyToRegion, flyTo, setLayerVisible, setInfraFilter, setEventFilter, setAgeReference,
+    applyData, flyToRegion, flyTo, setCamera, getCamera, selectCountryByKey, selectWaterById, countryCompareRows,
+    setLayerVisible, setInfraFilter, setEventFilter,
+    setVesselFilter, setAircraftFilter, setAgeReference,
+    emergencySquawks, selectAircraftByIcao,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
     setIconTheme, setLayerZoomOverrides, setLayerZoomMaxOverrides, setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
     choropleth, setChoroplethMetric,

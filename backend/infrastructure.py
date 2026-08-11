@@ -12,6 +12,8 @@ always rendered, same as everything else here -- the frontend has no region
 filter on this endpoint.
 """
 
+from backend.sources.proximity import haversine_km
+
 INFRA_SITES: list[dict] = [
     # ---- Persian Gulf / Strait of Hormuz ----
     {
@@ -1145,6 +1147,17 @@ INFRA_SITES: list[dict] = [
 # Major oil/gas pipeline routes -- rendered as lines rather than points.
 # `coords` are approximate waypoints along the real route, not surveyed
 # geometry; `region_keys` mirrors INFRA_SITES (empty == not zone-specific).
+#
+# Task 28: this list is untouched by that task and stays exactly what it has
+# always been -- a hand-maintained schematic. What changed is what rides
+# beside it: app.py's /api/infrastructure now folds in real pipeline
+# *geometry* OpenStreetMap's Overpass sweep finds inside this map's eleven
+# conflict theatres (backend/sources/osm_infra.py's "pipelines_osm" document,
+# man_made=pipeline, with substance/operator/diameter where OSM has them),
+# each entry stamped `source: "curated"` or `"osm"` so a reader can always
+# tell which claim they are looking at. Outside those theatres, and for any
+# route OSM has not mapped, this list is what a reader gets -- the fallback
+# the merge is built to fall back to, provenance intact.
 PIPELINE_ROUTES: list[dict] = [
     {
         "id": "trans_alaska",
@@ -1218,6 +1231,116 @@ PIPELINE_ROUTES: list[dict] = [
     },
 ]
 
+
+# The ten shipping corridors people actually name -- Task 20b. Hand-drawn
+# schematic waypoints, not a surveyed route and not derived from anything this
+# map has observed (that claim belongs to lane_density.py's grid instead, see
+# /api/lanes). Every entry carries `name` and `note`; where a transit figure is
+# included it also carries `transits`, `transits_unit`, `transits_publisher`
+# and `transits_year` -- the global rule against uncited numbers applies to
+# this list as much as anywhere else, so a corridor with no figure this
+# project can actually stand behind simply omits the four transit fields
+# rather than guessing. test_shipping_corridors.py checks that pattern holds.
+#
+# Task 20 review (Critical): this list shipped with three `transits` figures
+# (Suez, Hormuz, Panama) that were all wrong when checked against the
+# publisher's own page -- Suez off by 547, Panama off by ~1,000 (a 7% gap the
+# "approximate" label didn't cover), Hormuz a 2022-vs-2023 year mix-up. None
+# were re-derived and re-added: a hand-maintained statistic in a Python
+# literal has no refresh path, no owner and no way to signal staleness, which
+# is exactly what this project's rule against presenting a number it did not
+# receive is for. The bar for a transit figure to earn its way back in:
+# verified against the publisher's own page (not an aggregator), with the
+# source URL and access date stored beside the number so the next reader can
+# check it and see how old the check is. All ten corridors below carry none
+# until that bar is met.
+#
+# Task 20 review (Minor 1): the shipped `transits` field also conflated two
+# different quantities under one name -- Hormuz's figure was an oil-flow rate
+# (million barrels/day), everything else a vessel count. If a transit figure
+# returns for a chokepoint, keep a genuine vessel count under `transits` and
+# give a non-vessel quantity (barrels/day, tonnage, whatever the publisher
+# actually reports) its own differently-named field instead of sharing this
+# one -- `transits_unit` disambiguates it for a popup reader, but the schema
+# itself should not need a unit string to say what kind of number it holds.
+SHIPPING_LANES: list[dict] = [
+    {
+        "id": "suez_approach",
+        "name": "Suez approach",
+        "region_keys": ["red_sea_yemen"],
+        "note": "Mediterranean-Red Sea shortcut via the Suez Canal -- schematic corridor, not a surveyed route.",
+        "coords": [[31.26, 32.31], [30.6, 32.35], [29.95, 32.55], [29.5, 32.6]],
+    },
+    {
+        "id": "bab_el_mandeb",
+        "name": "Bab-el-Mandeb",
+        "region_keys": ["red_sea_yemen"],
+        "note": "Chokepoint linking the Red Sea/Suez route to the Gulf of Aden and Indian Ocean -- schematic corridor, not a surveyed route.",
+        "coords": [[14.0, 42.6], [12.6, 43.4], [11.6, 43.8], [11.0, 44.5]],
+    },
+    {
+        "id": "hormuz",
+        "name": "Strait of Hormuz",
+        "region_keys": ["persian_gulf_hormuz"],
+        "note": "The sole sea passage between the Persian Gulf and the Gulf of Oman -- schematic corridor, not a surveyed route.",
+        "coords": [[26.9, 51.5], [26.5, 55.0], [26.0, 56.3], [25.3, 57.0], [24.5, 58.5]],
+    },
+    {
+        "id": "malacca",
+        "name": "Strait of Malacca",
+        "region_keys": ["south_china_sea"],
+        "note": "Shortest sea route between the Indian Ocean and the Pacific -- schematic corridor, not a surveyed route.",
+        "coords": [[5.8, 95.3], [4.0, 98.0], [2.5, 101.0], [1.3, 103.5], [1.15, 104.0]],
+    },
+    {
+        "id": "taiwan_strait_lane",
+        "name": "Taiwan Strait",
+        "region_keys": ["taiwan_strait"],
+        "note": "Separates mainland China from Taiwan; also the route of frequent freedom-of-navigation transits -- schematic corridor, not a surveyed route.",
+        "coords": [[25.3, 121.7], [24.5, 119.6], [23.5, 119.2], [22.0, 118.9]],
+    },
+    {
+        "id": "bosphorus",
+        "name": "Bosphorus",
+        # Tagged to the Russia/Ukraine theatre rather than left unscoped
+        # (Task 20 review, Minor 2): the strait is the Montreux-governed
+        # chokepoint Russia's Black Sea Fleet and its grain/oil-export traffic
+        # both have to pass, and Turkey has restricted transit of belligerent
+        # warships through it since the 2022 invasion -- a live fact about
+        # that conflict, not the Turkey/Bosphorus theatre in general.
+        "region_keys": ["russia_ukraine"],
+        "note": "Connects the Black Sea to the Sea of Marmara and the Mediterranean, regulated by the 1936 Montreux Convention -- schematic corridor, not a surveyed route.",
+        "coords": [[41.25, 29.1], [41.05, 29.0], [40.97, 28.98], [40.75, 28.9]],
+    },
+    {
+        "id": "panama_approach",
+        "name": "Panama approach",
+        "region_keys": [],
+        "note": "Connects the Atlantic and Pacific via the Panama Canal -- schematic corridor, not a surveyed route.",
+        "coords": [[9.6, -79.9], [9.35, -79.92], [9.08, -79.68], [8.9, -79.57], [8.4, -79.9]],
+    },
+    {
+        "id": "gibraltar",
+        "name": "Strait of Gibraltar",
+        "region_keys": [],
+        "note": "Connects the Atlantic Ocean to the Mediterranean Sea; narrowest point about 13km wide -- schematic corridor, not a surveyed route.",
+        "coords": [[36.1, -5.9], [35.95, -5.6], [35.9, -5.35], [35.85, -5.1]],
+    },
+    {
+        "id": "danish_straits",
+        "name": "Danish straits",
+        "region_keys": [],
+        "note": "The only sea connection between the Baltic Sea and the North Sea/Atlantic, via the Kattegat, the Great Belt and the Oresund -- schematic corridor, not a surveyed route.",
+        "coords": [[57.7, 10.6], [56.5, 12.2], [55.6, 12.6], [54.9, 12.9], [54.5, 13.0]],
+    },
+    {
+        "id": "cape_of_good_hope",
+        "name": "Cape of Good Hope route",
+        "region_keys": [],
+        "note": "The traditional detour around southern Africa, used more heavily whenever the Suez/Red Sea corridor is unsafe -- schematic corridor, not a surveyed route.",
+        "coords": [[-30.0, 15.0], [-34.0, 18.4], [-35.0, 20.5], [-33.0, 27.0], [-29.0, 32.0]],
+    },
+]
 
 
 # Military bases -- rendered through the same "sites" list/Infra toggle as
@@ -1729,4 +1852,148 @@ MILITARY_BASES: list[dict] = [
 
 
 def serialize() -> dict:
-    return {"sites": INFRA_SITES + MILITARY_BASES, "pipelines": PIPELINE_ROUTES}
+    return {
+        "sites": INFRA_SITES + MILITARY_BASES,
+        "pipelines": PIPELINE_ROUTES,
+        "lanes": SHIPPING_LANES,
+    }
+
+
+# Task 29: which of osm_infra.py's kinds are a comparable claim to a
+# MILITARY_BASES entry -- an installation, not the broader (often
+# fragment-heavy) `landuse=military` area class, which stays out of this list
+# and continues to ride the plain OSM infrastructure layer unchanged. See
+# osm_infra.py's own _FEATURES comment for why each of these six carries (or
+# does not carry) a `["name"]` filter.
+MILITARY_OSM_KINDS = frozenset({
+    "military_airfield", "military_base", "military_naval_base",
+    "military_training_area", "military_barracks", "military_danger_area",
+})
+
+# The three air-defence/radar classes (Task 29 item 4) are a different layer
+# with a different completeness promise -- see decorateOsmInfra's own
+# "airDefense" branch on the frontend for the caveat this set exists to keep
+# separate from the bases merge below (the frontend's own split happens in
+# createMapController.js's isAirDefenseItem, a plain JS literal rather than an
+# import of this constant -- there is no cross-language import to have).
+# Exported and named here anyway, alongside MILITARY_OSM_KINDS, as the one
+# place in the backend that documents and tests the boundary between the two:
+# see test_military_merge.py's own check that these three can never inflate
+# an installation count.
+AIR_DEFENSE_OSM_KINDS = frozenset({"radar_station", "military_bunker", "military_checkpoint"})
+
+# A curated pin is hand-placed at the installation's own coordinates; an OSM
+# way's `out center` is a computed centroid of whatever polygon a mapper
+# traced for the same footprint, which for a sprawling base (an airfield's
+# runways plus its whole cantonment area, say) can land a couple of
+# kilometres from the curated point without being a different installation.
+# 5km is wide enough to bridge that gap.
+#
+# Task 29 review (Important 1): it is NOT, on its own, narrow enough to tell
+# two genuinely separate nearby facilities apart. Camp Lemonnier (US) and
+# JSDF Base Djibouti (Japan) are 1.56km apart -- both inside this radius of a
+# point near either one, not outside it as an earlier version of this
+# comment claimed, citing that exact pair, before anyone had actually
+# computed the distance. With curated points that close together, an OSM
+# centroid's documented drift is easily enough to make the *wrong* one the
+# nearest -- and a false `matched_curated_id` is the worst kind of error this
+# layer can make: it tells a reader OpenStreetMap corroborates one country's
+# base when the feature was mapped for a different country's.
+#
+# The radius alone cannot fix that -- shrinking it only moves the same
+# problem to a smaller cluster of close-together bases somewhere else, and a
+# global map of foreign military installations has more crowded corners than
+# Djibouti's. So the radius stays generous, and _closest_curated_match below
+# refuses to guess instead: an OSM site is matched only when exactly one
+# curated site is within this radius of it. Two or more, and the drift that
+# is normal at this radius is not precise enough to say which one the
+# feature belongs to, so no match is claimed at all.
+BASE_MATCH_RADIUS_KM = 5.0
+
+
+def _closest_curated_match(site: dict, curated: list[dict]) -> tuple[dict | None, bool]:
+    """The one curated site an OSM record should be matched to, or (None,
+    ambiguous) when the match was refused -- see BASE_MATCH_RADIUS_KM's own
+    note on why "more than one" refuses rather than picks the nearest.
+    `curated` is the small (~100-entry) MILITARY_BASES list, so a plain
+    per-call scan is simpler than building a spatial index for it and no
+    source of the bug a coarse grid cell could introduce at a cluster
+    boundary.
+
+    Task 32 review (empty-state sweep): a refusal used to come back as a bare
+    None, indistinguishable from "zero curated sites nearby" -- both read as
+    "no curated site nearby" to a caller that only checks `matched_curated_id`,
+    which is exactly the "found nothing" vs "did not look" conflation this
+    module's own docstring warns the merge step must not make. `ambiguous`
+    tells the two apart: True means this OSM site sits within range of more
+    than one curated site and the match was refused on purpose, not that
+    nothing curated is nearby at all.
+    """
+    within = [
+        c for c in curated
+        if haversine_km(site["lat"], site["lon"], c["lat"], c["lon"]) <= BASE_MATCH_RADIUS_KM
+    ]
+    if len(within) == 1:
+        return within[0], False
+    return None, len(within) > 1
+
+
+def merge_military_bases(curated: list[dict], osm_sites: list[dict]) -> list[dict]:
+    """Curated MILITARY_BASES beside OpenStreetMap's military=* sweep, each
+    site keeping its own `source` rather than being blended into one record --
+    see osm_infra.py's own module docstring for why that promise matters here
+    specifically (this list is the one place in the app where the two claims
+    a reader could most easily mistake for confirming each other actually
+    meet).
+
+    Every curated site passes through unchanged, `source: "curated"`. An OSM
+    site is included only when its `kind` is one of MILITARY_OSM_KINDS (the
+    plain `landuse=military` area class, or any other kind osm_sites happens
+    to carry, is left out -- this is a list of installations, not everything
+    the sweep found); it is stamped `source: "osm"`, and, when exactly one
+    curated site sits within BASE_MATCH_RADIUS_KM (see
+    _closest_curated_match), `matched_curated_id` names it. That flag is what
+    count_distinct_bases below reads to avoid reporting two installations
+    where a human curator and OpenStreetMap's mappers both independently
+    found the same one.
+
+    An OSM site refused a match because more than one curated site sits
+    within range is stamped `ambiguous_match: True` instead -- the refusal
+    itself is information (the frontend's own popup says so, see popups.js's
+    militaryBaseRows), not the same silence as an OSM site with no curated
+    neighbour at all.
+    """
+    out = [{**site, "source": "curated"} for site in curated]
+    for site in osm_sites:
+        if site.get("kind") not in MILITARY_OSM_KINDS:
+            continue
+        record = {**site, "source": "osm"}
+        match, ambiguous = _closest_curated_match(site, curated)
+        if match is not None:
+            record["matched_curated_id"] = match["id"]
+        elif ambiguous:
+            record["ambiguous_match"] = True
+        out.append(record)
+    return out
+
+
+def count_distinct_bases(merged: list[dict]) -> int:
+    """How many distinct physical installations `merge_military_bases`
+    reports, treating a matched OSM/curated pair as one site rather than two.
+
+    Summing every record in the merged list would double-count: an OSM entry
+    with `matched_curated_id` set is corroborating evidence for a site already
+    counted once as its curated entry, not a second installation.
+
+    Task 29 review (Minor 2): this dedups an OSM record against a *curated*
+    one only. Two separate OSM records for one joint-use installation (a
+    base two different mappers each traced a polygon for) are not deduped
+    against each other and both count -- outside the brief's ask, which was
+    pairing curated against OSM, not OSM against itself. Noted rather than
+    fixed here; an OSM-vs-OSM dedup would need its own distance/ambiguity
+    rule, the same shape as _closest_curated_match's, and its own review.
+    """
+    return sum(
+        1 for site in merged
+        if site.get("source") == "curated" or not site.get("matched_curated_id")
+    )

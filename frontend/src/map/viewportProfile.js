@@ -40,6 +40,25 @@ const ROWS = 5;
 const MARITIME_ENTER_BELOW = 0.20;
 const MARITIME_LEAVE_ABOVE = 0.30;
 
+// isMaritime is deliberately still read from land's *absence* rather than
+// from the water index's presence, even though map/water.js now exists and
+// even though that looks like the more direct question to ask. It was tried
+// (see git history on this file) and reverted: Natural Earth's 1:10m marine
+// file names oceans, seas, gulfs, bays, straits, sounds and channels, but it
+// does not tile the whole ocean surface the way a satellite basemap does --
+// large stretches of open water simply have no named polygon over them. A
+// water-fraction test built on that file under-counts exactly where the
+// land-absence test was already right, which would make a genuinely oceanic
+// viewport stop promoting AIS/tankers/ports/cables/GFW (MARITIME_PROMOTE) and
+// stop demoting cities/infra/airports/dams (MARITIME_DEMOTE, both in
+// scene.js) the moment marine data happened to land -- a real, silent,
+// mid-session regression, not a theoretical one. The water index is still the
+// right tool for a narrower question it answers exactly: which named body is
+// under the cursor right now (see findWaterAt, used directly by
+// createMapController.js's click/hover handling). "Is this viewport oceanic"
+// and "what is this point called" are different questions, and only the
+// second one belongs to the water index.
+
 // How coarsely the memo key rounds the viewport centre, per band. Deliberately
 // the same idea as the wind endpoint's snapped bbox cache key on the backend:
 // ordinary panning stays inside one cell and re-profiles zero times, and the

@@ -65,6 +65,11 @@ NOT_WARMED = {
     # storage.reference() per country, so the geometry is warm from Postgres
     # without this module restoring anything into its registry state.
     "admin1_boundaries": "the layer is read from Postgres per request, not from registry state",
+    # Same arrangement again, across three named datasets instead of one
+    # country list (see backend/sources/water_bodies.py): registry state holds
+    # only the marine/lakes/rivers feature counts, and the geometry itself is
+    # read from Postgres by whichever endpoint a later task adds.
+    "water_bodies": "the layer is read from Postgres per request, not from registry state",
 }
 
 _WRITE_CALLS = ("record_snapshot", "record_reference")

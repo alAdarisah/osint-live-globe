@@ -35,6 +35,42 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # coordinates are on the airports layer -- so it writes one keyed
         # document and app.py reads that table directly.
         "backend.sources.airfield_activity",
+        # Finds vessel dwells near a port in the AIS movement log. Publishes
+        # no layer either -- it writes vessel_port_calls rows, read per
+        # vessel or per port rather than served whole.
+        "backend.refine.port_calls",
+        # Cargo class and laden/ballast state per hull. Publishes no layer
+        # either -- one reference_snapshots document keyed by MMSI, attached
+        # to the ais layer's own coordinates rather than carrying its own.
+        "backend.refine.vessel_profile",
+        # AIS traffic grid. Publishes no layer either -- it writes lane_cells
+        # rows, a grid rather than a point per ship, and GET /api/lanes reads
+        # that table directly.
+        "backend.refine.lane_density",
+        # Departure/arrival legs derived from the ADS-B movement log, the
+        # aviation twin of port_calls. Publishes no layer either -- it writes
+        # flight_legs rows, read per airframe by GET /api/aircraft/{icao24}.
+        "backend.refine.flight_legs",
+        # Navy-classified AIS presence per theatre and per port, with a 7-day
+        # trend. Publishes no layer either -- one reference_snapshots
+        # document, read directly by GET /api/naval-presence.
+        "backend.refine.naval_presence",
+        # Which dams, power plants, cable landings, airfields and ports have
+        # the most conflict events inside their own uncertainty radius, over
+        # a 30-day window. Publishes no layer either -- one reference_
+        # snapshots document, read directly by GET /api/infra-risk.
+        "backend.refine.infra_risk",
+        # Whether a country's IODA outage score spikes at the same time as a
+        # conflict event lands near one of its submarine-cable landings.
+        # Publishes no layer either -- one reference_snapshots document, read
+        # directly by GET /api/cable-outage-risk.
+        "backend.refine.cable_outage",
+        # Aircraft whose own reported track does something physically
+        # implausible while sitting inside one of gpsjam.org's currently
+        # worst-affected cells. Publishes no layer either -- one
+        # reference_snapshots document, read directly by
+        # GET /api/jam-crosscheck and by GET /api/aircraft/{icao24}.
+        "backend.refine.jam_crosscheck",
     }
 
 
