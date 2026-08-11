@@ -1847,6 +1847,32 @@ html, body {
 #cableOutagePanel.collapsed .notable-caret { transform: rotate(-90deg); }
 #cableOutagePanel.collapsed .notable-header { border-bottom: none; }
 
+/* Task 41: SanctionsBoard.jsx -- stacked above #cableOutagePanel in the same
+   left-hand corner, for the same reason #cableOutagePanel stacks above
+   #infraRiskPanel: all five start collapsed, so by default this sits just
+   above #cableOutagePanel's collapsed header with a small gap. Same generic
+   .notable-header/.notable-list/.notable-item styling as the other four. */
+#sanctionsBoard {
+  position: fixed;
+  left: 14px;
+  bottom: 286px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#sanctionsBoard.collapsed .notable-caret { transform: rotate(-90deg); }
+#sanctionsBoard.collapsed .notable-header { border-bottom: none; }
+
 /* Persistent country details widget (CountryInfoCard.jsx) -- replaces the
    old Leaflet popup on country click so pan/zoom keep working while it's
    open. Reuses countryPopupHtml()'s markup verbatim, so it needs the same

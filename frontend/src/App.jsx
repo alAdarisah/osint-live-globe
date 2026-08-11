@@ -33,6 +33,7 @@ import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
 import CableOutagePanel from "./components/CableOutagePanel";
 import ChokepointPanel from "./components/ChokepointPanel";
 import InfraRiskPanel from "./components/InfraRiskPanel";
+import SanctionsBoard from "./components/SanctionsBoard";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
@@ -944,6 +945,18 @@ export default function App() {
           style.css's #cableOutagePanel rule); self-contained, so mounting
           it is this one line too. */}
       <CableOutagePanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+
+      {/* Task 41: every OFAC- and OpenSanctions-matched vessel and aircraft
+          this map's live AIS/ADS-B feed currently carries, aggregated into
+          one scannable board -- see SanctionsBoard.jsx's own module note.
+          Stacked above CableOutagePanel in the same left-hand corner; unlike
+          the four panels above it, this one reads live entity records via
+          mapApi.recordsFor (the same accessor AdminPanel's DataEditor uses)
+          rather than fetching its own document, and needs `health` to tell
+          "checked and found nothing" apart from "the reference lists or the
+          entity feed have not loaded" -- see that component's own note on
+          why an empty board is not always the same empty board. */}
+      <SanctionsBoard recordsFor={mapApi.recordsFor} health={health} onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
 
       {/* Opened by picking a theatre in the RegionBar above, which is a public
           control -- so gating this behind Admin Mode meant a reader could make
