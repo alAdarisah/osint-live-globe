@@ -48,6 +48,18 @@ test("a busy board beats faster than a quiet one", () => {
   assert.ok(busy < quiet, `expected ${busy}s to be quicker than ${quiet}s`);
 });
 
+test("a quiet board is actually reachable, not pinned at maximum", () => {
+  // Regression for the bug where the header was fed the raw, uncapped feed
+  // count (which saturates BUSY_EVENTS on its own) instead of the scoped,
+  // filtered count it was calibrated against -- the quiet branch existed in
+  // code but nothing ever hit it.
+  const busy = Number.parseFloat(ratePeriod(60));
+  for (const quiet of [0, 3]) {
+    const period = Number.parseFloat(ratePeriod(quiet));
+    assert.ok(period > busy, `ratePeriod(${quiet}) gave ${period}s, expected slower than ${busy}s at 60`);
+  }
+});
+
 test("the header always breathes", () => {
   // Unlike a source dot, this one never goes still: a stopped header would read
   // as a broken panel rather than as a quiet world.
