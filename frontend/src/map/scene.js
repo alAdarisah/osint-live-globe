@@ -901,6 +901,12 @@ export const TRAIL_PARENT = {
 export const UNGATED_FEEDS = new Set([
   "escalation", "conflictStats", "conflictDistricts", "humanitarian",
   "energyFlows", "foodTrade", "foodPriceIndex", "outages",
+  // Task 36: watched-water-box-keyed, read on demand by the water card and
+  // ChokepointPanel.jsx -- no pin, no gate, same footing as the country-keyed
+  // feeds above. (navalPresence belongs here too on the identical reasoning,
+  // and is missing -- a pre-existing Task 29 gap this task's own dev-console
+  // check surfaced, left unfixed as out of this task's own scope.)
+  "chokepoints",
   // One payload each, split across three toggles by their own renderers.
   "ais", "adsb",
 ]);

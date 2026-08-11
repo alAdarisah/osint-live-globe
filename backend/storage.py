@@ -725,15 +725,30 @@ def _conflict_row(item: dict, now: datetime) -> tuple | None:
     )
 
 
-async def record_reference(name: str, payload) -> None:
+async def record_reference(name: str, payload) -> bool:
     """Stores a whole-document source (countries GeoJSON, HDX series dict).
 
     These have no per-row lat/lon to snapshot -- they're one big document
     that's replaced wholesale on each refresh, so they get their own table
     rather than being forced into entity_latest's point shape.
+
+    Returns whether the write is now durable, the same bool
+    record_port_calls/upsert_lane_cells return and for the same reason: most
+    of this function's ~30 callers just fire the write and move on (a stale
+    document is fine until the next poll overwrites it), but a caller reading
+    an ever-advancing cursor over a pruned table -- backend/refine/
+    lane_density.py's chokepoint accounting is the first one -- cannot make
+    that assumption, and needs to know a write actually landed before it can
+    safely let the cursor move past the rows that produced it. `payload is
+    None` returns True (nothing to persist is not a failure, the same
+    reasoning upsert_lane_cells's `if not rows: return True` gives); no pool
+    returns False, matching upsert_lane_cells's own "can't confirm durability
+    without one".
     """
-    if _pool is None or payload is None:
-        return
+    if payload is None:
+        return True
+    if _pool is None:
+        return False
     try:
         async with _pool.acquire() as conn:
             await conn.execute(
@@ -743,8 +758,10 @@ async def record_reference(name: str, payload) -> None:
                      payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at""",
                 name, json.dumps(payload, default=str), datetime.now(timezone.utc),
             )
+        return True
     except Exception:  # noqa: BLE001
         log.exception("Failed to record reference snapshot %r", name)
+        return False
 
 
 async def reference(name: str):

@@ -1840,6 +1840,44 @@ async def naval_presence_endpoint():
     return JSONResponse(cached, headers={"Cache-Control": "no-store"})
 
 
+# Same shape and the same reasoning as the naval-presence cache just above:
+# one stored document written by the refine process (backend/refine/
+# lane_density.py's chokepoint accounting, which rides lane_density's own
+# LANE_DENSITY_INTERVAL cadence -- once an hour by default), read by a
+# frontend on its own slower timer.
+_CHOKEPOINTS_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("chokepoints", _CHOKEPOINTS_CACHE)
+
+
+@app.get("/api/chokepoints")
+async def chokepoints_endpoint():
+    """Distinct hulls this map's own AIS coverage has recorded crossing each
+    config.WATCHED_WATERS box, per day, by cargo class, with a 30-day trend
+    (backend/refine/lane_density.py's chokepoint accounting, Task 36).
+
+    An empty object -- not an error -- before the refine process has written
+    a pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document exists,
+    every trend entry carries a `status` of "counted", "partial" or
+    "missing" (see lane_density.build_chokepoint_document's own docstring for
+    what each means) -- a day this job never got to look at is served as
+    `total: null` under `status: "missing"`, never as a `0` a reader could
+    mistake for an observed absence of traffic. `note` restates the coverage
+    caveat this data rests on: a distinct-hull count is derived by counting
+    MMSIs this map actually heard, not a traffic census, and AIS reception is
+    not uniform across the eight boxes or across time.
+
+    Reads storage.reference(lane_density.CHOKEPOINT_DOC_NAME) only -- never
+    entity_history, the same "derived product read from its own compact
+    table" rule every other refine-derived endpoint here follows.
+    """
+    cached = _CHOKEPOINTS_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(lane_density.CHOKEPOINT_DOC_NAME) or {}
+        _CHOKEPOINTS_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
 async def _replay_source(kind, registry_key, ts_fn, at, bounds, window_seconds=None):
     """One replayed layer: the live payload time-filtered to `at`, falling back
     to what the database recorded by then once `at` predates the live window.

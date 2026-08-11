@@ -466,6 +466,35 @@ def _parse_bboxes(raw: str) -> list[tuple[float, float, float, float]]:
 
 WATCHED_WATERS = _parse_bboxes(os.getenv("WATCHED_WATERS", _DEFAULT_WATCHED_WATERS))
 
+# Human labels for the eight WATCHED_WATERS boxes above, in the same order --
+# the same eight names that used to live only as trailing comments on
+# _DEFAULT_WATCHED_WATERS and as a hand-kept mirror in frontend/src/map/
+# popups.js (WATCHED_WATERS there, for the Dark Vessels chokepoint fold).
+# Task 36 is the first thing that has to *say* a box's name from the backend
+# (the /api/chokepoints response, and the reference_snapshots document
+# behind it), so the names get a real home here rather than a second
+# hand-kept copy.
+#
+# Paired with WATCHED_WATERS by position, not by a dict keyed on the box
+# itself: the env var a deployment can override carries four numbers per
+# box and no name, so there is no label to read back out of it. A deployment
+# that overrides WATCHED_WATERS with a different box count desyncs this list
+# from what it is naming -- the same documented, accepted gap the frontend's
+# own mirror already carries (see its comment in popups.js), not a new one
+# this task introduces. zip() in every reader of this pair truncates to the
+# shorter of the two rather than raising, so a shortened override degrades to
+# "the trailing boxes go unnamed" rather than a startup crash.
+WATCHED_WATERS_LABELS = [
+    "Black Sea",
+    "Red Sea",
+    "Gulf of Aden / Bab-el-Mandeb approach",
+    "Strait of Hormuz / Persian Gulf",
+    "Taiwan Strait",
+    "South China Sea",
+    "Eastern Mediterranean",
+    "Suez Canal",
+]
+
 # What the AIS stream subscribes to, which is now the whole planet. Same format
 # as WATCHED_WATERS above and deliberately a separate setting: this one is about
 # what we collect, that one is about what we are prepared to draw a conclusion

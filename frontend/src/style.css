@@ -1766,6 +1766,35 @@ html, body {
 #airfieldPanel.collapsed .notable-caret { transform: rotate(-90deg); }
 #airfieldPanel.collapsed .notable-header { border-bottom: none; }
 
+/* Task 36: ChokepointPanel.jsx -- stacked above #airfieldPanel in the same
+   left-hand corner rather than given a fourth corner of its own: both start
+   collapsed (see the component's own note), so by default this sits just
+   above #airfieldPanel's collapsed header with a small gap, and only
+   overlaps it if a reader expands #airfieldPanel without first dragging
+   either one -- exactly the kind of thing useDraggablePanel.js's own stored
+   positions exist to let a reader fix once and keep. Same generic
+   .notable-header/.notable-list/.notable-item styling as both panels above. */
+#chokepointPanel {
+  position: fixed;
+  left: 14px;
+  bottom: 130px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#chokepointPanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#chokepointPanel.collapsed .notable-header { border-bottom: none; }
+
 /* Persistent country details widget (CountryInfoCard.jsx) -- replaces the
    old Leaflet popup on country click so pan/zoom keep working while it's
    open. Reuses countryPopupHtml()'s markup verbatim, so it needs the same

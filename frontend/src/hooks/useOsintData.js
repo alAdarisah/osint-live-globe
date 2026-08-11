@@ -195,6 +195,14 @@ const POLL_CONFIG = [
   // same "poll no faster than the document actually changes" reasoning as
   // escalation/airfieldActivity above.
   { key: "navalPresence", url: "/api/naval-presence", intervalMs: 15 * 60000 },
+  // Distinct hulls this map has recorded crossing each watched chokepoint
+  // box, per day, with a 30-day trend (backend/refine/lane_density.py's
+  // chokepoint accounting, Task 36). Recomputed there on lane_density's own
+  // LANE_DENSITY_INTERVAL cadence (an hour by default) -- same "poll no
+  // faster than the document actually changes" reasoning as navalPresence
+  // just above, at a slightly less eager interval to match the slower
+  // underlying cadence.
+  { key: "chokepoints", url: "/api/chokepoints", intervalMs: 20 * 60000 },
   // Global Fishing Watch's AIS disabling events. Refetched server-side every six
   // hours, and the batch itself is five or more days behind, so the hourly poll
   // is only about a long-lived tab noticing a new batch. Most of these return

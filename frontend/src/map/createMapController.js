@@ -508,7 +508,12 @@ const COUNTRY_CARD_FEEDS = new Set([
 // Task 29: navalPresence added -- the water card's own "three naval hulls in
 // this sea" line reads it directly (buildWaterTraffic), and it recomputes
 // every 15 minutes, well inside a plausible card session.
-const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps", "navalPresence"]);
+//
+// Task 36: chokepoints added for the same reason -- the water card's own
+// "Chokepoint traffic" fold reads it directly, and lane_density's own
+// LANE_DENSITY_INTERVAL cadence (an hour by default) is well inside a
+// plausible card session too.
+const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps", "navalPresence", "chokepoints"]);
 
 // The admin-1/admin-2 card counterpart to COUNTRY_CARD_FEEDS/WATER_CARD_FEEDS
 // above -- same reasoning: an open card is built from `raw` at the moment it
@@ -925,6 +930,13 @@ export function createMapController(container, initial, callbacks) {
     // themselves already draw as ordinary AIS navy pins; this is the
     // per-theatre/per-port trend over them).
     navalPresence: {},
+    // Task 36: backend/refine/lane_density.py's chokepoint accounting,
+    // keyed by the same box labels config.WATCHED_WATERS_LABELS names
+    // server-side. Same footing as navalPresence just above: a derived
+    // reference document, not a layer of its own -- the hulls it counts
+    // already draw as ordinary AIS pins, and ChokepointPanel.jsx polls this
+    // same endpoint independently for its own standalone view.
+    chokepoints: {},
     // Global Fishing Watch's two published maritime layers. Kept apart from
     // darkVessels above on purpose: that array is this app's inference from its
     // own three-day AIS history, these are another organisation's findings
@@ -7635,9 +7647,21 @@ export function createMapController(container, initial, callbacks) {
       // electricity flow is an edge between two countries and a marketing-year
       // balance sheet is a forecast about a whole state, so neither has a point
       // to draw. Both surface as a country-card section and a country fill.
+      //
+      // Task 36: chokepoints joins for the identical reason -- {boxes: {...}}
+      // keyed by watched-water label, read on demand by buildWaterChokepointTraffic
+      // and ChokepointPanel.jsx, never a point array. Found by exercising this
+      // panel against a live poll: navalPresence (Task 29) is the same shape
+      // and was never added here, so every navalPresence poll has been hitting
+      // the `renderMarkerLayer(key)` catch-all below and throwing "items is not
+      // iterable" (caught by useOsintData.js's per-poll try/catch, so silent
+      // beyond a console warning) since it shipped -- a pre-existing gap this
+      // task's own live check happened to surface, not something introduced
+      // here. Left unfixed as a drive-by outside Task 36's own scope; flagged
+      // separately rather than folded into this diff.
       else if (key === "conflictStats" || key === "escalation" || key === "conflictDistricts"
              || key === "humanitarian" || key === "energyFlows" || key === "foodTrade"
-             || key === "foodPriceIndex" || key === "fetchCoverage") {
+             || key === "foodPriceIndex" || key === "fetchCoverage" || key === "chokepoints") {
         /* reference data read on demand by popups.js -- no marker layer */
       }
       // Keyed by airfield ident, not a point layer of its own: it re-sizes and

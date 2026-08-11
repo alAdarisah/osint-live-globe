@@ -308,6 +308,78 @@ test("waterCardSections -- section shape and empty-section dropping", async (t) 
   });
 });
 
+test("waterCardSections -- chokepoint traffic fold (Task 36)", async (t) => {
+  const [hormuz] = buildWaterIndex([
+    feature({ id: "marine:36a", name: "Hormuz-ish", class: "strait", bbox: [25, 50, 28, 55] }, square(50, 25, 55, 28)),
+  ]);
+  const [farSea] = buildWaterIndex([
+    feature({ id: "marine:36b", name: "Nowhere Sea", class: "sea", bbox: [-40, -40, -35, -35] }, square(-40, -40, -35, -35)),
+  ]);
+
+  await t.test("outside every watched box: the fold is absent, not empty", () => {
+    const { sections } = waterCardSections(farSea, emptyRaw(), null);
+    assert.equal(sections.find((s) => s.id === "chokepointTraffic"), undefined);
+  });
+
+  await t.test("inside a watched box but the refine job has not written a pass yet", () => {
+    const { sections } = waterCardSections(hormuz, emptyRaw(), null);
+    const fold = sections.find((s) => s.id === "chokepointTraffic");
+    assert.ok(fold, "the fold still appears -- it has something to say (that nothing is recorded yet)");
+    assert.match(fold.html, /has not written a pass yet/);
+  });
+
+  await t.test("a missing day never reads as a zero, and today's count/by_class render", () => {
+    const raw = {
+      ...emptyRaw(),
+      chokepoints: {
+        note: "Distinct hulls this map's own AIS coverage has recorded...",
+        boxes: {
+          "Strait of Hormuz / Persian Gulf": {
+            label: "Strait of Hormuz / Persian Gulf",
+            bounds: [24, 48, 30, 57],
+            trend: [
+              { date: "2026-08-01", status: "missing", total: null, by_class: null },
+              { date: "2026-08-02", status: "counted", total: 0, by_class: {} },
+              { date: "2026-08-03", status: "partial", total: 4, by_class: { tanker: 3, cargo: 1 } },
+            ],
+            today: { date: "2026-08-03", status: "partial", total: 4, by_class: { tanker: 3, cargo: 1 } },
+          },
+        },
+      },
+    };
+    const { sections } = waterCardSections(hormuz, raw, null);
+    const fold = sections.find((s) => s.id === "chokepointTraffic");
+    assert.ok(fold);
+    assert.match(fold.html, /<b>4<\/b> distinct hulls/);
+    assert.match(fold.html, /still counting/);
+    assert.match(fold.html, /Tanker/);
+    assert.match(fold.html, /Cargo/);
+    assert.match(fold.html, /08-01: &mdash;/, "the missing day renders as an em dash, never as 0");
+    assert.doesNotMatch(fold.html, /08-01: 0/);
+    assert.match(fold.html, /1 not observed/);
+  });
+
+  await t.test("a fully counted day with zero traffic renders as a real, explicit zero", () => {
+    const raw = {
+      ...emptyRaw(),
+      chokepoints: {
+        boxes: {
+          "Strait of Hormuz / Persian Gulf": {
+            label: "Strait of Hormuz / Persian Gulf",
+            bounds: [24, 48, 30, 57],
+            trend: [{ date: "2026-08-02", status: "counted", total: 0, by_class: {} }],
+            today: { date: "2026-08-02", status: "counted", total: 0, by_class: {} },
+          },
+        },
+      },
+    };
+    const { sections } = waterCardSections(hormuz, raw, null);
+    const fold = sections.find((s) => s.id === "chokepointTraffic");
+    assert.match(fold.html, /<b>0<\/b> distinct hulls/);
+    assert.match(fold.html, /\(counted\)/);
+  });
+});
+
 // createMapController.js's waterCardFor (the wiring path a click actually
 // runs) is not importable here -- it lives inside createMapController's own
 // closure, which needs far more of the DOM/Leaflet surface than the L.geoJSON

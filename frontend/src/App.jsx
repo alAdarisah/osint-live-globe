@@ -30,6 +30,7 @@ import RegionBar from "./components/RegionBar";
 import SquawkAlertStrip from "./components/SquawkAlertStrip";
 import IntelPanel from "./components/IntelPanel";
 import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
+import ChokepointPanel from "./components/ChokepointPanel";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
@@ -898,6 +899,14 @@ export default function App() {
           than riding useOsintData's poller table), so mounting it is this one
           line. */}
       <AirfieldActivityPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+
+      {/* Task 36: GET /api/chokepoints has a document (backend/refine/
+          lane_density.py's chokepoint accounting) and nothing in the
+          frontend called it until this panel -- see ChokepointPanel.jsx's
+          own module note. Self-contained (its own fetch/interval, like
+          AirfieldActivityPanel just above), so mounting it is this one
+          line too. */}
+      <ChokepointPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
 
       {/* Opened by picking a theatre in the RegionBar above, which is a public
           control -- so gating this behind Admin Mode meant a reader could make

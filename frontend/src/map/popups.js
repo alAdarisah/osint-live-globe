@@ -2326,6 +2326,72 @@ function buildWaterChokepoint(feature) {
       unaffected and still run here.</p>`;
 }
 
+// Task 36: the seven cargo-class buckets backend/refine/vessel_profile.py's
+// cargo_class() returns. A hull whose ship type was never decoded has no key
+// in by_class at all (see lane_density.compute_chokepoints) rather than
+// falling into "other" -- so this table is never consulted for that case,
+// and nothing here needs an entry for it.
+const CHOKEPOINT_CLASS_LABEL = {
+  tanker: "Tanker", cargo: "Cargo", fishing: "Fishing", passenger: "Passenger",
+  tug: "Tug", naval: "Naval", other: "Other",
+};
+
+const CHOKEPOINT_STATUS_WORD = { counted: "counted", partial: "still counting", missing: "not observed" };
+
+// Task 36's own fold, distinct from buildWaterChokepoint above: that one is
+// about what the Dark Vessels layer is willing to claim, this one is the
+// actual distinct-hull count GET /api/chokepoints serves. Present only when
+// this water body overlaps one of the eight watched boxes -- the same test
+// buildWaterChokepoint uses -- because a box's own count is the only thing
+// this section has anything to say about.
+//
+// A missing day is spelled out as an em dash in the 7-day line and folded
+// into its own "N not observed" sentence, on purpose: this is the single
+// most repeated defect flagged across this plan's own reviews (a day with no
+// data rendering as zero traffic), and a reader skimming a popup is exactly
+// who would otherwise misread "0" as "nothing crossed" rather than "this job
+// never looked".
+function buildWaterChokepointTraffic(feature, raw) {
+  const hit = watchedWaterOverlap(feature);
+  if (!hit) return ""; // outside every watched box -- this section has nothing to say
+  const box = raw.chokepoints?.boxes?.[hit.label];
+  if (!box || !Array.isArray(box.trend) || !box.trend.length) {
+    return `<p class="meta">No chokepoint count recorded yet for <b>${esc(hit.label)}</b> &mdash; this map's
+      own distinct-hull counter (backend/refine/lane_density.py) has not written a pass yet.</p>`;
+  }
+  const today = box.today || box.trend[box.trend.length - 1];
+  const statusWord = CHOKEPOINT_STATUS_WORD[today.status] || today.status;
+  const totalLine = today.total == null
+    ? `<b>${esc(today.date)}</b>: not observed &mdash; this job has not looked at this day yet, which is
+       not the same as zero traffic.`
+    : `<b>${esc(today.date)}</b>: <b>${fmtNumber(today.total)}</b> distinct hull${today.total === 1 ? "" : "s"}
+       (${esc(statusWord)}).`;
+  const classEntries = today.by_class ? Object.entries(today.by_class).filter(([, n]) => n > 0) : [];
+  const classRows = classEntries.length
+    ? `<div class="cstats">${classEntries
+        .sort((a, b) => b[1] - a[1])
+        .map(([cls, n]) => statRow("", CHOKEPOINT_CLASS_LABEL[cls] || cls, n))
+        .join("")}</div>`
+    : "";
+  const observed = box.trend.filter((d) => d.total != null);
+  const missing = box.trend.length - observed.length;
+  const recentLine = box.trend
+    .slice(-7)
+    .map((d) => `${esc(d.date.slice(5))}: ${d.total == null ? "&mdash;" : fmtNumber(d.total)}`)
+    .join(" &middot; ");
+  return `
+    <div>${totalLine}</div>
+    ${classRows}
+    <p class="meta">Last 7 days: ${recentLine}. (&ldquo;&mdash;&rdquo; marks a day this job never observed,
+      not a day with no traffic.)</p>
+    <p class="meta">${esc(String(box.trend.length))}-day window: ${observed.length}
+      day${observed.length === 1 ? "" : "s"} observed${missing ? `, ${missing} not observed` : ""}.</p>
+    <p class="meta">Distinct hulls, by cargo class, <i>derived</i> by counting distinct MMSIs in this map's
+      own aisstream.io AIS history (backend/refine/lane_density.py) &mdash; not a published source, and not
+      a traffic census: AIS reception is not uniform, so a quiet day can mean genuinely little traffic or it
+      can mean this map's own receivers simply heard less that day.</p>`;
+}
+
 const INFRA_LIST_CAP = 6;
 
 function infraListRows(items, kind, nameOf) {
@@ -2425,6 +2491,7 @@ export function waterCardSections(feature, raw, bounds) {
     { id: "traffic", title: "Traffic now", html: buildWaterTraffic(feature, raw, bounds) },
     { id: "dark", title: "Dark activity", html: buildWaterDark(feature, raw, bounds) },
     { id: "chokepoint", title: "Chokepoint watch", html: buildWaterChokepoint(feature) },
+    { id: "chokepointTraffic", title: "Chokepoint traffic", html: buildWaterChokepointTraffic(feature, raw) },
     { id: "infrastructure", title: "Infrastructure", html: buildWaterInfrastructure(feature, raw, bounds) },
     { id: "incidents", title: "Incidents", html: buildWaterIncidents(feature, raw, bounds) },
     { id: "sources", title: "Sources & caveats", html: buildWaterSources() },

@@ -186,6 +186,15 @@ class _FakeStorage:
 
     async def record_reference(self, name, payload):
         self.docs[name] = payload
+        # True (durable write) by default -- Task 36's run_once now checks
+        # this return value to gate the cursor advance, mirroring
+        # storage.record_reference's own real signature. Every test in this
+        # file drives a batch through run_once, which now also writes and
+        # reads the chokepoint_state/chokepoint_transits documents through
+        # this same method (see lane_density.CHOKEPOINT_STATE_NAME/
+        # CHOKEPOINT_DOC_NAME) -- returning True here is what keeps every
+        # test written before Task 36 passing without having to know that.
+        return True
 
     async def upsert_lane_cells(self, rows):
         self.lane_batches.append(rows)
@@ -239,7 +248,17 @@ def test_a_pass_with_nothing_new_leaves_the_cursor_untouched(monkeypatch):
 def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     """A batch storage.upsert_lane_cells fails to write must be retried, not
     silently dropped -- entity_history is pruned at three days, so a batch
-    read and never durably written would otherwise be gone for good."""
+    read and never durably written would otherwise be gone for good.
+
+    Task 36's chokepoint writes run and durably succeed *before*
+    upsert_lane_cells is even attempted (see run_once's own docstring on why
+    that order, not the reverse, is what keeps a later failure safe to
+    retry) -- so this failure leaves the chokepoint documents written, just
+    not the cursor. That is the intended difference from the pre-Task-36
+    world this test used to assert ("nothing durable happened" at all):
+    chokepoint accounting is idempotent under replay, so writing it ahead of
+    a write that is not costs nothing on a retry.
+    """
     rows = [pos(1, 0.0, 10.0, 10.0, "111", course=90.0)]
     fake = _FakeStorage(rows, write_ok=False)
     monkeypatch.setattr(lane_density, "storage", fake)
@@ -247,7 +266,8 @@ def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     result = _run(lane_density.run_once())
     assert result["ok"] is False
     assert result["read"] == 1
-    assert fake.docs == {}  # nothing durable happened: no cursor stored
+    assert lane_density.CURSOR_NAME not in fake.docs  # the cursor itself was never stored
+    assert lane_density.CHOKEPOINT_DOC_NAME in fake.docs  # but the idempotent chokepoint write landed
 
     # The database recovers; the same batch is offered again, not skipped.
     fake.write_ok = True
