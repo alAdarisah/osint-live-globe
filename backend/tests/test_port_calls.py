@@ -209,14 +209,22 @@ class _FakeStorage:
     default (a healthy database), settable to False to play back the one
     failure mode run_once has to survive without losing data (see Important 1
     of the Task 15 review and run_once's docstring).
+
+    `fail_names` fails only the named reference_snapshots writes (pre-merge
+    review, Critical: record_port_calls can durably succeed while the state
+    document write that follows it fails on its own -- write_ok alone can
+    only fail everything together, which never exercises that interleaving --
+    see test_a_failed_state_write_holds_the_cursor_back_and_does_not_double_
+    the_open_call below), matching test_jam_crosscheck.py's own _FakeStorage.
     """
 
-    def __init__(self, rows, write_ok=True):
+    def __init__(self, rows, write_ok=True, fail_names=frozenset()):
         self.history = rows
         self.docs = {}
         self.calls = []
         self.port_call_batches = []
         self.write_ok = write_ok
+        self.fail_names = set(fail_names)
 
     async def entity_history_since(self, kind, after_id, limit):
         self.calls.append(after_id)
@@ -226,7 +234,10 @@ class _FakeStorage:
         return self.docs.get(name)
 
     async def record_reference(self, name, payload):
+        if not self.write_ok or name in self.fail_names:
+            return False
         self.docs[name] = payload
+        return True
 
     async def entity_latest(self, kind):
         return []
@@ -305,6 +316,51 @@ def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     assert retry["calls"] == 1
     assert fake.calls == [0, 0]  # both passes started from the same cursor
     assert fake.docs["port_calls_cursor"] == {"last_id": 2}
+
+
+def test_a_failed_state_write_holds_the_cursor_back_and_does_not_double_the_open_call(monkeypatch):
+    """Pre-merge review, Critical: record_port_calls durably wrote the open
+    call, but the state document write that follows it failed on its own --
+    the old code discarded that bool and wrote the cursor anyway, which lost
+    the only durable record that this hull already has an open call here.
+    The vessel's *next* dwell at the same port would then open a second,
+    unrelated call rather than ever closing the first one.
+
+    Unlike test_a_failed_write_holds_the_cursor_back_for_a_retry above (which
+    fails record_port_calls itself, via write_ok=False), this fails *only*
+    the state write -- record_port_calls succeeds and is durably recorded --
+    which is the one interleaving that test never exercised."""
+    rows = [pos(1, 0.0), pos(2, HOUR)]  # opens a call
+    fake = _FakeStorage(rows, fail_names={pc.STATE_NAME})
+    monkeypatch.setattr(pc, "storage", fake)
+    _stub_ports(monkeypatch)
+
+    first = _run(pc.run_once())
+    assert first["ok"] is False
+    assert first["calls"] == 0
+    # The call itself did land durably (record_port_calls is idempotent and
+    # ran first) -- what's missing is the state that would stop it being
+    # opened a second time.
+    assert len(fake.port_call_batches) == 1
+    assert fake.port_call_batches[0][0]["arrived_at"] == 0.0
+    # Nothing else is durable: neither the state document nor the cursor.
+    assert pc.STATE_NAME not in fake.docs
+    assert pc.CURSOR_NAME not in fake.docs
+
+    # The database recovers; the same batch -- read from the same
+    # untouched cursor, against the same (still-empty) state -- is replayed.
+    fake.fail_names.clear()
+    retry = _run(pc.run_once())
+    assert retry["ok"] is True
+    assert retry["calls"] == 1
+    assert fake.calls == [0, 0]  # both passes started from the same cursor
+    assert fake.docs[pc.CURSOR_NAME] == {"last_id": 2}
+
+    # Idempotent replay, not a second call: the retry's own batch is exactly
+    # the first attempt's batch, not a second dwell opened alongside it.
+    assert len(fake.port_call_batches) == 2
+    assert fake.port_call_batches[0] == fake.port_call_batches[1]
+    assert fake.docs[pc.STATE_NAME][MMSI]["run"]["phase"] == "open"
 
 
 def test_apply_positions_does_not_mutate_the_state_it_was_given():
