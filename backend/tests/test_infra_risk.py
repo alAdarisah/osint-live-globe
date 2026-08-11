@@ -264,10 +264,36 @@ def test_an_empty_input_is_not_an_error():
     assert doc["events_without_radius"] == 0
 
 
-def test_an_event_with_no_coordinate_is_skipped_rather_than_raising():
+def test_an_event_with_no_coordinate_is_counted_under_its_own_bucket_not_dropped():
+    """conflict_events.lat/lon are nullable at the schema level even though
+    the only writer refuses to insert a row without them (see storage.py).
+    A coordinate-less row cannot be searched at all -- there is no point to
+    draw a circle around -- and it must not vanish from every count: it is
+    neither `events_searched` (nothing was searched) nor
+    `events_without_radius` (that bucket means "we know where this
+    happened, just not how sure we are") -- it gets its own
+    `events_missing_coordinate` bucket instead."""
     index = ProximityIndex([{"lat": 10.0, "lon": 10.0, "site_id": "dam:1", "category": "dam", "name": "Dam"}])
     events = [{"id": "e1", "lat": None, "lon": None, "geo_radius_km": 5.0}]
     doc = infra_risk.build_document(events, index, _counts(dam=1), NOW)
     assert doc["events_searched"] == 0
     assert doc["events_without_radius"] == 0
+    assert doc["events_missing_coordinate"] == 1
     assert doc["top"] == []
+
+
+def test_a_missing_coordinate_and_a_missing_radius_are_counted_in_different_buckets():
+    events = [
+        {"id": "e1", "lat": None, "lon": None, "geo_radius_km": 5.0},  # no coordinate at all
+        {"id": "e2", "lat": 10.0, "lon": 10.0, "geo_radius_km": None},  # a real place, just no radius
+    ]
+    doc = infra_risk.build_document(events, ProximityIndex([]), _counts(), NOW)
+    assert doc["events_missing_coordinate"] == 1
+    assert doc["events_without_radius"] == 1
+    assert doc["events_searched"] == 0
+
+
+def test_missing_coordinate_count_defaults_to_zero_and_is_always_present():
+    doc = infra_risk.build_document([], ProximityIndex([]), _counts(), NOW)
+    assert doc["events_missing_coordinate"] == 0
+    assert "events_missing_coordinate" in doc

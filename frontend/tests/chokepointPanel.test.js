@@ -9,7 +9,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  CHOKEPOINT_SORT_KEYS, barHeight, boxCenter, chokepointRows, sortChokepoints, todayEntry, trendBars,
+  CHOKEPOINT_SORT_KEYS, barHeight, boxCenter, chokepointRows, hasChokepointDocument, sortChokepoints, todayEntry,
+  trendBars,
 } from "../src/components/chokepointPanelLogic.js";
 
 function box(label, overrides = {}) {
@@ -34,6 +35,22 @@ test("chokepointRows is empty, not an error, before anything has landed", () => 
   assert.deepEqual(chokepointRows(null), []);
   assert.deepEqual(chokepointRows(undefined), []);
   assert.deepEqual(chokepointRows({}), []);
+});
+
+// --- hasChokepointDocument (Task 37 review: fetch-failed vs not-computed vs empty) ---
+
+test("hasChokepointDocument: a real document (a boxes key, even one with content) is true", () => {
+  assert.equal(hasChokepointDocument({ boxes: { A: box("A") } }), true);
+});
+
+test("hasChokepointDocument: GET /api/chokepoints' own \"not computed yet\" {} is false", () => {
+  assert.equal(hasChokepointDocument({}), false);
+});
+
+test("hasChokepointDocument: null, undefined or a non-object is false, not a throw", () => {
+  assert.equal(hasChokepointDocument(null), false);
+  assert.equal(hasChokepointDocument(undefined), false);
+  assert.equal(hasChokepointDocument("not a document"), false);
 });
 
 // --- todayEntry ----------------------------------------------------------

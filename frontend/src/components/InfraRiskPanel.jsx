@@ -23,8 +23,9 @@ import { fetchJson } from "../api";
 import { fmtNumber } from "../utils/format";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import {
-  CATEGORY_LABEL, INFRA_RISK_SORT_KEYS, emptyCategories, infraRiskRows, sortInfraRisk,
+  CATEGORY_LABEL, INFRA_RISK_SORT_KEYS, emptyCategories, hasInfraRiskDocument, infraRiskRows, sortInfraRisk,
 } from "./infraRiskPanelLogic";
+import { REFINE_PANEL_STATUS, REFINE_PANEL_STATUS_BADGE, REFINE_PANEL_STATUS_TEXT, classifyRefinePanelStatus } from "./refinePanelStatus";
 
 const SORT_LABEL = { event_count: "Events nearby", name: "Name" };
 
@@ -74,14 +75,27 @@ export default function InfraRiskPanel({ onLocate, isMobile }) {
   const [sortDir, setSortDir] = useState("desc");
 
   const [doc, setDoc] = useState(null);
+  const [hasFetchedOnce, setHasFetchedOnce] = useState(false);
+  const [fetchFailed, setFetchFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       fetchJson("/api/infra-risk")
         .then((data) => {
-          if (!cancelled) setDoc(data || {});
+          if (cancelled) return;
+          setDoc(data || {});
+          setHasFetchedOnce(true);
+          setFetchFailed(false);
         })
-        .catch(() => {}); // an empty panel on a failed fetch, not an error banner
+        .catch(() => {
+          // Task 37 review (Minor, escalated): a failed fetch used to render
+          // identically to "nothing to show yet" -- see
+          // refinePanelStatus.js and ChokepointPanel.jsx's identical note.
+          // Only flips the flag when no earlier attempt has ever succeeded
+          // changes what renders, so a transient hiccup after a working
+          // panel does not blank out data the reader already has.
+          if (!cancelled) setFetchFailed(true);
+        });
     };
     load();
     const id = setInterval(load, REFRESH_INTERVAL_MS);
@@ -91,11 +105,48 @@ export default function InfraRiskPanel({ onLocate, isMobile }) {
     };
   }, []);
 
+  const status = classifyRefinePanelStatus({
+    hasFetchedOnce, fetchFailed, hasDocument: hasInfraRiskDocument(doc),
+  });
+
   const rows = useMemo(() => sortInfraRisk(infraRiskRows(doc), sortKey, sortDir), [doc, sortKey, sortDir]);
   const missingCategories = useMemo(() => emptyCategories(doc), [doc]);
 
-  if (!doc || (doc.events_searched === undefined && doc.events_without_radius === undefined)) {
-    return null; // no document written yet -- nothing to show, not an empty shell
+  // LOADING: unchanged from before -- nothing renders until the first
+  // response (success or failure) lands.
+  if (status === REFINE_PANEL_STATUS.LOADING) return null;
+
+  // ERROR and MISSING both mean "there is nothing to rank", for two
+  // different reasons a reader must be able to tell apart -- see
+  // ChokepointPanel.jsx's identical handling, worded consistently with it
+  // on purpose (refinePanelStatus.js is the shared source for both).
+  if (status === REFINE_PANEL_STATUS.ERROR || status === REFINE_PANEL_STATUS.MISSING) {
+    return (
+      <aside id="infraRiskPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+        <div
+          {...handleProps}
+          className={`notable-header ${handleProps.className || ""}`}
+          role="button"
+          tabIndex={0}
+          aria-expanded={!collapsed}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              toggleCollapsed();
+            }
+          }}
+          onClick={isMobile ? toggleCollapsed : undefined}
+        >
+          <span className="notable-pulse" />
+          <span className="notable-title">INFRASTRUCTURE AT RISK</span>
+          <span className={`news-updated panel-status-${status}`}>{REFINE_PANEL_STATUS_BADGE[status]}</span>
+          <span className="notable-caret" aria-hidden="true">&#9662;</span>
+        </div>
+        {!collapsed && (
+          <p className="meta" style={{ padding: "4px 10px" }}>{REFINE_PANEL_STATUS_TEXT[status]}</p>
+        )}
+      </aside>
+    );
   }
 
   return (

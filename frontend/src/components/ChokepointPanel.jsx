@@ -22,8 +22,9 @@ import { fetchJson } from "../api";
 import { fmtNumber } from "../utils/format";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import {
-  CHOKEPOINT_SORT_KEYS, boxCenter, chokepointRows, sortChokepoints, todayEntry, trendBars,
+  CHOKEPOINT_SORT_KEYS, boxCenter, chokepointRows, hasChokepointDocument, sortChokepoints, todayEntry, trendBars,
 } from "./chokepointPanelLogic";
+import { REFINE_PANEL_STATUS, REFINE_PANEL_STATUS_BADGE, REFINE_PANEL_STATUS_TEXT, classifyRefinePanelStatus } from "./refinePanelStatus";
 
 const SORT_LABEL = { total: "Today's hulls", label: "Name" };
 
@@ -128,14 +129,28 @@ export default function ChokepointPanel({ onLocate, isMobile }) {
   const [sortDir, setSortDir] = useState("desc");
 
   const [doc, setDoc] = useState(null);
+  const [hasFetchedOnce, setHasFetchedOnce] = useState(false);
+  const [fetchFailed, setFetchFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       fetchJson("/api/chokepoints")
         .then((data) => {
-          if (!cancelled) setDoc(data || {});
+          if (cancelled) return;
+          setDoc(data || {});
+          setHasFetchedOnce(true);
+          setFetchFailed(false);
         })
-        .catch(() => {}); // an empty panel on a failed fetch, not an error banner
+        .catch(() => {
+          // Task 37 review (Minor, escalated): a failed fetch used to render
+          // identically to "nothing to show yet" -- no panel at all, no
+          // distinction from the refine job simply not having run. See
+          // refinePanelStatus.js: this only flips `fetchFailed`, and only
+          // when no earlier attempt has ever succeeded does that change what
+          // renders (a transient hiccup after a working panel must not blank
+          // out data the reader already has).
+          if (!cancelled) setFetchFailed(true);
+        });
     };
     load();
     const id = setInterval(load, REFRESH_INTERVAL_MS);
@@ -145,12 +160,55 @@ export default function ChokepointPanel({ onLocate, isMobile }) {
     };
   }, []);
 
+  const status = classifyRefinePanelStatus({
+    hasFetchedOnce, fetchFailed, hasDocument: hasChokepointDocument(doc),
+  });
+
   const rows = useMemo(
     () => sortChokepoints(chokepointRows(doc), sortKey, sortDir),
     [doc, sortKey, sortDir]
   );
 
-  if (!rows.length) return null; // no document written yet -- nothing to show, not an empty shell
+  // LOADING: the ordinary first instant after mount, before any response has
+  // landed -- unchanged from before, nothing renders yet, no flash of an
+  // error state that turns out not to be one.
+  if (status === REFINE_PANEL_STATUS.LOADING) return null;
+
+  // ERROR and MISSING both mean "there is nothing to list", for two
+  // different reasons a reader must be able to tell apart -- so both mount
+  // a real, visible header (not silence) with their own badge word and, once
+  // expanded, their own sentence from refinePanelStatus.js, and neither
+  // shows the sort controls or a list, since there is nothing computed to
+  // sort. See ChokepointPanel's own review note and InfraRiskPanel.jsx's
+  // identical handling -- worded consistently between the two on purpose.
+  if (status === REFINE_PANEL_STATUS.ERROR || status === REFINE_PANEL_STATUS.MISSING) {
+    return (
+      <aside id="chokepointPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+        <div
+          {...handleProps}
+          className={`notable-header ${handleProps.className || ""}`}
+          role="button"
+          tabIndex={0}
+          aria-expanded={!collapsed}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              toggleCollapsed();
+            }
+          }}
+          onClick={isMobile ? toggleCollapsed : undefined}
+        >
+          <span className="notable-pulse" />
+          <span className="notable-title">CHOKEPOINTS</span>
+          <span className={`news-updated panel-status-${status}`}>{REFINE_PANEL_STATUS_BADGE[status]}</span>
+          <span className="notable-caret" aria-hidden="true">&#9662;</span>
+        </div>
+        {!collapsed && (
+          <p className="meta" style={{ padding: "4px 10px" }}>{REFINE_PANEL_STATUS_TEXT[status]}</p>
+        )}
+      </aside>
+    );
+  }
 
   return (
     <aside id="chokepointPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>

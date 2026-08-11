@@ -44,6 +44,19 @@ export function infraRiskRows(doc) {
   return Array.isArray(doc?.top) ? doc.top : [];
 }
 
+/**
+ * Whether `doc` is a real infra-risk document -- i.e. the refine process has
+ * written at least one pass -- rather than GET /api/infra-risk's own "not
+ * computed yet" `{}`. build_document (backend/refine/infra_risk.py) always
+ * writes `events_searched` (0 or more, never absent), so its presence is
+ * what tells "not computed" apart from "computed, and genuinely zero sites
+ * were ranked" -- infraRiskRows(doc).length alone cannot make that
+ * distinction, since both give an empty array. Feeds refinePanelStatus.js.
+ */
+export function hasInfraRiskDocument(doc) {
+  return !!doc && typeof doc === "object" && Number.isFinite(doc.events_searched);
+}
+
 // Sorts below every real event_count (always >= 1 for anything in `top` --
 // build_document never carries a zero-count site) -- so an unknown sort key
 // cannot silently drop rows, the same NO_TOTAL sentinel idiom

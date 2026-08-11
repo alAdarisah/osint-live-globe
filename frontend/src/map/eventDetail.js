@@ -109,6 +109,15 @@ export function formatMovedFrom(record) {
 // Task 28: power_plant used to be a *kind* inside raw.osmInfra; it is now
 // its own feed, raw.powerPlants (see createMapController.js's applyData
 // split, the same move Task 27 made for the four railway kinds).
+//
+// The label text is identical, word for word, to InfraRiskPanel's own
+// CATEGORY_LABEL (frontend/src/components/infraRiskPanelLogic.js) -- the
+// card and the panel name the same five categories, and a reader who has
+// both open should never see "Dam / reservoir" on one and "Dams" on the
+// other. Not imported from there: this file is used by the map's own
+// bundle and that one is a components-tree module, and a one-line object
+// duplicated in two places that both say so in a comment is a smaller risk
+// than a cross-boundary import for five strings.
 const NEARBY_LABEL = {
   dam: "Dam / reservoir",
   power_plant: "Power plant",
@@ -116,6 +125,19 @@ const NEARBY_LABEL = {
   airfield: "Airfield",
   port: "Port",
 };
+
+// [category, raw feed key] for all five Nearby categories, in the fixed
+// order both nearbyInfrastructure and the coverage helpers below iterate
+// in. Pulled out as its own table (Task 37 review, Important) so
+// "which categories exist" is declared once rather than duplicated between
+// the search loop and the coverage check that now has to agree with it.
+const NEARBY_SOURCES = [
+  ["dam", "dams"],
+  ["power_plant", "powerPlants"],
+  ["cable_landing", "cableLandings"],
+  ["airfield", "airports"],
+  ["port", "ports"],
+];
 
 /**
  * Infrastructure sites within `radiusMetres` of (lat, lon), nearest first.
@@ -125,22 +147,17 @@ const NEARBY_LABEL = {
  * point, a radius and the raw layer arrays, which sites are inside it and how
  * far away is each one. Only layers already loaded into `raw` this session
  * are searched -- an unloaded layer's sites are not counted as absent, which
- * is why buildNearbyBlock below says so in its own provenance line.
+ * is why buildNearbyBlock below renders that as its own, visually distinct
+ * state rather than folding it into "searched, found nothing" (see
+ * missingNearbyCategories below).
  */
 export function nearbyInfrastructure(lat, lon, radiusMetres, raw = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
   if (!Number.isFinite(radiusMetres) || radiusMetres <= 0) return [];
   const radiusKm = radiusMetres / 1000;
-  const categories = [
-    ["dam", raw.dams],
-    ["power_plant", raw.powerPlants],
-    ["cable_landing", raw.cableLandings],
-    ["airfield", raw.airports],
-    ["port", raw.ports],
-  ];
   const out = [];
-  for (const [category, items] of categories) {
-    for (const item of items || []) {
+  for (const [category, key] of NEARBY_SOURCES) {
+    for (const item of raw[key] || []) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       const distanceKm = haversineKm(lat, lon, item.lat, item.lon);
       if (distanceKm > radiusKm) continue;
@@ -148,6 +165,23 @@ export function nearbyInfrastructure(lat, lon, radiusMetres, raw = {}) {
     }
   }
   return out.sort((a, b) => a.distanceKm - b.distanceKm);
+}
+
+/**
+ * Which of the five Nearby categories were never loaded into `raw` this
+ * session -- `raw[key]` is not an array, so nearbyInfrastructure could not
+ * have searched it at all. This is the client-side twin of
+ * backend/refine/infra_risk.py's `category_counts` (a category with zero
+ * indexed sites there is "not collected here"; a category not present in
+ * `raw` here is "not loaded here"), and buildNearbyBlock reads it to keep
+ * "searched this category and it was clear" apart from "never checked this
+ * category at all" -- the (b)-vs-(c) distinction Task 37's brief made
+ * binding. An array that is present but empty (the layer loaded and simply
+ * has nothing nearby) is *not* missing -- it was searched, same as any
+ * other loaded layer.
+ */
+export function missingNearbyCategories(raw = {}) {
+  return NEARBY_SOURCES.filter(([, key]) => !Array.isArray(raw[key])).map(([category]) => category);
 }
 
 // ---------- blocks ----------
@@ -305,6 +339,26 @@ export function buildGeolocationBlock(record) {
 
 export const NEARBY_MAX_SHOWN = 10;
 
+// Task 37 review (Important): this used to say "found nothing" and "a
+// category was never loaded" in the same sentence -- "none of the layers
+// loaded in this session have a site here" reads as a report on the
+// *place* regardless of which case actually applied. Three states now
+// render distinctly instead:
+//
+//   (a) the record carries no uncertainty radius at all -- unchanged, the
+//       early return below, structurally distinct (no list, no coverage
+//       note, no provenance line: there is nothing derived to caveat).
+//   (b) every category was loaded and the search genuinely found nothing --
+//       a real, confident negative, stated plainly in the summary line.
+//   (c) one or more categories were never loaded this session -- rendered
+//       as its own line, `.nearby-coverage-note` (italic, see style.css),
+//       so it cannot be mistaken for the plain confident negative in (b)
+//       even when it happens to accompany the same "nothing shown" list.
+//       Wording mirrors InfraRiskPanel's own "Not indexed yet in this
+//       window: <categories>." for the equivalent server-side gap
+//       (category_counts) -- same "Not <verb> <scope>: <list>." shape,
+//       different verb and scope because a session's loaded layers and a
+//       window's indexed sites are genuinely different facts.
 export function buildNearbyBlock(record, raw) {
   const radiusMetres = uncertaintyRadiusMetres(record);
   if (radiusMetres === null) {
@@ -316,17 +370,41 @@ export function buildNearbyBlock(record, raw) {
   const shown = items.slice(0, NEARBY_MAX_SHOWN);
   const more = items.length - shown.length;
   const radiusKm = radiusMetres / 1000;
+  const radiusLabel = radiusKm < 10 ? radiusKm.toFixed(1) : Math.round(radiusKm);
+  const missing = missingNearbyCategories(raw);
+
   const rows = shown.map((i) => {
     const dist = i.distanceKm < 1 ? `${Math.round(i.distanceKm * 1000)} m` : `${i.distanceKm.toFixed(1)} km`;
     return `<li>${esc(NEARBY_LABEL[i.category] || i.category)}: ${esc(i.name)} &mdash; ${dist}</li>`;
   }).join("");
 
+  let summaryLine;
+  if (items.length > 0) {
+    summaryLine = `Within the event's own ${radiusLabel} km uncertainty radius:`;
+  } else if (missing.length === 0) {
+    // State (b): every category was searchable and none of them had a site
+    // inside the radius. A real answer, so it reads like one.
+    summaryLine = `No infrastructure found inside the event's own ${radiusLabel} km uncertainty radius.`;
+  } else {
+    // State (c) with nothing found in what *was* searched -- still an
+    // honest, qualified statement about only the loaded layers; the
+    // coverage note below is what tells the reader the search was partial.
+    summaryLine = `No infrastructure found among the layers loaded this session, `
+      + `within the event's own ${radiusLabel} km uncertainty radius.`;
+  }
+
+  const coverageNote = missing.length
+    ? `<div class="meta nearby-coverage-note">Not loaded this session: ${
+        missing.map((c) => esc(NEARBY_LABEL[c] || c)).join(", ")
+      }. Absence in these categories is not evidence there is nothing there.</div>`
+    : "";
+
   return wrapBlock("event-nearby-block", `
     <h4>Nearby infrastructure</h4>
-    <div class="meta">Within the event's own ${radiusKm < 10 ? radiusKm.toFixed(1) : Math.round(radiusKm)} km uncertainty radius${
-      items.length ? "" : " — none of the layers loaded in this session have a site here"}.</div>
+    <div class="meta">${esc(summaryLine)}</div>
     ${rows ? `<ul class="event-nearby-list">${rows}</ul>` : ""}
     ${more > 0 ? `<div class="meta">+${more} more within radius</div>` : ""}
+    ${coverageNote}
     ${provenanceLine(
       "derived",
       "Straight-line distance from this event's own coordinate to each site's reported position, "

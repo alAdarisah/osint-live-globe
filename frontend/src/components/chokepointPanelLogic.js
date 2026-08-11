@@ -22,6 +22,22 @@ export function chokepointRows(doc) {
 }
 
 /**
+ * Whether `doc` is a real chokepoint document -- i.e. the refine process has
+ * written at least one pass -- rather than GET /api/chokepoints' own "not
+ * computed yet" `{}`. build_chokepoint_document (backend/refine/
+ * lane_density.py) always writes a `boxes` key, with an entry for every one
+ * of the eight configured watched-water boxes even when none of them have
+ * ever seen a hull -- so a real document can never have an empty `boxes`,
+ * and this check (not chokepointRows(doc).length) is what tells "not
+ * computed" apart from a (today impossible, but not this function's job to
+ * assume) "computed, zero boxes configured" -- see refinePanelStatus.js,
+ * which this feeds.
+ */
+export function hasChokepointDocument(doc) {
+  return !!doc && typeof doc === "object" && "boxes" in doc;
+}
+
+/**
  * A box's own `today` entry, or a synthetic "nothing recorded" placeholder
  * for a box the refine job has never written a pass for yet -- so every row
  * this panel draws has something to read off, the same "never silently

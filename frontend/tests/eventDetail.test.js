@@ -31,7 +31,7 @@ registerHooks({
 
 const {
   earliestCoveragePublished, reportingLagDays, formatReportingLag, formatMovedFrom,
-  nearbyInfrastructure, NEARBY_MAX_SHOWN,
+  nearbyInfrastructure, missingNearbyCategories, NEARBY_MAX_SHOWN,
   buildHeaderBlock, buildCorroborationBlock, buildReliabilityBlock, buildGeolocationBlock,
   buildNearbyBlock, buildActionsBlock, buildEventDetailHtml,
 } = await import("../src/map/eventDetail.js");
@@ -215,6 +215,36 @@ test("nearbyInfrastructure: an empty raw bag is empty results, not a crash", () 
   assert.deepEqual(nearbyInfrastructure(50.45, 30.52, 5000, undefined), []);
 });
 
+// ---------- missingNearbyCategories ----------
+
+test("missingNearbyCategories: every category present is nothing missing", () => {
+  assert.deepEqual(missingNearbyCategories(RAW), []);
+});
+
+test("missingNearbyCategories: an absent key is missing, an empty array is not", () => {
+  // dams loaded (empty -- genuinely searched, nothing there); ports never
+  // fetched this session at all.
+  const raw = { dams: [], powerPlants: [], cableLandings: [], airports: [] };
+  assert.deepEqual(missingNearbyCategories(raw), ["port"]);
+});
+
+test("missingNearbyCategories: nothing loaded at all is every category missing", () => {
+  assert.deepEqual(missingNearbyCategories({}).sort(), [
+    "airfield", "cable_landing", "dam", "port", "power_plant",
+  ]);
+  assert.deepEqual(missingNearbyCategories(undefined).sort(), [
+    "airfield", "cable_landing", "dam", "port", "power_plant",
+  ]);
+});
+
+test("missingNearbyCategories: a non-array value on a key counts as not loaded", () => {
+  // Defensive: raw is assembled by the map controller, not authored by
+  // hand, but a key holding e.g. null rather than [] must not be read as
+  // "loaded, zero items" -- Array.isArray is the actual test, not truthiness.
+  const raw = { dams: null, powerPlants: [], cableLandings: [], airports: [], ports: [] };
+  assert.deepEqual(missingNearbyCategories(raw), ["dam"]);
+});
+
 // ---------- header block ----------
 
 test("buildHeaderBlock: a real headline is provenance 'reported'", () => {
@@ -341,9 +371,52 @@ test("buildNearbyBlock: a radius with matches lists them and states the radius",
   assert.match(html, /<b>derived<\/b>/);
 });
 
-test("buildNearbyBlock: a radius with nothing in it says so plainly", () => {
+// Task 37 review (Important): buildNearbyBlock used to say the identical
+// thing -- "none of the layers loaded in this session have a site here" --
+// whether every layer was loaded and genuinely empty, or nothing was loaded
+// at all. These three tests pin the three states apart: a real negative
+// (every category searched, nothing found), a pure coverage gap (nothing
+// loaded, so nothing was actually searched), and the mixed case (some
+// categories loaded and found nothing, others never checked).
+
+test("buildNearbyBlock: every category loaded and genuinely empty reads as a real negative", () => {
+  const allLoadedEmpty = { dams: [], powerPlants: [], cableLandings: [], airports: [], ports: [] };
+  const html = buildNearbyBlock(baseRecord({ geo_radius_km: 5 }), allLoadedEmpty);
+  // esc() turns an apostrophe into &#39; -- match around it rather than
+  // through it, the same reason every other assertion in this file that
+  // crosses a possessive avoids a literal ' in its regex.
+  assert.match(html, /No infrastructure found inside the event.{0,10}own 5(\.0)? km uncertainty radius\./);
+  // A real, confident negative gets no coverage-gap caveat at all.
+  assert.ok(!html.includes("nearby-coverage-note"));
+  assert.ok(!html.includes("Not loaded this session"));
+});
+
+test("buildNearbyBlock: nothing loaded at all is a coverage gap, not a negative result", () => {
   const html = buildNearbyBlock(baseRecord({ geo_radius_km: 5 }), {});
-  assert.match(html, /none of the layers loaded in this session/);
+  // Must not claim a real, comprehensive search happened when nothing was
+  // actually loaded.
+  assert.ok(!html.includes("No infrastructure found inside the event"));
+  assert.match(html, /No infrastructure found among the layers loaded this session/);
+  assert.match(html, /class="meta nearby-coverage-note"/);
+  assert.match(html, /Not loaded this session: .*Dam \/ reservoir/);
+  assert.match(html, /Absence in these categories is not evidence there is nothing there/);
+});
+
+test("buildNearbyBlock: some categories loaded and empty, others never checked -- both facts shown, styled apart", () => {
+  const partial = { dams: [], powerPlants: [], cableLandings: [] }; // airfield, port missing
+  const html = buildNearbyBlock(baseRecord({ geo_radius_km: 5 }), partial);
+  assert.match(html, /No infrastructure found among the layers loaded this session/);
+  assert.match(html, /class="meta nearby-coverage-note">Not loaded this session: Airfield, Port\./);
+});
+
+test("buildNearbyBlock: a coverage gap alongside real hits still lists the hits and flags what was not checked", () => {
+  // dams and power plants loaded (and one dam is a real hit); cable
+  // landings/airfields/ports never loaded this session.
+  const partial = { dams: RAW.dams, powerPlants: RAW.powerPlants };
+  const html = buildNearbyBlock(baseRecord({ geo_radius_km: 5 }), partial);
+  assert.match(html, /Near Dam/); // the real hit is still shown
+  assert.match(html, /Within the event.{0,10}own 5(\.0)? km uncertainty radius:/); // neutral lead-in, not a false "empty" claim
+  assert.match(html, /class="meta nearby-coverage-note">Not loaded this session: Submarine cable landing, Airfield, Port\./);
 });
 
 test("buildNearbyBlock: more than NEARBY_MAX_SHOWN sites are capped, with a '+N more' line", () => {

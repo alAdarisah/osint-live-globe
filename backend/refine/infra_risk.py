@@ -52,6 +52,16 @@ collapsing them into one count:
     collected in the theatres this event's window touches at all -- no
     number of events searched against it could ever turn up a match, which
     is a different fact from "we searched and this category was clear."
+
+Task 37 review (Minor): a fourth case exists that the first pass of this
+module counted nowhere -- `lat`/`lon` on `conflict_events` are plain
+`DOUBLE PRECISION` with no `NOT NULL` (see storage.py's own CREATE TABLE),
+so a row missing a coordinate is possible at the schema level even though
+the only writer today (`storage.record_conflict_events`) refuses to insert
+one. Such a row cannot be searched at all -- there is no point to draw a
+circle around -- so it is counted under its own `events_missing_coordinate`,
+never silently dropped and never folded into `events_without_radius` (which
+means "we know where this happened, just not how sure we are").
 """
 
 import asyncio
@@ -169,11 +179,18 @@ def build_document(events: list[dict], index: ProximityIndex, category_counts: d
     """
     searched = 0
     without_radius = 0
+    missing_coordinate = 0
     sites: dict[str, dict] = {}
 
     for event in events:
         lat, lon = event.get("lat"), event.get("lon")
         if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            # No coordinate, no circle to search -- a different fact from "we
+            # know where this happened but not how sure we are" (below), and
+            # from "we searched and found nothing", so it gets its own count
+            # (events_missing_coordinate) rather than vanishing from every
+            # bucket. See the module docstring's Task 37 review note.
+            missing_coordinate += 1
             continue
         radius = event.get("geo_radius_km")
         # A missing or non-positive radius is not searchable at all -- see
@@ -209,6 +226,7 @@ def build_document(events: list[dict], index: ProximityIndex, category_counts: d
         "window_days": WINDOW_DAYS,
         "events_searched": searched,
         "events_without_radius": without_radius,
+        "events_missing_coordinate": missing_coordinate,
         "category_counts": category_counts,
         "top": ranked[:TOP_N],
         "note": (
@@ -261,8 +279,9 @@ async def derive_forever():
             await storage.record_reference(REFERENCE_NAME, doc)
             await storage.record_source_health(REFERENCE_NAME, len(doc.get("top", [])), True)
             log.info(
-                "Infra risk: %d events searched, %d without a radius, %d sites ranked",
-                doc.get("events_searched", 0), doc.get("events_without_radius", 0), len(doc.get("top", [])),
+                "Infra risk: %d events searched, %d without a radius, %d with no coordinate, %d sites ranked",
+                doc.get("events_searched", 0), doc.get("events_without_radius", 0),
+                doc.get("events_missing_coordinate", 0), len(doc.get("top", [])),
             )
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
             log.warning("Infra risk computation failed: %s", exc)

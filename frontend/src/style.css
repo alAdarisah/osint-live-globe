@@ -1953,6 +1953,16 @@ html, body {
   color: var(--text-dim);
   white-space: nowrap;
 }
+/* Task 37 review (Minor, escalated): ChokepointPanel/InfraRiskPanel's header
+   badge for "the fetch failed" vs "not computed yet" -- two different
+   reasons there is nothing to show, and a reader should be able to tell
+   which one from the collapsed header alone, without opening the panel.
+   Amber for a genuine fault (the same amber the event card's own
+   .moved-note and the map's placement-doubted note use for "something is
+   off"); dimmer italic for "working as designed, just not run yet" -- not a
+   fault, so it does not get the fault colour. */
+.news-updated.panel-status-error { color: #ffb454; }
+.news-updated.panel-status-missing { font-style: italic; }
 
 .news-list {
   overflow-y: auto;
@@ -4192,6 +4202,13 @@ html, body {
 .event-detail-body-rich .coverage-meta { display: block; font-size: 10px; color: var(--text-dim); }
 .event-detail-body-rich .event-nearby-list { margin: 4px 0 0; padding-left: 15px; font-size: 11px; color: var(--text-secondary); }
 .event-detail-body-rich .event-nearby-list li { margin-bottom: 2px; }
+/* Task 37 review (Important): a category never loaded this session, so its
+   absence proves nothing, must not read as a fainter version of the plain
+   "searched, found nothing" line just above it -- italic is the one thing
+   that treatment cannot be mistaken for at a glance, the same "different
+   treatment, not a different shade of the same one" rule ChokepointPanel's
+   own BAR_FILL applies to a missing vs a real day. */
+.event-detail-body-rich .nearby-coverage-note { font-style: italic; }
 /* The one line every block ends on: which of the app's four provenance words
    applies. Dashed rule to read as a footnote to the block above it, not as
    another fact in the same list -- same visual register as the popup's own

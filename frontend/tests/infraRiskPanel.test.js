@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  CATEGORY_LABEL, INFRA_RISK_SORT_KEYS, emptyCategories, infraRiskRows, sortInfraRisk,
+  CATEGORY_LABEL, INFRA_RISK_SORT_KEYS, emptyCategories, hasInfraRiskDocument, infraRiskRows, sortInfraRisk,
 } from "../src/components/infraRiskPanelLogic.js";
 
 function site(site_id, overrides = {}) {
@@ -111,6 +111,23 @@ test("emptyCategories is empty when every category has at least one indexed site
 test("emptyCategories treats a missing category_counts document as every category empty", () => {
   assert.deepEqual(emptyCategories({}).sort(), Object.keys(CATEGORY_LABEL).sort());
   assert.deepEqual(emptyCategories(null).sort(), Object.keys(CATEGORY_LABEL).sort());
+});
+
+// --- hasInfraRiskDocument (Task 37 review: fetch-failed vs not-computed vs empty) ---
+
+test("hasInfraRiskDocument: a real document (events_searched present, even at 0) is true", () => {
+  assert.equal(hasInfraRiskDocument({ events_searched: 0, top: [] }), true);
+  assert.equal(hasInfraRiskDocument({ events_searched: 502, top: [site("a")] }), true);
+});
+
+test("hasInfraRiskDocument: GET /api/infra-risk's own \"not computed yet\" {} is false", () => {
+  assert.equal(hasInfraRiskDocument({}), false);
+});
+
+test("hasInfraRiskDocument: null, undefined or a non-object is false, not a throw", () => {
+  assert.equal(hasInfraRiskDocument(null), false);
+  assert.equal(hasInfraRiskDocument(undefined), false);
+  assert.equal(hasInfraRiskDocument("not a document"), false);
 });
 
 // --- CATEGORY_LABEL ---------------------------------------------------------
