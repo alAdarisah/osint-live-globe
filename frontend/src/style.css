@@ -312,8 +312,20 @@ html, body {
 
    Conflict, news, infrastructure and airspace only. The ship and aircraft
    layers turn over thousands of markers a refresh and a vessel appearing is
-   not news. */
-.marker-arrived {
+   not news.
+
+   Targets the inner <svg>, and that is load-bearing. Leaflet positions the
+   outer marker div with an inline translate3d, so animating transform there
+   parks the pin at the pane origin for the whole flash. One element in --
+   .entity-icon-wrap -- is no better: it carries the declutter offset and
+   rotation inline, so a transform animation on it snaps the glyph up to ~87px
+   back to its true point while its leader line keeps pointing where the glyph
+   used to be. A line that exists to say "the glyph is not where the record is"
+   would spend 420ms asserting the opposite. The wrapper also carries inline
+   opacity for age and confidence dimming, so animating opacity there flashes a
+   low-confidence event at full strength -- briefly claiming more certainty
+   than the record has. The <svg> child carries neither. */
+.marker-arrived .entity-icon-wrap > svg {
   animation: marker-arrived var(--t-settle) var(--e-out);
 }
 

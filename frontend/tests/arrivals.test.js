@@ -25,10 +25,10 @@ test("only the ids absent last time arrive", () => {
   assert.deepEqual([...second.arrived].sort(), ["c", "d"]);
 });
 
-test("a pan that drops items out of view is not an arrival when they return", () => {
+test("an unchanged payload produces no arrivals", () => {
   const first = newArrivals(null, items("a", "b"), "id");
-  const panned = newArrivals(first.ids, items("a", "b"), "id");
-  assert.deepEqual([...panned.arrived], []);
+  const again = newArrivals(first.ids, items("a", "b"), "id");
+  assert.deepEqual([...again.arrived], []);
 });
 
 test("the id set tracks removals so a returning event flashes again", () => {
@@ -52,4 +52,15 @@ test("an empty payload clears the set without flashing", () => {
   const empty = newArrivals(first.ids, [], "id");
   assert.deepEqual([...empty.ids], []);
   assert.deepEqual([...empty.arrived], []);
+});
+
+test("an id that changes type re-reads as a new record", () => {
+  // Documents a real sharp edge rather than blessing it: Set membership is
+  // SameValueZero, so a payload that starts serialising ids as strings would
+  // flash every pin in the layer at once. If that ever happens the fix belongs
+  // upstream in the feed, not in a coercion here -- but it should be a known
+  // failure rather than a mystery.
+  const first = newArrivals(null, [{ id: 5 }], "id");
+  const retyped = newArrivals(first.ids, [{ id: "5" }], "id");
+  assert.deepEqual([...retyped.arrived], ["5"]);
 });

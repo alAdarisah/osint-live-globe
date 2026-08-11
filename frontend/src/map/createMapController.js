@@ -583,7 +583,21 @@ export function createMapController(container, initial, callbacks) {
   // enough to still be flashing. Only the layers where a new record is news --
   // a ship appearing is not.
   const seenIdsByKey = {};
+  // key -> Map<id, arrivalTimeMs>, not key -> Set<id>. A render count is not a
+  // reliable clock: settlePlacement's declutter pass can trigger a second,
+  // synchronous renderMarkerLayer before the browser ever paints the first one
+  // (markDirty -> redrawLayerGroup -> renderMarkerLayer again, same JS task,
+  // same DECLUTTER_MIN_ZOOM=6 conditions that make arrivals common in the
+  // first place). If "still arriving" meant "arrived this render", that
+  // second pass would see zero new arrivals and every just-built marker would
+  // lose the class -- via updateMarker's setIcon -- before anything painted.
+  // A wall-clock lifetime survives that: an id stays flash-eligible for
+  // ARRIVAL_FLASH_MS regardless of how many renders land inside it.
   const arrivedByKey = {};
+  // Matches motion.css's --t-settle. Not read from the stylesheet -- see
+  // useCountUp's COUNT_DURATION_MS for why a runtime style read is the wrong
+  // tool here -- so if --t-settle ever moves, this has to move with it.
+  const ARRIVAL_FLASH_MS = 420;
   const FLASHES_ON_ARRIVAL = new Set(["events", "gdelt", "osmInfra", "czib"]);
   // Keyed by event id, same as markersByKey.events, so a circle and its pin
   // are added and dropped by the same diff against the same visible set.
@@ -2335,33 +2349,40 @@ export function createMapController(container, initial, callbacks) {
     return icon;
   }
 
+  // True while `id` is still within its ARRIVAL_FLASH_MS window, and prunes
+  // the entry the moment it isn't -- "expiring on read" rather than on a
+  // separate sweep, since buildMarker/updateMarker already visit every live
+  // id on every render and nothing else needs to know once its flash is over.
+  function isArriving(key, id) {
+    const flashing = arrivedByKey[key];
+    if (!flashing) return false;
+    const at = flashing.get(id);
+    if (at === undefined) return false;
+    if (Date.now() - at > ARRIVAL_FLASH_MS) {
+      flashing.delete(id);
+      return false;
+    }
+    return true;
+  }
+
+  // Appended to className, like tagIconLayer's layer-<key> class just above --
+  // never spliced into the icon's html. html is what updateMarker diffs to
+  // decide whether to rebuild a marker's DOM (see its own comment below), and
+  // the arrival flag is controller state updateMarker's freshly-decorated `d`
+  // never carries on its own; landing it in html would desync the two copies
+  // and the class would be gone before the flash painted. className costs no
+  // repaint either way, which is the whole reason tagIconLayer already uses it.
+  function applyArrivalClass(icon, key, id) {
+    if (!isArriving(key, id) || !icon?.options) return icon;
+    icon.options.className = `${icon.options.className || ""} marker-arrived`.trim();
+    return icon;
+  }
+
   function buildMarker(key, item, decorate, sizeOf, copy = 0) {
     const id = item[ID_FIELD[key]];
     const d = applyCollapsedFallback(decorate(item, decorateOptionsFor(key, item, id)), item);
-    // One flash as it lands. buildMarker also runs when a known record scrolls
-    // back into view, which is why the test is against the arrival set and not
-    // against "is this marker new".
-    //
-    // The class goes onto entity-icon-wrap inside the icon's html, not onto
-    // d.icon.options.className: that className lands on the element Leaflet
-    // itself positions (it sets that exact node's inline `transform:
-    // translate3d(...)` on every move -- see _setPos in leaflet.js), and a CSS
-    // animation touching `transform` on that same node overrides Leaflet's
-    // positioning transform for as long as it runs, which would flash the pin
-    // at the pane's origin instead of where it belongs. entity-icon-wrap is a
-    // plain child div with no positioning job -- the same reason every other
-    // marker animation in style.css (.infra-hot, .czib-live) is scoped to it
-    // rather than to the outer element, via a `.x .entity-icon-wrap` selector.
-    // buildDivIcon (svgIcons.js) always opens the icon's html with that div as
-    // its first element, so the string is safe to target directly, the same
-    // way applyCollapsedFallback above already edits this html for a badge.
-    if (arrivedByKey[key]?.has(id) && d.icon?.options?.html) {
-      d.icon.options.html = d.icon.options.html.replace(
-        'class="entity-icon-wrap',
-        'class="entity-icon-wrap marker-arrived'
-      );
-    }
     tagIconLayer(d.icon, key);
+    applyArrivalClass(d.icon, key, id);
     const marker = L.marker(drawLatLng(item, copy), { icon: d.icon });
     // Clicking a pin says "this kind of thing". Everything else on the map
     // recedes, and the layers that corroborate this one become eligible -- so
@@ -2394,6 +2415,14 @@ export function createMapController(container, initial, callbacks) {
       selectedIcao, selectedMmsi, ...decorateOptionsFor(key, item, id),
     }), item);
     tagIconLayer(d.icon, key);
+    // Also needed here, not just in buildMarker: settlePlacement's declutter
+    // pass can redraw a layer synchronously, within the same render pass that
+    // just built a marker as an arrival, before the browser has painted it
+    // once. That redraw goes through updateMarker (the marker already exists
+    // by then), and isArriving is still true -- it is keyed to wall-clock
+    // time, not to which of these two functions last ran -- so skipping this
+    // call here would strip the class the moment it was applied.
+    applyArrivalClass(d.icon, key, id);
     marker._item = item;
     marker.setLatLng(drawLatLng(item, copy));
     applyStacking(marker, sizeOf(item), key);
@@ -2641,6 +2670,11 @@ export function createMapController(container, initial, callbacks) {
     if (Array.isArray(items)) totals[key] = items.length;
     registerPlacement(key, []);
     scheduleReports({ counts: true });
+    // A layer that goes dark stops being updated, so its id set goes stale. Coming
+    // back is a re-seed, not an update -- without this, a conflict layer switched
+    // off for an hour flashes every record that arrived meanwhile.
+    delete seenIdsByKey[key];
+    delete arrivedByKey[key];
     return true;
   }
 
@@ -3021,12 +3055,18 @@ export function createMapController(container, initial, callbacks) {
     if (FLASHES_ON_ARRIVAL.has(key)) {
       const { ids, arrived } = newArrivals(seenIdsByKey[key] ?? null, items, idField);
       seenIdsByKey[key] = ids;
-      // Held until the next render of this layer rather than on a timer: the class
-      // only has to survive long enough for the marker to be built with it, and the
-      // animation is one-shot, so a stray timer would be a second source of truth
-      // about when the flash ends.
-      if (arrived.size) arrivedByKey[key] = arrived;
-      else delete arrivedByKey[key];
+      // Merged into the existing map, not replacing it: a synchronous second
+      // pass (see arrivedByKey's declaration) reports zero new arrivals and
+      // must not erase the timestamps this pass just wrote, or isArriving
+      // would go false before the flash has painted once. An id with nothing
+      // new to add is left alone -- it neither gains a fresh timestamp nor
+      // loses whatever time it has left.
+      if (arrived.size) {
+        const flashing = arrivedByKey[key] || new Map();
+        const now = Date.now();
+        for (const id of arrived) flashing.set(id, now);
+        arrivedByKey[key] = flashing;
+      }
     }
     let visible = [];
     if (!belowMinZoom) {
