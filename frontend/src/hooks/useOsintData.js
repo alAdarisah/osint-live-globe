@@ -195,7 +195,7 @@ export const POLL_CONFIG = [
   // the same document. Not zoom-gated despite attaching to a zoom-gated layer:
   // it is ~180 kB once, and the airfields toggle can be switched on at any time.
   { key: "airfieldActivity", url: "/api/airfield-activity", intervalMs: 30 * 60000 },
-  // Navy-classified AIS presence per theatre/port with a 7-day trend
+  // Navy-classified AIS presence per theatre/port with a day-over-day trend
   // (backend/refine/naval_presence.py), recomputed there four times a day --
   // same "poll no faster than the document actually changes" reasoning as
   // escalation/airfieldActivity above.
