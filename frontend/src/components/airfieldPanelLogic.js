@@ -84,3 +84,35 @@ export function trafficTrend(hourly) {
   if (secondHalf < firstHalf) return "down";
   return "flat";
 }
+
+// ---------- "found nothing" vs "did not look" ----------
+//
+// ChokepointPanel and InfraRiskPanel tell a real-but-empty document apart
+// from "the refine process has not written a pass yet" via a wrapper field
+// their own build_document always writes (chokepoints' `boxes` key,
+// infra-risk's `events_searched` count) even when the payload underneath is
+// empty -- see refinePanelStatus.js's own note. GET /api/airfield-activity
+// carries no such wrapper: storage.airfield_activity returns the ranked
+// `{code: {...}}` dict itself with nothing else alongside it, and its own
+// docstring is explicit that an empty `{}` means "no database, or the refine
+// process has not written a pass, or a pass ran and genuinely found no field
+// with any traffic" -- three situations, one wire shape, by that endpoint's
+// own design (it predates this panel, built for the airports layer's
+// "attach if present" use, where the three cases are equally fine to treat
+// alike).
+//
+// This project's rule is that "found nothing" must never render the same as
+// "did not look" -- but this module has no way to tell those two apart from
+// the document alone, and backend/** is out of scope to change that
+// contract. Claiming either specific reading ("not computed yet" or "zero
+// movements") would be asserting something this data cannot support, which
+// this project's provenance rule treats as its own kind of dishonesty. So
+// AirfieldActivityPanel.jsx only ever classifies LOADING (nothing has come
+// back yet) and ERROR (the fetch itself failed) through
+// refinePanelStatus.js -- both are true client-side facts, independent of
+// the document's own shape -- and never claims MISSING. An empty result
+// after a successful fetch reads as READY with this sentence, which says
+// what is actually known and is honest about the rest.
+export function airfieldActivityEmptyMessage() {
+  return "No airfield movements recorded in the last 24h, or the refine process has not written a pass yet.";
+}
