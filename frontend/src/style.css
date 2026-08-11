@@ -1,3 +1,7 @@
+/* Must be first: @import is only legal before any other rule, and every
+   duration below is one of these tokens. */
+@import "./motion.css";
+
 * { box-sizing: border-box; }
 
 /* Thin themed scrollbar for every scrollable panel (control panel, country
@@ -85,7 +89,7 @@ html, body {
   bottom: 0;
   left: 0;
   background: var(--bg-map);
-  transition: left 0.22s ease;
+  transition: left var(--t-panel) var(--e-out);
 }
 
 /* The control panel is opaque and fixed above the map (z-index 1000) -- without
@@ -175,12 +179,12 @@ html, body {
   stroke-width: 1.25;
   /* r and opacity are written per frame by cursor.js; the transition is what
      turns those discrete writes into the tighten/release the reader sees. */
-  transition: r 120ms ease-out, opacity 120ms ease-out;
+  transition: r var(--t-ui) ease-out, opacity var(--t-ui) ease-out;
 }
 .map-reticle-ticks {
   stroke: currentColor;
   stroke-width: 1.25;
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--t-ui) ease-out;
 }
 .map-reticle-dot { fill: currentColor; }
 
@@ -279,7 +283,7 @@ html, body {
    .military-marker above, but animated so it visibly flares rather than just
    glowing steady. */
 .infra-hot .entity-icon-wrap {
-  animation: infra-flare 1.1s ease-in-out infinite;
+  animation: infra-flare var(--tempo-urgent) var(--e-inout) infinite;
 }
 @keyframes infra-flare {
   0%, 100% { filter: drop-shadow(0 0 3px #ff3d3d) drop-shadow(0 0 1px #ff3d3d); }
@@ -295,7 +299,7 @@ html, body {
    whose stated review date passed is drawn in the warning colour and left
    still. Motion on this map means "now" (see decorateCzib). */
 .czib-live .entity-icon-wrap {
-  animation: czib-warn 2.4s ease-in-out infinite;
+  animation: czib-warn var(--tempo-live) var(--e-inout) infinite;
 }
 @keyframes czib-warn {
   0%, 100% { filter: drop-shadow(0 0 2px #ff8c00); }
@@ -312,7 +316,7 @@ html, body {
   border-radius: 4px;
   padding: 1px 4px;
   vertical-align: middle;
-  animation: infra-badge-pulse 1.1s ease-in-out infinite;
+  animation: infra-badge-pulse var(--tempo-urgent) var(--e-inout) infinite;
 }
 @keyframes infra-badge-pulse {
   0%, 100% { opacity: 1; }
@@ -341,7 +345,7 @@ html, body {
   border: 2px solid #e066ff;
   box-shadow: 0 0 6px #b833e0;
   opacity: 0;
-  animation: jamming-ping 6s ease-out infinite;
+  animation: jamming-ping var(--tempo-ambient) ease-out infinite;
 }
 @keyframes jamming-ping {
   0% { transform: scale(0.3); opacity: 0.9; }
@@ -447,7 +451,7 @@ html, body {
   letter-spacing: 0.3px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition: background var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out), color var(--t-ui) var(--e-out);
 }
 .region-btn:hover { color: var(--text-bright); border-color: var(--accent); }
 .region-btn.active {
@@ -487,7 +491,7 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 1001;
-  animation: popup-in 0.16s ease;
+  animation: popup-in var(--t-ui) var(--e-out);
 }
 .region-zone-menu-item {
   border: none;
@@ -499,7 +503,7 @@ html, body {
   font-size: 11px;
   font-family: inherit;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--t-ui) var(--e-out), color var(--t-ui) var(--e-out);
 }
 .region-zone-menu-item:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--text-bright); }
 .region-zone-menu-item.active { color: #ff8080; font-weight: 700; }
@@ -517,7 +521,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: border-color 0.15s ease, transform 0.15s ease;
+  transition: border-color var(--t-ui) var(--e-out), transform var(--t-ui) var(--e-out);
   padding: 0;
 }
 #themeToggle:hover { border-color: var(--accent); transform: rotate(20deg); }
@@ -536,7 +540,7 @@ html, body {
   color: var(--accent);
   cursor: pointer;
   font-size: 11px;
-  transition: left 0.22s ease;
+  transition: left var(--t-panel) var(--e-out);
 }
 #panelToggle.open { left: 320px; }
 
@@ -553,7 +557,7 @@ html, body {
   z-index: 1000;
   backdrop-filter: blur(6px);
   transform: translateX(-100%);
-  transition: transform 0.22s ease;
+  transition: transform var(--t-panel) var(--e-out);
 }
 
 #controlPanel.open { transform: translateX(0); }
@@ -599,7 +603,7 @@ html, body {
   list-style: none;
   padding: 4px 2px;
   border-radius: 4px;
-  transition: background 0.15s ease, opacity 0.15s ease;
+  transition: background var(--t-ui) var(--e-out), opacity var(--t-ui) var(--e-out);
 }
 .panel-group > summary::-webkit-details-marker { display: none; }
 .panel-group > summary:hover { background: rgba(var(--accent-rgb), 0.08); opacity: 1; }
@@ -621,7 +625,7 @@ html, body {
   border-left: 4px solid currentColor;
   border-top: 3.5px solid transparent;
   border-bottom: 3.5px solid transparent;
-  transition: transform 0.15s ease;
+  transition: transform var(--t-ui) var(--e-out);
 }
 .panel-group[open] > summary::before { transform: rotate(90deg); }
 
@@ -653,7 +657,7 @@ html, body {
   list-style: none;
   border-radius: 3px;
   opacity: 0.72;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  transition: opacity var(--t-ui) var(--e-out), background var(--t-ui) var(--e-out);
 }
 .layer-details > summary::-webkit-details-marker { display: none; }
 .layer-details > summary:hover { opacity: 1; background: rgba(var(--accent-rgb), 0.08); }
@@ -670,7 +674,7 @@ html, body {
   border-left: 3.5px solid currentColor;
   border-top: 3px solid transparent;
   border-bottom: 3px solid transparent;
-  transition: transform 0.15s ease;
+  transition: transform var(--t-ui) var(--e-out);
 }
 .layer-details[open] > summary::before { transform: rotate(90deg); }
 .layer-details[open] > summary { opacity: 1; }
@@ -693,7 +697,7 @@ html, body {
   cursor: pointer;
   user-select: none;
   border-radius: 4px;
-  transition: background 0.15s ease;
+  transition: background var(--t-ui) var(--e-out);
 }
 .layer-row:hover { background: rgba(var(--accent-rgb), 0.08); }
 
@@ -909,7 +913,7 @@ html, body {
   fill: var(--country-fill);
   stroke: rgba(var(--accent-rgb), 0.45);
   stroke-width: 1;
-  transition: fill 0.15s ease;
+  transition: fill var(--t-ui) var(--e-out);
   /* Paint only -- never an event target. Hover and click are hit-tested
      against the geometry from the map's own mousemove/click (see
      map/countryHitTest.js). The previous `pointer-events: all` arrangement
@@ -935,7 +939,7 @@ html, body {
    "alternate a resting/brighter drop-shadow" technique as .infra-hot, just
    applied to a polygon's stroke/glow instead of a marker icon. */
 .country-shape.country-hot {
-  animation: country-flare 1.4s ease-in-out infinite;
+  animation: country-flare var(--tempo-urgent) var(--e-inout) infinite;
 }
 @keyframes country-flare {
   0%, 100% { stroke: #ff3d3d; stroke-width: 1.5; filter: drop-shadow(0 0 2px #ff3d3d); }
@@ -1030,7 +1034,7 @@ html, body {
   /* Reads over both the light and the dark basemap without a second rule. */
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55), 0 1px 3px rgba(0, 0, 0, 0.5);
   cursor: grab;
-  transition: transform 0.08s ease;
+  transition: transform var(--t-tap) var(--e-out);
 }
 .border-handle:hover { transform: scale(1.35); }
 .border-handle:active { cursor: grabbing; transform: scale(1.15); }
@@ -1193,7 +1197,7 @@ html, body {
   max-width: min(320px, calc(100vw - 40px));
 }
 .leaflet-popup {
-  animation: popup-in 0.16s ease;
+  animation: popup-in var(--t-ui) var(--e-out);
 }
 @keyframes popup-in {
   from { opacity: 0; transform: translateY(4px) scale(0.97); }
@@ -1418,7 +1422,7 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
-  animation: popup-in 0.16s ease;
+  animation: popup-in var(--t-ui) var(--e-out);
 }
 .country-info-body {
   overflow-y: auto;
@@ -1498,7 +1502,7 @@ html, body {
   flex: none;
   font-size: 13px;
   line-height: 1;
-  transition: transform 0.2s ease;
+  transition: transform var(--t-ui) var(--e-out);
 }
 
 #newsBroadcast.collapsed .news-caret { transform: rotate(-90deg); }
@@ -1511,7 +1515,7 @@ html, body {
   border-radius: 50%;
   background: #ff3d3d;
   flex: none;
-  animation: news-pulse 1.6s ease-in-out infinite;
+  animation: news-pulse var(--tempo-live) var(--e-inout) infinite;
 }
 
 @keyframes news-pulse {
@@ -1545,7 +1549,7 @@ html, body {
 .news-item {
   padding: 6px 0;
   border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
-  animation: news-item-in 0.35s ease;
+  animation: news-item-in var(--t-settle) var(--e-out);
 }
 .news-item:last-child { border-bottom: none; }
 
@@ -1598,7 +1602,7 @@ html, body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
   z-index: 950;
   overflow: hidden;
-  animation: popup-in 0.16s ease;
+  animation: popup-in var(--t-ui) var(--e-out);
 }
 
 .briefing-header {
@@ -1799,7 +1803,7 @@ html, body {
 .notable-caret {
   font-size: 10px;
   color: var(--accent);
-  transition: transform 0.18s ease;
+  transition: transform var(--t-ui) var(--e-out);
 }
 #notableEvents.collapsed .notable-caret { transform: rotate(-90deg); }
 #notableEvents.collapsed .notable-header { border-bottom: none; }
@@ -1814,7 +1818,7 @@ html, body {
   border-radius: 50%;
   background: #ff5c2a;
   flex: none;
-  animation: notable-pulse 1.8s ease-in-out infinite;
+  animation: notable-pulse var(--tempo-live) var(--e-inout) infinite;
 }
 @keyframes notable-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 92, 42, 0.6); }
@@ -2450,7 +2454,7 @@ html, body {
   align-items: center;
   justify-content: center;
   background: radial-gradient(ellipse at center, #071822 0%, #000308 75%);
-  transition: opacity 0.6s ease;
+  transition: opacity var(--t-boot) var(--e-out);
 }
 #loadingScreen.hidden {
   opacity: 0;
@@ -2485,6 +2489,9 @@ html, body {
   background: conic-gradient(from 0deg, rgba(111, 227, 255, 0.9), rgba(111, 227, 255, 0) 40%);
   -webkit-mask: radial-gradient(circle, transparent 0, transparent 2px, black 3px);
   mask: radial-gradient(circle, transparent 0, transparent 2px, black 3px);
+  /* Exempt from the tempo scale on purpose: this is mechanism, not status. The
+     tempo tokens answer "how urgent is this condition", and a spinner saying
+     work is in progress is not in a position to be asked that. */
   animation: loading-radar-spin 1.7s linear infinite;
 }
 @keyframes loading-radar-spin {
@@ -2523,7 +2530,7 @@ html, body {
   padding: 3px 0;
   color: var(--text-dim);
   opacity: 0.55;
-  transition: opacity 0.3s ease, color 0.3s ease;
+  transition: opacity var(--t-panel) var(--e-out), color var(--t-panel) var(--e-out);
 }
 .loading-log-line.ok { color: #cfe8f2; opacity: 1; }
 .loading-log-line.warn { opacity: 0.7; }
@@ -2536,6 +2543,9 @@ html, body {
   font-weight: 700;
   color: var(--text-dim);
 }
+/* Exempt from the tempo scale on purpose: this is mechanism, not status. The
+   tempo tokens answer "how urgent is this condition", and a spinner saying
+   work is in progress is not in a position to be asked that. */
 .loading-log-line.pending .loading-log-status { animation: loading-ellipsis-pulse 1.2s ease-in-out infinite; }
 .loading-log-line.ok .loading-log-status { color: #34c759; }
 .loading-log-line.warn .loading-log-status { color: #ff9500; }
@@ -2557,7 +2567,7 @@ html, body {
   height: 100%;
   width: 0%;
   background: var(--accent);
-  transition: width 0.4s ease;
+  transition: width var(--t-settle) var(--e-out);
 }
 
 /* ============================================================
@@ -3013,7 +3023,7 @@ html, body {
   width: 10px;
   color: var(--text-dim);
   font-size: 9px;
-  transition: transform 0.12s ease;
+  transition: transform var(--t-tap) var(--e-out);
 }
 .admin-layer-block[open] > .admin-layer-summary::before { transform: rotate(90deg); }
 .admin-layer-summary:hover { color: var(--text-bright); }
@@ -3252,7 +3262,7 @@ html, body {
   padding: 3px 6px;
   border-radius: 4px;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background var(--t-tap) var(--e-out);
 }
 .event-row-open:hover,
 .event-row-open:focus-visible {
@@ -3281,7 +3291,7 @@ html, body {
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 22px var(--shadow-color);
   z-index: 1100;
-  animation: popup-in 0.16s ease;
+  animation: popup-in var(--t-ui) var(--e-out);
 }
 .event-detail-header {
   display: flex;
@@ -3352,7 +3362,7 @@ html, body {
   content: "\25B8";
   position: absolute;
   left: 2px;
-  transition: transform 0.15s ease;
+  transition: transform var(--t-ui) var(--e-out);
   display: inline-block;
 }
 .country-section[open] > summary::before { transform: rotate(90deg); }
@@ -3442,7 +3452,7 @@ html, body {
 #map[data-emphasis] .entity-marker,
 #map[data-emphasis] .leaflet-marker-icon {
   opacity: 0.28;
-  transition: opacity 0.18s ease;
+  transition: opacity var(--t-ui) var(--e-out);
 }
 #map[data-emphasis="events"] .entity-marker.layer-events,
 #map[data-emphasis="gdelt"] .entity-marker.layer-gdelt,
