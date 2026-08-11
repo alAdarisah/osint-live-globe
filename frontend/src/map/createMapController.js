@@ -6906,8 +6906,19 @@ export function createMapController(container, initial, callbacks) {
    * and, debounced, from moveend below -- both funnel through the same
    * "has the viewport actually left the loaded extent" check, so a reader
    * cannot end up re-fetching the same rivers on every pan inside a city.
+   *
+   * destroy()'s own map.stop() (called just before map.remove(), see its
+   * comment) makes Leaflet's _resetView fire one last synchronous 'moveend'
+   * on its way out -- which re-arms moveEndRiversTimer for 500ms in the
+   * future, after map.remove() has already deleted _mapPane. Without this
+   * guard that stale timer calls map.getBounds() on a torn-down map and
+   * throws "Cannot read properties of undefined (reading '_leaflet_pos')"
+   * into the console on every teardown (StrictMode's dev-only double mount
+   * hits this on every load). Same pane check createEntityWebglLayer uses to
+   * detect a map removed out from under a pending attach.
    */
   function maybeRefetchRivers() {
+    if (!map._mapPane) return;
     if (!waterRiversVisible) return;
     if (waterRiversLoadedBounds && waterRiversLoadedBounds.contains(map.getBounds())) return;
     fetchRivers();
