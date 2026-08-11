@@ -3055,6 +3055,26 @@ export function createMapController(container, initial, callbacks) {
     if (FLASHES_ON_ARRIVAL.has(key)) {
       const { ids, arrived } = newArrivals(seenIdsByKey[key] ?? null, items, idField);
       seenIdsByKey[key] = ids;
+      const now = Date.now();
+      // Swept here, unconditionally, on every render of this layer -- not
+      // only when something new arrives. isArriving's own "expire on read"
+      // is only ever reached from buildMarker/updateMarker, and those only
+      // run for ids that actually get a marker built. An id that arrives
+      // off-screen (outside the viewport, below capByRank's cut, absorbed as
+      // a non-head member of a collapseFor group) never reaches either
+      // function, so its entry would never be read and never pruned -- for
+      // gdelt, where collapsing is routine, that is most arrivals, and left
+      // alone the map grows for the life of the session by however many ids
+      // ever arrived without being drawn. Sweeping here instead gives it a
+      // hard bound: ids that arrived within the last ARRIVAL_FLASH_MS, full
+      // stop, whether or not anything ever drew them.
+      const flashing = arrivedByKey[key];
+      if (flashing) {
+        for (const [id, at] of flashing) {
+          if (now - at > ARRIVAL_FLASH_MS) flashing.delete(id);
+        }
+        if (flashing.size === 0) delete arrivedByKey[key];
+      }
       // Merged into the existing map, not replacing it: a synchronous second
       // pass (see arrivedByKey's declaration) reports zero new arrivals and
       // must not erase the timestamps this pass just wrote, or isArriving
@@ -3062,10 +3082,9 @@ export function createMapController(container, initial, callbacks) {
       // new to add is left alone -- it neither gains a fresh timestamp nor
       // loses whatever time it has left.
       if (arrived.size) {
-        const flashing = arrivedByKey[key] || new Map();
-        const now = Date.now();
-        for (const id of arrived) flashing.set(id, now);
-        arrivedByKey[key] = flashing;
+        const target = arrivedByKey[key] || new Map();
+        for (const id of arrived) target.set(id, now);
+        arrivedByKey[key] = target;
       }
     }
     let visible = [];
