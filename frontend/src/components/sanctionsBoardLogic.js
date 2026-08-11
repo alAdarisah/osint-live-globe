@@ -52,6 +52,23 @@
 // views of the same data this codebase's own history (see Task 12's note on
 // the conflict-event filters) keeps finding and fixing.
 //
+// **Provenance is two separate claims here, not one.** Per this project's
+// four-word vocabulary (measured/reported/derived/inferred): the listing
+// itself -- that OFAC or OpenSanctions named this hull or airframe under a
+// programme or a risk tag -- is REPORTED, by the named authority. That the
+// vessel or aircraft this board shows the listing *against* is the entity
+// the listing meant is DERIVED, from the identifier match (matched_on) --
+// arithmetic/lookup over a reported value, not itself a fresh observation.
+// Neither is ever MEASURED (nobody instrumented a sanctions programme) and
+// neither is INFERRED (a direct identifier match is not a judgement from
+// indirect evidence -- that word is reserved elsewhere in this codebase for
+// exactly that weaker kind of claim, e.g. countryCompareLogic.js's own
+// militaryAircraft row). LISTING_PROVENANCE/MATCH_PROVENANCE below and
+// provenanceLine() say both words on every row, the same discipline
+// countryCompareLogic.js's own `provenance` field follows per metric.
+export const LISTING_PROVENANCE = "reported";
+export const MATCH_PROVENANCE = "derived";
+
 // **"Found nothing" must never render the same as "did not look."** A zero-
 // row board can mean at least four different things: the reference lists
 // (OFAC, OpenSanctions) have not loaded, so nothing could have matched; the
@@ -180,6 +197,12 @@ function baseRow(entity, kind, source) {
     // separately (see secondaryIdLine) because the two are genuinely
     // different fields for an aircraft (icao24 vs registration).
     trackedId: kind === "aircraft" ? (entity?.icao24 || null) : (entity?.mmsi != null ? String(entity.mmsi) : null),
+    // See this module's own header note on why these are two constants, not
+    // one: the listing is reported by the named source; the match to this
+    // particular hull or airframe is derived from its identifier. Carried on
+    // every row explicitly rather than left for the prose to imply.
+    listingProvenance: LISTING_PROVENANCE,
+    matchProvenance: MATCH_PROVENANCE,
   };
 }
 
@@ -309,6 +332,16 @@ export function secondaryIdLine(row) {
 export function lastSeenLine(row) {
   if (!Number.isFinite(row?.updated)) return "Last position report: not stated by the feed";
   return `Last position report: ${timeAgoFromUnix(row.updated)} · ${utcClockFromUnix(row.updated)}`;
+}
+
+/** The two-provenance line this module's header note requires: what kind of
+ * claim the listing itself is, and separately what kind of claim ties it to
+ * this particular hull or airframe. Two words, never merged into one, and
+ * never "measured" or "inferred" -- see LISTING_PROVENANCE/MATCH_PROVENANCE. */
+export function provenanceLine(row) {
+  return `Listing ${row?.listingProvenance || LISTING_PROVENANCE} by ${row?.sourceFullLabel || row?.sourceLabel || "the source"} `
+    + `· match to this ${kindLabel(row?.kind).toLowerCase()} ${row?.matchProvenance || MATCH_PROVENANCE} from its `
+    + `${MATCHED_ON_LABEL[row?.matchedOn] || "identifier"}`;
 }
 
 export function positionLine(row) {

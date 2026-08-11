@@ -34,7 +34,8 @@ import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import {
   BOARD_STATUS, CLAIM_CLASS_COLOR, MATCHED_ON_NOTE, SANCTIONS_BOARD_SORT_KEYS,
   buildSanctionsBoardRows, canLocate, claimSummaryLine, classifyBoardStatus, coverageLine, emptyStateText,
-  lastSeenLine, listedAsLine, matchedOnLine, positionLine, secondaryIdLine, sortSanctionsBoard, undatedNote,
+  lastSeenLine, listedAsLine, matchedOnLine, positionLine, provenanceLine, secondaryIdLine, sortSanctionsBoard,
+  undatedNote,
 } from "./sanctionsBoardLogic";
 
 const SORT_LABEL = { updated: "Last seen", name: "Name" };
@@ -76,7 +77,8 @@ function SanctionsRow({ row, onLocate }) {
       {row.claimNote && <p className="meta">{row.claimNote}</p>}
       {undatedNote(row) && <p className="meta"><b>Undated list:</b> {undatedNote(row)}</p>}
       {secondaryIdLine(row) && <div className="notable-item-meta">{secondaryIdLine(row)}</div>}
-      <div className="notable-item-meta">{lastSeenLine(row)} &middot; {positionLine(row)}</div>
+      <div className="notable-item-meta">{lastSeenLine(row)} · {positionLine(row)}</div>
+      <p className="meta">{provenanceLine(row)}</p>
     </div>
   );
 }

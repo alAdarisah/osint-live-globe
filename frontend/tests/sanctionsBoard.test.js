@@ -11,10 +11,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  BOARD_STATUS, CLAIM_CLASS_LABEL, FEED_STATE, MATCHED_ON_LABEL, MATCHED_ON_NOTE, SANCTIONS_BOARD_SORT_KEYS,
+  BOARD_STATUS, CLAIM_CLASS_LABEL, FEED_STATE, LISTING_PROVENANCE, MATCH_PROVENANCE, MATCHED_ON_LABEL,
+  MATCHED_ON_NOTE, SANCTIONS_BOARD_SORT_KEYS,
   boardCoverage, buildSanctionsBoardRows, canLocate, claimSummaryLine, classifyBoardStatus, coverageLine,
-  emptyStateText, feedState, lastSeenLine, listedAsLine, matchedOnLine, positionLine, secondaryIdLine,
-  sortSanctionsBoard, undatedNote,
+  emptyStateText, feedState, lastSeenLine, listedAsLine, matchedOnLine, positionLine, provenanceLine,
+  secondaryIdLine, sortSanctionsBoard, undatedNote,
 } from "../src/components/sanctionsBoardLogic.js";
 
 // --- fixtures, shaped like the real records (see backend/sources/ais.py's
@@ -311,6 +312,33 @@ test("canLocate is false and positionLine says so when a position is missing", (
   const row = buildSanctionsBoardRows([vessel({ lat: null, lon: null, sanctions: ofacVesselHit() })], [])[0];
   assert.equal(canLocate(row), false);
   assert.equal(positionLine(row), "position not stated");
+});
+
+// --- provenance: two separate claims, never "measured" or "inferred" -----
+
+test("LISTING_PROVENANCE is reported and MATCH_PROVENANCE is derived, never measured or inferred", () => {
+  assert.equal(LISTING_PROVENANCE, "reported");
+  assert.equal(MATCH_PROVENANCE, "derived");
+});
+
+test("every row carries both provenance words explicitly, for both sources", () => {
+  const ofacRow = buildSanctionsBoardRows([vessel({ sanctions: ofacVesselHit() })], [])[0];
+  assert.equal(ofacRow.listingProvenance, "reported");
+  assert.equal(ofacRow.matchProvenance, "derived");
+  const wlRow = buildSanctionsBoardRows([vessel({ watchlist: watchlistHit() })], [])[0];
+  assert.equal(wlRow.listingProvenance, "reported");
+  assert.equal(wlRow.matchProvenance, "derived");
+});
+
+test("provenanceLine states who reported the listing and what identifier the match was derived from", () => {
+  const row = buildSanctionsBoardRows([vessel({ sanctions: ofacVesselHit({ matched_on: "imo" }) })], [])[0];
+  const line = provenanceLine(row);
+  assert.match(line, /reported/);
+  assert.match(line, /derived/);
+  assert.match(line, /OFAC/);
+  assert.match(line, /IMO number/);
+  assert.doesNotMatch(line, /measured/);
+  assert.doesNotMatch(line, /\binferred\b/);
 });
 
 // --- sortSanctionsBoard -----------------------------------------------
