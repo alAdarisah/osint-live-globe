@@ -138,6 +138,7 @@ import {
 } from "./subdivisions";
 import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
+import { newArrivals } from "./arrivals";
 import { createEntityWebglLayer } from "./webglLayer";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
 import {
@@ -578,6 +579,12 @@ export function createMapController(container, initial, callbacks) {
     czib: new Map(), floods: new Map(), ports: new Map(), dams: new Map(),
     deflock: new Map(),
   };
+  // Which record ids each layer held last render, and which of them are new
+  // enough to still be flashing. Only the layers where a new record is news --
+  // a ship appearing is not.
+  const seenIdsByKey = {};
+  const arrivedByKey = {};
+  const FLASHES_ON_ARRIVAL = new Set(["events", "gdelt", "osmInfra", "czib"]);
   // Keyed by event id, same as markersByKey.events, so a circle and its pin
   // are added and dropped by the same diff against the same visible set.
   const uncertaintyCircles = new Map();
@@ -2331,6 +2338,29 @@ export function createMapController(container, initial, callbacks) {
   function buildMarker(key, item, decorate, sizeOf, copy = 0) {
     const id = item[ID_FIELD[key]];
     const d = applyCollapsedFallback(decorate(item, decorateOptionsFor(key, item, id)), item);
+    // One flash as it lands. buildMarker also runs when a known record scrolls
+    // back into view, which is why the test is against the arrival set and not
+    // against "is this marker new".
+    //
+    // The class goes onto entity-icon-wrap inside the icon's html, not onto
+    // d.icon.options.className: that className lands on the element Leaflet
+    // itself positions (it sets that exact node's inline `transform:
+    // translate3d(...)` on every move -- see _setPos in leaflet.js), and a CSS
+    // animation touching `transform` on that same node overrides Leaflet's
+    // positioning transform for as long as it runs, which would flash the pin
+    // at the pane's origin instead of where it belongs. entity-icon-wrap is a
+    // plain child div with no positioning job -- the same reason every other
+    // marker animation in style.css (.infra-hot, .czib-live) is scoped to it
+    // rather than to the outer element, via a `.x .entity-icon-wrap` selector.
+    // buildDivIcon (svgIcons.js) always opens the icon's html with that div as
+    // its first element, so the string is safe to target directly, the same
+    // way applyCollapsedFallback above already edits this html for a badge.
+    if (arrivedByKey[key]?.has(id) && d.icon?.options?.html) {
+      d.icon.options.html = d.icon.options.html.replace(
+        'class="entity-icon-wrap',
+        'class="entity-icon-wrap marker-arrived'
+      );
+    }
     tagIconLayer(d.icon, key);
     const marker = L.marker(drawLatLng(item, copy), { icon: d.icon });
     // Clicking a pin says "this kind of thing". Everything else on the map
@@ -2983,6 +3013,21 @@ export function createMapController(container, initial, callbacks) {
     // entirely when it has no history for it, and an undefined here used to
     // take the whole render down rather than drawing an empty layer.
     const items = raw[key] || [];
+    // Computed from `items` -- the layer's full payload -- and never from
+    // `visible` below. `visible` is the viewport-filtered, capped, collapsed
+    // slice that gets rebuilt on every pan and zoom; an arrival set built from
+    // it would flash on every pan and mean nothing. This has to run before any
+    // of that filtering, against the same items raw[key] just handed back.
+    if (FLASHES_ON_ARRIVAL.has(key)) {
+      const { ids, arrived } = newArrivals(seenIdsByKey[key] ?? null, items, idField);
+      seenIdsByKey[key] = ids;
+      // Held until the next render of this layer rather than on a timer: the class
+      // only has to survive long enough for the marker to be built with it, and the
+      // animation is one-shot, so a stray timer would be a second source of truth
+      // about when the flash ends.
+      if (arrived.size) arrivedByKey[key] = arrived;
+      else delete arrivedByKey[key];
+    }
     let visible = [];
     if (!belowMinZoom) {
       for (const item of items) {

@@ -306,6 +306,23 @@ html, body {
   50% { filter: drop-shadow(0 0 11px #ff8c00) drop-shadow(0 0 4px #ffcc80); }
 }
 
+/* A record that is new to the feed, flashing once as it lands. One-shot, not a
+   loop: this says "this just arrived", and a pin that kept flashing would be
+   saying "this is urgent", which is severity's job and not arrival's.
+
+   Conflict, news, infrastructure and airspace only. The ship and aircraft
+   layers turn over thousands of markers a refresh and a vessel appearing is
+   not news. */
+.marker-arrived {
+  animation: marker-arrived var(--t-settle) var(--e-out);
+}
+
+@keyframes marker-arrived {
+  from { transform: scale(2.1); opacity: 0; }
+  60% { opacity: 1; }
+  to { transform: scale(1); opacity: 1; }
+}
+
 .infra-hot-badge {
   display: inline-block;
   font-size: 9px;
