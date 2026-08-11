@@ -64,6 +64,12 @@ export const INFERENCE_PRODUCTS = [
     effect: "card",
     backendKeys: ["flight_legs"],
   },
+  {
+    key: "jamCrosscheck",
+    label: "GPS jamming cross-check",
+    effect: "card",
+    backendKeys: ["jam_crosscheck"],
+  },
 ];
 
 /**

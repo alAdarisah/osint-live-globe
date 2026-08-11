@@ -206,6 +206,13 @@ export const POLL_CONFIG = [
   // just above, at a slightly less eager interval to match the slower
   // underlying cadence.
   { key: "chokepoints", url: "/api/chokepoints", intervalMs: 20 * 60000 },
+  // Task 39: which of gpsjam's current worst-hundred cells this map's own
+  // ADS-B history shows an aircraft position anomaly inside, read by
+  // renderJamming's own popup build and by the aircraft card's route
+  // section. Recomputed there on its own JAM_CROSSCHECK_INTERVAL cadence
+  // (15 minutes by default) -- same "poll no faster than the document
+  // actually changes" reasoning as navalPresence/chokepoints above.
+  { key: "jamCrosscheck", url: "/api/jam-crosscheck", intervalMs: 15 * 60000 },
   // Global Fishing Watch's AIS disabling events. Refetched server-side every six
   // hours, and the batch itself is five or more days behind, so the hourly poll
   // is only about a long-lived tab noticing a new batch. Most of these return

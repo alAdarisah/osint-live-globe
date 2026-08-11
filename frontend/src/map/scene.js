@@ -907,6 +907,11 @@ export const UNGATED_FEEDS = new Set([
   // here from Task 29 until it was fixed alongside the matching gap in
   // createMapController.js's applyData; see REFERENCE_ONLY_FEEDS there.
   "chokepoints", "navalPresence",
+  // Task 39: gpsjam-cell-keyed, read on demand by renderJamming's own popup
+  // build for whichever cells are on screen -- same footing as chokepoints/
+  // navalPresence just above, not a layer the jamming toggle needs a pin for
+  // (the jamming layer itself already has one).
+  "jamCrosscheck",
   // One payload each, split across three toggles by their own renderers.
   "ais", "adsb",
 ]);
@@ -945,7 +950,7 @@ export const UNGATED_FEEDS = new Set([
 export const REFERENCE_ONLY_FEEDS = new Set([
   "conflictStats", "escalation", "conflictDistricts", "humanitarian",
   "energyFlows", "foodTrade", "foodPriceIndex", "fetchCoverage",
-  "navalPresence", "chokepoints",
+  "navalPresence", "chokepoints", "jamCrosscheck",
 ]);
 
 /** Every layer key the manifest knows about. */

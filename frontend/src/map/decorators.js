@@ -21,6 +21,7 @@ import {
 import { paletteColor, paletteGlyph, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
 import { footprintRadiusKm } from "./groundTrack";
 import { inferenceHidden } from "./inferenceVisibility";
+import { REFINE_PANEL_STATUS_TEXT, REFINE_PANEL_STATUS } from "../components/refinePanelStatus";
 
 // --- level of detail -------------------------------------------------------
 //
@@ -3855,6 +3856,119 @@ function routeSection(flightDetail, updated) {
       position history &mdash; <i>inferred</i>, never a filed flight plan</div>`;
 }
 
+// ---------- Task 39: jamming/ADS-B cross-check ------------------------------
+//
+// Same fetch-after-the-popup-opens shape as routeSection just above -- this
+// reads `data.jam_crosscheck`/`data.jam_crosscheck_note`, both riding the
+// same GET /api/aircraft/{icao24} response flightDetail already carries, not
+// a second fetch. See backend/refine/jam_crosscheck.py's own docstring for
+// why an airframe that has never sat inside one of gpsjam's currently-
+// tracked worst-hundred cells has no `jam_crosscheck` entry at all (`null`
+// here) rather than a fabricated "checked, clean" one -- that is a third,
+// genuinely different state from "checked, clean" and "flagged", and this
+// section renders all three with different wording, never collapsing "did
+// not look" into "found nothing".
+
+const JAM_FLAG_TYPE_LABEL = {
+  speed: "Implausible speed",
+  heading_reversal: "Heading-inconsistent reversal",
+};
+
+function jamFlagLine(flag) {
+  const label = JAM_FLAG_TYPE_LABEL[flag.type] || flag.type;
+  const detail = flag.type === "speed"
+    ? `${Math.round(flag.speed_kmh).toLocaleString()} km/h implied over ${Math.round(flag.distance_km)} km`
+    : `track disagreed with reported heading by ${Math.round(flag.deviation_deg)}&deg;`;
+  return `<li>${esc(utcClockFromUnix(flag.ts))} &mdash; <b>${esc(label)}</b>: ${detail}</li>`;
+}
+
+/**
+ * The jamming *cell*'s own half of the cross-check, for renderJamming's
+ * popup (createMapController.js) -- the mirror of jamCrosscheckSection just
+ * below, which is the *aircraft*'s half. `doc` is `raw.jamCrosscheck` as
+ * polled (see map/scene.js's REFERENCE_ONLY_FEEDS); `hex` is the jamming
+ * point's own H3 cell id (backend/sources/jamming.py's `hex` field).
+ *
+ * Three real states, never collapsed into each other (global-constraints.md's
+ * own repeated defect: "found nothing" must never render the same as "did
+ * not look"): the whole document missing (this job has not written a first
+ * pass at all -- REFINE_PANEL_STATUS_TEXT's own wording, not a second copy
+ * of it), this one cell missing from an otherwise-real document (gpsjam's
+ * own top hundred changed since this document was built, or a snapshot
+ * predates Task 39's own `hex` field), and the cell's own three-way
+ * `status` once it is present.
+ */
+export function jamCellCrosscheckNote(doc, hex) {
+  if (!doc || !doc.cells) {
+    return `<p class="meta">Aircraft cross-check: ${esc(REFINE_PANEL_STATUS_TEXT[REFINE_PANEL_STATUS.MISSING])}</p>`;
+  }
+  const cell = hex ? doc.cells[hex] : null;
+  if (!cell) {
+    return '<p class="meta">Aircraft cross-check: not available for this cell right now.</p>';
+  }
+  const trackedSince = Number.isFinite(doc.as_of) && Number.isFinite(cell.tracked_seconds)
+    ? doc.as_of - cell.tracked_seconds
+    : null;
+  const trackedFor = trackedSince !== null ? timeAgoFromUnix(trackedSince).replace(/ ago$/, "") : null;
+  const trackedNote = trackedFor ? ` (tracked for ${esc(trackedFor)})` : "";
+  if (cell.status === "no_traffic") {
+    return `<p class="meta">Aircraft cross-check: no aircraft recorded here by this map's own ADS-B ` +
+      `coverage${trackedNote} &mdash; not evidence either way, only that this map saw no traffic to check.</p>`;
+  }
+  if (cell.status === "clean") {
+    return `<p class="meta">Aircraft cross-check: <b>${cell.aircraft_observed} aircraft</b> observed here, ` +
+      `none showed a position anomaly${trackedNote}.</p>`;
+  }
+  return `<p class="meta">Aircraft cross-check: <b>${cell.aircraft_flagged} of ${cell.aircraft_observed} ` +
+    `aircraft</b> showed a position anomaly here${trackedNote}. That the anomaly coincided with this cell ` +
+    `is derived; that jamming explains it is an inference, never an observation.</p>`;
+}
+
+/** The jamming cross-check fold. Opens with the same honesty caveat every
+ * reader of this product gets, regardless of which of the three states the
+ * airframe is in -- an inference is never presented as an observation, see
+ * this project's own rule (global-constraints.md). */
+function jamCrosscheckSection(flightDetail) {
+  // Task 31: the Inference section's own switch for this product.
+  if (inferenceHidden("jamCrosscheck")) return "";
+  const head = '<div class="csection-h">GPS jamming cross-check</div>';
+  if (!flightDetail || flightDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (flightDetail.status === "error") {
+    return `${head}<p class="meta"><b>Cross-check unavailable</b> &mdash; the aircraft-detail request failed.</p>`;
+  }
+  const data = flightDetail.data || {};
+  const jc = data.jam_crosscheck;
+  if (!data.jam_crosscheck_note) {
+    // The refine job itself has never written a pass -- distinct from "it
+    // ran and this airframe simply has no entry" just below, which is a
+    // real, checked fact rather than an absence of computation.
+    return `${head}<p class="meta">${esc(REFINE_PANEL_STATUS_TEXT[REFINE_PANEL_STATUS.MISSING])}</p>`;
+  }
+  const note = data.jam_crosscheck_note;
+  if (!jc) {
+    return `${head}<p class="meta">This airframe has not been recorded inside one of gpsjam.org's currently ` +
+      `tracked worst-hundred cells &mdash; not evidence of anything either way, since that list covers only ` +
+      `a tiny fraction of the globe.</p><p class="meta">${esc(note)}</p>`;
+  }
+  let body;
+  if (jc.status === "flagged") {
+    body = `<p class="meta">${jc.flag_count} position anomal${jc.flag_count === 1 ? "y" : "ies"} recorded while ` +
+      `this airframe sat inside a tracked jamming cell (${jc.sample_count} sample${jc.sample_count === 1 ? "" : "s"} ` +
+      `checked). That the jump coincided with the cell is derived; that jamming explains it is an inference, ` +
+      `not an observation.</p>` +
+      `<ul class="meta">${jc.flags.slice(0, 10).map(jamFlagLine).join("")}</ul>`;
+  } else if (jc.status === "checked_clean") {
+    body = `<p class="meta">Checked while inside a tracked jamming cell (${jc.sample_count} samples) &mdash; ` +
+      `no position anomaly found.</p>`;
+  } else {
+    body = `<p class="meta">Positioned inside a tracked jamming cell, but too few samples ` +
+      `(${jc.sample_count}) yet to call this airframe's track clean or anomalous.</p>`;
+  }
+  return `${head}${body}<p class="meta">${esc(note)}</p>`;
+}
+
 export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
   const type = classifyAircraft(d);
   const base = (type === "military" && d.military_role && MILITARY_ROLE_STYLE[d.military_role]) || AIRCRAFT_STYLE[type];
@@ -3968,7 +4082,8 @@ export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
       identity fields (registration, operator, type) <i>reported</i> by airplanes.live's reference data, where it
       has an entry; ICAO allocation country <i>derived</i> from the Mode-S address block; vertical trend
       <i>derived</i> from this aircraft's own recorded track${airfield ? "; airfields: OurAirports" : ""}</div>
-    ${d.icao24 === selectedIcao ? routeSection(flightDetail, d.updated) : ""}`;
+    ${d.icao24 === selectedIcao ? routeSection(flightDetail, d.updated) : ""}
+    ${d.icao24 === selectedIcao ? jamCrosscheckSection(flightDetail) : ""}`;
   let cls = "aircraft-marker";
   if (type === "military") cls += " military-marker";
   if (flag) cls += ` aircraft-flagged aircraft-${flag === "emergency" ? "emergency" : "hidden"}`;

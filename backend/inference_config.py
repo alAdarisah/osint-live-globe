@@ -9,7 +9,11 @@ constant, "put there specifically so this task could expose them" -- true of
 exactly four of them: VESSEL_DRAUGHT_LADEN_RATIO/BALLAST_RATIO/MIN_SAMPLES,
 and LANE_DENSITY_INTERVAL (the job interval lane_density's own fields report
 alongside its decay factor below -- see that field's own note on why the two
-travel together). Every other threshold here is a plain module-level
+travel together). Task 39's five (JAM_CROSSCHECK_MAX_SPEED_KMH/MIN_REVERSAL_
+KM/MAX_HEADING_DEVIATION_DEG/MIN_SAMPLES/WINDOW_SECONDS) live in config.py
+too, by that same task's own brief -- see backend/refine/jam_crosscheck.py's
+own docstring for why each one is a measured figure, not a remembered
+airframe spec. Every other threshold here is a plain module-level
 constant inside the refine job (or the source module) that actually applies
 it: backend/sources/dark_vessels.py's GAP_MIN_HOURS/GAP_MAX_HOURS/
 REACH_CROSS_TRACK_FRACTION, backend/refine/port_calls.py's
@@ -47,7 +51,7 @@ no dial, and this is not a dial.
 # off the constant that actually governs the job" true rather than aspirational,
 # and what lets a test monkeypatch the owning module's attribute and see it here.
 from backend import config, infrastructure
-from backend.refine import flight_legs, lane_density, port_call_thresholds, port_calls
+from backend.refine import flight_legs, jam_crosscheck, lane_density, port_call_thresholds, port_calls
 from backend.sources import dark_vessels
 
 
@@ -195,6 +199,41 @@ def describe() -> dict:
                     "coverage_gap_seconds", "Coverage gap", flight_legs.COVERAGE_GAP_SECONDS, "seconds",
                     "How long an aircraft can go unseen before a leg is closed as \"coverage lost\" rather"
                     " than assumed still in progress -- twice the anonymous ADS-B poll interval.",
+                ),
+            ],
+        },
+        "jam_crosscheck": {
+            "label": "Jamming / ADS-B cross-check",
+            "governs": "backend.refine.jam_crosscheck",
+            "fields": [
+                _field(
+                    "max_speed_kmh", "Max plausible speed", config.JAM_CROSSCHECK_MAX_SPEED_KMH, "km/h",
+                    "A position delta between two consecutive ADS-B fixes implying a ground speed above"
+                    " this is called implausible. Measured against this map's own live entity_history, not"
+                    " an airframe spec -- see the constant's own comment in backend/config.py.",
+                ),
+                _field(
+                    "min_reversal_km", "Min displacement for a heading check", config.JAM_CROSSCHECK_MIN_REVERSAL_KM,
+                    "km",
+                    "Below this much movement between two fixes, ordinary GPS jitter dominates the implied"
+                    " bearing and it is not compared against the reported heading at all.",
+                ),
+                _field(
+                    "max_heading_deviation_deg", "Max heading deviation", config.JAM_CROSSCHECK_MAX_HEADING_DEVIATION_DEG,
+                    "degrees",
+                    "Past JAM_CROSSCHECK_MIN_REVERSAL_KM of movement, a displacement whose own bearing"
+                    " disagrees with the reported heading by more than this is called a reversal.",
+                ),
+                _field(
+                    "min_samples", "Minimum samples for a clean verdict", config.JAM_CROSSCHECK_MIN_SAMPLES, "samples",
+                    "Fewer qualifying position-delta pairs than this for one airframe, while it sat inside"
+                    " a currently-tracked jam cell, and \"no anomaly found\" is not yet a real \"checked,"
+                    " clean\" verdict.",
+                ),
+                _field(
+                    "window_seconds", "Rolling window", config.JAM_CROSSCHECK_WINDOW_SECONDS, "seconds",
+                    "How long a sampled or flagged aircraft stays counted against a jam cell in the served"
+                    " document -- what \"N aircraft showed a position anomaly here\" actually covers.",
                 ),
             ],
         },

@@ -141,6 +141,7 @@ import {
   applyCollapsedFallback,
   TOKEN_FOR,
   satellitePassesPopupHtml,
+  jamCellCrosscheckNote,
 } from "./decorators";
 import {
   setIconTheme, themedStyle, tokenZoom, tokenZoomMax, layerHasTokenZoom, layerHasTokenZoomMax, layerOpacity, stackZIndex, scaledSize, scaledWeight, layerScale,
@@ -945,6 +946,12 @@ export function createMapController(container, initial, callbacks) {
     // already draw as ordinary AIS pins, and ChokepointPanel.jsx polls this
     // same endpoint independently for its own standalone view.
     chokepoints: {},
+    // Task 39: backend/refine/jam_crosscheck.py's document -- also consumed
+    // only by the jamming layer's own popup (renderJamming) and the aircraft
+    // card's route section, not drawn as its own layer: the cells already
+    // draw on the jamming layer and the airframes already draw on the adsb
+    // one, this is corroboration attached to both.
+    jamCrosscheck: {},
     // Global Fishing Watch's two published maritime layers. Kept apart from
     // darkVessels above on purpose: that array is this app's inference from its
     // own three-day AIS history, these are another organisation's findings
@@ -5192,7 +5199,8 @@ export function createMapController(container, initial, callbacks) {
         <div class="meta">${esc(d.date || "")}</div>
         <div>Affected aircraft reports: ${Math.round(d.jam_ratio * 100)}% (${d.bad} of ${d.bad + d.good})</div>
         <p class="meta">Derived from ADS-B aircraft GPS-quality reports, aggregated into a ~1,770km&sup2; hex cell -- a once-daily, regional signal, not a real-time or pinpoint one.</p>
-        <div class="meta">Source: gpsjam.org (ADS-B Exchange)</div>`;
+        <div class="meta">Source: gpsjam.org (ADS-B Exchange)</div>
+        ${jamCellCrosscheckNote(raw.jamCrosscheck, d.hex)}`;
       // Hit radius sized to the *visible* ping ring (up to ~31px at peak
       // scale, see .jamming-ping-ring/@keyframes jamming-ping in style.css),
       // not the old 8px dot -- otherwise the pulsing ring people actually

@@ -208,15 +208,16 @@ test("filters", async (t) => {
 // --- inference: the three-state switch's persistence --------------------
 
 test("inference mode", async (t) => {
-  await t.test("there are five products: two backed by a real layer, three that gate a card section", () => {
+  await t.test("there are six products: two backed by a real layer, four that gate a card section", () => {
     // Task 31 review, Minor 2: InferenceSection.jsx's showIsNoOp cue keys
     // off `effect === "card"` -- this pins the count its own note claims
-    // ("Show is a silent no-op for three of the five products") so a future
+    // ("Show is a silent no-op for card-effect products") so a future
     // product added with the wrong `effect` (or the wrong total) cannot
-    // silently make that note wrong without a test noticing.
-    assert.equal(INFERENCE_PRODUCTS.length, 5);
+    // silently make that note wrong without a test noticing. Task 39 added
+    // jamCrosscheck as the fourth card-effect product.
+    assert.equal(INFERENCE_PRODUCTS.length, 6);
     assert.equal(INFERENCE_PRODUCTS.filter((p) => p.effect === "layer").length, 2);
-    assert.equal(INFERENCE_PRODUCTS.filter((p) => p.effect === "card").length, 3);
+    assert.equal(INFERENCE_PRODUCTS.filter((p) => p.effect === "card").length, 4);
     for (const product of INFERENCE_PRODUCTS) {
       assert.ok(["layer", "card"].includes(product.effect), product.key);
       if (product.effect === "layer") assert.ok(product.layerKey, `${product.key} needs a layerKey`);

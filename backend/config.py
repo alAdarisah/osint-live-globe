@@ -438,6 +438,92 @@ VESSEL_DRAUGHT_BALLAST_RATIO = float(os.getenv("VESSEL_DRAUGHT_BALLAST_RATIO", "
 # `insufficient_samples` reason.
 VESSEL_DRAUGHT_MIN_SAMPLES = int(os.getenv("VESSEL_DRAUGHT_MIN_SAMPLES", "5"))
 
+# --- Task 39: jamming / ADS-B cross-check -----------------------------------
+#
+# backend/refine/jam_crosscheck.py flags a position delta between two
+# consecutive ADS-B fixes for the same airframe as "implausible" one of two
+# ways -- an implied ground speed above JAM_CROSSCHECK_MAX_SPEED_KMH, or a
+# displacement whose own bearing runs more than JAM_CROSSCHECK_MAX_HEADING_
+# DEVIATION_DEG away from the aircraft's own reported heading -- and only
+# ever calls it corroboration of GPS jamming when the anomalous fix itself
+# sits inside one of gpsjam.org's currently-reported worst-100 H3 cells (see
+# backend/sources/jamming.py). All four numbers below were read off this
+# map's own live entity_history (kind="adsb"), not remembered from an
+# airframe spec sheet -- see the module's own docstring for why: the ADS-B
+# payload's own "velocity" field cannot be used for grounding instead,
+# because backend/sources/adsb.py stores it in knots from airplanes.live but
+# in raw OpenSky units (m/s) from OpenSky, with no conversion between the
+# two -- a pre-existing mismatch this task does not fix, and not something
+# to build a hard threshold on top of.
+#
+# How long two consecutive fixes for the same airframe may be apart and still
+# be compared as one continuous reading, rather than a coverage gap this
+# module cannot draw any conclusion from (a dropped sample, a receiver
+# handoff, hours out of range). Same figure and the same reasoning as
+# backend/refine/flight_legs.py's COVERAGE_GAP_SECONDS: twice the slowest
+# cadence this map polls ADS-B at (ADSB_POLL_INTERVAL_ANON, 900s), which is
+# headroom for one missed poll without being anywhere close to wide enough to
+# fold a multi-hour blackout into "the previous reading".
+JAM_CROSSCHECK_MAX_GAP_SECONDS = int(os.getenv("JAM_CROSSCHECK_MAX_GAP_SECONDS", str(2 * ADSB_POLL_INTERVAL_ANON)))
+# Implied ground speed above which a position delta is called implausible,
+# measured directly against this map's own live database (2026-08-11):
+# consecutive-fix pairs for an airborne airframe, gap-bounded by
+# JAM_CROSSCHECK_MAX_GAP_SECONDS above, n=12,359,867. The distribution's
+# ordinary range tops out in the low thousands (p99=1082km/h, p99.9=1597,
+# p99.95=1858km/h) and then knees sharply upward (p99.97=2755, p99.99=8463) --
+# a heavy-tailed jump consistent with a second, different population (bad
+# fixes, receiver noise, occasional ICAO24 collisions) taking over from
+# "ordinary cruise plus an exceptional jet-stream tailwind" somewhere in that
+# gap. The fastest jet-stream-aided subsonic airliner groundspeeds on public
+# record sit around 1300-1400km/h; 2200km/h sits comfortably clear of that
+# real population, inside the knee (between the measured p99.95 and p99.97),
+# and well under Mach 2 (~2450km/h at altitude) -- a speed essentially no
+# ADS-B-tracked airframe sustains in the traffic this map actually covers.
+# At this threshold the live database flagged 4,739 of those 12.36M pairs
+# (0.038%), only 77 of them (1.6%) inside a cell gpsjam was reporting at the
+# time -- see the module docstring's own note on why that is expected, not a
+# defect in the threshold.
+JAM_CROSSCHECK_MAX_SPEED_KMH = float(os.getenv("JAM_CROSSCHECK_MAX_SPEED_KMH", "2200"))
+# How far an airframe must have moved between two consecutive fixes before
+# the *bearing* of that movement is trusted at all -- below this, ordinary
+# position jitter dominates. Measured against the same live database: binned
+# by displacement, the deviation between a pair's implied ground track and
+# the airframe's own reported heading is wildly noisy under 2km (28-39% of
+# pairs disagree by more than 90 degrees) and collapses sharply at or above
+# 5km (0.55% exceed 90 degrees; median deviation drops to 0.3 degrees) --
+# the point past which the measured population looks like real flight
+# dynamics (wind crab, ordinary turns) rather than fix-to-fix noise.
+JAM_CROSSCHECK_MIN_REVERSAL_KM = float(os.getenv("JAM_CROSSCHECK_MIN_REVERSAL_KM", "5.0"))
+# Above this, the deviation between a pair's implied ground track and the
+# airframe's own reported heading is called a reversal rather than a turn or
+# wind crab. Measured at the >=5km displacement floor above: p99 of the
+# deviation distribution is only 73.8 degrees, so 150 sits deep past the
+# genuine tail (0.13% of qualifying pairs exceed it) -- and 45,321 of those
+# pairs (Task 39's own live measurement) were spread across 20,412 distinct
+# airframes, not concentrated in a handful of broken transponders, which is
+# why this is a plausibility threshold rather than a denylist.
+JAM_CROSSCHECK_MAX_HEADING_DEVIATION_DEG = float(os.getenv("JAM_CROSSCHECK_MAX_HEADING_DEVIATION_DEG", "150"))
+# Fewer qualifying position-delta samples than this for one airframe, while
+# positioned inside a currently-tracked jam cell, and "no anomaly found" is
+# not yet a real "checked, clean" verdict -- see laden_state's own
+# `insufficient_samples` reason for the same shape of judgement, and
+# jamming.MIN_TRAFFIC (gpsjam's own floor for trusting a cell's ratio at all)
+# for the precedent of using a small integer rather than nothing.
+JAM_CROSSCHECK_MIN_SAMPLES = int(os.getenv("JAM_CROSSCHECK_MIN_SAMPLES", "2"))
+# How often backend/refine/jam_crosscheck.py reads the next slice of ADS-B
+# history. Matched to FLIGHT_LEG_INTERVAL: both walk the same entity_history
+# kind ("adsb") looking for a transition/anomaly that is more usefully caught
+# soon after it happens than left for a slower sweep, and this is the pace a
+# job that has fallen behind catches up at.
+JAM_CROSSCHECK_INTERVAL = int(os.getenv("JAM_CROSSCHECK_INTERVAL", "900"))
+# How long a flagged or sampled aircraft stays counted against a jam cell in
+# the served document, i.e. what "N aircraft showed a position anomaly here"
+# actually covers. gpsjam's own feed is daily (see jamming.py's own
+# REFRESH_INTERVAL comment) and the brief's own suggested wording was "in the
+# last 24h" -- both line up with keeping a rolling day here, even though this
+# job's own read cadence (JAM_CROSSCHECK_INTERVAL above) is far faster.
+JAM_CROSSCHECK_WINDOW_SECONDS = int(os.getenv("JAM_CROSSCHECK_WINDOW_SECONDS", str(24 * 3600)))
+
 # The waters this map *claims* as watched, as "lat_min,lon_min,lat_max,lon_max"
 # boxes separated by ";". High-interest maritime chokepoints and conflict water.
 #

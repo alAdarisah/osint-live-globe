@@ -17,7 +17,7 @@ def test_every_product_is_named_and_governs_a_real_module():
     doc = inference_config.describe()
     assert set(doc) == {
         "laden_ballast", "cargo_class", "dark_ship", "port_calls",
-        "lane_density", "flight_legs", "military_bases",
+        "lane_density", "flight_legs", "jam_crosscheck", "military_bases",
     }
     for key, product in doc.items():
         assert product["label"], key
@@ -55,6 +55,13 @@ def test_every_field_has_a_unit_and_a_plain_language_note():
         for field in product["fields"]:
             assert field["unit"], field["key"]
             assert len(field["note"]) > 10, field["key"]
+
+
+def test_jam_crosscheck_reads_the_live_config_values(monkeypatch):
+    monkeypatch.setattr(config, "JAM_CROSSCHECK_MAX_SPEED_KMH", 3000.0)
+    doc = inference_config.describe()
+    fields = {f["key"]: f["value"] for f in doc["jam_crosscheck"]["fields"]}
+    assert fields["max_speed_kmh"] == 3000.0
 
 
 def test_lane_density_decay_factor_is_derived_not_restated():

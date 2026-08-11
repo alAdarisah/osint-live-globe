@@ -65,6 +65,12 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # Publishes no layer either -- one reference_snapshots document, read
         # directly by GET /api/cable-outage-risk.
         "backend.refine.cable_outage",
+        # Aircraft whose own reported track does something physically
+        # implausible while sitting inside one of gpsjam.org's currently
+        # worst-affected cells. Publishes no layer either -- one
+        # reference_snapshots document, read directly by
+        # GET /api/jam-crosscheck and by GET /api/aircraft/{icao24}.
+        "backend.refine.jam_crosscheck",
     }
 
 

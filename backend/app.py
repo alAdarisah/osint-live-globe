@@ -21,7 +21,9 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.refine import cable_outage, flight_legs, infra_risk, lane_density, naval_presence, port_call_thresholds
+from backend.refine import (
+    cable_outage, flight_legs, infra_risk, jam_crosscheck, lane_density, naval_presence, port_call_thresholds,
+)
 # Aliased: this module already has a route handler literally named
 # `satellites` (see /api/satellites below, unchanged from before this task),
 # and that function def rebinds the bare module-level name `satellites` --
@@ -1596,15 +1598,26 @@ async def aircraft_detail(icao24: str):
     share.
 
     Reads flight_legs (backend/refine/flight_legs.py, via flight_legs_for /
-    open_flight_leg) and entity_latest -- never entity_history. That table is
-    read incrementally, on a schedule, by the refine job above; a request
-    path must never open it directly (see global-constraints.md), and
-    nothing below does.
+    open_flight_leg), entity_latest and one cached refine document -- never
+    entity_history. That table is read incrementally, on a schedule, by the
+    refine jobs above; a request path must never open it directly (see
+    global-constraints.md), and nothing below does.
+
+    `jam_crosscheck` (Task 39) is this airframe's own slice of
+    jam_crosscheck.REFERENCE_NAME -- the same cached document
+    GET /api/jam-crosscheck serves whole (see _jam_crosscheck_doc above,
+    shared between the two so a card open and a panel poll cost at most one
+    Postgres read per cache TTL between them). `None` here is not "checked,
+    clean" -- it is "this airframe has never sat inside one of gpsjam's
+    currently-tracked worst-hundred cells", a different fact the card has to
+    render differently (see jam_crosscheck.py's own docstring on why only
+    cell-relevant airframes get an entry at all).
     """
-    identity, legs, current_leg = await asyncio.gather(
+    identity, legs, current_leg, jam_doc = await asyncio.gather(
         storage.entity_latest_one("adsb", icao24),
         storage.flight_legs_for(icao24, limit=20),
         storage.open_flight_leg(icao24),
+        _jam_crosscheck_doc(),
     )
     if identity is None and not legs and current_leg is None:
         raise HTTPException(status_code=404, detail=f"no record for aircraft '{icao24}'")
@@ -1627,6 +1640,8 @@ async def aircraft_detail(icao24: str):
         "legs": legs,
         "current_leg": current_leg,
         "cargo_hint": cargo_hint,
+        "jam_crosscheck": (jam_doc.get("aircraft") or {}).get(icao24),
+        "jam_crosscheck_note": jam_crosscheck.NOTE if jam_doc else None,
     }
 
 
@@ -1966,6 +1981,60 @@ async def cable_outage_endpoint():
         cached = await storage.reference(cable_outage.REFERENCE_NAME) or {}
         _CABLE_OUTAGE_CACHE.set("all", cached)
     return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the cable-outage cache just above: one
+# stored document written by the refine process (backend/refine/
+# jam_crosscheck.py, on its own JAM_CROSSCHECK_INTERVAL cadence -- 15 minutes
+# by default), read by a frontend on its own slower timer. Also reused by
+# aircraft_detail below (its own `jam_crosscheck` field is a slice of this
+# same document, not a second read of entity_history) so both consumers pay
+# for at most one Postgres read per cache TTL rather than one each.
+_JAM_CROSSCHECK_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("jam_crosscheck", _JAM_CROSSCHECK_CACHE)
+
+
+async def _jam_crosscheck_doc() -> dict:
+    cached = _JAM_CROSSCHECK_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(jam_crosscheck.REFERENCE_NAME) or {}
+        _JAM_CROSSCHECK_CACHE.set("all", cached)
+    return cached
+
+
+@app.get("/api/jam-crosscheck")
+async def jam_crosscheck_endpoint():
+    """Task 39: aircraft whose own reported track did something physically
+    implausible while sitting inside one of gpsjam.org's currently
+    worst-affected cells (backend/refine/jam_crosscheck.py) -- independent
+    corroboration for a jamming layer that otherwise stands alone.
+
+    An empty object -- not an error -- before the refine process has written
+    a pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document
+    exists, every cell in gpsjam's own current top hundred gets an entry
+    keyed by its own H3 hex id, `status` (`"no_traffic"` / `"clean"` /
+    `"flagged"`) and `tracked_seconds` say how long this map has actually
+    been able to look at that cell, and an aircraft entry only exists for an
+    airframe that has itself sat inside a tracked cell at least once -- see
+    the module's own docstring for why an airframe elsewhere on the map has
+    no entry here at all rather than a fabricated "checked" one.
+
+    **This is corroboration, not detection** -- restated in the document's
+    own `note` field verbatim, the same "one home for the caveat" discipline
+    cable_outage.py's own NOTE and infra_risk.py's own `note` already use:
+    that a flagged jump coincides with a reported cell is derived arithmetic;
+    that jamming explains it is an inference, never printed as an
+    observation.
+
+    Reads storage.reference(jam_crosscheck.REFERENCE_NAME) only -- never
+    entity_history or entity_latest("jamming") directly. Both the anomaly
+    detection and the cell-membership test run in the refine process
+    precisely so this endpoint never has to touch either (see
+    jam_crosscheck.py's own docstring on why entity_history is read there,
+    incrementally, and nowhere else).
+    """
+    return JSONResponse(await _jam_crosscheck_doc(), headers={"Cache-Control": "no-store"})
 
 
 async def _replay_source(kind, registry_key, ts_fn, at, bounds, window_seconds=None):

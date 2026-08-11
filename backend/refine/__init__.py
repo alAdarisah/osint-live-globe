@@ -198,6 +198,25 @@ _JOBS = (
         health_name="cable_outage",
         health_every=config.CABLE_OUTAGE_INTERVAL,
     ),
+    # Task 39: aircraft whose own reported track does something physically
+    # implausible while sitting inside one of gpsjam.org's currently
+    # worst-affected cells -- corroboration for the jamming layer, which
+    # otherwise stands alone. Publishes no layer of its own -- the cells
+    # already exist on the jamming layer and the aircraft already exist on
+    # the adsb one -- so it writes one keyed reference document and
+    # GET /api/jam-crosscheck (backend/app.py) reads it directly, the same
+    # shape naval_presence's/infra_risk's/cable_outage's own documents are
+    # served; GET /api/aircraft/{icao24} reads the same document's own
+    # `aircraft` slice.
+    Job(
+        module="backend.refine.jam_crosscheck",
+        entrypoint="derive_forever",
+        publishes=(),
+        # jam_crosscheck.HEALTH_NAME, copied for the same reason
+        # port_calls.HEALTH_NAME is copied above.
+        health_name="jam_crosscheck",
+        health_every=config.JAM_CROSSCHECK_INTERVAL,
+    ),
 )
 
 
