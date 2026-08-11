@@ -35,7 +35,7 @@ near a port.
 
 import math
 
-from backend.sources.proximity import haversine_km
+from backend.sources.proximity import EARTH_RADIUS_KM
 
 Bounds = tuple[float, float, float, float]
 
@@ -258,6 +258,49 @@ def _ring_area(ring: list) -> float:
     return abs(total) / 2.0
 
 
+def _point_to_segment_km(lat: float, lon: float, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distance from (lat, lon) to the segment (lat1, lon1)-(lat2, lon2), in
+    km -- the true minimum over every point on the segment, not just its two
+    endpoints (see CountryIndex.nearest_country's own docstring for why that
+    distinction matters).
+
+    Computed via a local equirectangular projection centred on the query
+    point (`lat`, `lon` becomes the origin; longitude is scaled by
+    cos(lat) so a degree of longitude and a degree of latitude are
+    comparable distances near the origin), then plain 2D point-to-segment
+    geometry in that projected space. This is a flat-earth approximation,
+    not true spherical geometry -- accurate to a small fraction of a percent
+    at the tens-of-km scale this fallback operates at, and it needs no
+    geodesy dependency this project does not otherwise carry. It is not
+    meant to be accurate over hundreds of kilometres, which is exactly why
+    `nearest_country` bounds its own search to `max_km` before ever
+    trusting a result this function returns.
+    """
+    cos_lat0 = math.cos(math.radians(lat))
+
+    def to_xy(la: float, lo: float) -> tuple[float, float]:
+        x = math.radians(lo - lon) * cos_lat0 * EARTH_RADIUS_KM
+        y = math.radians(la - lat) * EARTH_RADIUS_KM
+        return x, y
+
+    ax, ay = to_xy(lat1, lon1)
+    bx, by = to_xy(lat2, lon2)
+    dx, dy = bx - ax, by - ay
+    seg_len2 = dx * dx + dy * dy
+    if seg_len2 == 0.0:
+        # A degenerate segment (two identical points, which a real ring
+        # should not carry but a malformed one might) -- distance to that
+        # single point.
+        return math.hypot(ax, ay)
+    # t is how far along A->B the query point's projection falls; clamped to
+    # [0, 1] so a point whose perpendicular foot lands *past* an endpoint is
+    # measured to that endpoint instead, which is what "closest point on the
+    # segment" (not on the infinite line through it) means.
+    t = max(0.0, min(1.0, (-ax * dx + -ay * dy) / seg_len2))
+    cx, cy = ax + t * dx, ay + t * dy
+    return math.hypot(cx, cy)  # the query point is the origin (0, 0)
+
+
 def _polygons_of(geometry: dict | None) -> list:
     if not geometry:
         return []
@@ -355,20 +398,31 @@ class CountryIndex:
 
     def nearest_country(self, lat, lon, max_km: float = 25.0) -> dict | None:
         """The country whose outer coastline passes closest to (lat, lon),
-        within `max_km` -> {"iso2", "name"}, or None past that radius.
+        within `max_km` -> {"iso2", "name", "distance_km"}, or None past that
+        radius.
 
         For a point `country_at` already places inside a polygon, call that
         instead -- this is the fallback for one that just misses every ring,
         which real cable landings do often enough to matter (see this
-        module's own docstring). Distance is measured to the nearest vertex
-        of each candidate's own outer ring, not a true point-to-segment
-        distance -- an approximation, but Natural Earth's 1:50m rings are
-        dense enough along real coastlines that the two rarely disagree by
-        more than the resolution of the coastline itself, and a normal
-        Python loop computing exact segment distance against every edge of
-        every candidate ring is a heavier cost this fallback (invoked only
-        for the minority of points that already failed containment) does not
-        need to pay to be useful.
+        module's own docstring).
+
+        Task 38 review (Important 2): the first version of this measured
+        distance to the nearest *vertex* of each candidate ring, which has a
+        real failure mode -- a point sitting near the middle of a country's
+        own long, vertex-sparse coastal edge can read as farther from that
+        country than from a neighbour whose nearest *vertex* merely happens
+        to be closer, even though the neighbour's actual coastline is
+        farther away. `distance_km` below is instead the true minimum
+        distance from the point to any *edge* (the segment between two
+        consecutive ring vertices, not just their endpoints), computed via a
+        local equirectangular (flat-earth) projection centred on the query
+        point -- accurate to a small fraction of a percent at the scale this
+        fallback operates at (tens of km, never hundreds -- see max_km), and
+        needing no geodesy dependency this project does not otherwise carry.
+        `distance_km` is returned (not just used internally) so a caller can
+        carry the confidence of a snapped attribution through to wherever it
+        is displayed, rather than only into an aggregate count -- see
+        backend/refine/cable_outage.py's own group_landings_by_country.
 
         `max_km` bounds the guess the same way PORT_MATCH_RADIUS_KM bounds
         naval_presence.py's own port attribution: past it, "nearest country"
@@ -380,7 +434,7 @@ class CountryIndex:
             return None
         x = _wrap_lon(lon)
         # A fixed degree margin, not a precise km->degree conversion: this
-        # only widens the bbox pre-filter before the real haversine check
+        # only widens the bbox pre-filter before the real distance check
         # below runs, so over-including a few extra candidate countries
         # costs a little time and never correctness. 111 km/degree is the
         # equatorial figure, deliberately generous at higher latitudes where
@@ -393,17 +447,19 @@ class CountryIndex:
             if lat < min_lat - pad or lat > max_lat + pad or x < min_lon - pad or x > max_lon + pad:
                 continue
             for rings in entry["polygons"]:
-                outer = rings[0] if rings else None
-                if not outer:
-                    continue
-                for vlon, vlat in outer:
-                    km = haversine_km(lat, x, vlat, vlon)
-                    if km < best_km:
-                        best_km = km
-                        best = entry
+                for ring in rings:
+                    if not ring or len(ring) < 2:
+                        continue
+                    for i in range(len(ring) - 1):
+                        lon1, lat1 = ring[i]
+                        lon2, lat2 = ring[i + 1]
+                        km = _point_to_segment_km(lat, x, lat1, lon1, lat2, lon2)
+                        if km < best_km:
+                            best_km = km
+                            best = entry
         if best is None:
             return None
-        return {"iso2": best["iso2"], "name": best["name"]}
+        return {"iso2": best["iso2"], "name": best["name"], "distance_km": best_km}
 
 
 def _country_contains(entry: dict, lat: float, lon: float) -> bool:

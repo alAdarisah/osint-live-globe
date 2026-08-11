@@ -93,6 +93,24 @@ export function landingsHeaderLine(count) {
 }
 
 /**
+ * "" for a landing genuinely inside its country's own drawn border, or
+ * " -- attributed by nearest coastline, ~4.2km outside the border" for one
+ * backend/refine/cable_outage.py's own nearest_country fallback pulled in
+ * (see that module's CONTAINED/SNAPPED). Task 38 review (Important 1): a
+ * snapped attribution is derived from a weaker premise than a contained
+ * one -- a nearby coastline, not the country's own drawn border -- and has
+ * to be visible next to the landing itself, not only in the aggregate
+ * `landings_snapped` count the coverage paragraph already carries.
+ */
+export function landingAttributionNote(landing) {
+  if (!landing || landing.attribution !== "snapped") return "";
+  const km = landing.snap_distance_km;
+  return Number.isFinite(km)
+    ? ` -- attributed by nearest coastline, ~${km}km outside the border`
+    : " -- attributed by nearest coastline, outside the border";
+}
+
+/**
  * "N event(s) recorded inside a cable landing's own radius in this window:"
  * -- worded like infra_risk.py's own "inside its uncertainty radius" (see
  * InfraRiskPanel.jsx), not "landed near" or any construction that could

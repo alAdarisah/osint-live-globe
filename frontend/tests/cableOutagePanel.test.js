@@ -36,7 +36,8 @@ registerHooks({
 
 const {
   STATUS_LABEL, coincidenceRows, emptyStateText, eventLine, eventSearchLine, eventsHeaderLine,
-  hasCableOutageDocument, landingCoverageLine, landingsHeaderLine, scoreLine, statusCounts, statusSummaryLine,
+  hasCableOutageDocument, landingAttributionNote, landingCoverageLine, landingsHeaderLine, scoreLine, statusCounts,
+  statusSummaryLine,
 } = await import("../src/components/cableOutagePanelLogic.js");
 
 function coincidence(country_code, overrides = {}) {
@@ -172,6 +173,29 @@ test("eventLine falls back to neutral wording for a missing type or place", () =
   assert.equal(eventLine(undefined), "event recorded in an unspecified location");
 });
 
+// --- landingAttributionNote --------------------------------------------
+//
+// Task 38 review (Important 1): a snapped landing has to be distinguishable
+// from a genuinely contained one *at the landing itself*, not only via the
+// aggregate landings_snapped count landingCoverageLine already reports.
+
+test("landingAttributionNote is empty for a directly contained landing", () => {
+  assert.equal(landingAttributionNote({ attribution: "contained" }), "");
+  assert.equal(landingAttributionNote({}), "");
+  assert.equal(landingAttributionNote(null), "");
+});
+
+test("landingAttributionNote reports the snap distance when the backend supplied one", () => {
+  const text = landingAttributionNote({ attribution: "snapped", snap_distance_km: 4.2 });
+  assert.match(text, /~4\.2km/);
+  assert.match(text, /outside the border/);
+});
+
+test("landingAttributionNote degrades gracefully with no distance figure", () => {
+  const text = landingAttributionNote({ attribution: "snapped" });
+  assert.equal(text, " -- attributed by nearest coastline, outside the border");
+});
+
 // --- statusSummaryLine / eventSearchLine / landingCoverageLine -------------
 
 test("statusSummaryLine reports every one of the five status counts", () => {
@@ -250,11 +274,12 @@ test("no banned causal phrase appears in emptyStateText, across every branch", (
   assertClean(emptyStateText({ countries_with_landings: 5, status_counts: { spike: 2 } }), "emptyStateText(spiking, no coincidence)");
 });
 
-test("no banned causal phrase appears in scoreLine, landingsHeaderLine, eventsHeaderLine or eventLine", () => {
+test("no banned causal phrase appears in scoreLine, landingsHeaderLine, eventsHeaderLine, eventLine or landingAttributionNote", () => {
   assertClean(scoreLine({ current_score: 5_000_000, baseline_score: 1_000_000, ratio: 5.0 }), "scoreLine");
   assertClean(landingsHeaderLine(3), "landingsHeaderLine");
   assertClean(eventsHeaderLine(3), "eventsHeaderLine");
   assertClean(eventLine({ event_type: "violence", country: "Egypt" }), "eventLine");
+  assertClean(landingAttributionNote({ attribution: "snapped", snap_distance_km: 4.2 }), "landingAttributionNote");
 });
 
 test("no banned causal phrase appears in statusSummaryLine, eventSearchLine or landingCoverageLine", () => {

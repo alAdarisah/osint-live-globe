@@ -207,9 +207,46 @@ _ISO2_NAME_OVERRIDE = {"France": "FR", "Norway": "NO", "Kosovo": "XK"}
 # docstring for why this fallback exists at all (cable landings are drawn at
 # the coast, not surveyed onto it, so a real, correctly-placed landing often
 # lands a short distance seaward of Natural Earth's own 1:50m coastline).
-# Same figure and the same "coastal snap" reasoning as naval_presence.py's
-# own PORT_MATCH_RADIUS_KM.
-LANDING_SNAP_RADIUS_KM = 25.0
+#
+# Task 38 review (Important 3): the first cut of this reused naval_presence.
+# py's own PORT_MATCH_RADIUS_KM (25km) without checking whether that figure
+# actually fit this problem -- and it does not fit as well: nearest-of-a-
+# curated-port-list cannot misattribute (naval_presence.py's own ports are
+# few and far apart), where nearest-of-240-country-polygons can, across a
+# short land or sea border. This number is instead read off the real
+# distribution of this map's own landing set, measured directly against the
+# strict-containment misses (n=702, no radius cap, this map's live database,
+# 2026-08-11):
+#
+#   min 0.1km / p10 1.1km / p25 2.2km / median 3.8km / p75 8.7km / p90 49km
+#
+#   0-1km: 64   1-2km: 100   2-5km: 251   5-10km: 126   10-15km: 24
+#   15-20km: 18   20-25km: 13   25-30km: 6   30-50km: 31   50km+: 69
+#
+# Three quarters of every real snap this map has ever needed happens inside
+# 8.7km, and the shape of the histogram (a sharp fall-off after ~10km, then
+# a long, thin tail out past 50km) says the close-in cases are a real,
+# uniform population -- a schematic coastal offset, the same handful of km
+# regardless of country -- while the far tail is a different population
+# (small islands and inlets this map's 1:50m coastline cannot resolve at
+# all), not more of the same thing at lower confidence. 10km sits just past
+# the natural knee: it keeps 541 of the 596 landings the old 25km radius
+# recovered (91%) while cutting the radius, and with it the geometric area
+# in which a genuinely wrong neighbouring country could be nearer, by more
+# than half.
+LANDING_SNAP_RADIUS_KM = 10.0
+
+# Attribution methods a grouped landing can carry -- CONTAINED when the
+# landing's own coordinate sits inside the country's own drawn polygon,
+# SNAPPED when it missed every polygon and was pulled in by nearest_country
+# instead. Both are `derived` (see the module docstring's own provenance
+# note), but a snapped attribution rests on a weaker premise -- a nearby
+# coastline, not the country's own drawn border -- and Task 38 review
+# (Important 1) is explicit that this has to be visible wherever the
+# landing itself is named, not only as an aggregate count elsewhere on the
+# panel.
+CONTAINED = "contained"
+SNAPPED = "snapped"
 
 
 # --- landing -> country ------------------------------------------------------
@@ -257,6 +294,16 @@ def group_landings_by_country(
     draws -- is counted under `landings_unmatched`. That is a different,
     rarer fact than `landings_unattributed` below (a country *was* found, it
     just has no ISO2 this map can check).
+
+    Every grouped landing carries its own `attribution` (CONTAINED or
+    SNAPPED) and, when snapped, its own `snap_distance_km` -- Task 38 review
+    (Important 1): a snapped attribution is derived from a weaker premise
+    than a contained one (a nearby coastline, not the country's own drawn
+    border), and that has to travel with the landing itself, not live only
+    in the `landings_snapped` aggregate below. build_document passes these
+    straight through into a coincidence's own `landings` list, and the
+    frontend renders them next to the landing's own name -- see
+    cableOutagePanelLogic.js's landingAttributionNote.
     """
     by_country: dict[str, list[dict]] = {}
     unattributed: set[str] = set()
@@ -273,9 +320,13 @@ def group_landings_by_country(
         if landing_id is None:
             continue
         hit = country_index.country_at(lat, lon)
+        attribution = CONTAINED
+        distance_km = None
         if hit is None:
             hit = country_index.nearest_country(lat, lon, max_km=LANDING_SNAP_RADIUS_KM)
             if hit is not None:
+                attribution = SNAPPED
+                distance_km = hit.get("distance_km")
                 snapped += 1
         if hit is None:
             unmatched += 1
@@ -288,9 +339,17 @@ def group_landings_by_country(
         if not checkable:
             unattributed.add(key)
             unattributed_landings += 1
-        by_country.setdefault(key, []).append({
+        entry = {
             "id": landing_id, "name": landing.get("name"), "lat": lat, "lon": lon,
-        })
+            "attribution": attribution,
+        }
+        if distance_km is not None:
+            # Rounded for display -- the raw float has no meaning past
+            # roughly the precision of the flat-earth approximation
+            # nearest_country's own distance is computed with (see that
+            # function's docstring).
+            entry["snap_distance_km"] = round(distance_km, 1)
+        by_country.setdefault(key, []).append(entry)
     stats = {
         "landings_total": total,
         "landings_planned_excluded": planned_excluded,

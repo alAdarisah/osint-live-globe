@@ -143,6 +143,16 @@ def test_a_landing_is_grouped_by_which_polygon_its_coordinate_falls_inside():
     assert unattributed == set()
 
 
+def test_a_directly_contained_landing_is_marked_contained_with_no_snap_distance():
+    """Task 38 review (Important 1): the landing's own entry, not just an
+    aggregate stat, has to say how it was attributed."""
+    landings = [landing("l1", "Alexandria, Egypt", lat=30.0, lon=31.0)]
+    by_country, stats, unattributed = co.group_landings_by_country(landings, COUNTRY_INDEX)
+    entry = by_country["EG"][0]
+    assert entry["attribution"] == co.CONTAINED
+    assert "snap_distance_km" not in entry
+
+
 def test_a_landing_named_for_the_wrong_gazetteer_spelling_still_matches_by_coordinate():
     """The regression case itself: TeleGeography's own free-text name reads
     "United States", which no Natural Earth feature is named -- but the
@@ -167,6 +177,10 @@ def test_a_landing_just_outside_the_polygon_snaps_to_the_nearest_country():
     assert [l["id"] for l in by_country["EG"]] == ["l1"]
     assert stats["landings_snapped"] == 1
     assert stats["landings_unmatched"] == 0
+
+    entry = by_country["EG"][0]
+    assert entry["attribution"] == co.SNAPPED
+    assert 0 < entry["snap_distance_km"] < 10  # Task 38 review (Important 1): carried on the landing itself
 
 
 def test_a_coordinate_outside_every_polygon_is_counted_not_silently_dropped():
@@ -327,6 +341,26 @@ def test_a_spike_with_a_landing_and_a_nearby_event_is_a_coincidence():
     assert doc["coincidences"][0]["events"][0]["id"] == "e1"
     assert doc["statuses"]["EG"]["status"] == co.SPIKE
     assert doc["status_counts"][co.SPIKE] == 1
+
+
+def test_a_coincidences_own_landings_carry_their_attribution_method_through():
+    """Task 38 review (Important 1): build_document must not drop the
+    attribution/snap_distance_km a snapped landing carries -- a reader
+    looking at a coincidence card has to be able to tell a landing genuinely
+    inside the country from one pulled in from a nearby coastline."""
+    snapped_landing = landing("l1", "Alexandria, Egypt", lat=30.0, lon=32.0)
+    snapped_landing["attribution"] = co.SNAPPED
+    snapped_landing["snap_distance_km"] = 4.2
+    outages = {"EG": outage_record(5_000_000.0)}
+    by_country = {"EG": [snapped_landing]}
+    stats = {"landings_total": 1, "landings_planned_excluded": 0, "landings_unmatched": 0, "landings_matched": 1}
+    events = [event("e1", lat=30.01, lon=32.01, radius=5.0)]
+
+    doc = co.build_document(outages, by_country, stats, events, _base_history(), NOW)
+
+    landing_out = doc["coincidences"][0]["landings"][0]
+    assert landing_out["attribution"] == co.SNAPPED
+    assert landing_out["snap_distance_km"] == 4.2
 
 
 def test_an_event_outside_the_landings_radius_produces_no_coincidence():

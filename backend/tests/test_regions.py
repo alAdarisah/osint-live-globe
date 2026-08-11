@@ -28,6 +28,41 @@ def fc(*features):
     return {"type": "FeatureCollection", "features": list(features)}
 
 
+# --- _point_to_segment_km ---------------------------------------------
+#
+# Direct coverage of the primitive nearest_country's edge-distance fallback
+# is built on, independent of CountryIndex's own candidate-selection logic.
+
+
+def test_point_to_segment_perpendicular_to_the_middle_of_a_long_segment():
+    # A ~1110km-long segment along the equator; the query point sits at its
+    # midpoint, 1 degree (~111km) north.
+    km = regions._point_to_segment_km(1.0, 5.0, 0.0, 0.0, 0.0, 10.0)
+    assert 105 < km < 115
+
+
+def test_point_to_segment_clamps_to_the_nearer_endpoint_past_the_segments_end():
+    # The point's perpendicular foot falls beyond (0, 10), the segment's own
+    # east end, so the closest point on the *segment* is that endpoint, not
+    # the infinite line through it.
+    km_to_endpoint = regions._point_to_segment_km(0.0, 12.0, 0.0, 0.0, 0.0, 10.0)
+    km_to_line = 0.0  # the query point sits exactly on the infinite line
+    assert km_to_endpoint > km_to_line
+    assert 200 < km_to_endpoint < 230  # ~2 degrees past the endpoint, ~222km
+
+
+def test_point_to_segment_is_zero_on_the_segment_itself():
+    km = regions._point_to_segment_km(0.0, 5.0, 0.0, 0.0, 0.0, 10.0)
+    assert km == 0.0
+
+
+def test_point_to_segment_handles_a_degenerate_zero_length_segment():
+    """Both endpoints identical -- distance is just distance to that one
+    point, not a division by zero."""
+    km = regions._point_to_segment_km(1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    assert 105 < km < 115  # ~1 degree of latitude, ~111km
+
+
 # --- basic containment -------------------------------------------------
 
 
@@ -181,15 +216,12 @@ def test_a_feature_with_a_degenerate_ring_is_skipped():
 
 
 def test_nearest_country_snaps_a_point_just_outside_the_polygon():
-    # Distance here is to the nearest *vertex* (see nearest_country's own
-    # docstring on why), so the query point has to sit near one of the
-    # square's four corners, not the middle of a long, vertex-sparse edge --
-    # a real Natural Earth coastline is dense enough along its own length
-    # that this distinction rarely matters there. (1.03, 1.03) is ~4.7km
-    # from the corner at (1, 1).
+    # ~5.5km east of the square's own edge at lon=1.
     index = regions.CountryIndex(fc(square_feature("Squareland", "SQ", 0, 0, 1, 1)))
-    hit = index.nearest_country(1.03, 1.03, max_km=25.0)
-    assert hit == {"iso2": "SQ", "name": "Squareland"}
+    hit = index.nearest_country(0.5, 1.05, max_km=25.0)
+    assert hit["iso2"] == "SQ"
+    assert hit["name"] == "Squareland"
+    assert 0 < hit["distance_km"] < 10
 
 
 def test_nearest_country_returns_none_past_max_km():
@@ -197,13 +229,14 @@ def test_nearest_country_returns_none_past_max_km():
     assert index.nearest_country(0.5, 5.0, max_km=25.0) is None  # ~500km away
 
 
-def test_nearest_country_is_none_for_a_point_already_inside_a_polygon_query_at_that_point():
-    """Not the intended use (call country_at for that), but nearest_country
-    must not throw or misbehave on a point that happens to also be inside a
-    polygon -- distance to the nearest vertex is simply 0 or near it."""
+def test_nearest_country_is_zero_for_a_point_already_on_the_boundary():
+    """Not the intended use (call country_at for a point actually inside),
+    but nearest_country must not throw or misbehave on a point that lands
+    exactly on a ring's own vertex -- distance is 0."""
     index = regions.CountryIndex(fc(square_feature("Squareland", "SQ", 0, 0, 1, 1)))
     hit = index.nearest_country(0.0, 0.0, max_km=25.0)  # exactly on a vertex
-    assert hit == {"iso2": "SQ", "name": "Squareland"}
+    assert hit["iso2"] == "SQ"
+    assert hit["distance_km"] == 0
 
 
 def test_nearest_country_picks_the_closer_of_two_candidates():
@@ -211,7 +244,34 @@ def test_nearest_country_picks_the_closer_of_two_candidates():
     far = square_feature("Far", "FR", 3, 0, 4, 1)
     index = regions.CountryIndex(fc(near, far))
     hit = index.nearest_country(0.5, 1.1, max_km=500.0)
-    assert hit == {"iso2": "NR", "name": "Near"}
+    assert hit["iso2"] == "NR"
+
+
+def test_nearest_country_measures_the_true_distance_to_an_edge_not_only_to_its_endpoints():
+    """Task 38 review (Important 2): the regression case the vertex-only
+    version of this algorithm got wrong. Country A is long and thin -- a
+    coastal strip running from lat 0 to lat 10 along lon in [0, 1] -- so its
+    only vertices sit at the far north and south ends, five degrees (about
+    555km) from a query point sitting at the strip's own *midpoint*, even
+    though that point is only ~5.5km off A's actual eastern edge. Country B
+    is a small, compact country whose nearest vertex happens to be closer
+    to the query point (~425km) than A's nearest *vertex* is -- a vertex-
+    only distance would pick B, attributing a landing that sits right next
+    to A's own coastline to a country hundreds of kilometres away instead.
+    Measuring distance to the segment itself (not just its endpoints) is
+    what makes A win, correctly."""
+    strip = square_feature("Strip", "ST", 0, 0, 1, 10)  # long coastal strip
+    compact = square_feature("Compact", "CO", 4.9, 4.9, 5.1, 5.1)  # small, far away
+    index = regions.CountryIndex(fc(strip, compact))
+
+    query_lat, query_lon = 5.0, 1.05  # the strip's own midpoint, just east of its edge
+    hit = index.nearest_country(query_lat, query_lon, max_km=1000.0)
+
+    assert hit["iso2"] == "ST", (
+        f"expected the strip (true edge ~5.5km away) to win over the compact country "
+        f"(nearest vertex ~425km away), got {hit}"
+    )
+    assert hit["distance_km"] < 10  # the true perpendicular distance to the strip's edge
 
 
 def test_nearest_country_on_an_empty_index_is_none():

@@ -27,7 +27,8 @@ import { fetchJson } from "../api";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import {
   coincidenceRows, emptyStateText, eventLine, eventSearchLine, eventsHeaderLine,
-  hasCableOutageDocument, landingCoverageLine, landingsHeaderLine, scoreLine, statusSummaryLine,
+  hasCableOutageDocument, landingAttributionNote, landingCoverageLine, landingsHeaderLine, scoreLine,
+  statusSummaryLine,
 } from "./cableOutagePanelLogic";
 import { REFINE_PANEL_STATUS, REFINE_PANEL_STATUS_BADGE, REFINE_PANEL_STATUS_TEXT, classifyRefinePanelStatus } from "./refinePanelStatus";
 
@@ -50,6 +51,9 @@ function CoincidenceCard({ entry, onLocate }) {
           <span key={l.id}>
             {i > 0 && ", "}
             {l.name}
+            {landingAttributionNote(l) && (
+              <em className="meta" style={{ fontStyle: "italic" }}>{landingAttributionNote(l)}</em>
+            )}
             {Number.isFinite(l.lat) && Number.isFinite(l.lon) && (
               <button
                 type="button" className="news-locate-btn" title="Show on map"
