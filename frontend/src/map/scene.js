@@ -901,14 +901,51 @@ export const TRAIL_PARENT = {
 export const UNGATED_FEEDS = new Set([
   "escalation", "conflictStats", "conflictDistricts", "humanitarian",
   "energyFlows", "foodTrade", "foodPriceIndex", "outages",
-  // Task 36: watched-water-box-keyed, read on demand by the water card and
-  // ChokepointPanel.jsx -- no pin, no gate, same footing as the country-keyed
-  // feeds above. (navalPresence belongs here too on the identical reasoning,
-  // and is missing -- a pre-existing Task 29 gap this task's own dev-console
-  // check surfaced, left unfixed as out of this task's own scope.)
-  "chokepoints",
+  // Watched-water-box-keyed and sea-keyed respectively, read on demand by the
+  // water card, ChokepointPanel.jsx and buildWaterTraffic -- no pin, no gate,
+  // same footing as the country-keyed feeds above. navalPresence was missing
+  // here from Task 29 until it was fixed alongside the matching gap in
+  // createMapController.js's applyData; see REFERENCE_ONLY_FEEDS there.
+  "chokepoints", "navalPresence",
   // One payload each, split across three toggles by their own renderers.
   "ais", "adsb",
+]);
+
+/**
+ * Feeds that arrive as a whole reference document rather than an array of
+ * points: a country->series dict, a ranked region list, a box-keyed traffic
+ * table. Popups read them straight out of `raw` when a card is built. None has
+ * a marker layer, so createMapController.js's applyData dispatch has to stop
+ * at them rather than reaching its `renderMarkerLayer(key)` catch-all, which
+ * iterates its argument and throws "items is not iterable" on an object.
+ *
+ * This lives here, next to UNGATED_FEEDS, rather than beside the dispatch that
+ * reads it: the two lists make the same claim about the same feeds -- this one
+ * has nothing to draw -- and every feed in this set belongs in that one too.
+ * Keeping them in one dependency-free module is what lets a test check the
+ * pairing at all.
+ *
+ * It was an if-chain of `key === "..."` comparisons until it needed to be a
+ * list something could check. Task 29 added navalPresence to POLL_CONFIG and
+ * to neither list, so from the day it shipped every navalPresence poll threw
+ * inside applyData; useOsintData.js's per-poll try/catch swallowed it into a
+ * console warning, which is why it went unnoticed. Task 36 added chokepoints
+ * and hit the identical wall, which is what surfaced the older one.
+ *
+ * What that cost is narrower than it first looks, and worth recording so the
+ * next person weighs it right: `raw[key] = data` runs at the top of applyData,
+ * before the dispatch, so the document did land and a card opened afterwards
+ * read live data. What never ran was the tail of applyData below the throw --
+ * refreshChoropleth and the four refreshFocused*Card calls -- so a card left
+ * open across a poll silently kept the numbers it was built with. Stale on an
+ * open card, not absent.
+ *
+ * See frontend/tests/referenceOnlyFeeds.test.js.
+ */
+export const REFERENCE_ONLY_FEEDS = new Set([
+  "conflictStats", "escalation", "conflictDistricts", "humanitarian",
+  "energyFlows", "foodTrade", "foodPriceIndex", "fetchCoverage",
+  "navalPresence", "chokepoints",
 ]);
 
 /** Every layer key the manifest knows about. */

@@ -155,7 +155,10 @@ import {
   AIRFIELD_MATCH_KM, DAM_MATCH_KM, buildTwinIndex, buildAbsorbedArticles,
   normalizeArticleUrl,
 } from "./crossSource";
-import { resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST } from "./scene";
+import {
+  resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST,
+  REFERENCE_ONLY_FEEDS,
+} from "./scene";
 import { reachLineEnds, reachContourRings, reachOnScreen } from "./reachGeometry";
 import { profileViewport } from "./viewportProfile";
 import { buildCountryIndex, findCountryAt, representativePointOf } from "./countryHitTest";
@@ -514,6 +517,11 @@ const COUNTRY_CARD_FEEDS = new Set([
 // LANE_DENSITY_INTERVAL cadence (an hour by default) is well inside a
 // plausible card session too.
 const WATER_CARD_FEEDS = new Set(["events", "gdelt", "darkVessels", "gfwGaps", "navalPresence", "chokepoints"]);
+
+// REFERENCE_ONLY_FEEDS -- the feeds applyData must not try to draw -- lives in
+// scene.js beside UNGATED_FEEDS rather than here, because the two lists say
+// the same thing about the same feeds and drifting apart is exactly the bug
+// that made either of them worth naming. See its docstring there.
 
 // The admin-1/admin-2 card counterpart to COUNTRY_CARD_FEEDS/WATER_CARD_FEEDS
 // above -- same reasoning: an open card is built from `raw` at the moment it
@@ -7650,18 +7658,11 @@ export function createMapController(container, initial, callbacks) {
       //
       // Task 36: chokepoints joins for the identical reason -- {boxes: {...}}
       // keyed by watched-water label, read on demand by buildWaterChokepointTraffic
-      // and ChokepointPanel.jsx, never a point array. Found by exercising this
-      // panel against a live poll: navalPresence (Task 29) is the same shape
-      // and was never added here, so every navalPresence poll has been hitting
-      // the `renderMarkerLayer(key)` catch-all below and throwing "items is not
-      // iterable" (caught by useOsintData.js's per-poll try/catch, so silent
-      // beyond a console warning) since it shipped -- a pre-existing gap this
-      // task's own live check happened to surface, not something introduced
-      // here. Left unfixed as a drive-by outside Task 36's own scope; flagged
-      // separately rather than folded into this diff.
-      else if (key === "conflictStats" || key === "escalation" || key === "conflictDistricts"
-             || key === "humanitarian" || key === "energyFlows" || key === "foodTrade"
-             || key === "foodPriceIndex" || key === "fetchCoverage" || key === "chokepoints") {
+      // and ChokepointPanel.jsx, never a point array. navalPresence (Task 29) is
+      // the same shape and was missing here from the day it shipped; see
+      // REFERENCE_ONLY_FEEDS above for what that cost and for the test that now
+      // stops the next one going the same way.
+      else if (REFERENCE_ONLY_FEEDS.has(key)) {
         /* reference data read on demand by popups.js -- no marker layer */
       }
       // Keyed by airfield ident, not a point layer of its own: it re-sizes and
