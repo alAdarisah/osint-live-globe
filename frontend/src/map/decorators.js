@@ -11,6 +11,7 @@ import {
   formatDistanceKm, formatSpeedKmh, formatAltitudeM, nmToKm, feetToMeters,
 } from "../utils/format";
 import { flagForMmsi } from "../utils/mmsi";
+import { aisNetwork, shipPingSeconds } from "./aisNetwork";
 import {
   severityBand, severityColor, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
   placementDoubtful, positionUncertain, VERDICT_NOTE,
@@ -1727,8 +1728,13 @@ function portCallsSection(vesselDetail) {
       &mdash; <i>inferred</i>, not a port authority record</div>`;
 }
 
-export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
+// Which network heard a hull, and when it last reported, live in
+// map/aisNetwork.js -- see the note at the top of that file for why they are
+// not in here.
+export function decorateAis(d, { selectedMmsi, vesselDetail, layerKey } = {}) {
   const type = classifyShip(d);
+  const network = aisNetwork(d);
+  const pinged = shipPingSeconds(d);
   const navy = type === "navy";
   const tanker = type === "tanker";
   const typeLabel = navy ? " &middot; US Navy / MSC" : tanker ? " &middot; Oil/chemical tanker" : "";
@@ -1740,7 +1746,11 @@ export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
     // an allegation are three different claims (see watchlistDetail).
     `${watchlisted ? `<br/><span class="watchlist-flag">Watchlist: ${esc(WATCHLIST_CLASS_LABEL[watchlisted.evidence] || "listed")}</span>` : ""}` +
     `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${d.speed != null ? esc(formatSpeedKn(d.speed)) : "?"}` +
-    lastPingTooltip(d.updated);
+    // On the hover tooltip, not only in the popup: which network heard a hull
+    // is part of reading the pin, and a reader scanning a coastline should not
+    // have to click to find out that one layer stops at the Baltic.
+    `<br/><span class="meta">via ${esc(network.label)}</span>` +
+    lastPingTooltip(pinged);
 
   // Everything below is stored, and until this task nothing read it back:
   // length_m/beam_m (ais.py:185,187), the raw eta dict, and the flag a MID
@@ -1798,7 +1808,7 @@ export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
     <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
     <div>Speed: ${d.speed != null ? esc(formatSpeedKn(d.speed)) : "n/a"} &middot; Course: ${esc(d.course ?? "n/a")}&deg; &middot;
       Heading: ${headingKnown ? `${esc(d.heading)}&deg;` : "n/a"}</div>
-    ${lastPingDetail(d.updated)}
+    ${lastPingDetail(pinged)}
 
     <div class="csection-h">Flags</div>
     ${sanctionDetail(d)}
@@ -1808,9 +1818,16 @@ export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
 
     ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS ship-type code (or USS/USNS naming when static data hasn\'t arrived yet). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
     ${tanker ? '<p class="meta">Identified as an oil/chemical tanker from its AIS ship-type code.</p>' : ""}
-    <div class="meta">Source: aisstream.io (AIS) &mdash; position, speed, course and heading <i>measured</i> by
+    ${network.coverage ? `<p class="meta">${esc(network.coverage)}</p>` : ""}
+    <div class="meta">Source: ${esc(network.label)} (AIS) &mdash; position, speed, course and heading <i>measured</i> by
       the vessel's own transponder; identity, destination, ETA, draught, dimensions and ship type
       <i>reported</i> by the crew via AIS static data; flag state <i>derived</i> from the MMSI's MID${
+        // The licence the record carries, not one restated here: Digitraffic's
+        // CC-BY attribution string travels on every row and has to be shown
+        // verbatim, and a second copy in this file would be a second thing to
+        // keep in step with the feed.
+        d.license ? ` &middot; ${esc(d.license)}` : ""
+      }${
         designated ? " &middot; designations: US Treasury OFAC" : ""
       }</div>
     ${d.mmsi === selectedMmsi ? cargoSection(vesselDetail) : ""}
@@ -1824,7 +1841,11 @@ export function decorateAis(d, { selectedMmsi, vesselDetail } = {}) {
   // One table rather than three parallel ternaries -- the previous form
   // restated SHIP_STYLE's colours and sizes inline, which is how a themed
   // colour would have reached the sprites and not this icon.
-  const base = themedStyle(SHIP_STYLE[type], SHIP_LAYER_KEY[type]);
+  // The glyph is picked by ship class either way, but the opacity/scale dials
+  // are read from whichever layer this pin actually belongs to -- a Digitraffic
+  // hull is drawn on its own layer and must answer to that layer's settings,
+  // not to the aisstream bucket its class would otherwise name.
+  const base = themedStyle(SHIP_STYLE[type], layerKey || SHIP_LAYER_KEY[type]);
   const style = designated ? withSanctionRing(base) : base;
   return { icon: icon(style, style.color, style.size, heading, cls, style.opacity), tooltip, detail };
 }
@@ -4770,6 +4791,11 @@ export const TOKEN_FOR = {
   aisNavy: () => "ship.navy",
   aisTanker: () => "ship.tanker",
   aisCivilian: () => "ship.other",
+  // One layer, three pin types. The Digitraffic layer is not split by class the
+  // way the aisstream buckets are -- it is a single network with a single
+  // toggle -- but a hull inside it is still drawn as a warship, a tanker or a
+  // merchantman, so it is gated by whichever pin type it is actually drawn as.
+  aisDigitraffic: (d) => SHIP_STYLE[classifyShip(d)].token,
   adsbMilitary: aircraftToken,
   adsbCivilian: aircraftToken,
   adsbFlagged: aircraftToken,

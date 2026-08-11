@@ -87,6 +87,15 @@ export const POLL_CONFIG = [
   { key: "countries", url: "/api/countries", intervalMs: 5 * 60000 },
   { key: "cities", url: "/api/cities", intervalMs: 5 * 60000 },
   { key: "ais", url: "/api/ships", intervalMs: 10000 },
+  // The second AIS network: Fintraffic's own coastal receivers, Finnish and
+  // Baltic waters (backend/sources/digitraffic_ais.py). Its own feed and its
+  // own layer, never merged into "ais" -- see the manifest entry in map/scene.js.
+  //
+  // Thirty seconds rather than ten: the backend re-polls Digitraffic every 300s
+  // (DIGITRAFFIC_AIS_POLL_INTERVAL, their own recommendedFetchInterval), so a
+  // faster client poll can only arrive at the same document sooner, and every
+  // poll between two refreshes 304s at zero bytes anyway.
+  { key: "aisDigitraffic", url: "/api/ais-digitraffic", intervalMs: 30000 },
   // Aircraft, and the biggest single payload the frontend takes: ~6.6 MB of
   // roughly seventeen thousand airframes.
   //

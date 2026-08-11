@@ -121,7 +121,7 @@ const GROUP_LAYERS = {
   // publisher, and a reader comparing this map's inference against somebody
   // else's record should not have to hunt for the second one.
   traffic: [
-    "aisNavy", "aisTanker", "aisCivilian", "darkVessels", "gfwGaps", "gfwDetections",
+    "aisNavy", "aisTanker", "aisCivilian", "aisDigitraffic", "darkVessels", "gfwGaps", "gfwDetections",
     "adsbMilitary", "adsbCivilian", "adsbFlagged",
   ],
   // Airfields sit with infrastructure rather than with the aircraft layers:
@@ -163,6 +163,7 @@ const LAYER_LABEL = {
   cities: "Cities", dams: "Dams", ports: "Ports", osmInfra: "OSM infrastructure",
   gfwGaps: "AIS disabling", gfwDetections: "Vessel detections",
   aisCivilian: "Civilian ships", adsbCivilian: "Civilian aircraft",
+  aisDigitraffic: "Baltic ships",
   // Task 27: railwayPoints carries the same LOCAL cap osmInfra's own points
   // did before the move (see LAYER_MANIFEST), so it needs a name here too.
   railwayPoints: "Railway points (OSM)",
@@ -518,6 +519,32 @@ export default function LayersSection({
         <div id="aisZoomNote" className={`sublegend${zoomNotes.ais ? " visible" : ""}`}>
           Zoom in to show civilian ships
         </div>
+
+        {/* A network, not a ship class -- which is why it sits below the three
+            class toggles rather than among them. The three above split one
+            global feed by what a hull is; this one is a different set of
+            receivers, and its extent is the thing worth saying on the row. */}
+        <label className="layer-row" data-layer="aisDigitraffic">
+          <LayerCheck
+            layerKey="aisDigitraffic"
+            on={layerVisibility.aisDigitraffic}
+            wish={layerWish?.aisDigitraffic}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SVG.ship} color="#35c2ff" token="ship.other" /> Ships &mdash; Baltic (Fintraffic)
+          <span className="count"><CountUp value={counts.aisDigitraffic} /> (<CountUp value={counts.aisDigitrafficTotal} />)</span>
+        </label>
+        <div id="aisDigitrafficZoomNote" className={`sublegend${zoomNotes.aisDigitraffic ? " visible" : ""}`}>
+          Zoom in to show Baltic ships
+        </div>
+        <LayerDetails id="det-aisDigitraffic" open={isOpen("det-aisDigitraffic")} onToggle={setOpen}>
+          <div className="sublegend">
+            Fintraffic&apos;s own coastal receivers (digitraffic.fi), Finnish and Baltic waters only &mdash;
+            a separate AIS network from the three layers above, so a vessel missing here may simply be
+            outside its coverage rather than dark. Warships, tankers and merchantmen are drawn with the
+            same glyphs; each popup names the network it was heard by. CC BY 4.0.
+          </div>
+        </LayerDetails>
 
         {/* Not a layer -- a count across all three ship classes at once, since a
             designated hull is most often an ordinary cargo ship and the question
