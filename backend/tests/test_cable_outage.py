@@ -15,6 +15,7 @@ this module emits is checked against a list of causal-attribution phrases a
 later edit must never reintroduce.
 """
 
+from backend import regions
 from backend.refine import cable_outage as co
 
 NOW = 1_754_000_000.0
@@ -24,18 +25,36 @@ HOUR = 3600.0
 # --- helpers -----------------------------------------------------------
 
 
-def country_feature(name, iso2):
-    return {"type": "Feature", "properties": {"name": name, "iso_a2": iso2}, "geometry": {}}
+def square_feature(name, iso2, min_lon, min_lat, max_lon, max_lat):
+    """A small rectangular country, real enough for regions.CountryIndex's
+    ray cast to test a point against -- see backend/tests/test_regions.py
+    for the algorithm's own coverage; this file only needs "is this landing
+    inside this country's own polygon", not the geometry edge cases."""
+    ring = [
+        [min_lon, min_lat], [max_lon, min_lat], [max_lon, max_lat], [min_lon, max_lat], [min_lon, min_lat],
+    ]
+    return {
+        "type": "Feature", "properties": {"name": name, "iso_a2": iso2},
+        "geometry": {"type": "Polygon", "coordinates": [ring]},
+    }
 
 
+# Four small, non-overlapping squares standing in for real country
+# geometry -- Egypt and Indonesia carry a real Natural Earth ISO2, France
+# carries Natural Earth's own "-99" sentinel (picked up by cable_outage's
+# _ISO2_NAME_OVERRIDE), and Ruritania carries no ISO2 at all and is *not* in
+# that override -- the NOT_CHECKABLE case group_landings_by_country has to
+# produce for any such country. Landings default to sitting inside Egypt's
+# square unless a test overrides lat/lon.
 COUNTRIES_FC = {
     "features": [
-        country_feature("Egypt", "EG"),
-        country_feature("Indonesia", "ID"),
-        country_feature("France", "FR"),
+        square_feature("Egypt", "EG", 25.0, 22.0, 35.0, 32.0),
+        square_feature("Indonesia", "ID", 95.0, -11.0, 141.0, 6.0),
+        square_feature("France", "-99", -5.0, 41.0, 9.0, 51.0),
+        square_feature("Ruritania", None, 60.0, 60.0, 65.0, 65.0),
     ],
 }
-COUNTRY_INDEX = co._country_index_from_geojson(COUNTRIES_FC)
+COUNTRY_INDEX = regions.CountryIndex(COUNTRIES_FC)
 
 
 def landing(landing_id, name, lat=30.0, lon=32.0, planned=False):
@@ -67,88 +86,119 @@ def history_with(country_code, started_at=NOW - 30 * HOUR, **countries):
     return hist
 
 
-# --- _country_index_from_geojson / _landing_country ---------------------
+# --- _country_key -----------------------------------------------------
 
 
-def test_country_index_reads_name_and_iso2_from_the_countries_geojson():
-    assert COUNTRY_INDEX["exact"]["Egypt"] == "EG"
+def test_country_key_uses_the_real_iso2_when_natural_earth_carries_one():
+    assert co._country_key({"iso2": "EG", "name": "Egypt"}) == ("EG", True)
 
 
-def test_country_index_skips_natural_earths_no_iso2_sentinel():
-    """"Nowhere" carries Natural Earth's own "-99" sentinel and must not be
-    joinable -- unlike France/Norway/Kosovo (see _ISO2_NAME_OVERRIDE), it has
-    no known real ISO2 to fall back on, so it simply never enters the index."""
-    fc = {"features": [country_feature("Nowhere", "-99")]}
-    index = co._country_index_from_geojson(fc)
-    assert "Nowhere" not in index["exact"]
-    assert co._landing_country("Somewhere, Nowhere", index) == (None, "unmatched")
+def test_country_key_uses_the_curated_override_for_natural_earths_no_iso2_sentinel():
+    """France carries Natural Earth's own "-99" (surfaced here as iso2=None
+    by regions.CountryIndex) -- the three-country override, copied from
+    outages.py's own _ISO3_BY_ISO2_OVERRIDE, must still resolve it to a real,
+    checkable ISO2."""
+    assert co._country_key({"iso2": None, "name": "France"}) == ("FR", True)
 
 
-def test_country_index_seeds_the_natural_earth_no_iso2_override_even_with_no_features_at_all():
-    """France/Norway/Kosovo carry Natural Earth's own "-99" ISO2 sentinel (see
-    outages.py's identical override, copied rather than re-derived here) --
-    the override must be available even before any countries document has
-    ever been fetched, the same "seeded, not dependent on a live fetch having
-    already happened" footing outages.py's own override constant has."""
-    index = co._country_index_from_geojson({})
-    assert index["exact"] == {"France": "FR", "Norway": "NO", "Kosovo": "XK"}
+def test_country_key_falls_back_to_the_bare_name_when_not_overridden():
+    """Ruritania has no ISO2 and is not one of the three curated overrides --
+    its landings still group under its own name, but the key is marked
+    uncheckable rather than silently matched to nothing."""
+    assert co._country_key({"iso2": None, "name": "Ruritania"}) == ("Ruritania", False)
 
 
-def test_landing_country_matches_the_trailing_comma_token():
-    iso2, how = co._landing_country("Beculuk, Indonesia", COUNTRY_INDEX)
-    assert (iso2, how) == ("ID", "exact")
+def test_country_key_with_no_name_and_no_iso2_is_none():
+    assert co._country_key({"iso2": None, "name": None}) == (None, False)
 
 
-def test_landing_country_uses_only_the_last_comma_token():
-    """"Miami, FL, United States" -- style TeleGeography names -- must match on
-    "United States", not on "FL, United States"."""
-    fc = {"features": [country_feature("United States", "US")]}
-    index = co._country_index_from_geojson(fc)
-    iso2, how = co._landing_country("Miami, FL, United States", index)
-    assert (iso2, how) == ("US", "exact")
-
-
-def test_landing_country_falls_back_to_normalized_fuzzy_match():
-    fc = {"features": [country_feature("Cote d'Ivoire", "CI")]}
-    index = co._country_index_from_geojson(fc)
-    iso2, how = co._landing_country("Abidjan, Cote dIvoire", index)
-    assert (iso2, how) == ("CI", "fuzzy")
-
-
-def test_landing_country_with_no_comma_is_unmatched():
-    assert co._landing_country("NoCommaName", COUNTRY_INDEX) == (None, "unmatched")
-
-
-def test_landing_country_with_an_unknown_trailing_token_is_unmatched():
-    assert co._landing_country("Somewhere, Atlantis", COUNTRY_INDEX) == (None, "unmatched")
-
-
-# --- group_landings_by_country -------------------------------------------
+# --- group_landings_by_country: geometric attribution -----------------
+#
+# Task 38 review (Important 2): the first version of this join matched a
+# landing's free-text name against a country name list, and every US
+# landing silently fell out of by_country because TeleGeography writes
+# "United States" and Natural Earth's own name is "United States of
+# America" -- a country checked never at all, reading identically to
+# "checked, quiet". These tests are the regression guard for the fix:
+# attribution now runs on the landing's own coordinate against the real
+# country polygon, so no gazetteer's spelling can break it.
 
 
 def test_a_planned_landing_is_excluded_not_merely_flagged():
     """A TBD landing's site is not settled -- there is no fixed point for an
     event to be "near", so it must never support a coincidence claim."""
     landings = [landing("l1", "Alexandria, Egypt", planned=True)]
-    by_country, stats = co.group_landings_by_country(landings, COUNTRY_INDEX)
+    by_country, stats, unattributed = co.group_landings_by_country(landings, COUNTRY_INDEX)
     assert by_country == {}
     assert stats["landings_planned_excluded"] == 1
     assert stats["landings_matched"] == 0
+    assert unattributed == set()
 
 
-def test_a_matched_confirmed_landing_is_grouped_by_country():
-    landings = [landing("l1", "Alexandria, Egypt")]
-    by_country, stats = co.group_landings_by_country(landings, COUNTRY_INDEX)
+def test_a_landing_is_grouped_by_which_polygon_its_coordinate_falls_inside():
+    landings = [landing("l1", "Alexandria, Egypt", lat=30.0, lon=31.0)]  # inside Egypt's square
+    by_country, stats, unattributed = co.group_landings_by_country(landings, COUNTRY_INDEX)
     assert [l["id"] for l in by_country["EG"]] == ["l1"]
     assert stats["landings_matched"] == 1
+    assert unattributed == set()
 
 
-def test_an_unmatched_landing_is_counted_not_silently_dropped():
-    landings = [landing("l1", "NoCommaHere")]
-    by_country, stats = co.group_landings_by_country(landings, COUNTRY_INDEX)
+def test_a_landing_named_for_the_wrong_gazetteer_spelling_still_matches_by_coordinate():
+    """The regression case itself: TeleGeography's own free-text name reads
+    "United States", which no Natural Earth feature is named -- but the
+    landing's coordinate sits inside Egypt's square regardless of what its
+    name says, so a name-based join's exact failure mode cannot recur here."""
+    landings = [landing("l1", "Somewhere, United States", lat=27.0, lon=30.0)]  # inside Egypt's square
+    by_country, stats, unattributed = co.group_landings_by_country(landings, COUNTRY_INDEX)
+    assert [l["id"] for l in by_country["EG"]] == ["l1"]
+    assert unattributed == set()
+
+
+def test_a_landing_just_outside_the_polygon_snaps_to_the_nearest_country():
+    """Real cable landings are drawn at the coast, not surveyed onto it (see
+    backend/sources/cables.py's own "schematic, not survey-accurate" note),
+    so a real, correctly-placed landing often sits a short distance seaward
+    of Natural Earth's own 1:50m coastline -- see
+    regions.CountryIndex.nearest_country's own docstring, and
+    LANDING_SNAP_RADIUS_KM. Egypt's square runs to (35, 32); ~4.7km past
+    that corner is still Egypt, not nowhere."""
+    landings = [landing("l1", "Somewhere, Egypt", lat=32.03, lon=35.03)]
+    by_country, stats, unattributed = co.group_landings_by_country(landings, COUNTRY_INDEX)
+    assert [l["id"] for l in by_country["EG"]] == ["l1"]
+    assert stats["landings_snapped"] == 1
+    assert stats["landings_unmatched"] == 0
+
+
+def test_a_coordinate_outside_every_polygon_is_counted_not_silently_dropped():
+    landings = [landing("l1", "Nowhere, Atlantis", lat=0.0, lon=0.0)]  # outside every square
+    by_country, stats, unattributed = co.group_landings_by_country(landings, COUNTRY_INDEX)
     assert by_country == {}
     assert stats["landings_unmatched"] == 1
     assert stats["landings_total"] == 1
+
+
+def test_a_country_with_no_iso2_and_no_override_is_grouped_but_marked_unattributed():
+    """Ruritania (see COUNTRIES_FC) has no ISO2 and is not one of the three
+    curated overrides -- its landing must still be grouped under its own
+    name (a real, non-zero landing count), but flagged unattributed so
+    build_document can report NOT_CHECKABLE instead of silently defaulting
+    to a status that implies this map actually looked at its outage score."""
+    landings = [landing("l1", "Somewhere, Ruritania", lat=62.0, lon=62.0)]
+    by_country, stats, unattributed = co.group_landings_by_country(landings, COUNTRY_INDEX)
+    assert [l["id"] for l in by_country["Ruritania"]] == ["l1"]
+    assert unattributed == {"Ruritania"}
+    assert stats["landings_matched"] == 1
+    assert stats["landings_unattributed"] == 1
+
+
+def test_the_natural_earth_no_iso2_override_resolves_to_a_real_checkable_key():
+    """France (see COUNTRIES_FC) carries Natural Earth's own "-99" but is one
+    of the three curated overrides -- its landing groups under the real ISO2
+    "FR", not under its own name, and is never marked unattributed."""
+    landings = [landing("l1", "Calais, France", lat=45.0, lon=2.0)]
+    by_country, stats, unattributed = co.group_landings_by_country(landings, COUNTRY_INDEX)
+    assert [l["id"] for l in by_country["FR"]] == ["l1"]
+    assert unattributed == set()
 
 
 # --- update_history --------------------------------------------------------
@@ -321,6 +371,49 @@ def test_landings_with_no_spike_produce_no_coincidence():
     assert doc["statuses"]["EG"]["status"] != co.SPIKE
 
 
+def test_a_country_with_unattributed_landings_is_not_checkable_not_silently_no_spike():
+    """Task 38 review (Important 2): a country whose landings could not be
+    matched to a code must be distinguishable, per country, from a country
+    that was checked and found quiet -- not folded into no_spike/
+    insufficient_history/never_observed, all three of which imply this
+    module actually looked at an outage score for it. `outages` and
+    `history` both carry real data under "Ruritania" here on purpose: if
+    build_document ever stopped special-casing `unattributed` codes, this
+    test would start seeing SPIKE or NO_SPIKE instead of NOT_CHECKABLE,
+    which is exactly the regression this guards against."""
+    by_country = {"Ruritania": [landing("l1", "Somewhere, Ruritania", lat=62.0, lon=62.0)]}
+    stats = {
+        "landings_total": 1, "landings_planned_excluded": 0, "landings_unmatched": 0,
+        "landings_matched": 1, "landings_unattributed": 1,
+    }
+    hist = history_with("Ruritania", Ruritania=samples(
+        (NOW - 20 * HOUR, 1_000_000.0), (NOW - 14 * HOUR, 1_000_000.0), (NOW - 8 * HOUR, 1_000_000.0),
+    ))
+    outages = {"Ruritania": outage_record(9_000_000.0, "Ruritania")}  # would read as a clear spike if checked
+
+    doc = co.build_document(outages, by_country, stats, [], hist, NOW, unattributed={"Ruritania"})
+
+    assert doc["statuses"]["Ruritania"]["status"] == co.NOT_CHECKABLE
+    assert doc["statuses"]["Ruritania"]["current_score"] is None
+    assert doc["status_counts"][co.NOT_CHECKABLE] == 1
+    assert doc["status_counts"][co.SPIKE] == 0
+    assert doc["coincidences"] == []
+
+
+def test_an_unattributed_country_can_never_produce_a_coincidence_even_with_a_nearby_event():
+    by_country = {"Ruritania": [landing("l1", "Somewhere, Ruritania", lat=62.0, lon=62.0)]}
+    stats = {
+        "landings_total": 1, "landings_planned_excluded": 0, "landings_unmatched": 0,
+        "landings_matched": 1, "landings_unattributed": 1,
+    }
+    events = [event("e1", lat=62.0, lon=62.0, radius=5.0, country="Ruritania")]
+
+    doc = co.build_document({}, by_country, stats, events, {}, NOW, unattributed={"Ruritania"})
+
+    assert doc["coincidences"] == []
+    assert doc["statuses"]["Ruritania"]["status"] == co.NOT_CHECKABLE
+
+
 def test_events_without_a_radius_are_never_searched_not_silently_treated_as_clear():
     by_country = {"EG": [landing("l1", "Alexandria, Egypt", lat=30.0, lon=32.0)]}
     stats = {"landings_total": 1, "landings_planned_excluded": 0, "landings_unmatched": 0, "landings_matched": 1}
@@ -355,7 +448,9 @@ def test_an_empty_input_is_not_an_error():
                                       "landings_unmatched": 0, "landings_matched": 0}, [], {}, NOW)
     assert doc["coincidences"] == []
     assert doc["countries_with_landings"] == 0
-    assert doc["status_counts"] == {co.SPIKE: 0, co.NO_SPIKE: 0, co.INSUFFICIENT_HISTORY: 0, co.NEVER_OBSERVED: 0}
+    assert doc["status_counts"] == {
+        co.SPIKE: 0, co.NO_SPIKE: 0, co.INSUFFICIENT_HISTORY: 0, co.NEVER_OBSERVED: 0, co.NOT_CHECKABLE: 0,
+    }
 
 
 def test_coincidences_are_ranked_by_matched_event_count_then_country_code():
@@ -410,13 +505,19 @@ def test_the_document_is_built_from_the_pre_update_history_not_a_freshly_appende
 
 # --- language: no causal claim anywhere in the emitted text ---------------
 
-# The brief's own list, plus the closest obvious variants -- deliberately not
-# including bare words like "cause" or "deliberate" on their own, since the
-# one fact this feature is allowed to state (faults are usually anchors and
-# dredging, not anything deliberate) has to *use* "deliberate" in its own
-# negation. What must never appear, in any casing, is an affirmative
-# attribution: something on this card *did* one of these things to something
-# else.
+# Task 38 review (Important 1): the brief's own five words (caused by,
+# attack, sabotage, targeted, responsible for) are the easy ones -- nobody
+# writes those by accident. The realistic regression is softer: a bridge
+# word that implies a link between the outage score and the event without
+# ever saying "caused". Deliberately *not* including bare words like "cause"
+# or "deliberate" on their own, since the one fact this feature is allowed to
+# state (faults are usually anchors and dredging, not anything deliberate)
+# has to *use* "deliberate" in its own negation -- see NOTE. "after" is left
+# out for the same reason: this card has to say things like "24h after the
+# window opened" without tripping a ban meant for "the score spiked after
+# the blast", and a bare-word ban cannot tell those apart. What it bans
+# instead is the narrower set of phrases that only ever do the bridging work
+# themselves, in any casing:
 _BANNED_PHRASES = [
     "caused by", "was caused", "has caused",
     "attack", "attacking", "attacked",
@@ -426,6 +527,9 @@ _BANNED_PHRASES = [
     "to blame", "blamed on",
     "retaliat",  # retaliation / retaliatory
     "culprit",
+    "linked to", "a link between", "in the wake of", "prompted by", "triggered by",
+    "in response to", "tied to", "resulted in", "resulting in", "led to",
+    "due to", "because of", "amid", "following", "coincides with", "suspected",
 ]
 
 
@@ -459,6 +563,15 @@ def test_no_banned_causal_phrase_appears_in_a_built_documents_emitted_strings():
         lowered = text.lower()
         for phrase in _BANNED_PHRASES:
             assert phrase not in lowered, f"banned phrase {phrase!r} found in {text!r}"
+
+
+def test_the_banned_phrase_list_actually_catches_a_reintroduced_bridge_word():
+    """A guard on the guard: if _BANNED_PHRASES were ever emptied, or the
+    loop above stopped iterating it, this is what would stop catching the
+    softer bridge-word regression Task 38 review flagged (as opposed to the
+    five obvious words nobody writes by accident)."""
+    poisoned = "The outage score coincides with a nearby event in the wake of the incident."
+    assert any(phrase in poisoned.lower() for phrase in _BANNED_PHRASES)
 
 
 def test_the_note_explicitly_says_this_is_a_coincidence_not_causation():

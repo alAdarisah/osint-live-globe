@@ -14,17 +14,20 @@
 // backend/tests/test_cable_outage.py's banned-language assertion for why
 // that sentence is worded the way it is.
 //
-// All the row/status arithmetic lives in cableOutagePanelLogic.js, a plain-JS
-// sibling module, for the same reason infraRiskPanelLogic.js is: this file is
+// All the row/status arithmetic *and every string this panel composes* live
+// in cableOutagePanelLogic.js, a plain-JS sibling module -- this file is
 // JSX, and the project's headless test suite (`node --test`, no build step)
-// cannot import it at all -- see frontend/tests/cableOutagePanel.test.js.
+// cannot import it, or assert on strings buried in its markup, at all. See
+// frontend/tests/cableOutagePanel.test.js, and cableOutagePanelLogic.js's
+// own module note on why every composed sentence was pulled out here after
+// Task 38 review (Important 1).
 import { useCallback, useEffect, useState } from "react";
 import LocateIcon from "./icons/LocateIcon";
 import { fetchJson } from "../api";
-import { fmtNumber } from "../utils/format";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import {
-  STATUS_LABEL, coincidenceRows, emptyStateText, hasCableOutageDocument, statusCounts,
+  coincidenceRows, emptyStateText, eventLine, eventSearchLine, eventsHeaderLine,
+  hasCableOutageDocument, landingCoverageLine, landingsHeaderLine, scoreLine, statusSummaryLine,
 } from "./cableOutagePanelLogic";
 import { REFINE_PANEL_STATUS, REFINE_PANEL_STATUS_BADGE, REFINE_PANEL_STATUS_TEXT, classifyRefinePanelStatus } from "./refinePanelStatus";
 
@@ -40,12 +43,9 @@ function CoincidenceCard({ entry, onLocate }) {
       <div className="notable-item-row">
         <span className="notable-line">{entry.country || entry.country_code}</span>
       </div>
+      <div className="notable-item-meta">{scoreLine(entry)}</div>
       <div className="notable-item-meta">
-        Outage score {fmtNumber(entry.current_score)}
-        {Number.isFinite(entry.ratio) && ` (${entry.ratio.toFixed(1)}x its own recent peak of ${fmtNumber(entry.baseline_score)})`}
-      </div>
-      <div className="notable-item-meta">
-        {landings.length} cable landing{landings.length === 1 ? "" : "s"} in this country:{" "}
+        {landingsHeaderLine(landings.length)}{" "}
         {landings.map((l, i) => (
           <span key={l.id}>
             {i > 0 && ", "}
@@ -62,12 +62,10 @@ function CoincidenceCard({ entry, onLocate }) {
           </span>
         ))}
       </div>
-      <div className="notable-item-meta">
-        {events.length} event{events.length === 1 ? "" : "s"} landed near a cable landing in this window:
-      </div>
+      <div className="notable-item-meta">{eventsHeaderLine(events.length)}</div>
       {events.map((e) => (
         <div className="notable-item-meta" key={e.id} style={{ paddingLeft: "8px" }}>
-          {e.event_type || "event"} in {e.country || "an unspecified location"} at {fmtTime(e.first_seen)}
+          {eventLine(e)} at {fmtTime(e.first_seen)}
           {Number.isFinite(e.lat) && Number.isFinite(e.lon) && (
             <button
               type="button" className="news-locate-btn" title="Show on map"
@@ -134,7 +132,6 @@ export default function CableOutagePanel({ onLocate, isMobile }) {
   });
 
   const rows = coincidenceRows(doc);
-  const counts = statusCounts(doc);
 
   if (status === REFINE_PANEL_STATUS.LOADING) return null;
 
@@ -192,25 +189,10 @@ export default function CableOutagePanel({ onLocate, isMobile }) {
       {!collapsed && (
         <>
           <p className="meta" style={{ padding: "4px 10px" }}>{doc.note}</p>
-          <p className="meta" style={{ padding: "0 10px 4px" }}>
-            {doc.countries_with_landings ?? 0} countr{(doc.countries_with_landings ?? 0) === 1 ? "y" : "ies"} with a
-            recorded cable landing checked this pass -- {counts.spike} {STATUS_LABEL.spike},{" "}
-            {counts.no_spike} {STATUS_LABEL.no_spike}, {counts.insufficient_history} {STATUS_LABEL.insufficient_history},{" "}
-            {counts.never_observed} {STATUS_LABEL.never_observed}.
-          </p>
-          <p className="meta" style={{ padding: "0 10px 8px" }}>
-            Last {doc.event_window_hours ?? 24}h: {fmtNumber(doc.events_searched ?? 0)} fused event
-            {(doc.events_searched ?? 0) === 1 ? "" : "s"} had a stated uncertainty radius and were searched against
-            every cable landing; {fmtNumber(doc.events_without_radius ?? 0)} had none and could not be.
-          </p>
+          <p className="meta" style={{ padding: "0 10px 4px" }}>{statusSummaryLine(doc)}</p>
+          <p className="meta" style={{ padding: "0 10px 8px" }}>{eventSearchLine(doc)}</p>
           {doc.landing_stats && (
-            <p className="meta" style={{ padding: "0 10px 8px" }}>
-              {fmtNumber(doc.landing_stats.landings_matched ?? 0)} of {fmtNumber(doc.landing_stats.landings_total ?? 0)}{" "}
-              cable landings this map has collected could be matched to a country by name;{" "}
-              {fmtNumber(doc.landing_stats.landings_unmatched ?? 0)} could not be and are not checked against any
-              country's score, {fmtNumber(doc.landing_stats.landings_planned_excluded ?? 0)} are planned landings
-              excluded because their site is not yet settled.
-            </p>
+            <p className="meta" style={{ padding: "0 10px 8px" }}>{landingCoverageLine(doc)}</p>
           )}
           {rows.length === 0 ? (
             <p className="meta" style={{ padding: "0 10px 8px" }}>{emptyStateText(doc)}</p>

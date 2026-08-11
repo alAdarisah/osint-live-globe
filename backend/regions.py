@@ -6,7 +6,36 @@ add a region here and it shows up as a button *and* as a valid filter.
 Bounds are (south, west, north, east) in degrees. "world" (and any unknown
 key) means "no filter" -- the caller gets the full global dataset, same as
 before this feature existed.
+
+**CountryIndex, at the bottom of this file**, is the other kind of spatial
+work this module holds: not a fixed camera box but a real point-in-country
+test over the countries GeoJSON (backend/sources/countries.py). There is no
+PostGIS in this project (see the global "plain columns plus Python"
+constraint), and frontend/src/map/countryHitTest.js already had to solve the
+identical problem for the map's own click/hover hit-testing -- so this is a
+direct Python port of that file's pointInRing/ringArea/countryContainsPoint,
+not a second algorithm invented for the backend. Keeping the two in step
+matters: a point either side of this map calls "inside France" should always
+be the same point.
+
+`CountryIndex.nearest_country` is the fallback `country_at` itself does not
+attempt: backend/sources/cables.py's own docstring warns that TeleGeography's
+geometry is "schematic rather than survey-accurate", and a cable landing
+point is drawn at the coast rather than surveyed onto it -- so a real,
+correctly-named landing can sit a short distance seaward of Natural Earth's
+own 1:50m coastline and miss every polygon's ray cast outright. Measured
+against Task 38's own landing set: a strict `country_at` alone left roughly
+a third of all real (non-planned) landings unmatched, most of them exactly
+this case (Aden, Ajaccio, Al Faw -- real cities on a real coast, just outside
+the drawn line). `nearest_country` snaps a near-miss to the closest country
+within a short radius, the same "coastal snap" judgement call
+naval_presence.py's own PORT_MATCH_RADIUS_KM already makes for AIS positions
+near a port.
 """
+
+import math
+
+from backend.sources.proximity import haversine_km
 
 Bounds = tuple[float, float, float, float]
 
@@ -189,3 +218,206 @@ def filter_geojson(fc: dict, bounds: Bounds | None) -> dict:
         _bbox_cache_bboxes = [_feature_bbox(f) for f in features]
     kept = [f for f, bbox in zip(features, _bbox_cache_bboxes) if _bboxes_intersect(bbox, bounds)]
     return {"type": "FeatureCollection", "features": kept}
+
+
+# --- point-in-country -------------------------------------------------------
+#
+# Ported from frontend/src/map/countryHitTest.js -- see this module's own
+# docstring for why a port rather than a new algorithm. Names below
+# (_point_in_ring, _ring_area) mirror that file's pointInRing/ringArea on
+# purpose, so the two can be read side by side.
+
+
+def _wrap_lon(lon: float) -> float:
+    return ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
+
+
+def _point_in_ring(ring: list, lat: float, lon: float) -> bool:
+    """Standard even-odd ray cast. `ring` is GeoJSON order: [[lon, lat], ...]."""
+    inside = False
+    j = len(ring) - 1
+    for i in range(len(ring)):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        if (yi > lat) != (yj > lat) and lon < (xj - xi) * (lat - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _ring_area(ring: list) -> float:
+    """Shoelace, in raw degrees -- only ever compared against other rings'
+    values to break a "point falls in two features" tie (an enclave inside
+    its enclosing state), the same reason countryHitTest.js's own ringArea
+    does not need a real projection either."""
+    total = 0.0
+    j = len(ring) - 1
+    for i in range(len(ring)):
+        total += ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1]
+        j = i
+    return abs(total) / 2.0
+
+
+def _polygons_of(geometry: dict | None) -> list:
+    if not geometry:
+        return []
+    kind = geometry.get("type")
+    if kind == "Polygon":
+        return [geometry.get("coordinates") or []]
+    if kind == "MultiPolygon":
+        return geometry.get("coordinates") or []
+    return []
+
+
+class CountryIndex:
+    """Point-in-country lookup over the countries GeoJSON (backend/sources/
+    countries.py). Built once per caller from a FeatureCollection and queried
+    per point -- the same shape backend/sources/proximity.py's ProximityIndex
+    takes for "build once, query many" over a source's own snapshot.
+
+    A landing name is free text some other gazetteer chose to write ("United
+    States" against Natural Earth's "United States of America" is the gap
+    that first motivated this); a landing's *coordinate* is not, so testing
+    it against the polygon this map already draws for that country removes
+    the join's dependency on anyone's spelling entirely.
+    """
+
+    __slots__ = ("_entries",)
+
+    def __init__(self, feature_collection: dict | None):
+        entries = []
+        for feature in (feature_collection or {}).get("features") or []:
+            polygons = _polygons_of(feature.get("geometry"))
+            if not polygons:
+                continue
+            min_lat = min_lon = math.inf
+            max_lat = max_lon = -math.inf
+            area = 0.0
+            for rings in polygons:
+                outer = rings[0] if rings else None
+                if not outer or len(outer) < 4:
+                    continue
+                area += _ring_area(outer)
+                for lon, lat in outer:
+                    if lat < min_lat:
+                        min_lat = lat
+                    if lat > max_lat:
+                        max_lat = lat
+                    if lon < min_lon:
+                        min_lon = lon
+                    if lon > max_lon:
+                        max_lon = lon
+            if min_lat == math.inf:
+                continue  # every ring in this feature was degenerate -- nothing to test against
+            props = feature.get("properties") or {}
+            iso2 = props.get("iso_a2")
+            iso2 = iso2.strip().upper() if isinstance(iso2, str) else None
+            if not iso2 or iso2 == "-99":
+                # Natural Earth's own "no ISO2" sentinel -- see
+                # backend/sources/outages.py's identical override note.
+                # Left None here rather than guessed: it is the caller's own
+                # decision (and its own already-cited override, if it has
+                # one) what a missing code should fall back to.
+                iso2 = None
+            entries.append({
+                "iso2": iso2,
+                "name": props.get("name"),
+                "polygons": polygons,
+                "bbox": (min_lat, min_lon, max_lat, max_lon),
+                "area": area,
+            })
+        # Smallest-area-first, so an enclave (Lesotho inside South Africa, San
+        # Marino inside Italy) is matched before the country surrounding it --
+        # the identical reason countryHitTest.js's buildCountryIndex sorts the
+        # same way for the frontend's own click hit-test.
+        entries.sort(key=lambda e: e["area"])
+        self._entries = entries
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def country_at(self, lat, lon) -> dict | None:
+        """The smallest country containing (lat, lon) -> {"iso2", "name"}
+        (`iso2` may be None -- see __init__'s own note), or None if the point
+        falls outside every polygon this index holds (open ocean, or a
+        coastline this map's 1:50m resolution does not resolve finely enough
+        to close around a point right at the water's edge)."""
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            return None
+        x = _wrap_lon(lon)
+        for entry in self._entries:
+            min_lat, min_lon, max_lat, max_lon = entry["bbox"]
+            if lat < min_lat or lat > max_lat or x < min_lon or x > max_lon:
+                continue
+            if _country_contains(entry, lat, x):
+                return {"iso2": entry["iso2"], "name": entry["name"]}
+        return None
+
+    def nearest_country(self, lat, lon, max_km: float = 25.0) -> dict | None:
+        """The country whose outer coastline passes closest to (lat, lon),
+        within `max_km` -> {"iso2", "name"}, or None past that radius.
+
+        For a point `country_at` already places inside a polygon, call that
+        instead -- this is the fallback for one that just misses every ring,
+        which real cable landings do often enough to matter (see this
+        module's own docstring). Distance is measured to the nearest vertex
+        of each candidate's own outer ring, not a true point-to-segment
+        distance -- an approximation, but Natural Earth's 1:50m rings are
+        dense enough along real coastlines that the two rarely disagree by
+        more than the resolution of the coastline itself, and a normal
+        Python loop computing exact segment distance against every edge of
+        every candidate ring is a heavier cost this fallback (invoked only
+        for the minority of points that already failed containment) does not
+        need to pay to be useful.
+
+        `max_km` bounds the guess the same way PORT_MATCH_RADIUS_KM bounds
+        naval_presence.py's own port attribution: past it, "nearest country"
+        stops meaning anything (the middle of the Pacific has a nearest
+        country too, just not a meaningful one), so the caller gets None
+        rather than a distant, misleading match.
+        """
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            return None
+        x = _wrap_lon(lon)
+        # A fixed degree margin, not a precise km->degree conversion: this
+        # only widens the bbox pre-filter before the real haversine check
+        # below runs, so over-including a few extra candidate countries
+        # costs a little time and never correctness. 111 km/degree is the
+        # equatorial figure, deliberately generous at higher latitudes where
+        # a degree of longitude is narrower than that.
+        pad = max_km / 111.0 + 0.5
+        best: dict | None = None
+        best_km = max_km
+        for entry in self._entries:
+            min_lat, min_lon, max_lat, max_lon = entry["bbox"]
+            if lat < min_lat - pad or lat > max_lat + pad or x < min_lon - pad or x > max_lon + pad:
+                continue
+            for rings in entry["polygons"]:
+                outer = rings[0] if rings else None
+                if not outer:
+                    continue
+                for vlon, vlat in outer:
+                    km = haversine_km(lat, x, vlat, vlon)
+                    if km < best_km:
+                        best_km = km
+                        best = entry
+        if best is None:
+            return None
+        return {"iso2": best["iso2"], "name": best["name"]}
+
+
+def _country_contains(entry: dict, lat: float, lon: float) -> bool:
+    for rings in entry["polygons"]:
+        outer = rings[0] if rings else None
+        if not outer or not _point_in_ring(outer, lat, lon):
+            continue
+        # Holes: a point inside a hole is outside the country (e.g. an
+        # enclave cut out of the surrounding state's own polygon).
+        in_hole = False
+        for hole in rings[1:]:
+            if _point_in_ring(hole, lat, lon):
+                in_hole = True
+                break
+        if not in_hole:
+            return True
+    return False

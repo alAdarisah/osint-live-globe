@@ -55,22 +55,42 @@ Four different facts this module keeps apart, for two independent axes:
     is not reporting above IODA's own MIN_SCORE floor right now, but this
     module has seen it above that floor before), `insufficient_history` (this
     module has not watched this country, or has not watched it for long
-    enough, to say either of the above with any confidence), and
-    `never_observed` (this module's own history is old enough, in aggregate,
-    that "IODA has never once put this country above its floor while we were
-    watching" is a real fact rather than an artefact of having only just
-    started). The last two are easy to conflate -- both look like "zero
-    samples" from this country's own row -- and are told apart by the *whole*
-    history's own age (`_meta.started_at`, not any one country's), see
-    _spike_status below.
+    enough, to say either of the above with any confidence), `never_observed`
+    (this module's own history is old enough, in aggregate, that "IODA has
+    never once put this country above its floor while we were watching" is a
+    real fact rather than an artefact of having only just started), and
+    `not_checkable` (this country's landings were found, but this map has no
+    ISO2 code for the country at all -- see the geometric-attribution note
+    below -- so there is no key IODA's own document could ever be looked up
+    under, checked or not; a permanent structural gap, not a temporal one).
+    The middle two are easy to conflate -- both look like "zero samples" from
+    this country's own row -- and are told apart by the *whole* history's own
+    age (`_meta.started_at`, not any one country's), see _spike_status below.
+
+**Landing -> country is geometric, not by name.** The first version of this
+module joined a landing to a country by parsing the trailing token off
+TeleGeography's own free-text name ("Beculuk, Indonesia") against Natural
+Earth's admin-0 name list. Task 38 review (Important 2): that join silently
+dropped every US landing, because TeleGeography writes "United States" and
+Natural Earth's own ADMIN field is "United States of America" -- a country a
+reader is near-certain to check first, checked never at all, and reading
+identically to "checked, quiet". A landing's *coordinate* carries no such
+spelling disagreement, and this map already draws the polygon to test it
+against (backend/sources/countries.py) -- so `group_landings_by_country`
+below tests each landing's point against backend/regions.py's CountryIndex
+(itself a Python port of the frontend's own countryHitTest.js) instead. A
+landing whose point falls inside a real Natural Earth feature but that
+feature carries no ISO2 (Natural Earth's own "-99" sentinel, past the three-
+country override below) is still grouped by country -- its own landings
+still cohere -- but is marked `not_checkable` rather than silently defaulting
+to a status that would misreport "checked" as "quiet".
 """
 
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from backend import config, storage
-from backend.sources.gazetteer import normalize
+from backend import config, regions, storage
 from backend.sources.proximity import ProximityIndex
 
 log = logging.getLogger("osint-globe.cable_outage")
@@ -146,6 +166,7 @@ SPIKE = "spike"
 NO_SPIKE = "no_spike"
 INSUFFICIENT_HISTORY = "insufficient_history"
 NEVER_OBSERVED = "never_observed"
+NOT_CHECKABLE = "not_checkable"
 
 # The one sentence this whole feature exists to attach to every number it
 # produces. Rendered verbatim by the frontend panel (never re-typed there),
@@ -176,90 +197,70 @@ SELECT id, lat, lon, geo_radius_km, event_type, country, notes, severity, first_
 # countries' ISO2, copied from that already-reviewed constant rather than
 # re-derived -- not a new fact, the same one this codebase already ships.
 # Without it, every landing on France's or Norway's own coastline (both carry
-# several) would be unmatched for a reason that has nothing to do with the
-# name-join itself.
+# several) would be grouped under its own name but never checkable against
+# an outage score, for a reason that has nothing to do with the geometric
+# join itself.
 _ISO2_NAME_OVERRIDE = {"France": "FR", "Norway": "NO", "Kosovo": "XK"}
+
+# How far a landing may sit outside every country polygon and still snap to
+# the nearest one -- see regions.CountryIndex.nearest_country's own
+# docstring for why this fallback exists at all (cable landings are drawn at
+# the coast, not surveyed onto it, so a real, correctly-placed landing often
+# lands a short distance seaward of Natural Earth's own 1:50m coastline).
+# Same figure and the same "coastal snap" reasoning as naval_presence.py's
+# own PORT_MATCH_RADIUS_KM.
+LANDING_SNAP_RADIUS_KM = 25.0
 
 
 # --- landing -> country ------------------------------------------------------
 
 
-def _country_index_from_geojson(feature_collection: dict) -> dict:
-    """The countries GeoJSON (backend/sources/countries.py) -> {"exact": {name:
-    iso2}, "fuzzy": {normalized_name: iso2}}.
+def _country_key(hit: dict) -> tuple[str | None, bool]:
+    """A regions.CountryIndex hit (`{"iso2", "name"}`) -> (key, checkable).
 
-    Submarine cable landing names carry their country as free text ("Beculuk,
-    Indonesia" -- see backend/sources/cables.py's own test fixture), and the
-    only country-name list this map already collects is this one, so joining
-    against it -- the same exact-then-normalised two-tier join outages.py's
-    own region_lookup_for_country already uses for a different name-matching
-    problem -- keeps every country attribution here something the map fetched,
-    never a hand-typed alias table (_ISO2_NAME_OVERRIDE above is the one
-    narrow exception, and it copies rather than invents its three entries).
-
-    This is a plain name join, not a gazetteer: TeleGeography's own
-    conventional country name does not always match Natural Earth's ADMIN
-    field for the same country ("United States" against "United States of
-    America" is the biggest single gap this leaves as of this writing). Left
-    unmatched rather than guessed -- see group_landings_by_country's own
-    `landings_unmatched` count, which is how that gap stays visible instead
-    of silently shrinking coverage.
+    `key` is what group_landings_by_country/build_document key a country
+    by. `checkable` says whether that key can ever be looked up in
+    outages.py's own ISO2-keyed document: true for a real Natural Earth ISO2
+    or one of the three curated overrides above, false for the country's
+    bare name -- the fallback that still groups a country's own landings
+    together (so its landing count is real and its name is real) even though
+    this map has no code to compare its outage score against at all. See
+    NOT_CHECKABLE.
     """
-    exact: dict[str, str] = {}
-    fuzzy: dict[str, str] = {}
-    for name, iso2 in _ISO2_NAME_OVERRIDE.items():
-        exact[name] = iso2
-        fuzzy[normalize(name)] = iso2
-    for feature in (feature_collection or {}).get("features") or []:
-        props = feature.get("properties") or {}
-        name = props.get("name")
-        iso2 = (props.get("iso_a2") or "").strip().upper()
-        if not name or not iso2 or iso2 == "-99":
-            continue  # Natural Earth's own "no ISO2" sentinel -- see outages.py's override table
-        exact.setdefault(name, iso2)
-        fuzzy.setdefault(normalize(name), iso2)
-    return {"exact": exact, "fuzzy": fuzzy}
-
-
-def _landing_country(name: str, country_index: dict) -> tuple[str | None, str]:
-    """A landing's free-text `name` -> (iso2 or None, "exact" | "fuzzy" |
-    "unmatched"). TeleGeography trails the country after the *last* comma
-    ("Beculuk, Indonesia"; a US landing might read "Miami, FL, United
-    States"), so only that trailing token is ever offered to the join -- never
-    the whole name, which would never match a bare country name at all.
-
-    A name with no comma, or whose trailing token matches no known country,
-    comes back unmatched -- the same "real data with nowhere to place it"
-    choice outages.py's own region matcher makes for an unplaceable NetAcuity
-    region, rather than a guess.
-    """
-    name = name or ""
-    if "," not in name:
-        return None, "unmatched"
-    candidate = name.rsplit(",", 1)[-1].strip()
-    if not candidate:
-        return None, "unmatched"
-    iso2 = country_index.get("exact", {}).get(candidate)
+    iso2 = hit.get("iso2")
     if iso2:
-        return iso2, "exact"
-    iso2 = country_index.get("fuzzy", {}).get(normalize(candidate))
-    if iso2:
-        return iso2, "fuzzy"
-    return None, "unmatched"
+        return iso2, True
+    name = hit.get("name")
+    if name and name in _ISO2_NAME_OVERRIDE:
+        return _ISO2_NAME_OVERRIDE[name], True
+    return name, False
 
 
-def group_landings_by_country(landings: list[dict], country_index: dict) -> tuple[dict[str, list[dict]], dict]:
-    """entity_latest("cable_landings") rows -> {iso2: [landing, ...]}, plus how
-    many were excluded and why.
+def group_landings_by_country(
+    landings: list[dict], country_index: "regions.CountryIndex",
+) -> tuple[dict[str, list[dict]], dict, set[str]]:
+    """entity_latest("cable_landings") rows -> {key: [landing, ...]}, how many
+    were excluded and why, and which keys are `not_checkable` (see
+    _country_key).
 
     A planned (`is_tbd`) landing is excluded outright, not merely flagged: its
     site is, by TeleGeography's own definition, not yet settled (see
     cables.py's own docstring), so there is no fixed point for a conflict
     event to be "near" at all -- counting a not-yet-built landing toward a
     coincidence would be a claim about a location that does not exist yet.
+
+    A landing whose coordinate falls outside every polygon `country_index`
+    holds is first retried with country_index.nearest_country (a landing is
+    drawn at the coast, not surveyed onto it -- see LANDING_SNAP_RADIUS_KM's
+    own comment); only a landing still unplaced after that -- genuinely in
+    open water, or too far from any coastline this map's 1:50m resolution
+    draws -- is counted under `landings_unmatched`. That is a different,
+    rarer fact than `landings_unattributed` below (a country *was* found, it
+    just has no ISO2 this map can check).
     """
     by_country: dict[str, list[dict]] = {}
-    total = planned_excluded = unmatched = matched = 0
+    unattributed: set[str] = set()
+    total = planned_excluded = unmatched = matched = unattributed_landings = snapped = 0
     for landing in landings or ():
         total += 1
         if landing.get("planned"):
@@ -271,12 +272,23 @@ def group_landings_by_country(landings: list[dict], country_index: dict) -> tupl
         landing_id = landing.get("id")
         if landing_id is None:
             continue
-        iso2, _how = _landing_country(landing.get("name") or "", country_index)
-        if iso2 is None:
+        hit = country_index.country_at(lat, lon)
+        if hit is None:
+            hit = country_index.nearest_country(lat, lon, max_km=LANDING_SNAP_RADIUS_KM)
+            if hit is not None:
+                snapped += 1
+        if hit is None:
+            unmatched += 1
+            continue
+        key, checkable = _country_key(hit)
+        if key is None:
             unmatched += 1
             continue
         matched += 1
-        by_country.setdefault(iso2, []).append({
+        if not checkable:
+            unattributed.add(key)
+            unattributed_landings += 1
+        by_country.setdefault(key, []).append({
             "id": landing_id, "name": landing.get("name"), "lat": lat, "lon": lon,
         })
     stats = {
@@ -284,8 +296,10 @@ def group_landings_by_country(landings: list[dict], country_index: dict) -> tupl
         "landings_planned_excluded": planned_excluded,
         "landings_unmatched": unmatched,
         "landings_matched": matched,
+        "landings_unattributed": unattributed_landings,
+        "landings_snapped": snapped,
     }
-    return by_country, stats
+    return by_country, stats, unattributed
 
 
 # --- score history ------------------------------------------------------
@@ -391,6 +405,7 @@ def _spike_status(country_code: str, history: dict, current_score, now: float) -
 
 def build_document(
     outages: dict, by_country: dict, landing_stats: dict, events: list[dict], history: dict, now: float,
+    unattributed: set[str] = frozenset(),
 ) -> dict:
     """Everything above, combined -- no asyncpg, no network, so the
     correlation logic is directly testable, the same shape naval_presence.py
@@ -398,7 +413,8 @@ def build_document(
 
     `outages`: backend/sources/outages.py's own parse_outages shape,
         {iso2: {"score": float, "country": str, ...}}.
-    `by_country`, `landing_stats`: group_landings_by_country's return.
+    `by_country`, `landing_stats`, `unattributed`: group_landings_by_country's
+        return.
     `events`: conflict_events rows already windowed to EVENT_WINDOW_HOURS,
         [{"id", "lat", "lon", "geo_radius_km", "event_type", "country",
           "notes", "severity", "first_seen"}, ...] -- first_seen a float
@@ -450,11 +466,25 @@ def build_document(
                 "lon": lon,
             }
 
-    status_counts = {SPIKE: 0, NO_SPIKE: 0, INSUFFICIENT_HISTORY: 0, NEVER_OBSERVED: 0}
+    status_counts = {SPIKE: 0, NO_SPIKE: 0, INSUFFICIENT_HISTORY: 0, NEVER_OBSERVED: 0, NOT_CHECKABLE: 0}
     statuses: dict[str, dict] = {}
     coincidences: list[dict] = []
 
     for code, landings in (by_country or {}).items():
+        if code in unattributed:
+            # This country's landings were found geometrically, but it has no
+            # ISO2 this map can look outages.py's own document up under --
+            # not "checked and quiet", not "too little history yet": there is
+            # no key to check at all, ever, until this map's own country data
+            # carries one. See _country_key and the module docstring's own
+            # "landing -> country is geometric" note.
+            status_counts[NOT_CHECKABLE] += 1
+            statuses[code] = {
+                "status": NOT_CHECKABLE, "current_score": None, "baseline_score": None, "ratio": None,
+                "country": code, "landing_count": len(landings),
+            }
+            continue
+
         verdict = _spike_status(code, history, (outages or {}).get(code, {}).get("score"), now)
         status_counts[verdict["status"]] += 1
         statuses[code] = {
@@ -526,8 +556,8 @@ async def compute() -> dict:
     outages = outages or {}
     history = history or {}
 
-    country_index = _country_index_from_geojson(countries_geojson or {})
-    by_country, landing_stats = group_landings_by_country(landings, country_index)
+    country_index = regions.CountryIndex(countries_geojson or {})
+    by_country, landing_stats, unattributed = group_landings_by_country(landings, country_index)
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(_EVENTS_SQL, since, config.CONFLICT_PIPELINE_VERSION)
@@ -541,7 +571,7 @@ async def compute() -> dict:
         for r in rows
     ]
 
-    doc = build_document(outages, by_country, landing_stats, events, history, now)
+    doc = build_document(outages, by_country, landing_stats, events, history, now, unattributed)
 
     updated_history = update_history(history, outages, now, BASELINE_LOOKBACK_HOURS * 3600)
     wrote = await storage.record_reference(HISTORY_NAME, updated_history)
