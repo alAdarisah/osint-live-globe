@@ -137,7 +137,13 @@ function loopingSelectors(css) {
       /animation:\s*[\w-]+[^;]*infinite/.test(body) ||
       (/animation-name\s*:/.test(body) && /animation-iteration-count\s*:\s*infinite/.test(body))
     ))
-    .map(([selector]) => selector);
+    // Split grouped selectors, because the reduce-motion lists this is compared
+    // against are comma-split too. Without this, a looping rule written as
+    // `.a,\n.b { ... }` is reported uncovered even when both selectors are
+    // correctly listed in both blocks -- an unsatisfiable red that the next
+    // person to add a grouped loop would have no way to fix.
+    .flatMap(([selector]) => selector.split(",").map((one) => one.trim()))
+    .filter(Boolean);
 }
 
 test("motion.css defines every token the stylesheet is allowed to use", () => {
@@ -266,7 +272,7 @@ test("every looping animation can be switched off", () => {
 // during review -- nothing stopped the next PR from wrapping
 // `event.fatalities` in `<CountUp>` and shipping it green.
 test("casualty figures never go through CountUp", () => {
-  const CASUALTY_KEYWORD = /fatalit|casualt|killed|injur/i;
+  const CASUALTY_KEYWORD = /fatalit|casualt|killed|injur|dead|deaths/i;
   const dirs = ["../src/components", "../src/map"];
   const offenders = [];
 
@@ -276,26 +282,76 @@ test("casualty figures never go through CountUp", () => {
       const rel = entry.toString();
       if (!/\.(jsx?|tsx?)$/.test(rel)) continue;
       const abs = path.join(root, rel);
-      // CountUp.jsx's own path and its required warning comment both contain
-      // a casualty keyword ("Never put this around a casualty figure...") --
-      // the trap that bit an earlier pass at this test. Excluded by path, not
-      // by content, so the component can go on documenting its own rule.
-      if (path.basename(abs) === "CountUp.jsx") continue;
+      // By full path, not by basename: a second CountUp.jsx created anywhere
+      // else under these directories would otherwise exempt itself. This one
+      // is excluded because its required warning comment ("Never put this
+      // around a casualty figure") necessarily contains the keywords.
+      if (abs === resolvePath("../src/components/CountUp.jsx")) continue;
       const text = readFileSync(abs, "utf8");
-      text.split("\n").forEach((line, i) => {
-        if (CASUALTY_KEYWORD.test(line) && line.includes("CountUp")) {
-          offenders.push(`${path.relative(root, abs).replace(/\\/g, "/")}:${i + 1}: ${line.trim()}`);
+
+      // Whatever this file actually calls the counter. Checking for the
+      // literal string "CountUp" would miss `import Odometer from "./CountUp"`,
+      // and a rule guarding this constraint should not be defeated by a rename.
+      const names = new Set();
+      for (const m of text.matchAll(/import\s+(\w+)\s+from\s+["'][^"']*\/CountUp["']/g)) {
+        names.add(m[1]);
+      }
+      for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s+["'][^"']*\/useCountUp[\w.]*["']/g)) {
+        for (const spec of m[1].split(",")) {
+          const local = spec.trim().split(/\s+as\s+/).pop().trim();
+          if (local) names.add(local);
         }
-      });
+      }
+      if (!names.size) continue;
+
+      // The opening tag or call, from its "<" to the matching ">", newlines
+      // included. Line-by-line scanning was the hole here: a formatter wrapping
+      // `<CountUp value={event.fatalities} />` across three lines -- which is
+      // what a formatter does the moment the attribute list grows -- put the
+      // component name and the death toll on different lines and walked
+      // straight past a single-line check.
+      const spans = [];
+      for (const name of names) {
+        const tag = new RegExp(`<${name}\\b[^>]*>`, "gs");
+        for (const m of text.matchAll(tag)) spans.push(m);
+        const call = new RegExp(`\\b${name}\\s*\\([^)]*\\)`, "gs");
+        for (const m of text.matchAll(call)) spans.push(m);
+      }
+
+      const where = path.relative(root, abs).replace(/\\/g, "/");
+      for (const span of spans) {
+        if (!CASUALTY_KEYWORD.test(span[0])) continue;
+        const line = text.slice(0, span.index).split("\n").length;
+        offenders.push(`${where}:${line}: ${span[0].replace(/\s+/g, " ").trim()}`);
+      }
     }
   }
 
   assert.deepEqual(
     offenders,
     [],
-    "a casualty/fatality/injury figure appears on the same line as CountUp -- " +
-    "this map renders death tolls directly and lets them snap on purpose; a " +
-    "counter that rolls up to a number of dead people is not a rendering choice, " +
-    `it is the thing this feature is not allowed to do:\n${offenders.join("\n")}`,
+    "a casualty, fatality or injury figure is being passed to the counting " +
+    "component. This map renders death tolls directly and lets them snap, on " +
+    "purpose: a counter rolling up to a number of dead people is not a " +
+    "rendering choice, it is the one thing this feature is not allowed to do. " +
+    `Render the figure directly instead:\n${offenders.join("\n")}`,
   );
+});
+
+test("the casualty guard can actually catch a wrapped call", () => {
+  // The guard above passes on a clean tree, which is also what a guard that
+  // matches nothing does. This pins the specific evasion that defeated the
+  // first version of it -- the component name and the figure on different
+  // lines, exactly as a formatter would leave them.
+  const wrapped = [
+    'import CountUp from "../CountUp";',
+    "<CountUp",
+    "  value={event.fatalities}",
+    "/>",
+  ].join("\n");
+  const names = [...wrapped.matchAll(/import\s+(\w+)\s+from\s+["'][^"']*\/CountUp["']/g)].map((m) => m[1]);
+  assert.deepEqual(names, ["CountUp"]);
+  const span = wrapped.match(new RegExp(`<${names[0]}\\b[^>]*>`, "s"));
+  assert.ok(span, "the tag regex must span newlines");
+  assert.match(span[0], /fatalit/i);
 });
