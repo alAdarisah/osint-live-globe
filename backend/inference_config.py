@@ -9,12 +9,12 @@ constant, "put there specifically so this task could expose them" -- true of
 exactly four of them: VESSEL_DRAUGHT_LADEN_RATIO/BALLAST_RATIO/MIN_SAMPLES,
 and LANE_DENSITY_INTERVAL (the job interval lane_density's own fields report
 alongside its decay factor below -- see that field's own note on why the two
-travel together). Task 39's six (JAM_CROSSCHECK_MAX_SPEED_KMH/MIN_REVERSAL_
-KM/MAX_HEADING_DEVIATION_DEG/MIN_SAMPLES/WINDOW_SECONDS/MIN_FLAG_RATIO) live
-in config.py too, by that same task's own brief -- see
-backend/refine/jam_crosscheck.py's own docstring for why each one is a
-measured figure, not a remembered airframe spec. Every other threshold here
-is a plain module-level
+travel together). Task 39's seven (JAM_CROSSCHECK_MAX_SPEED_KMH/MIN_
+REVERSAL_KM/MAX_HEADING_DEVIATION_DEG/MIN_SAMPLES/WINDOW_SECONDS/MIN_FLAG_
+RATIO/MAX_EVENTS_PER_AIRCRAFT) live in config.py too, by that same task's
+own brief -- see backend/refine/jam_crosscheck.py's own docstring for why
+each one is a measured figure, not a remembered airframe spec. Every other
+threshold here is a plain module-level
 constant inside the refine job (or the source module) that actually applies
 it: backend/sources/dark_vessels.py's GAP_MIN_HOURS/GAP_MAX_HOURS/
 REACH_CROSS_TRACK_FRACTION, backend/refine/port_calls.py's
@@ -243,6 +243,12 @@ def describe() -> dict:
                     "A cell's own status only reads \"flagged\" once at least this fraction of its observed"
                     " aircraft are flagged, not merely one -- a busier cell has proportionally more chances"
                     " to produce a single noisy flag by chance alone.",
+                ),
+                _field(
+                    "max_events_per_aircraft", "Max stored samples/flags per airframe",
+                    config.JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT, "events",
+                    "A hard cap on top of the rolling window itself, so one malformed or replayed ADS-B"
+                    " stream for a single airframe cannot grow this job's own stored state without bound.",
                 ),
             ],
         },

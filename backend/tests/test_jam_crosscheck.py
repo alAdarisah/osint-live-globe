@@ -336,6 +336,36 @@ def test_tracked_seconds_reflects_how_long_this_job_has_watched_the_cell():
     assert later["cells"][_HEX]["tracked_seconds"] == 3600
 
 
+def test_tracking_since_is_stable_across_passes_once_set():
+    """The document-wide mirror of tracked_seconds -- set once when a state
+    is first built (a genuine first run, or _load_state discarding an
+    incompatible one, see below), then carried forward unchanged. It must
+    not silently reset just because more time has passed."""
+    first = jc.apply_batch([], _JAM_CELLS, {}, now=1000.0)
+    assert first["tracking_since"] == 1000.0
+    second = jc.apply_batch([], _JAM_CELLS, first, now=5000.0)
+    assert second["tracking_since"] == 1000.0
+
+
+def test_samples_are_capped_at_append_time_not_only_pruned_by_age(monkeypatch):
+    """Task 39 review, Important 2: JAM_CROSSCHECK_WINDOW_SECONDS alone only
+    bounds *age* -- a single airframe producing many qualifying pairs within
+    one still-open window must not grow its own state without bound.
+    JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT is lowered here so the test does
+    not need a thousand rows to exercise the cap."""
+    monkeypatch.setattr(config, "JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT", 3)
+    rows = [row(1, 0.0, _CENTER_LAT, _CENTER_LON)]
+    for i in range(2, 8):  # six more fixes -> six transitions, all inside the cell
+        rows.append(row(i, (i - 1) * 60.0, _CENTER_LAT, _CENTER_LON))
+    state = jc.apply_batch(rows, _JAM_CELLS, {}, now=rows[-1]["ts"])
+    doc = jc.build_document(state, _JAM_CELLS, now=rows[-1]["ts"])
+
+    assert doc["aircraft"][ICAO]["sample_count"] == 3  # capped, not the true six transitions
+    kept = state["cells"][_HEX]["aircraft"][ICAO]["samples"]
+    assert kept == sorted(kept)  # the most recent ones are kept, not an arbitrary subset
+    assert kept[-1] == rows[-1]["ts"]
+
+
 # --- run_once: cursor/write discipline, matching every other refine job -----
 
 
@@ -464,6 +494,60 @@ def test_a_failed_reference_write_does_not_double_count_on_retry(monkeypatch):
 
     assert fake.docs[jc.REFERENCE_NAME]["aircraft"][ICAO]["sample_count"] == baseline_count
     assert fake.docs[jc.REFERENCE_NAME]["cells"][_HEX]["aircraft_observed"] == 1
+
+
+def test_run_once_recovers_from_an_old_shaped_state_document(monkeypatch, caplog):
+    """Task 39 review, Important 1. The live database this branch deploys
+    against already holds jam_crosscheck_state rows written by earlier
+    builds -- both the pre-review running-counter shape
+    ({"count","flag_count","last_ts","flags"}) and this review's own
+    unversioned first-fix-pass shape (raw lists, but no schema_version).
+    Handed straight to apply_batch, `cell_entry["aircraft"].setdefault(icao,
+    {"samples": [], "flags": []})` would return the *existing* (old-shaped)
+    dict, and the very next `.append()` would raise KeyError. This drives
+    the whole stack through run_once() itself -- _load_state, apply_batch,
+    build_document, and the writes -- not just the version check in
+    isolation, per the review's own instruction.
+    """
+    old_shaped_state = {
+        "last": {},
+        "cells": {
+            _HEX: {
+                "tracked_since": 0.0,
+                "aircraft": {
+                    "zz9999": {
+                        "count": 3, "flag_count": 1, "last_ts": 0.0,
+                        "flags": [{"type": "speed", "ts": 0.0}],
+                    },
+                },
+            },
+        },
+        # No "schema_version" at all -- exactly what every jam_crosscheck_state
+        # document written before this review point looks like.
+    }
+    rows = [row(1, 0.0, _CENTER_LAT, _CENTER_LON), row(2, 300.0, _CENTER_LAT, _CENTER_LON)]
+    jamming = [{"hex": _HEX, "lat": _CENTER_LAT, "lon": _CENTER_LON, "jam_ratio": 0.4, "date": "2026-08-10"}]
+    fake = _FakeStorage(rows, jamming=jamming)
+    fake.docs[jc.STATE_NAME] = old_shaped_state
+    monkeypatch.setattr(jc, "storage", fake)
+
+    with caplog.at_level("WARNING", logger="osint-globe.jam_crosscheck"):
+        result = _run(jc.run_once())
+    assert result["ok"] is True  # did not raise
+    assert any("schema_version" in r.message for r in caplog.records)  # logged, not silent
+
+    doc = fake.docs[jc.REFERENCE_NAME]
+    # The old airframe's stale entry is gone -- state was discarded wholesale
+    # (not selectively repaired), and the reset is visible on the document
+    # itself, not just inferred from an empty aircraft list.
+    assert "zz9999" not in doc["aircraft"]
+    assert doc["tracking_since"] == rows[-1]["ts"]
+    # This pass's own new rows were still processed normally against the
+    # freshly-rebuilt state -- recovery, not a pass that gave up entirely.
+    assert doc["aircraft"][ICAO]["sample_count"] == 1
+
+    new_state = fake.docs[jc.STATE_NAME]
+    assert new_state["schema_version"] == jc.STATE_SCHEMA_VERSION
 
 
 def test_run_once_still_republishes_on_an_empty_batch(monkeypatch):

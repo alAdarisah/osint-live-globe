@@ -545,6 +545,24 @@ JAM_CROSSCHECK_WINDOW_SECONDS = int(os.getenv("JAM_CROSSCHECK_WINDOW_SECONDS", s
 # hides `aircraft_flagged` itself, which is always the real, unrounded count
 # regardless of which word `status` carries -- see build_document.
 JAM_CROSSCHECK_MIN_FLAG_RATIO = float(os.getenv("JAM_CROSSCHECK_MIN_FLAG_RATIO", "0.25"))
+# Bounds each airframe's own samples/flags lists inside one cell's state, on
+# top of (not instead of) JAM_CROSSCHECK_WINDOW_SECONDS' own time-based
+# pruning -- Task 39 review, Important 2: the window alone only prunes by
+# *age*, so a single malformed or replayed entity_history stream for one
+# ICAO24 (a glitching transponder, a duplicated feed, or a catch-up pass
+# whose one BATCH_LIMIT read spans hours of real time for one especially
+# chatty airframe) could append far faster than the window ever ages
+# anything back out. Set comfortably above what a genuinely well-behaved
+# airframe could ever produce: at the fastest cadence this map polls ADS-B
+# (ADSB_POLL_INTERVAL_AUTH, 120s), a full JAM_CROSSCHECK_WINDOW_SECONDS
+# (24h) is 86400/120 = 720 samples -- 1000 leaves headroom above that
+# without the cap itself ever trimming an ordinary airframe's real history.
+# Worst case: one (aircraft, cell) pair holds at most 1000 sample
+# timestamps (~8 bytes each) plus 1000 flag dicts (~250 bytes each,
+# serialised) -- on the order of 250KB, not an unbounded document, even for
+# a single pathological airframe looping through one cell all day; see
+# jam_crosscheck.apply_batch's own append-time trim.
+JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT = int(os.getenv("JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT", "1000"))
 
 # The waters this map *claims* as watched, as "lat_min,lon_min,lat_max,lon_max"
 # boxes separated by ";". High-interest maritime chokepoints and conflict water.

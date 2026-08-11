@@ -121,6 +121,42 @@ why): the cursor only advances past a batch this pass actually finished
 writing. entity_history is pruned at three days, so a write this pass drops
 is a permanently lost slice of the record, not merely stale until the next
 poll -- see run_once.
+
+**State-shape tolerance (Task 39 review, Important 1).** `jam_crosscheck_
+state` has already changed shape once during this task's own review, and the
+live database this branch deploys against already held rows in the old
+shape, written by an earlier build. Loading an old-shaped entry straight
+into apply_batch's `setdefault(icao, {"samples": [], "flags": []})` would
+return the *existing* (old-shaped) dict, and the very next `.append()` would
+raise `KeyError` -- caught by derive_forever's own try/except (the process
+survives, source_health goes red honestly), but the cursor never advances
+and no document is ever written again: a silent, permanent crash-loop
+against a database this exact branch produces. `STATE_SCHEMA_VERSION` and
+`_load_state`'s own check exist to make that impossible: a stored document
+whose `schema_version` does not match this build's is discarded (logged, not
+silent) and treated as if there were no prior state at all -- state is cheap
+to rebuild by design (a rolling window plus a short bridge, see above), so
+this loses nothing but the current window's own history, not anything this
+job cannot recover on its own within JAM_CROSSCHECK_WINDOW_SECONDS. Bump
+STATE_SCHEMA_VERSION on the *next* shape change too, whatever it turns out
+to be -- that is the whole point of checking a version rather than sniffing
+for one particular missing key, and it is why this note says "the next
+shape change", not "this one".
+
+The discarded-and-rebuilding moment is exactly where "found nothing" and
+"did not look" are easiest to blur by accident (see the "found nothing" vs
+"did not look" section above) -- a document rebuilt from nothing would
+otherwise show every currently-tracked cell as `no_traffic` and every
+newly-touched airframe as `insufficient_samples`, which happen to be the
+*correct*, honest answers for a freshly-started window, not a lie, but only
+if a reader can tell "freshly started" from "checked all day, genuinely
+quiet". `tracked_seconds` already carries that signal per cell (every cell's
+own state entry is rebuilt fresh, so `tracked_seconds` reads near zero for
+all of them right after a reset, the same as any other newly-promoted cell);
+`tracking_since` on the served document itself is the document-wide version
+of the same fact, set once when a state is first built (by a genuine first
+run or a reset alike) and carried forward unchanged after that -- see
+build_document.
 """
 
 import asyncio
@@ -139,6 +175,15 @@ CURSOR_NAME = "jam_crosscheck_cursor"
 STATE_NAME = "jam_crosscheck_state"
 REFERENCE_NAME = "jam_crosscheck"
 HEALTH_NAME = "jam_crosscheck"
+
+# Bump this whenever jam_crosscheck_state's own shape changes -- see the
+# module docstring's "State-shape tolerance" section. _load_state discards
+# (and logs) any stored document whose own "schema_version" does not match,
+# rather than handing apply_batch a shape it does not understand. Checked by
+# value, not by sniffing for a particular key some future shape might not
+# even have -- the point is that this same guard keeps working after the
+# *next* shape change too, not just this one.
+STATE_SCHEMA_VERSION = 2
 
 # Rows read from entity_history per pass. Same figure and the same reasoning
 # as every other refine job walking this table (see port_calls.BATCH_LIMIT):
@@ -254,6 +299,17 @@ def apply_batch(rows: list[dict], jam_cells: dict[str, dict], state: dict, now: 
     reasoning on why that has to be an omission rather than a label.
     """
     new_state = copy.deepcopy(state) if state else {}
+    new_state["schema_version"] = STATE_SCHEMA_VERSION
+    if "tracking_since" not in new_state:
+        # First time this exact state document has existed with this shape
+        # -- either a genuinely fresh job, or _load_state just discarded an
+        # incompatible one and handed apply_batch {} to rebuild from (see
+        # the module docstring's "State-shape tolerance" section). Either
+        # way, nothing in `new_state` has any history before `now`, and
+        # that has to be a fact the served document itself carries, not
+        # something a reader has to infer from every cell's own
+        # tracked_since independently reading close to zero.
+        new_state["tracking_since"] = now
     last_map: dict = new_state.setdefault("last", {})
     cells_state: dict = new_state.setdefault("cells", {})
 
@@ -296,12 +352,22 @@ def apply_batch(rows: list[dict], jam_cells: dict[str, dict], state: dict, now: 
                     # counter has no way to let an old event age back out
                     # again, and config.JAM_CROSSCHECK_WINDOW_SECONDS is
                     # documented (and pruned, below) as a true rolling
-                    # window, not merely an inactivity timeout.
+                    # window, not merely an inactivity timeout. Each list is
+                    # also trimmed to config.JAM_CROSSCHECK_MAX_EVENTS_PER_
+                    # AIRCRAFT on every append, on top of (not instead of)
+                    # that time-based pruning -- Task 39 review, Important
+                    # 2: the window alone only bounds *age*, not the rate a
+                    # single malformed or replayed stream could append at
+                    # within one still-open window; see that constant's own
+                    # comment in backend/config.py for the worst-case size
+                    # this keeps the state to.
                     aircraft_entry = cell_entry["aircraft"].setdefault(icao, {"samples": [], "flags": []})
                     aircraft_entry["samples"].append(ts)
+                    aircraft_entry["samples"] = aircraft_entry["samples"][-config.JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT:]
                     if flag is not None:
                         flag["jam_cell"] = cell_hex
                         aircraft_entry["flags"].append(flag)
+                        aircraft_entry["flags"] = aircraft_entry["flags"][-config.JAM_CROSSCHECK_MAX_EVENTS_PER_AIRCRAFT:]
                 # cell_entry is None (no cell currently tracks this fix) ->
                 # deliberately nothing recorded, flagged or not; see the
                 # docstring above.
@@ -411,6 +477,14 @@ def build_document(state: dict, jam_cells: dict[str, dict], now: float) -> dict:
 
     return {
         "as_of": now,
+        # When this state last had nothing in it at all -- a genuine first
+        # run, or _load_state discarding an incompatible shape and starting
+        # over (see the module docstring's "State-shape tolerance" section).
+        # A reader (or the frontend) can use this the same way tracked_seconds
+        # already reads per cell: a cell showing "no_traffic" a few minutes
+        # after tracking_since is "has not been watched long enough to say",
+        # not "checked, genuinely quiet".
+        "tracking_since": state.get("tracking_since"),
         "window_seconds": config.JAM_CROSSCHECK_WINDOW_SECONDS,
         "min_samples": config.JAM_CROSSCHECK_MIN_SAMPLES,
         "provenance": "derived",
@@ -426,8 +500,32 @@ async def _load_cursor() -> int:
 
 
 async def _load_state() -> dict:
+    """The last durably-written jam_crosscheck_state, or {} if there is
+    none -- or if there is one this build does not recognise.
+
+    See the module docstring's "State-shape tolerance" section (Task 39
+    review, Important 1): a document whose own `schema_version` does not
+    match STATE_SCHEMA_VERSION is discarded rather than handed to
+    apply_batch, which would otherwise raise on the first old-shaped entry
+    it tried to mutate. Logged at warning level -- a deliberate, visible
+    reset, not a silent one -- and then treated exactly like "no state at
+    all yet", which apply_batch already knows how to rebuild from (state is
+    cheap to redo by design; see the module docstring).
+    """
     doc = await storage.reference(STATE_NAME)
-    return doc if isinstance(doc, dict) else {}
+    if not isinstance(doc, dict):
+        return {}
+    if doc.get("schema_version") != STATE_SCHEMA_VERSION:
+        log.warning(
+            "Jam crosscheck: stored state is schema_version=%r, this build expects %r -- "
+            "discarding it and rebuilding from an empty state rather than crash on an "
+            "incompatible shape. The served document's cells/aircraft will read as freshly "
+            "tracked (see tracked_seconds/tracking_since) until this window fills back in, "
+            "not as a checked, empty result.",
+            doc.get("schema_version"), STATE_SCHEMA_VERSION,
+        )
+        return {}
+    return doc
 
 
 async def _load_jam_cells() -> dict[str, dict]:
