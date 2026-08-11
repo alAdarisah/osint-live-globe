@@ -422,6 +422,26 @@ async def run_once() -> dict:
     both left exactly where they were, so the same batch is read again next
     pass rather than silently dropped (entity_history has its own retention,
     so a row once passed here is never offered again).
+
+    **Write order, and why the state write's own result has to gate the
+    cursor (pre-merge review, Critical).** Mirrors port_calls.run_once's own
+    fix exactly, and for the identical reason: this used to write the state
+    document and then the cursor unconditionally, discarding both bools. The
+    failing sequence is the aviation twin of port_calls' own: a leg opens (the
+    row lands via the durably-verified record_flight_legs above), the state
+    write fails, the cursor write still lands regardless -- so the rows that
+    opened this leg fall behind the cursor and are pruned from entity_history
+    at three days, taking the only durable record of "leg": {"arrived_at":
+    None, ...} with them. The leg never closes, and the next transition this
+    airframe makes opens a second, unrelated leg, because the state that
+    would have recognised "this icao24 already has an open leg" was never
+    written. record_flight_legs is upsert-keyed (see storage.py), so it can
+    run first, unconditionally -- but the state write can only be retried
+    blind because apply_positions above was handed whatever `state` was still
+    durably on disk; only once that write is itself confirmed durable is it
+    safe to move the cursor past these rows. See test_a_failed_state_write_
+    holds_the_cursor_back_and_does_not_double_the_open_leg in
+    backend/tests/test_flight_legs.py.
     """
     cursor = await _load_cursor()
     rows = await storage.entity_history_since("adsb", cursor, BATCH_LIMIT)
@@ -435,8 +455,13 @@ async def run_once() -> dict:
     if not wrote:
         return {"read": len(rows), "legs": 0, "ok": False}
 
-    await storage.record_reference(STATE_NAME, _prune_state(new_state, rows[-1]["ts"]))
-    await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    state_ok = await storage.record_reference(STATE_NAME, _prune_state(new_state, rows[-1]["ts"]))
+    if not state_ok:
+        return {"read": len(rows), "legs": 0, "ok": False}
+
+    cursor_ok = await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    if not cursor_ok:
+        return {"read": len(rows), "legs": 0, "ok": False}
 
     return {"read": len(rows), "legs": len(upserts), "ok": True}
 

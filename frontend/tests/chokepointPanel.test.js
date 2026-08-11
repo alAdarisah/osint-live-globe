@@ -1,17 +1,35 @@
 // Task 36: ChokepointPanel's own logic -- the row extraction, the sort, the
 // trend-strip bar arithmetic that keeps a "missing" day from ever getting a
 // bar the same shape as a real zero, and the box-centre helper "click to
-// fly" needs. chokepointPanelLogic.js imports nothing, so unlike
-// intelPanel.test.js this needs no window/Leaflet stub -- same footing as
+// fly" needs. chokepointPanelLogic.js imports nothing but utils/format's
+// fmtNumber (for hullCountLine's own thousands separators), so like
+// infraRiskPanel.test.js this needs no window/Leaflet stub -- same footing as
 // airfieldPanel.test.js.
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 
-import {
-  CHOKEPOINT_SORT_KEYS, barHeight, boxCenter, chokepointRows, hasChokepointDocument, sortChokepoints, todayEntry,
-  trendBars,
-} from "../src/components/chokepointPanelLogic.js";
+// Every src file in this project uses Vite-style extensionless relative
+// imports (chokepointPanelLogic.js imports "../utils/format"), which Node's
+// own resolver cannot follow -- the identical loader shim
+// cableOutagePanel.test.js and 25 other test files in this suite already
+// carry. registerHooks only affects resolutions that happen *after* it runs,
+// so the module under test has to be a dynamic `await import()` below rather
+// than a static top-of-file `import`.
+registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier.startsWith(".") && !specifier.endsWith(".js")) {
+      return next(`${specifier}.js`, context);
+    }
+    return next(specifier, context);
+  },
+});
+
+const {
+  CHOKEPOINT_SORT_KEYS, STATUS_WORD, barHeight, boxCenter, chokepointRows, hasChokepointDocument, hullCountLine,
+  sortChokepoints, todayEntry, trendBars,
+} = await import("../src/components/chokepointPanelLogic.js");
 
 function box(label, overrides = {}) {
   return {
@@ -172,6 +190,40 @@ test("trendBars scales against the real max, ignoring missing days entirely", ()
   const bars = trendBars(trend, 24);
   assert.equal(bars[2].height, 24); // the max (4) fills the track
   assert.equal(bars[1].height, 12); // half the max
+});
+
+// --- hullCountLine -------------------------------------------------------
+
+test("hullCountLine: a box never observed today reads as not observed, not zero hulls", () => {
+  assert.equal(hullCountLine({ date: null, status: "missing", total: null, by_class: null }), "Not observed yet today");
+});
+
+test("hullCountLine: pluralises a single hull correctly", () => {
+  assert.equal(hullCountLine({ date: "d", status: "counted", total: 1, by_class: {} }), "1 distinct hull today (counted)");
+});
+
+test("hullCountLine: pluralises more than one hull, including a real counted zero", () => {
+  assert.equal(hullCountLine({ date: "d", status: "counted", total: 0, by_class: {} }), "0 distinct hulls today (counted)");
+  assert.equal(hullCountLine({ date: "d", status: "counted", total: 5, by_class: {} }), "5 distinct hulls today (counted)");
+});
+
+test("hullCountLine: prints STATUS_WORD's own word for each status", () => {
+  assert.equal(hullCountLine({ date: "d", status: "counted", total: 3, by_class: {} }), "3 distinct hulls today (counted)");
+  assert.equal(hullCountLine({ date: "d", status: "partial", total: 3, by_class: {} }), "3 distinct hulls today (still counting)");
+});
+
+test("hullCountLine: an unknown status word falls back to the raw status string rather than throwing", () => {
+  assert.equal(hullCountLine({ date: "d", status: "weird", total: 3, by_class: {} }), "3 distinct hulls today (weird)");
+});
+
+test("hullCountLine: large totals go through fmtNumber's own thousands separators", () => {
+  assert.equal(hullCountLine({ date: "d", status: "counted", total: 1234, by_class: {} }), "1,234 distinct hulls today (counted)");
+});
+
+test("STATUS_WORD covers every status build_chokepoint_document can write", () => {
+  assert.equal(STATUS_WORD.counted, "counted");
+  assert.equal(STATUS_WORD.partial, "still counting");
+  assert.equal(STATUS_WORD.missing, "not observed");
 });
 
 // --- boxCenter ---------------------------------------------------------

@@ -917,6 +917,13 @@ export const TRAIL_PARENT = {
 export const UNGATED_FEEDS = new Set([
   "escalation", "conflictStats", "conflictDistricts", "humanitarian",
   "energyFlows", "foodTrade", "foodPriceIndex", "outages",
+  // The region-level half of the same poll ("outages" above is the country
+  // level). Fetched always for the same reason -- see FETCH_ALWAYS_BECAUSE's
+  // own "outagesRegions" row -- but it was missing from this set, so the
+  // dev-only warning below fired on every boot: outageRegionPoints (the
+  // derived point layer) has its own LAYER_MANIFEST entry, but the raw feed
+  // never did, the same split "outages"/"outagePoints" already has.
+  "outagesRegions",
   // Watched-water-box-keyed and sea-keyed respectively, read on demand by the
   // water card, ChokepointPanel.jsx and buildWaterTraffic -- no pin, no gate,
   // same footing as the country-keyed feeds above. navalPresence was missing
@@ -967,6 +974,34 @@ export const REFERENCE_ONLY_FEEDS = new Set([
   "conflictStats", "escalation", "conflictDistricts", "humanitarian",
   "energyFlows", "foodTrade", "foodPriceIndex", "fetchCoverage",
   "navalPresence", "chokepoints", "jamCrosscheck",
+  // Both ride the one-shot /api/infrastructure payload (see useOsintData.js's
+  // publishFetchOutcome call for it), the same boot fetch "infra"/"pipelines"/
+  // "shippingLanes" ride -- but unlike those three, neither has anything to
+  // draw of its own, so they belong here instead of getting an applyData
+  // branch or a DECORATORS entry.
+  //
+  // pipelinesTruncatedRegions is a list of region names the OSM pipeline
+  // sweep gave up on early (see osm_infra.py), read by zoomNotes.pipelinesTruncated
+  // for the "this map is drawing an incomplete pipeline picture" note -- no
+  // pin, ever.
+  //
+  // militaryBases is the curated MILITARY_BASES gazetteer, read only by the
+  // country card's Military & security fold (popups.js) -- Task 29 gave it a
+  // COVERAGE_FEEDS-style ride on infra's own coverage record but never a
+  // layer of its own, so there is nothing for applyData to draw either.
+  //
+  // Both were missing here before this fix. pipelinesTruncatedRegions is
+  // tuple 2 of the five ["infra", "pipelinesTruncatedRegions", "pipelines",
+  // "shippingLanes", "militaryBases"] onData calls publishFetchOutcome makes
+  // in landing order (see useOsintData.js), so a poll landing threw on the
+  // very next tuple after "infra" -- "markerMap is not iterable", the
+  // generic renderMarkerLayer catch-all trying to iterate an array of plain
+  // strings as though it were point records -- which meant tuples 3-5
+  // ("pipelines", "shippingLanes", "militaryBases") never published at all:
+  // pipeline routes and the ten shipping corridors drew nothing for the
+  // whole session, and militaryBases never reached the country card either,
+  // even though it was never the one that threw.
+  "pipelinesTruncatedRegions", "militaryBases",
 ]);
 
 /** Every layer key the manifest knows about. */

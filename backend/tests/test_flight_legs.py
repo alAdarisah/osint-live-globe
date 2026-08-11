@@ -369,14 +369,18 @@ def test_callsign_is_backfilled_from_a_later_row_without_overwriting():
 
 class _FakeStorage:
     """Just enough of backend.storage to drive run_once() without Postgres --
-    mirrors test_port_calls.py's own _FakeStorage exactly."""
+    mirrors test_port_calls.py's own _FakeStorage exactly, including
+    `fail_names` for failing only the named reference_snapshots write (see
+    test_a_failed_state_write_holds_the_cursor_back_and_does_not_double_the_
+    open_leg below, the aviation twin of test_port_calls.py's own equivalent)."""
 
-    def __init__(self, rows, write_ok=True):
+    def __init__(self, rows, write_ok=True, fail_names=frozenset()):
         self.history = rows
         self.docs = {}
         self.calls = []
         self.leg_batches = []
         self.write_ok = write_ok
+        self.fail_names = set(fail_names)
 
     async def entity_history_since(self, kind, after_id, limit):
         self.calls.append(after_id)
@@ -386,7 +390,10 @@ class _FakeStorage:
         return self.docs.get(name)
 
     async def record_reference(self, name, payload):
+        if not self.write_ok or name in self.fail_names:
+            return False
         self.docs[name] = payload
+        return True
 
     async def record_flight_legs(self, rows):
         self.leg_batches.append(rows)
@@ -449,6 +456,47 @@ def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     assert retry["legs"] == 1
     assert fake.calls == [0, 0]  # both passes started from the same cursor
     assert fake.docs["flight_legs_cursor"] == {"last_id": 2}
+
+
+def test_a_failed_state_write_holds_the_cursor_back_and_does_not_double_the_open_leg(monkeypatch):
+    """Pre-merge review, Critical: the aviation twin of test_port_calls.py's
+    own equivalent test. record_flight_legs durably wrote the open leg, but
+    the state document write that follows it failed on its own -- the old
+    code discarded that bool and wrote the cursor anyway, which lost the only
+    durable record that this airframe already has an open leg. The next
+    transition this icao24 makes would then open a second, unrelated leg
+    rather than ever closing the first one."""
+    rows = [pos(1, 0.0, on_ground=True, airfield_km=1.0), pos(2, 60.0, on_ground=False, airfield_km=1.0)]
+    fake = _FakeStorage(rows, fail_names={fl.STATE_NAME})
+    monkeypatch.setattr(fl, "storage", fake)
+
+    first = _run(fl.run_once())
+    assert first["ok"] is False
+    assert first["legs"] == 0
+    # The leg itself did land durably (record_flight_legs is idempotent and
+    # ran first) -- what's missing is the state that would stop it being
+    # opened a second time.
+    assert len(fake.leg_batches) == 1
+    assert fake.leg_batches[0][0]["departed_at"] == 60.0  # the row that observed the transition
+    assert fake.leg_batches[0][0]["arrived_at"] is None
+    # Nothing else is durable: neither the state document nor the cursor.
+    assert fl.STATE_NAME not in fake.docs
+    assert fl.CURSOR_NAME not in fake.docs
+
+    # The database recovers; the same batch -- read from the same untouched
+    # cursor, against the same (still-empty) state -- is replayed.
+    fake.fail_names.clear()
+    retry = _run(fl.run_once())
+    assert retry["ok"] is True
+    assert retry["legs"] == 1
+    assert fake.calls == [0, 0]  # both passes started from the same cursor
+    assert fake.docs[fl.CURSOR_NAME] == {"last_id": 2}
+
+    # Idempotent replay, not a second leg: the retry's own batch is exactly
+    # the first attempt's batch, not a second departure opened alongside it.
+    assert len(fake.leg_batches) == 2
+    assert fake.leg_batches[0] == fake.leg_batches[1]
+    assert fake.docs[fl.STATE_NAME][ICAO]["leg"]["arrived_at"] is None
 
 
 def test_apply_positions_does_not_mutate_the_state_it_was_given():

@@ -7057,12 +7057,49 @@ export function createMapController(container, initial, callbacks) {
   function fetchRivers() {
     if (waterRiversFetchInFlight) return;
     waterRiversFetchInFlight = true;
-    const bounds = map.getBounds().pad(1.0);
+    // pad(1.0) doubles the viewport on every side, and at WORLD/THEATRE zoom
+    // that overshoots the coordinate range entirely -- a bbox like
+    // "-207.57,-322.56,220.16,352.44" -- which backend/regions.py's
+    // parse_bbox cannot parse (it rejects anything outside +-90/+-180) and
+    // water_endpoint then 400s, since kind=rivers refuses to serve unbounded.
+    // A 400 means fetchRivers' own .catch swallows it, waterRiversLoadedBounds
+    // never gets set, and maybeRefetchRivers retries on every moveend forever
+    // -- rivers simply never load below zoom ~4, which per this function's
+    // own docstring reads to a reader as "we looked and there are no rivers
+    // here" rather than "we never actually asked". useOsintData.js's own
+    // bboxCell clamps south/north to +-90 and west/east to +-180 for exactly
+    // this reason; this is the one bbox producer that had not been brought
+    // into line with it.
+    const padded = map.getBounds().pad(1.0);
+    const bounds = L.latLngBounds(
+      [Math.max(-90, padded.getSouth()), Math.max(-180, padded.getWest())],
+      [Math.min(90, padded.getNorth()), Math.min(180, padded.getEast())]
+    );
     const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
     fetchJson(`/api/water?kind=rivers&bbox=${encodeURIComponent(bbox)}`)
       .then((data) => {
-        waterRiversFeatures = data?.features || [];
-        waterRiversLoadedBounds = bounds;
+        const features = data?.features || [];
+        waterRiversFeatures = features;
+        // Only record an extent as loaded when something actually came back.
+        //
+        // The clamp above made the world-zoom request legal, which is the
+        // whole point of it -- but a legal request that answers with zero
+        // features is not the same fact as "there are no rivers in the
+        // world", and treating it as one is worse than the 400 this replaced.
+        // waterRiversLoadedBounds is what maybeRefetchRivers checks to decide
+        // the viewport is still inside what it already has, so setting it to
+        // the whole world on an empty answer makes every later pan a
+        // no-op: rivers stay absent for the rest of the session, everywhere,
+        // with nothing on screen distinguishing that from genuinely empty
+        // water. Found in review against the live backend, where the exact
+        // clamped world bbox hit a _WATER_CACHE entry (app.py's 1h TTL) that
+        // had been filled with an empty payload -- the same bounds a
+        // ten-thousandth of a degree in returned 1,454 features.
+        //
+        // Leaving the extent unset means the next moveend simply asks again,
+        // which is the correct behaviour for "we have not successfully loaded
+        // this yet" and costs one request per pan until the cache expires.
+        if (features.length) waterRiversLoadedBounds = bounds;
         renderWater();
       })
       .catch((err) => console.warn("Failed to load rivers:", err))
@@ -7075,8 +7112,19 @@ export function createMapController(container, initial, callbacks) {
    * and, debounced, from moveend below -- both funnel through the same
    * "has the viewport actually left the loaded extent" check, so a reader
    * cannot end up re-fetching the same rivers on every pan inside a city.
+   *
+   * destroy()'s own map.stop() (called just before map.remove(), see its
+   * comment) makes Leaflet's _resetView fire one last synchronous 'moveend'
+   * on its way out -- which re-arms moveEndRiversTimer for 500ms in the
+   * future, after map.remove() has already deleted _mapPane. Without this
+   * guard that stale timer calls map.getBounds() on a torn-down map and
+   * throws "Cannot read properties of undefined (reading '_leaflet_pos')"
+   * into the console on every teardown (StrictMode's dev-only double mount
+   * hits this on every load). Same pane check createEntityWebglLayer uses to
+   * detect a map removed out from under a pending attach.
    */
   function maybeRefetchRivers() {
+    if (!map._mapPane) return;
     if (!waterRiversVisible) return;
     if (waterRiversLoadedBounds && waterRiversLoadedBounds.contains(map.getBounds())) return;
     fetchRivers();
@@ -7373,6 +7421,15 @@ export function createMapController(container, initial, callbacks) {
 
   let firstWindLoadDone = false;
   async function refreshWindArrows() {
+    // Same torn-down-map guard maybeRefetchRivers carries, for the same
+    // reason: destroy() clears moveEndWindTimer and moveEndRiversTimer, then
+    // calls map.stop(), whose synchronous 'moveend' re-arms *both* one line
+    // before map.remove() deletes _mapPane. The rivers half of that was found
+    // and fixed; this half was missed because windArrows defaults off, so the
+    // early return below usually hides it -- a reader with the wind layer on
+    // gets the identical "_leaflet_pos" throw on every teardown. Guard first,
+    // before that early return, so being switched off is not what protects it.
+    if (!map._mapPane) return;
     // The layer is off by default (see DEFAULT_LAYER_VISIBILITY in App.jsx), and
     // this used to run regardless: a debounced round trip on every moveend, plus
     // a five-minute interval, plus a visibilitychange catch-up, all to hand data

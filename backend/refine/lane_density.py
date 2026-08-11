@@ -594,8 +594,24 @@ async def run_once() -> dict:
     if not wrote:
         return {"read": len(rows), "cells": 0, "ok": False}
 
-    await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
-    return {"read": len(rows), "cells": len(cells), "ok": True}
+    # This function's own docstring calls the cursor "the outermost gate of
+    # all" -- pre-merge review, Also fix 1: that bool used to be discarded
+    # here, so a Postgres hiccup on exactly this one write still reported
+    # "ok": True. Checking it doesn't undo upsert_lane_cells' own
+    # non-idempotence -- that write already landed durably, and if the cursor
+    # write above it fails, the next pass reads the same rows from the same
+    # unmoved cursor and calls upsert_lane_cells on them a second time,
+    # double-counting every cell this batch touched (see the module
+    # docstring's own note on why the two writes are ordered idempotent-first
+    # for exactly this reason). What checking the bool does fix is health
+    # reporting: this failure is now visible as a red source_health row
+    # rather than silently reprocessing on every subsequent pass while
+    # looking healthy. Actually preventing the double-count on a cursor-write
+    # failure would need retrying that one write in place, which is a bigger
+    # change than this pass -- see the plan's own out-of-scope note on not
+    # extracting a shared cursor module.
+    cursor_ok = await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    return {"read": len(rows), "cells": len(cells), "ok": cursor_ok}
 
 
 async def _tick() -> None:

@@ -1,6 +1,6 @@
 """How many navy-classified AIS hulls are sitting in each conflict theatre's
 waters, and near each curated port, right now -- and whether that is up or
-down on a week ago.
+down on the day before.
 
 "Water body" per the brief means one of regions.py's eleven conflict-theatre
 boxes here, not a Natural Earth marine polygon: Task 6's `findWaterAt` (point-
@@ -25,9 +25,34 @@ from only the handful of hours since midnight while still labelling it
 "right now" -- correct at 23:00 UTC and badly wrong at 00:30. CURRENT_START/
 BASELINE_START below are trailing windows measured from the moment this pass
 actually runs, so the figure means the same thing at every hour of the day.
-The trade is that "a week ago" is now the 24h window ending exactly
-WINDOW_DAYS before this pass, not last Tuesday's calendar totals -- the more
-honest reading of "up from one last week" either way.
+
+**The baseline compares against the day before, not a week before (pre-merge
+review, Critical).** This module originally compared "right now" against a
+window ending WINDOW_DAYS=7 days before this pass -- but entity_history, the
+only table navy positions are ever read from, is pruned at
+config.HISTORY_RETENTION_SECONDS (3 days; see backend/config.py), and a
+baseline window that starts at (now - WINDOW_DAYS - CURRENT_WINDOW_HOURS) =
+now minus 8 days reaches for rows that have never once existed by the time
+this job could read them. Verified live against the real database
+(2026-08-11): the oldest row in entity_history was exactly 72h old, i.e. the
+retention sweep's own cutoff, not a coincidence of quiet traffic. That made
+`baseline_rows` empty on every single pass, `trend_computable` False always,
+every `trend` field permanently None -- while still paying for both range
+scans on every pass to produce nothing. WINDOW_DAYS is now 1: the baseline
+window is the 24h immediately preceding the current one (contiguous, no
+gap), reaching back 48h at its farthest edge -- 24h of margin inside the 72h
+retention window, comfortably clear of the retention sweep's own 10-minute
+granularity and this job's own NAVAL_PRESENCE_INTERVAL. This is a judgment
+call, not a further-measured figure: shrinking the comparison to
+"day-over-day" is what retention actually allows this module to compute
+honestly; there was no operational reason to prefer some other split of that
+48h budget between the two windows over an even, contiguous one. `week_ago`
+is kept as this document's own field name (backend/app.py's naval_presence_
+endpoint and the frontend both read it) even though the period it now covers
+is a day, not a week -- see this fix's own report for the follow-up needed
+on the frontend copy that still says "last week"/"7-day window" in plain
+words (frontend/src/map/popups.js), which is out of this module's own scope
+to correct.
 
 **Full window recomputed on every pass**, not a port_calls-style incremental
 cursor: a trend is a comparison between two fixed windows, not an append-only
@@ -63,7 +88,15 @@ from backend.sources.proximity import haversine_km
 
 log = logging.getLogger("osint-globe.naval_presence")
 
-WINDOW_DAYS = 7
+# How many days before "now" the baseline window ends -- see the module
+# docstring's "The baseline compares against the day before, not a week
+# before" section. Bound above by config.HISTORY_RETENTION_SECONDS (3 days):
+# the baseline window's own farthest edge sits at
+# (WINDOW_DAYS days + CURRENT_WINDOW_HOURS) before now, and that has to stay
+# comfortably inside what entity_history can actually still hold or
+# baseline_rows is permanently empty. At 1 it reaches 48h back, leaving 24h
+# of margin inside the 72h retention window.
+WINDOW_DAYS = 1
 
 # How wide each of the two compared windows is. A day, not an hour: AIS
 # coverage and naval movement both have real diurnal rhythm (a port empties
@@ -187,9 +220,11 @@ def build_document(navy_rows: list[dict], coverage: dict, now: datetime) -> dict
     trend_computable = (
         current_reports >= MIN_WINDOW_AIS_REPORTS and baseline_reports >= MIN_WINDOW_AIS_REPORTS
     )
+    _day_word = "day" if WINDOW_DAYS == 1 else "days"
     reason = None if trend_computable else (
         "AIS coverage in the "
-        + ("last 24h" if current_reports < MIN_WINDOW_AIS_REPORTS else f"24h window {WINDOW_DAYS} days ago")
+        + ("last 24h" if current_reports < MIN_WINDOW_AIS_REPORTS
+           else f"24h window {WINDOW_DAYS} {_day_word} ago")
         + " is too thin to compare against the other end of the window"
     )
 

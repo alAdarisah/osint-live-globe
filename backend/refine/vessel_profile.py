@@ -452,9 +452,18 @@ async def run_once() -> dict:
 
     await storage.record_reference(STATE_NAME, new_state)
     await storage.record_reference(PROFILES_NAME, profiles)
-    await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    # Unlike STATE_NAME/PROFILES_NAME above -- deliberately unverified, see
+    # this function's own docstring -- the cursor write's bool is not safe to
+    # discard (pre-merge review, Also fix 1). A dropped cursor write is
+    # harmless to the *data* here (apply_history/build_profile are idempotent
+    # under replay, so reprocessing the same rows next pass just recomputes
+    # the same numbers), but reporting "ok": True regardless meant
+    # source_health stayed green while this job silently reprocessed the same
+    # backlog forever, never actually advancing -- a real defect even though
+    # it is a health-reporting one rather than a data-loss one.
+    cursor_ok = await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
 
-    return {"read": len(rows), "touched": len(touched), "profiles": len(profiles), "ok": True}
+    return {"read": len(rows), "touched": len(touched), "profiles": len(profiles), "ok": cursor_ok}
 
 
 async def derive_forever():
@@ -467,12 +476,30 @@ async def derive_forever():
     while True:
         try:
             summary = await run_once()
-            log.info(
-                "Vessel profiles: read %d AIS movement rows, %d hull(s) reported this "
-                "pass, %d profile(s) held",
-                summary["read"], summary["touched"], summary["profiles"],
-            )
-            await storage.record_source_health(HEALTH_NAME, summary["profiles"], True)
+            if summary["ok"]:
+                log.info(
+                    "Vessel profiles: read %d AIS movement rows, %d hull(s) reported this "
+                    "pass, %d profile(s) held",
+                    summary["read"], summary["touched"], summary["profiles"],
+                )
+                await storage.record_source_health(HEALTH_NAME, summary["profiles"], True)
+            else:
+                # run_once's data itself is fine here -- see its own docstring
+                # on why STATE_NAME/PROFILES_NAME are unverified by design --
+                # it is only the cursor write that failed (pre-merge review,
+                # Also fix 1). Reported red anyway: a cursor that never
+                # advances means this job silently reprocesses the same
+                # backlog every pass, which source_health has to be able to
+                # show rather than read as a quiet, healthy no-op.
+                log.warning(
+                    "Vessel profiles: read %d AIS movement rows but the cursor write "
+                    "failed -- the same batch will be re-read next pass",
+                    summary["read"],
+                )
+                await storage.record_source_health(
+                    HEALTH_NAME, None, False,
+                    "the cursor write failed; the same rows will be re-read next pass",
+                )
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
             log.warning("Vessel profile derivation failed: %s", exc)
             await storage.record_source_health(HEALTH_NAME, None, False, str(exc))

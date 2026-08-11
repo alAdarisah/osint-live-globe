@@ -90,6 +90,18 @@ export default function CountryCompareView({ selection, getRows, onClose, onFocu
   const keysSignature = keys.join("|");
   const [payload, setPayload] = useState(null);
 
+  // Escape closes it, the same convention EventDetailCard.jsx establishes for
+  // this app's other floating, backdrop-dismissible surfaces: registered on
+  // window rather than the dialog itself, so it works whether or not this
+  // view has actually taken focus.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   useEffect(() => {
     if (keys.length < MIN_COMPARE_COUNTRIES) {
       setPayload(null);

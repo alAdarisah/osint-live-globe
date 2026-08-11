@@ -1843,7 +1843,16 @@ metrics.track_local_cache("naval_presence", _NAVAL_PRESENCE_CACHE)
 @app.get("/api/naval-presence")
 async def naval_presence_endpoint():
     """Navy-classified AIS presence per conflict theatre and per curated port,
-    with a 7-day trend (backend/refine/naval_presence.py).
+    with a day-over-day trend (backend/refine/naval_presence.py).
+
+    "Day-over-day", not the 7-day trend this line used to claim: the baseline
+    is a 24-hour window ending 24 hours ago, compared against the last 24
+    hours. The week-long version could never populate -- it read
+    entity_history from 8 days back against a 3-day retention, so the baseline
+    was empty on every pass and the trend was never computable. See
+    naval_presence.py's WINDOW_DAYS and CURRENT_WINDOW_HOURS, and the module
+    docstring's own account of why the window had to shrink rather than
+    retention grow.
 
     An empty object -- not an error -- before the refine process has written a
     pass yet, the same "not computed" vs "nothing there" distinction every

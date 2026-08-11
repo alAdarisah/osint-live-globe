@@ -74,7 +74,15 @@ function fetchedUnscoped(at = Date.now()) {
 const emptyRaw = () => ({
   ais: [], darkVessels: [], gfwGaps: [], cables: [], cableLandings: [], ports: [],
   events: [], gdelt: [], officials: [], countryIndex: [],
-  fetchCoverage: { ais: fetchedUnscoped(), cableLandings: fetchedUnscoped(), ports: fetchedUnscoped() },
+  fetchCoverage: {
+    ais: fetchedUnscoped(), cableLandings: fetchedUnscoped(), ports: fetchedUnscoped(),
+    // buildWaterDark checks darkVessels/gfwGaps and buildWaterTraffic checks
+    // navalPresence alongside ais now (see popups.js's own fix notes on both
+    // folds) -- same "marked fetched by default, one dedicated test covers
+    // never-fetched on its own" reasoning this function's own comment gives
+    // for ais/cableLandings/ports above.
+    darkVessels: fetchedUnscoped(), gfwGaps: fetchedUnscoped(), navalPresence: fetchedUnscoped(),
+  },
 });
 
 test("countVesselsByClass -- the five-way traffic tally", async (t) => {
@@ -274,7 +282,7 @@ test("waterCardSections -- section shape and empty-section dropping", async (t) 
     const { sections } = waterCardSections(sea, raw, bounds);
     const traffic = sections.find((s) => s.id === "traffic");
     assert.ok(traffic, "the trend alone, with zero ships currently in view, still produces the fold");
-    assert.match(traffic.html, /3 naval hulls in Test Sea theatre right now, up from 1 last week\./);
+    assert.match(traffic.html, /3 naval hulls in Test Sea theatre right now, up from 1 the day before\./);
     // Task 29 review (Important 2): the same caveat the country card now
     // carries, worded identically -- both call sites share one constant.
     assert.match(traffic.html, /Reported for the wider conflict theatre this sits inside, not this exact area/);

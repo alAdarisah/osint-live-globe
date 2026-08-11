@@ -328,6 +328,33 @@ async def run_once() -> dict:
     On a failed write, the state document and cursor are both left exactly
     where they were, so the same (idempotent, upsert-keyed) batch is read
     again next pass rather than silently skipped.
+
+    **Write order, and why the state write's own result has to gate the
+    cursor (pre-merge review, Critical).** This used to write the state
+    document and then the cursor unconditionally, discarding both bools --
+    which meant a state write dropped by a Postgres hiccup left the cursor
+    advancing anyway. The failing sequence: this pass opens a dwell (the call
+    row lands via the durably-verified record_port_calls above), the state
+    write then fails, and the cursor write still lands. The rows that opened
+    that dwell are now behind the cursor -- entity_history is pruned at three
+    days, so this job never reads them again -- but the "run": {"phase":
+    "open"} that record_port_calls' row depends on for its eventual departure
+    was never durably saved. The call is stuck open forever, and the next
+    dwell this hull has at the same port opens a second, unrelated call under
+    a new arrived_at, because the state that would have recognised "this
+    hull already has an open call here" was never written.
+    record_port_calls is upsert-keyed on (mmsi, port_id, arrived_at), so
+    retrying it on the very same `upserts` is safe -- that write can run
+    first, unconditionally, matching backend/refine/lane_density.py's own
+    "idempotent write first" ordering. The state write is not safe to retry
+    blind, though: apply_positions above was handed whatever `state` was
+    still durably on disk, so a retry that starts from that same untouched
+    document reproduces an identical `new_state`; only once *that* write is
+    confirmed durable is it safe to move the cursor past these rows -- moving
+    it any earlier would let a state write that silently failed be
+    permanently skipped, invisible until this vessel's next dwell quietly
+    doubles up. See test_a_failed_state_write_holds_the_cursor_back_and_does_
+    not_double_the_open_call in backend/tests/test_port_calls.py.
     """
     cursor = await _load_cursor()
     rows = await storage.entity_history_since("ais", cursor, BATCH_LIMIT)
@@ -342,8 +369,13 @@ async def run_once() -> dict:
     if not wrote:
         return {"read": len(rows), "calls": 0, "rejected": rejected, "ok": False}
 
-    await storage.record_reference(STATE_NAME, _prune_state(new_state, rows[-1]["ts"]))
-    await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    state_ok = await storage.record_reference(STATE_NAME, _prune_state(new_state, rows[-1]["ts"]))
+    if not state_ok:
+        return {"read": len(rows), "calls": 0, "rejected": rejected, "ok": False}
+
+    cursor_ok = await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    if not cursor_ok:
+        return {"read": len(rows), "calls": 0, "rejected": rejected, "ok": False}
 
     return {"read": len(rows), "calls": len(upserts), "rejected": rejected, "ok": True}
 

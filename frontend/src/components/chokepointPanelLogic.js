@@ -11,6 +11,7 @@
 // trend entry's `status` (counted/partial/missing) means, and why a missing
 // day carries `total: null` rather than `0`. Nothing here is allowed to
 // collapse that distinction back into a number; see trendBars below.
+import { fmtNumber } from "../utils/format";
 
 /**
  * {boxes: {label: entry}} -> a plain array, in the order the backend built
@@ -124,4 +125,24 @@ export function boxCenter(bounds) {
   const [south, west, north, east] = bounds;
   if (![south, west, north, east].every((n) => typeof n === "number" && Number.isFinite(n))) return null;
   return { lat: (south + north) / 2, lon: (west + east) / 2 };
+}
+
+// A day's own `status` (counted/partial/missing, see build_chokepoint_document)
+// in the words ChokepointRow prints beside its hull count -- kept here, next
+// to hullCountLine below, rather than inline in ChokepointPanel.jsx, so the
+// same lookup that composes the sentence is the one a headless test can
+// import (this project's suite cannot import JSX at all).
+export const STATUS_WORD = { counted: "counted", partial: "still counting", missing: "not observed" };
+
+/**
+ * ChokepointRow's own meta line: a box with no `today` entry at all reads as
+ * "not observed yet today" rather than a hull count of zero -- the same
+ * never-collapse-missing-into-zero rule trendBars holds for the strip below
+ * it, applied to the one line of text above it. `today` is todayEntry's
+ * output (or the box's raw `today`, which has the same shape).
+ */
+export function hullCountLine(today) {
+  if (today.total == null) return "Not observed yet today";
+  const statusWord = STATUS_WORD[today.status] || today.status;
+  return `${fmtNumber(today.total)} distinct hull${today.total === 1 ? "" : "s"} today (${statusWord})`;
 }

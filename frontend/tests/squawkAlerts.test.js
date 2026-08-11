@@ -42,7 +42,7 @@ globalThis.window = {
 
 const {
   trackEmergencySquawks, dismissAlert, pruneDismissed, visibleAlerts, formatSquawkDuration,
-  alertLabel, squawkAnnouncement,
+  alertLabel, squawkAnnouncement, dismissAlertLabel,
 } = await import("../src/components/squawkAlertsLogic.js");
 const { aircraftEmergencyLine, squawkEmergencyMeaning, AIRCRAFT_FLAG_NOTE } = await import("../src/map/decorators.js");
 
@@ -312,4 +312,23 @@ test("squawkAnnouncement is stable and self-contained across all three codes", (
     assert.match(text, new RegExp(meaning.replace(/[()]/g, "\\$&")));
     assert.match(text, /not a confirmed incident/);
   }
+});
+
+// --- dismissAlertLabel ----------------------------------------------------
+//
+// The dismiss button's accessible name, not just its visible "x" glyph -- the
+// caveat belongs in the name itself since a screen-reader user tabbing
+// straight to the button may never visit the header it would otherwise only
+// live in (see SquawkAlertStrip.jsx's own review note).
+
+test("dismissAlertLabel names the aircraft and carries the caveat", () => {
+  const label = dismissAlertLabel("TESTANN111");
+  assert.match(label, /TESTANN111/);
+  assert.match(label, /^Dismiss the emergency squawk alert for/);
+  assert.match(label, /occasionally set by mistake/);
+  assert.match(label, /not a confirmed incident/);
+});
+
+test("dismissAlertLabel is a function of the label alone, so two different aircraft never collide", () => {
+  assert.notEqual(dismissAlertLabel("AAA111"), dismissAlertLabel("BBB222"));
 });

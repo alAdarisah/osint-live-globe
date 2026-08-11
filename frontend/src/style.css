@@ -4791,7 +4791,16 @@ tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
   font-size: calc(10px * var(--ui-text-scale));
   cursor: help;
 }
-.compare-cell-not-loaded .compare-cell-dash { color: #ff9500; }
+/* Task review: #ff9500 against the light-theme panel background sits at
+   roughly 2.2:1 -- on its own, a reader who cannot rely on colour has no way
+   to tell "not checked yet" apart from a plain dash. not-applicable and
+   not-collected each already carry a second, non-colour cue (italic +
+   reduced opacity; a dotted underline); this needed the same treatment
+   rather than being the one state color alone had to carry. Bold is
+   deliberately distinct from both of those -- not italic, not underlined --
+   so a reader distinguishing by shape alone still gets three different
+   answers, not two-plus-a-miss. */
+.compare-cell-not-loaded .compare-cell-dash { color: #ff9500; font-weight: 700; }
 .compare-cell-not-applicable .compare-cell-dash { font-style: italic; opacity: 0.7; }
 /* Task 40 review (Minor): not-collected used to fall back to the same plain
    .compare-cell-dash treatment not-loaded/not-applicable were given their

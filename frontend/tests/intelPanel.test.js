@@ -34,6 +34,8 @@ const {
   intelPanelIsEmpty,
   eventsSeverityFloor, windowMaxAgeDays, withinWindowHours, WINDOW_OPTIONS,
   selectEventItems, selectEscalationZones, selectNewsItems, selectOfficialsItems,
+  escalationMiniBarTitle, eventReliabilityTooltip,
+  escalationEmptyMessage, eventsEmptyMessage, newsEmptyMessage, officialsEmptyMessage,
 } = await import("../src/components/intelPanelLogic.js");
 
 const { DEFAULT_EVENT_FILTER } = await import("../src/map/severity.js");
@@ -558,4 +560,66 @@ test("selectOfficialsItems sorts most recent first", async (t) => {
   ];
   const out = selectOfficialsItems(items, { scope, windowHours: null });
   assert.deepEqual(out.map((i) => i.published_at), [300, 200, 100]);
+});
+
+// ---------- user-visible strings ----------
+//
+// IntelPanel.jsx is JSX and this headless suite cannot import it -- every
+// sentence the panel shows a reader has to live in intelPanelLogic.js
+// instead so it can be pinned here, the same discipline this module's other
+// exports already follow.
+
+test("escalationMiniBarTitle states both figures and the flat-baseline caveat", () => {
+  const title = escalationMiniBarTitle({ current: 12, baseline_per_day: 4 });
+  assert.match(title, /12 events in the last 24h/);
+  assert.match(title, /4\/day baseline/);
+  assert.match(title, /trailing 7 days/);
+  assert.match(title, /no day-by-day history behind this yet/);
+});
+
+test("eventReliabilityTooltip prints the record's own score when it has one", () => {
+  const tooltip = eventReliabilityTooltip({ reliability: 72 }, { min: 50 });
+  assert.match(tooltip, /Reliability 72\/100/);
+  assert.match(tooltip, /who is behind this report/);
+});
+
+test("eventReliabilityTooltip falls back to the band's own floor for an unscored record", () => {
+  const tooltip = eventReliabilityTooltip({ reliability: null }, { min: 30 });
+  assert.match(tooltip, /Reliability 30\/100/);
+});
+
+test("escalationEmptyMessage names the place for a deliberate scope, and speaks generally for World", () => {
+  assert.equal(
+    escalationEmptyMessage({ deliberate: true, label: "Ukraine" }),
+    "No zone inside Ukraine is currently running above its own baseline."
+  );
+  assert.equal(
+    escalationEmptyMessage({ deliberate: false, label: "World" }),
+    "No region is currently running above its own 7-day baseline."
+  );
+});
+
+test("eventsEmptyMessage points a deliberate scope at the window/scope controls, and World at the significance floor", () => {
+  const scoped = eventsEmptyMessage({ deliberate: true, label: "Yemen" });
+  assert.match(scoped, /No recorded conflict activity in Yemen/);
+  assert.match(scoped, /Widen the window, or clear the scope/);
+
+  const world = eventsEmptyMessage({ deliberate: false, label: "World" });
+  assert.match(world, /Nothing clears the significance bar/);
+});
+
+test("newsEmptyMessage names the place for a deliberate scope, and speaks generally for World", () => {
+  assert.equal(newsEmptyMessage({ deliberate: true, label: "Taiwan Strait" }), "No recent headlines for Taiwan Strait.");
+  assert.equal(newsEmptyMessage({ deliberate: false, label: "World" }), "No recent headlines for this area.");
+});
+
+test("officialsEmptyMessage names the place for a deliberate scope, and speaks generally for World", () => {
+  assert.equal(
+    officialsEmptyMessage({ deliberate: true, label: "Red Sea" }),
+    "No diplomatic activity recorded for Red Sea."
+  );
+  assert.equal(
+    officialsEmptyMessage({ deliberate: false, label: "World" }),
+    "No diplomatic activity in the current window."
+  );
 });

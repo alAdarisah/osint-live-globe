@@ -183,3 +183,13 @@ export function squawkAnnouncement(entry) {
   const caveat = unescapeHtml(AIRCRAFT_FLAG_NOTE.emergency);
   return `Emergency squawk alert for ${alertLabel(entry)}: ${meaning}. ${caveat}`;
 }
+
+/** The dismiss button's own accessible name -- a full explanatory sentence,
+ *  not just "Dismiss", because the caveat this whole module exists to keep
+ *  attached (squawks are often mis-set, not confirmed incidents) belongs in
+ *  the accessible name itself: a screen-reader user tabbing straight to the
+ *  dismiss button may never visit the header it would otherwise only live
+ *  in. See the review note in SquawkAlertStrip.jsx's own module comment. */
+export function dismissAlertLabel(label) {
+  return `Dismiss the emergency squawk alert for ${label} — squawks are occasionally set by mistake, not a confirmed incident`;
+}
