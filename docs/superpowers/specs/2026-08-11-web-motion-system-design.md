@@ -85,11 +85,20 @@ on press feels loose rather than responsive.
 }
 ```
 
-Existing keyframe rules are retagged to these tokens. Their visual behaviour
-does not change — `infra-flare` still runs at 1.1s, it just says
-`--tempo-urgent` now. This is the whole of the mechanical work in the base
-layer, and it is deliberately behaviour-preserving so that a reviewer can read
-the rest of the diff as new work rather than as regression risk.
+Existing rules are retagged to these tokens. Where a rule already sits on a
+token value — `infra-flare` at 1.1s, `czib-warn` at 2.4s, `jamming-ping` at 6s
+— nothing changes but the text. Where it does not, the value converges onto
+the nearest token and the motion shifts slightly: `country-flare` 1.4s → 1.1s,
+`news-pulse` 1.6s → 2.4s, `notable-pulse` 1.8s → 2.4s, and the one-shot
+durations move by at most 60ms. That convergence is the point of having a
+scale; if a rule genuinely needs a value the scale does not offer, that is an
+argument for changing the scale, not for exempting the rule.
+
+Two rules are exempt, and the exemption is written in the stylesheet next to
+them: `loading-radar-spin` and `loading-ellipsis-pulse`. Those are mechanism —
+a spinner reporting that work is in progress — not status. The tempo scale
+answers "how urgent is this condition", which is a question a spinner is not
+in a position to be asked.
 
 The file is separate from `style.css` rather than a block at its top for two
 reasons. `style.css` is 3511 lines, and a token block inside it would sit in
@@ -175,6 +184,15 @@ A conflict, notable or infrastructure marker that appears on the map runs one
 `alert` flash as it lands — a single expansion and fade, on `--t-settle`, not
 a loop.
 
+"Appears" has to mean *new to the data*, not new to the screen.
+`renderMarkerLayer` rebuilds markers as the viewport moves
+(`createMapController.js:3007`), so a flash hung off marker construction would
+fire on every pan and mean nothing. Instead the controller keeps the previous
+poll's id set per layer and computes the ids that are new to it; only those
+markers get the class. A layer whose previous set is empty is being seeded
+rather than updated, and seeds nothing — otherwise first load flashes several
+hundred pins at once.
+
 Conflict, notable and infra layers only. The Pixi ship and aircraft layer is
 explicitly excluded: those layers turn over thousands of markers per refresh,
 and per-marker DOM animation there would violate the framerate constraint and
@@ -182,10 +200,19 @@ mean nothing anyway, since a ship appearing is not news.
 
 ### 5. Control panel folds
 
-`Collapsible.jsx` toggles `display`, which cannot transition. Changed to a
-`grid-template-rows: 0fr / 1fr` transition on `--t-ui`, which animates to
-content height without measuring it. The caret rotation already exists and
-retags to the token.
+`Collapsible.jsx` is built on native `<details>`/`<summary>`, deliberately —
+the file says why, and that reasoning stands. A closed `<details>` does not
+render its body at all, so there is no height to transition from and the usual
+`grid-template-rows: 0fr/1fr` trick has nothing to animate.
+
+So: animate the opening only. `details[open] > .panel-group-body` runs a
+one-shot `fold-open` keyframe on `--t-ui` — a small downward slide with a fade
+— and closing stays instant. This works in every browser without feature
+detection, and the asymmetry is the honest one: opening a fold is the reader
+asking to see something, and closing it is them done looking.
+
+The same rule applies to `.layer-details-body`. The caret rotation already
+exists and retags to the token.
 
 ### 6. Controls acknowledge
 
