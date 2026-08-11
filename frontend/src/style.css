@@ -480,7 +480,7 @@ html, body {
   letter-spacing: 0.3px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out), color var(--t-ui) var(--e-out);
+  transition: background var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out), color var(--t-ui) var(--e-out), transform var(--t-tap) var(--e-out);
 }
 .region-btn:hover { color: var(--text-bright); border-color: var(--accent); }
 .region-btn.active {
@@ -531,7 +531,7 @@ html, body {
   font-size: 11px;
   font-family: inherit;
   cursor: pointer;
-  transition: background var(--t-ui) var(--e-out), color var(--t-ui) var(--e-out);
+  transition: background var(--t-ui) var(--e-out), color var(--t-ui) var(--e-out), transform var(--t-tap) var(--e-out);
 }
 .region-zone-menu-item:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--text-bright); }
 .region-zone-menu-item.active { color: #ff8080; font-weight: 700; }
@@ -553,6 +553,10 @@ html, body {
   padding: 0;
 }
 #themeToggle:hover { border-color: var(--accent); transform: rotate(20deg); }
+/* transform is a single property, so a press while hovered can't have both
+   the hover's rotate and a press scale unless this rule composes them --
+   repeating rotate(20deg) here is that composition, not a copy-paste leftover. */
+#themeToggle:active { transform: rotate(20deg) scale(0.93); }
 
 #panelToggle {
   position: fixed;
@@ -715,6 +719,20 @@ html, body {
   border-left: 1px solid var(--panel-border);
 }
 .layer-details-body .sublegend { padding-left: 0; }
+
+/* Opening a fold is the reader asking to see something; closing it is them
+   done looking. So the open is animated and the close is instant, which also
+   happens to be the only thing native <details> can do without a height to
+   transition from. */
+details[open] > .panel-group-body,
+details[open] > .layer-details-body {
+  animation: fold-open var(--t-ui) var(--e-out);
+}
+
+@keyframes fold-open {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 .layer-row {
   display: flex;
@@ -2718,6 +2736,29 @@ html, body {
   background: #ff8c3a;
   z-index: 2000;
   pointer-events: none;
+}
+
+/* The difference between "clicked" and "clicked?". Scale rather than colour:
+   several of these already change colour to mean something else (a pinned
+   layer, an active region, Admin Mode being on), and a press must not be
+   confusable with a state. */
+.layer-check,
+.timeline-play,
+.timeline-live-btn,
+.news-locate-btn,
+.news-caret-btn,
+#adminToggle {
+  transition: transform var(--t-tap) var(--e-out);
+}
+.layer-check:active,
+.region-btn:active,
+.region-zone-menu-item:active,
+.timeline-play:active,
+.timeline-live-btn:not(:disabled):active,
+.news-locate-btn:active,
+.news-caret-btn:active,
+#adminToggle:active {
+  transform: scale(0.93);
 }
 
 /* --- the admin panel --- */
