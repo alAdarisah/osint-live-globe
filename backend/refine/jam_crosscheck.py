@@ -538,6 +538,34 @@ async def _load_jam_cells() -> dict[str, dict]:
     nothing in backend/refine makes an outbound call; test_refine_jobs.py's
     own test_no_refine_job_makes_an_outbound_call enforces it).
 
+    **Filtered to the most recent poll's own top hundred, not staleness
+    alone (pre-merge review, Critical 3).** entity_latest("jamming") returns
+    every jamming cell config.ENTITY_STALE_AFTER["jamming"] (2 days) has not
+    yet evicted -- a far wider window than jamming.REFRESH_INTERVAL (6h), so
+    a cell that fell out of the top hundred a poll or two ago is still
+    sitting in entity_latest, stale but not yet swept. Measured live
+    (2026-08-11): entity_latest("jamming") returned 298 rows against
+    jamming.MAX_CELLS=100 -- two thirds of what this function returned were
+    cells gpsjam had already dropped, contradicting this function's own
+    docstring and the module docstring's "hundred worst gpsjam cells"
+    framing. Every point jamming.py's own poller writes in one pass carries
+    the same `date` (see jamming.start(), which stamps every point in a
+    batch with the one date _latest_date returned for that fetch), so
+    filtering to only the newest `date` value present recovers exactly what
+    the most recent successful poll wrote as its own top hundred, and drops
+    anything left over from an earlier poll's now-superseded batch. A pass
+    that happens to run while jamming.py's own poller is mid-rollover (some
+    cells already rewritten under a new date, others not yet touched this
+    cycle) honestly reports fewer than a hundred cells until the next poll
+    finishes, rather than a stale majority standing in for a complete one --
+    the same "found nothing yet" shape every other freshly-reset accumulator
+    in this tier reports (see the module docstring's own "found nothing" vs
+    "did not look" section). A store with no `date` on any point at all (a
+    snapshot from before jamming.py started stamping one) falls back to
+    every point entity_latest returned, the same as before this fix -- there
+    is nothing here to filter *by* in that case, so this degrades to the old
+    staleness-only behaviour rather than returning nothing.
+
     `hex` falls back to a fresh h3.latlng_to_cell of the point's own stored
     centroid for a snapshot recorded before Task 39 started asking
     jamming.py to carry the id itself -- see that module's own comment on
@@ -548,8 +576,18 @@ async def _load_jam_cells() -> dict[str, dict]:
     deploy, not as the normal path.
     """
     points = await storage.entity_latest("jamming")
+    latest_date = None
+    for p in points or ():
+        date = p.get("date")
+        if date is not None and (latest_date is None or date > latest_date):
+            latest_date = date
+
     out: dict[str, dict] = {}
     for p in points or ():
+        if latest_date is not None and p.get("date") != latest_date:
+            # Left over from a poll gpsjam's own top hundred has already
+            # moved on from -- see this function's own docstring.
+            continue
         lat, lon = p.get("lat"), p.get("lon")
         if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
             continue
@@ -619,12 +657,32 @@ async def run_once() -> dict:
     if not state_ok:
         return {"read": len(rows), "cells": len(jam_cells), "flags": 0, "ok": False}
 
+    cursor_ok = True
     if rows:
         # Nothing to advance past when this pass read no rows at all -- the
         # cursor already sits at the right place, and a write here would
         # just be a no-op record of the same last_id.
-        await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
-    return {"read": len(rows), "cells": len(jam_cells), "flags": _count_flags(doc), "ok": True}
+        #
+        # This bool used to be discarded (pre-merge review, Also fix 1) --
+        # this docstring calls the cursor "the outermost gate of all", but
+        # nothing checked whether that outermost write itself actually
+        # landed. That is not merely a health-reporting gap here the way it
+        # is for vessel_profile.py: `new_state` above is already durably
+        # written by the time this runs, so a dropped cursor write means the
+        # next pass reads the *same* rows again but replays them against a
+        # `state` that already reflects this batch -- last_map's own `last`
+        # pointer per airframe is already advanced, giving a negative or
+        # zero dt on the first row of the replay, which apply_batch's own
+        # `0 < (ts - last["ts"])` guard treats as a fresh start rather than a
+        # duplicate to skip (see the module docstring's "Cursor discipline"
+        # section and the failing sequence spelled out in the review). Every
+        # sample and flag in the replayed batch is then re-appended,
+        # doubling sample_count/flag_count for every airframe it touched.
+        # Checking the bool cannot undo a write that already landed, but it
+        # does turn this from a silent double-count into a red source_health
+        # row -- see derive_forever.
+        cursor_ok = await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    return {"read": len(rows), "cells": len(jam_cells), "flags": _count_flags(doc), "ok": cursor_ok}
 
 
 def _count_flags(doc: dict) -> int:

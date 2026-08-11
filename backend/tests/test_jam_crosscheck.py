@@ -29,6 +29,12 @@ _HEX = h3.latlng_to_cell(40.0, -3.0, 4)
 _CENTER_LAT, _CENTER_LON = h3.cell_to_latlng(_HEX)
 _JAM_CELLS = {_HEX: {"lat": _CENTER_LAT, "lon": _CENTER_LON, "jam_ratio": 0.4, "date": "2026-08-10"}}
 
+# A second, distinct real H3 cell -- used only by
+# test_load_jam_cells_only_returns_the_most_recent_polls_own_top_hundred to
+# stand in for a cell left over from an earlier poll's own top hundred.
+_STALE_HEX = h3.latlng_to_cell(10.0, 100.0, 4)
+_STALE_LAT, _STALE_LON = h3.cell_to_latlng(_STALE_HEX)
+
 ICAO = "a1b2c3"
 NOW = 1_800_000_000.0
 
@@ -430,6 +436,31 @@ def test_the_cursor_advances_and_a_second_pass_does_not_reprocess(monkeypatch):
     assert fake.calls == [0, 2]
 
 
+def test_run_once_reports_not_ok_when_only_the_cursor_write_fails(monkeypatch):
+    """Pre-merge review, Also fix 1: this function's own docstring calls the
+    cursor "the outermost gate of all", but its return value used to be
+    discarded -- a Postgres hiccup on exactly that one write still reported
+    "ok": True. Unlike vessel_profile.py/lane_density.py's own equivalent
+    fix, this one is not just a health-reporting gap: `new_state` is already
+    durably written by the time the cursor write runs, so a dropped cursor
+    write means the *next* pass replays the same rows against a `state` that
+    already reflects them -- see run_once's own docstring on the resulting
+    double count. Checking the bool cannot undo that, but it does turn it
+    into a visible failure rather than a silently green one."""
+    rows = [row(1, 0.0, _CENTER_LAT, _CENTER_LON), row(2, 60.0, _CENTER_LAT, _CENTER_LON)]
+    fake = _FakeStorage(rows, fail_names={jc.CURSOR_NAME})
+    monkeypatch.setattr(jc, "storage", fake)
+
+    result = _run(jc.run_once())
+    assert result["ok"] is False
+    assert jc.CURSOR_NAME not in fake.docs
+    # The state/document writes did land -- this is the residual
+    # double-count risk the fix's own docstring documents, not something a
+    # single-write test can eliminate.
+    assert jc.STATE_NAME in fake.docs
+    assert jc.REFERENCE_NAME in fake.docs
+
+
 def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     rows = [row(1, 0.0, _CENTER_LAT, _CENTER_LON), row(2, 60.0, _CENTER_LAT, _CENTER_LON)]
     fake = _FakeStorage(rows, write_ok=False)
@@ -575,3 +606,36 @@ def test_load_jam_cells_falls_back_to_recomputing_the_hex_from_the_centroid(monk
     monkeypatch.setattr(jc, "storage", fake)
     cells = _run(jc._load_jam_cells())
     assert _HEX in cells
+
+
+def test_load_jam_cells_drops_a_cell_left_over_from_an_earlier_poll(monkeypatch):
+    """Pre-merge review, Critical 3: entity_latest("jamming") returns every
+    cell ENTITY_STALE_AFTER["jamming"] (2 days) has not yet evicted, not just
+    gpsjam's current top hundred -- measured live against the real database
+    (2026-08-11), it returned 298 rows against jamming.MAX_CELLS=100. A cell
+    carrying an older `date` than the newest one present is left over from a
+    poll gpsjam's own top hundred has already moved past, and must not be
+    reported as though it were still tracked today."""
+    fake = _FakeStorage([], jamming=[
+        {"hex": _HEX, "lat": _CENTER_LAT, "lon": _CENTER_LON, "jam_ratio": 0.4, "date": "2026-08-11"},
+        {"hex": _STALE_HEX, "lat": _STALE_LAT, "lon": _STALE_LON, "jam_ratio": 0.3, "date": "2026-08-09"},
+    ])
+    monkeypatch.setattr(jc, "storage", fake)
+    cells = _run(jc._load_jam_cells())
+    assert _HEX in cells
+    assert _STALE_HEX not in cells
+
+
+def test_load_jam_cells_keeps_every_point_when_none_carry_a_date(monkeypatch):
+    """A store where nothing carries a `date` at all has nothing for this
+    filter to compare against -- see _load_jam_cells' own docstring on why
+    that degrades to the old staleness-only behaviour rather than dropping
+    everything."""
+    fake = _FakeStorage([], jamming=[
+        {"hex": _HEX, "lat": _CENTER_LAT, "lon": _CENTER_LON, "jam_ratio": 0.4},
+        {"hex": _STALE_HEX, "lat": _STALE_LAT, "lon": _STALE_LON, "jam_ratio": 0.3},
+    ])
+    monkeypatch.setattr(jc, "storage", fake)
+    cells = _run(jc._load_jam_cells())
+    assert _HEX in cells
+    assert _STALE_HEX in cells
