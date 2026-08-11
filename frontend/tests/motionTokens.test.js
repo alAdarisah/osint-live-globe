@@ -22,12 +22,43 @@ const DURATION = /(?<![\w-])\d*\.?\d+m?s(?![\w-])/;
 // scale answers. Both carry the same explanation in the stylesheet.
 const EXEMPT = ["loading-radar-spin", "loading-ellipsis-pulse"];
 
+// Matches the shorthand (animation:, transition:) and the four longhands
+// (animation-duration:, animation-delay:, transition-duration:,
+// transition-delay:) -- \b after "animation"/"transition" does not clear the
+// hyphen in "animation-delay", so the shorthand-only pattern let every
+// longhand property smuggle a raw duration past this file.
+const TIMING_PROPERTY = /\b(?:animation|transition)(?:-duration|-delay)?\s*:/;
+
 function timingLines(css) {
   return css
     .split("\n")
     .map((line, i) => [i + 1, line])
-    .filter(([, line]) => /\b(animation|transition)\b\s*:/.test(line))
-    .filter(([, line]) => !EXEMPT.some((name) => line.includes(name)));
+    .filter(([, line]) => TIMING_PROPERTY.test(line))
+    .filter(([, line]) => !EXEMPT.some((name) => line.includes(name)))
+    // .stagger-children > :nth-child(1) (and its .news-list / .notable-list /
+    // .loading-log twins, all one rule) is the one accepted raw value: zero is
+    // not a magic number, and inventing a --t-none token to spell "no delay"
+    // would be sillier than the thing it replaces.
+    .filter(([, line]) => !(line.includes(":nth-child(1)") && /animation-delay\s*:\s*0ms/.test(line)));
+}
+
+// A duration hiding inside a var() fallback is still a duration. This
+// collapses var(...) calls from the inside out: a pure token reference
+// (var(--e-out), or var(--tempo-live) once it is the innermost survivor of
+// var(--period, var(--tempo-live))) contributes nothing and disappears,
+// while a literal fallback (var(--not-a-token, 0.33s)) is left behind as
+// plain text so the duration check downstream still sees it. Nesting depth
+// is arbitrary because this runs to a fixed point, not a single pass.
+function stripTokenVars(line) {
+  let prev;
+  do {
+    prev = line;
+    line = line.replace(/var\(([^()]*)\)/g, (_, inner) => {
+      const comma = inner.indexOf(",");
+      return comma === -1 ? "" : inner.slice(comma + 1).trim();
+    });
+  } while (line !== prev);
+  return line;
 }
 
 test("motion.css defines every token the stylesheet is allowed to use", () => {
@@ -44,7 +75,7 @@ test("motion.css defines every token the stylesheet is allowed to use", () => {
 
 test("style.css states no duration of its own", () => {
   const offenders = timingLines(read("../src/style.css"))
-    .filter(([, line]) => DURATION.test(line.replace(/var\([^)]*\)/g, "")))
+    .filter(([, line]) => DURATION.test(stripTokenVars(line)))
     .map(([number, line]) => `style.css:${number}: ${line.trim()}`);
   assert.deepEqual(offenders, [], `raw durations outside motion.css:\n${offenders.join("\n")}`);
 });
@@ -69,4 +100,39 @@ test("the exempt animations say why they are exempt", () => {
     assert.match(css.slice(Math.max(0, at - 400), at), /mechanism/i,
       `${name} is exempt from the tempo scale and must say why`);
   }
+});
+
+test("every looping animation can be switched off", () => {
+  const css = read("../src/style.css");
+  // Anchored on the block's comment, not on ":root.reduce-motion" -- that
+  // selector also opens the unrelated map-reticle rule further up the file
+  // (transition: none, no loop involved), and indexOf would land there first.
+  const blockStart = css.indexOf('"Reduce motion":');
+  assert.notEqual(blockStart, -1, "the reduce-motion block's comment has gone missing");
+  const reduceBlock = css.slice(blockStart);
+  const stop = reduceBlock.indexOf("animation: none");
+  assert.notEqual(stop, -1, "the reduce-motion block has gone missing");
+  const selectors = reduceBlock.slice(0, stop);
+
+  // Every rule that loops. A looping animation nobody can switch off is the one
+  // accessibility failure this feature can actually cause, and it is invisible
+  // to whoever adds the loop. EXEMPT is excluded here too -- loading-radar-spin
+  // and loading-ellipsis-pulse are mechanism, not status, and the earlier test
+  // already guards that their exemption stays documented; this test is only
+  // about loops that are supposed to be reachable through reduce-motion.
+  const looping = [...css.matchAll(/animation:\s*([\w-]+)[^;]*infinite/g)]
+    .filter((match) => !EXEMPT.includes(match[1]))
+    .map((match) => {
+      // Walk back to the selector that owns this declaration.
+      const before = css.slice(0, match.index);
+      const brace = before.lastIndexOf("{");
+      return before.slice(before.lastIndexOf("}", brace) + 1, brace).trim();
+    })
+    .filter((selector) => selector && !selector.startsWith("@"));
+
+  const uncovered = looping.filter((selector) => {
+    const leaf = selector.split(/[\s>,]+/).filter(Boolean).pop();
+    return !selectors.includes(leaf);
+  });
+  assert.deepEqual(uncovered, [], `looping rules missing from :root.reduce-motion:\n${uncovered.join("\n")}`);
 });

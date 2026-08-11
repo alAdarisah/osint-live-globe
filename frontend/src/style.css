@@ -2700,14 +2700,48 @@ details[open] > .layer-details-body {
 
 /* "Reduce motion": kills the decorative loops (pulsing dots, jamming pings,
    hot-zone flares) without touching the transitions that tell you a control
-   responded. */
+   responded.
+
+   The data-driven tempos join it too. A source dot's cadence is real
+   information, but a reader who has asked for stillness has asked for
+   stillness -- the "updated 4s ago" beside the dot says the same thing in
+   words, which is why the information is not lost by switching this off. */
 :root.reduce-motion .live-dot,
 :root.reduce-motion .notable-pulse,
 :root.reduce-motion .jamming-ping-ring,
 :root.reduce-motion .infra-hot .entity-icon-wrap,
 :root.reduce-motion .czib-live .entity-icon-wrap,
-:root.reduce-motion .country-shape.country-hot {
+:root.reduce-motion .country-shape.country-hot,
+:root.reduce-motion .dot.breathing,
+:root.reduce-motion .infra-hot-badge,
+:root.reduce-motion .marker-arrived .entity-icon-wrap > svg,
+:root.reduce-motion .panel-enter,
+:root.reduce-motion .stagger-children > *,
+:root.reduce-motion .loading-log-line,
+:root.reduce-motion .news-list > *,
+:root.reduce-motion .notable-list > * {
   animation: none !important;
+}
+
+/* The setting above is the app's; this is the operating system's. A reader who
+   set it there should not have to find it here as well. */
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .notable-pulse,
+  .jamming-ping-ring,
+  .infra-hot .entity-icon-wrap,
+  .czib-live .entity-icon-wrap,
+  .country-shape.country-hot,
+  .dot.breathing,
+  .infra-hot-badge,
+  .marker-arrived .entity-icon-wrap > svg,
+  .panel-enter,
+  .stagger-children > *,
+  .loading-log-line,
+  .news-list > *,
+  .notable-list > * {
+    animation: none !important;
+  }
 }
 
 :root.hide-leaders .pin-leader { display: none; }
