@@ -138,6 +138,7 @@ import {
 } from "./subdivisions";
 import { updateTrails, renderTrailLayer, seedTrailFromTrack } from "./trails";
 import { syncLayerMarkers } from "./syncLayerMarkers";
+import { newArrivals } from "./arrivals";
 import { createEntityWebglLayer } from "./webglLayer";
 import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } from "../utils/format";
 import {
@@ -578,6 +579,26 @@ export function createMapController(container, initial, callbacks) {
     czib: new Map(), floods: new Map(), ports: new Map(), dams: new Map(),
     deflock: new Map(),
   };
+  // Which record ids each layer held last render, and which of them are new
+  // enough to still be flashing. Only the layers where a new record is news --
+  // a ship appearing is not.
+  const seenIdsByKey = {};
+  // key -> Map<id, arrivalTimeMs>, not key -> Set<id>. A render count is not a
+  // reliable clock: settlePlacement's declutter pass can trigger a second,
+  // synchronous renderMarkerLayer before the browser ever paints the first one
+  // (markDirty -> redrawLayerGroup -> renderMarkerLayer again, same JS task,
+  // same DECLUTTER_MIN_ZOOM=6 conditions that make arrivals common in the
+  // first place). If "still arriving" meant "arrived this render", that
+  // second pass would see zero new arrivals and every just-built marker would
+  // lose the class -- via updateMarker's setIcon -- before anything painted.
+  // A wall-clock lifetime survives that: an id stays flash-eligible for
+  // ARRIVAL_FLASH_MS regardless of how many renders land inside it.
+  const arrivedByKey = {};
+  // Matches motion.css's --t-settle. Not read from the stylesheet -- see
+  // useCountUp's COUNT_DURATION_MS for why a runtime style read is the wrong
+  // tool here -- so if --t-settle ever moves, this has to move with it.
+  const ARRIVAL_FLASH_MS = 420;
+  const FLASHES_ON_ARRIVAL = new Set(["events", "gdelt", "osmInfra", "czib"]);
   // Keyed by event id, same as markersByKey.events, so a circle and its pin
   // are added and dropped by the same diff against the same visible set.
   const uncertaintyCircles = new Map();
@@ -2328,10 +2349,40 @@ export function createMapController(container, initial, callbacks) {
     return icon;
   }
 
+  // True while `id` is still within its ARRIVAL_FLASH_MS window, and prunes
+  // the entry the moment it isn't -- "expiring on read" rather than on a
+  // separate sweep, since buildMarker/updateMarker already visit every live
+  // id on every render and nothing else needs to know once its flash is over.
+  function isArriving(key, id) {
+    const flashing = arrivedByKey[key];
+    if (!flashing) return false;
+    const at = flashing.get(id);
+    if (at === undefined) return false;
+    if (Date.now() - at > ARRIVAL_FLASH_MS) {
+      flashing.delete(id);
+      return false;
+    }
+    return true;
+  }
+
+  // Appended to className, like tagIconLayer's layer-<key> class just above --
+  // never spliced into the icon's html. html is what updateMarker diffs to
+  // decide whether to rebuild a marker's DOM (see its own comment below), and
+  // the arrival flag is controller state updateMarker's freshly-decorated `d`
+  // never carries on its own; landing it in html would desync the two copies
+  // and the class would be gone before the flash painted. className costs no
+  // repaint either way, which is the whole reason tagIconLayer already uses it.
+  function applyArrivalClass(icon, key, id) {
+    if (!isArriving(key, id) || !icon?.options) return icon;
+    icon.options.className = `${icon.options.className || ""} marker-arrived`.trim();
+    return icon;
+  }
+
   function buildMarker(key, item, decorate, sizeOf, copy = 0) {
     const id = item[ID_FIELD[key]];
     const d = applyCollapsedFallback(decorate(item, decorateOptionsFor(key, item, id)), item);
     tagIconLayer(d.icon, key);
+    applyArrivalClass(d.icon, key, id);
     const marker = L.marker(drawLatLng(item, copy), { icon: d.icon });
     // Clicking a pin says "this kind of thing". Everything else on the map
     // recedes, and the layers that corroborate this one become eligible -- so
@@ -2364,6 +2415,14 @@ export function createMapController(container, initial, callbacks) {
       selectedIcao, selectedMmsi, ...decorateOptionsFor(key, item, id),
     }), item);
     tagIconLayer(d.icon, key);
+    // Also needed here, not just in buildMarker: settlePlacement's declutter
+    // pass can redraw a layer synchronously, within the same render pass that
+    // just built a marker as an arrival, before the browser has painted it
+    // once. That redraw goes through updateMarker (the marker already exists
+    // by then), and isArriving is still true -- it is keyed to wall-clock
+    // time, not to which of these two functions last ran -- so skipping this
+    // call here would strip the class the moment it was applied.
+    applyArrivalClass(d.icon, key, id);
     marker._item = item;
     marker.setLatLng(drawLatLng(item, copy));
     applyStacking(marker, sizeOf(item), key);
@@ -2611,6 +2670,11 @@ export function createMapController(container, initial, callbacks) {
     if (Array.isArray(items)) totals[key] = items.length;
     registerPlacement(key, []);
     scheduleReports({ counts: true });
+    // A layer that goes dark stops being updated, so its id set goes stale. Coming
+    // back is a re-seed, not an update -- without this, a conflict layer switched
+    // off for an hour flashes every record that arrived meanwhile.
+    delete seenIdsByKey[key];
+    delete arrivedByKey[key];
     return true;
   }
 
@@ -2983,6 +3047,46 @@ export function createMapController(container, initial, callbacks) {
     // entirely when it has no history for it, and an undefined here used to
     // take the whole render down rather than drawing an empty layer.
     const items = raw[key] || [];
+    // Computed from `items` -- the layer's full payload -- and never from
+    // `visible` below. `visible` is the viewport-filtered, capped, collapsed
+    // slice that gets rebuilt on every pan and zoom; an arrival set built from
+    // it would flash on every pan and mean nothing. This has to run before any
+    // of that filtering, against the same items raw[key] just handed back.
+    if (FLASHES_ON_ARRIVAL.has(key)) {
+      const { ids, arrived } = newArrivals(seenIdsByKey[key] ?? null, items, idField);
+      seenIdsByKey[key] = ids;
+      const now = Date.now();
+      // Swept here, unconditionally, on every render of this layer -- not
+      // only when something new arrives. isArriving's own "expire on read"
+      // is only ever reached from buildMarker/updateMarker, and those only
+      // run for ids that actually get a marker built. An id that arrives
+      // off-screen (outside the viewport, below capByRank's cut, absorbed as
+      // a non-head member of a collapseFor group) never reaches either
+      // function, so its entry would never be read and never pruned -- for
+      // gdelt, where collapsing is routine, that is most arrivals, and left
+      // alone the map grows for the life of the session by however many ids
+      // ever arrived without being drawn. Sweeping here instead gives it a
+      // hard bound: ids that arrived within the last ARRIVAL_FLASH_MS, full
+      // stop, whether or not anything ever drew them.
+      const flashing = arrivedByKey[key];
+      if (flashing) {
+        for (const [id, at] of flashing) {
+          if (now - at > ARRIVAL_FLASH_MS) flashing.delete(id);
+        }
+        if (flashing.size === 0) delete arrivedByKey[key];
+      }
+      // Merged into the existing map, not replacing it: a synchronous second
+      // pass (see arrivedByKey's declaration) reports zero new arrivals and
+      // must not erase the timestamps this pass just wrote, or isArriving
+      // would go false before the flash has painted once. An id with nothing
+      // new to add is left alone -- it neither gains a fresh timestamp nor
+      // loses whatever time it has left.
+      if (arrived.size) {
+        const target = arrivedByKey[key] || new Map();
+        for (const id of arrived) target.set(id, now);
+        arrivedByKey[key] = target;
+      }
+    }
     let visible = [];
     if (!belowMinZoom) {
       for (const item of items) {
