@@ -31,6 +31,7 @@ import SquawkAlertStrip from "./components/SquawkAlertStrip";
 import IntelPanel from "./components/IntelPanel";
 import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
 import ChokepointPanel from "./components/ChokepointPanel";
+import InfraRiskPanel from "./components/InfraRiskPanel";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
@@ -907,6 +908,16 @@ export default function App() {
           AirfieldActivityPanel just above), so mounting it is this one
           line too. */}
       <ChokepointPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+
+      {/* Task 37: GET /api/infra-risk has a document (backend/refine/
+          infra_risk.py -- which dams, power plants, cable landings,
+          airfields and ports have the most conflict events inside their own
+          uncertainty radius) and nothing in the frontend called it until
+          this panel -- see InfraRiskPanel.jsx's own module note. Stacked
+          above ChokepointPanel in the same left-hand corner (see
+          style.css's #infraRiskPanel rule); self-contained, so mounting it
+          is this one line too. */}
+      <InfraRiskPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
 
       {/* Opened by picking a theatre in the RegionBar above, which is a public
           control -- so gating this behind Admin Mode meant a reader could make

@@ -55,6 +55,11 @@ def test_the_refine_tier_is_exactly_the_declared_derivations():
         # trend. Publishes no layer either -- one reference_snapshots
         # document, read directly by GET /api/naval-presence.
         "backend.refine.naval_presence",
+        # Which dams, power plants, cable landings, airfields and ports have
+        # the most conflict events inside their own uncertainty radius, over
+        # a 30-day window. Publishes no layer either -- one reference_
+        # snapshots document, read directly by GET /api/infra-risk.
+        "backend.refine.infra_risk",
     }
 
 

@@ -1795,6 +1795,32 @@ html, body {
 #chokepointPanel.collapsed .notable-caret { transform: rotate(-90deg); }
 #chokepointPanel.collapsed .notable-header { border-bottom: none; }
 
+/* Task 37: InfraRiskPanel.jsx -- stacked above #chokepointPanel in the same
+   left-hand corner, for the same reason #chokepointPanel stacks above
+   #airfieldPanel: all three start collapsed, so by default this sits just
+   above #chokepointPanel's collapsed header with a small gap. Same generic
+   .notable-header/.notable-list/.notable-item styling as the other two. */
+#infraRiskPanel {
+  position: fixed;
+  left: 14px;
+  bottom: 182px;
+  width: 340px;
+  max-width: calc(100vw - 28px);
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 950;
+  overflow: hidden;
+  pointer-events: none;
+}
+#infraRiskPanel.collapsed .notable-caret { transform: rotate(-90deg); }
+#infraRiskPanel.collapsed .notable-header { border-bottom: none; }
+
 /* Persistent country details widget (CountryInfoCard.jsx) -- replaces the
    old Leaflet popup on country click so pan/zoom keep working while it's
    open. Reuses countryPopupHtml()'s markup verbatim, so it needs the same

@@ -167,6 +167,23 @@ _JOBS = (
         health_name="naval_presence",
         health_every=config.NAVAL_PRESENCE_INTERVAL,
     ),
+    # Task 37: which dams, power plants, cable landings, airfields and ports
+    # have the most conflict events inside their own uncertainty radius, over
+    # a 30-day window. Reads conflict_events plus the entity_latest rows the
+    # backend and ingest processes already wrote for the five Nearby
+    # categories (see the module's own docstring for why it reads Postgres
+    # rather than any in-process registry) and writes one keyed reference
+    # document; GET /api/infra-risk (backend/app.py) reads it directly, the
+    # same shape naval_presence's own document is served.
+    Job(
+        module="backend.refine.infra_risk",
+        entrypoint="derive_forever",
+        publishes=(),
+        # infra_risk.REFERENCE_NAME, copied for the same reason
+        # port_calls.HEALTH_NAME is copied above.
+        health_name="infra_risk",
+        health_every=config.INFRA_RISK_INTERVAL,
+    ),
 )
 
 

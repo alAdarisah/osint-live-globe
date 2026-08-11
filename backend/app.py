@@ -21,7 +21,7 @@ from backend import (
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
-from backend.refine import flight_legs, lane_density, naval_presence, port_call_thresholds
+from backend.refine import flight_legs, infra_risk, lane_density, naval_presence, port_call_thresholds
 # Aliased: this module already has a route handler literally named
 # `satellites` (see /api/satellites below, unchanged from before this task),
 # and that function def rebinds the bare module-level name `satellites` --
@@ -1875,6 +1875,49 @@ async def chokepoints_endpoint():
     if cached is None:
         cached = await storage.reference(lane_density.CHOKEPOINT_DOC_NAME) or {}
         _CHOKEPOINTS_CACHE.set("all", cached)
+    return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+
+
+# Same shape and the same reasoning as the chokepoints cache just above: one
+# stored document written by the refine process (backend/refine/
+# infra_risk.py, on its own INFRA_RISK_INTERVAL cadence -- an hour by
+# default), read by a frontend on its own slower timer.
+_INFRA_RISK_CACHE = LruTtlCache(maxsize=1, ttl=300)
+metrics.track_local_cache("infra_risk", _INFRA_RISK_CACHE)
+
+
+@app.get("/api/infra-risk")
+async def infra_risk_endpoint():
+    """Task 37: which dams, power plants, cable landings, airfields and ports
+    have the most conflict events inside their own uncertainty radius, over
+    backend/refine/infra_risk.py's 30-day window.
+
+    An empty object -- not an error -- before the refine process has written
+    a pass yet, the same "not computed" vs "nothing there" distinction every
+    other refine-derived endpoint here already draws. Once a document
+    exists, `events_without_radius` and `category_counts` say what was and
+    was not actually searched (see infra_risk.py's own module docstring for
+    the three-way "found nothing / did not look / not collected here"
+    distinction this document keeps apart) -- an empty `top` is never on its
+    own evidence that nothing is at risk.
+
+    **Proximity is not causation** -- restated in the document's own `note`
+    field, verbatim, so a consumer of the raw JSON gets the same caveat a
+    reader of the panel does: a site in this ranking sits inside one or more
+    events' own radius of positional doubt, not evidence it was targeted,
+    struck, or involved.
+
+    Reads storage.reference(infra_risk.REFERENCE_NAME) only -- never
+    conflict_events or entity_latest directly, and never entity_history at
+    all. The aggregation itself happens in the refine process precisely so
+    this endpoint does not have to run it (see infra_risk.py's own docstring
+    on why this moved out of the request path, the same trade
+    escalation.py made for the same table).
+    """
+    cached = _INFRA_RISK_CACHE.get("all")
+    if cached is None:
+        cached = await storage.reference(infra_risk.REFERENCE_NAME) or {}
+        _INFRA_RISK_CACHE.set("all", cached)
     return JSONResponse(cached, headers={"Cache-Control": "no-store"})
 
 

@@ -404,6 +404,15 @@ LANE_DENSITY_INTERVAL = int(os.getenv("LANE_DENSITY_INTERVAL", "3600"))
 # looking at yesterday's number.
 NAVAL_PRESENCE_INTERVAL = int(os.getenv("NAVAL_PRESENCE_INTERVAL", str(6 * 3600)))
 
+# How often backend/refine/infra_risk.py recomputes which dams, power plants,
+# cable landings, airfields and ports have the most conflict events inside
+# their own uncertainty radius. The figure is a 30-day (WINDOW_DAYS) ranked
+# count, not a same-day one, so an hourly pass -- the same cadence
+# lane_density.py already uses for its own grid -- is frequent enough that a
+# newly-fused event's radius search shows up within the hour, without paying
+# for a full conflict_events window scan any faster than that.
+INFRA_RISK_INTERVAL = int(os.getenv("INFRA_RISK_INTERVAL", "3600"))
+
 # The laden/ballast thresholds themselves -- named constants rather than
 # numbers inline in backend/refine/vessel_profile.py because Task 33's admin
 # panel exposes them in an "Inference" section, where a reader can see exactly

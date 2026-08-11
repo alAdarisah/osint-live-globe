@@ -133,3 +133,46 @@ class ProximityIndex:
                     if distance <= best_km:
                         best, best_km = point, distance
         return best
+
+    def within(self, lat: float, lon: float, radius_km: float) -> list[dict]:
+        """Every indexed point within radius_km, nearest first.
+
+        nearest()'s sibling: that answers "is there one of these near here";
+        this answers "how many, and which ones" -- what Task 37's per-event
+        uncertainty-circle search and infrastructure-ranking both need, and
+        neither can get from a single best match. Same cell-neighbourhood
+        scan as nearest() -- same lat/lon reach, same wraparound at the
+        antimeridian -- just collecting every point that clears the radius
+        instead of keeping a running best.
+
+        A non-positive radius is not special-cased: lat_reach/lon_reach are
+        floored at 1 cell either way (same as nearest()), so the scan still
+        runs, and `distance <= radius_km` simply never passes for a real
+        (non-coincident) point -- the same "let the arithmetic decide"
+        approach nearest() already takes.
+        """
+        if not self._cells:
+            return []
+        span = int(round(360.0 / self._cell_deg))
+        lat_reach = max(1, math.ceil(radius_km / (110.574 * self._cell_deg)))
+        lon_reach = lon_cells_for_radius(lat, radius_km, self._cell_deg)
+        lat_cell, lon_cell = self._cell(lat, lon)
+
+        found: list[tuple[float, dict]] = []
+        for d_lat in range(-lat_reach, lat_reach + 1):
+            for d_lon in range(-lon_reach, lon_reach + 1):
+                bucket = self._cells.get((lat_cell + d_lat, (lon_cell + d_lon) % span))
+                if not bucket:
+                    continue
+                for point in bucket:
+                    distance = haversine_km(lat, lon, point["lat"], point["lon"])
+                    if distance <= radius_km:
+                        found.append((distance, point))
+        # Stable sort on distance only: two points at (numerically) the same
+        # distance keep the order the cell scan happened to visit them in,
+        # which is deterministic for one call but not a property of the
+        # points themselves -- a caller that needs a total order over ties
+        # (Task 37's ranked panel does) breaks them on something the points
+        # actually carry, not on this order.
+        found.sort(key=lambda pair: pair[0])
+        return [point for _, point in found]
