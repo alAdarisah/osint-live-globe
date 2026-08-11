@@ -78,7 +78,15 @@ const emptyRaw = () => ({
     cities: fetchedUnscoped(), adsb: fetchedUnscoped(), ais: fetchedUnscoped(),
     firms: fetchedUnscoped(), jamming: fetchedUnscoped(), osmInfra: fetchedUnscoped(),
     dams: fetchedUnscoped(), airports: fetchedUnscoped(), ports: fetchedUnscoped(),
-    outages: fetchedUnscoped(),
+    // "outages" is the country-level poll; "outagesRegions" is the separate
+    // region-level one buildAdminCoverage/buildAdminConnectivity actually read
+    // (see popups.js's own fix note on why the two must not be conflated) --
+    // both marked fetched here for the same reason fetchedUnscoped's own
+    // comment above gives for every other feed in this table: these fixtures
+    // are about polygon clipping and the archive, not about coverage honesty,
+    // so a feed reading "never fetched" here would be an accident, not a case
+    // this file means to exercise.
+    outages: fetchedUnscoped(), outagesRegions: fetchedUnscoped(),
   },
 });
 

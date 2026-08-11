@@ -436,13 +436,21 @@ test("buildAdminConnectivity (state/district card) -- known instance from the br
 
   function raw(overrides) {
     return {
-      ...adminEmptyRaw({ outages: fetchedUnscoped() }),
+      // adminOutageRecord (what buildAdminConnectivity actually reads for a
+      // state/district) is fed entirely by raw.outagesRegions, not
+      // raw.outages -- a separate POLL_CONFIG row with its own fetchCoverage
+      // entry (see popups.js's own fix note on this fold). Both are marked
+      // fetched here so the sub-tests below exercise the region tally itself
+      // rather than a coverage state neither of them is about; the "never
+      // fetched" sub-test overrides fetchCoverage wholesale to get back to
+      // that state on purpose.
+      ...adminEmptyRaw({ outages: fetchedUnscoped(), outagesRegions: fetchedUnscoped() }),
       countries: { features: [usCountryFeature] },
       ...overrides,
     };
   }
 
-  await t.test("outages feed never fetched: says so rather than a bare absent fold", () => {
+  await t.test("outagesRegions feed never fetched: says so rather than a bare absent fold", () => {
     const { sections } = subdivisionCardSections(state, raw({ fetchCoverage: {} }), null);
     const connectivity = sections.find((s) => s.id === "connectivity");
     assert.ok(connectivity);
@@ -524,7 +532,15 @@ test("buildWaterTraffic/buildWaterInfrastructure (water card) -- not loaded vs. 
   });
 
   await t.test("both: checked and genuinely quiet still drop, unchanged from before this task", () => {
-    const CHECKED = { ais: fetchedUnscoped(), cableLandings: fetchedUnscoped(), ports: fetchedUnscoped() };
+    // navalPresence added: buildWaterTraffic also reads it (navalPresenceRegion)
+    // and now checks its coverage too -- see popups.js's own fix note on why
+    // the traffic fold used to only ask about "ais" -- so it has to be marked
+    // fetched here as well, or this becomes the "not loaded" case instead of
+    // "checked and quiet".
+    const CHECKED = {
+      ais: fetchedUnscoped(), cableLandings: fetchedUnscoped(), ports: fetchedUnscoped(),
+      navalPresence: fetchedUnscoped(),
+    };
     const { sections } = waterCardSections(sea, waterRaw(CHECKED), null);
     assert.equal(sections.find((s) => s.id === "traffic"), undefined);
     assert.equal(sections.find((s) => s.id === "infrastructure"), undefined);
@@ -535,7 +551,9 @@ test("buildWaterTraffic/buildWaterInfrastructure (water card) -- not loaded vs. 
     // (it is a pre-filter only) -- a missing bounds must not itself read as
     // "did not look" for the water card the way it correctly does for a
     // country's count-based folds. See emptyFoldReason's own boundsOptional.
-    const raw = waterRaw({ ais: fetchedUnscoped() });
+    // navalPresence marked fetched too -- see the "checked and genuinely
+    // quiet" case just above for why buildWaterTraffic now checks it as well.
+    const raw = waterRaw({ ais: fetchedUnscoped(), navalPresence: fetchedUnscoped() });
     raw.ais = [{ lat: 90, lon: 90, ship_type: 80 }]; // real data, well outside the sea's polygon
     const { sections } = waterCardSections(sea, raw, null);
     assert.equal(sections.find((s) => s.id === "traffic"), undefined, "checked and empty, not 'did not look'");
