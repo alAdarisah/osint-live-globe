@@ -189,3 +189,59 @@ test("coverageLegendHtml: rendered output distinguishes all five states, not jus
   const colors = new Set(Object.values(COVERAGE_STATE_STYLE).map((s) => s.color));
   assert.equal(colors.size, 4); // global and scoped intentionally share one colour
 });
+
+
+// The drift this list is exposed to, closed the way referenceOnlyFeeds.test.js
+// closed its own.
+//
+// COVERAGE_OVERLAY_SOURCES is hand-maintained, and the module's own comment
+// explains honestly why: coverageOverlay.js has to stay importable from a
+// plain `node --test` run, and useOsintData.js pulls in React at module scope,
+// so the list cannot be derived at import time.
+//
+// That is a constraint on the *module*, not on a *test*. This file already
+// carries the registerHooks shim, so it can import the real POLL_CONFIG and
+// check the pairing here instead -- exactly the move referenceOnlyFeeds.test.js
+// made after a hand-copied list let the same feed-wiring bug recur three times
+// on this branch. A list nothing checks is how that happened; the fix each time
+// was not a better list, it was a test that reads the real one.
+const { POLL_CONFIG } = await import("../src/hooks/useOsintData.js");
+
+test("every polled source appears in the coverage overlay's own list", async (t) => {
+  const listed = new Set(COVERAGE_OVERLAY_SOURCES.map((entry) => entry.key));
+
+  await t.test("no POLL_CONFIG key is missing from COVERAGE_OVERLAY_SOURCES", () => {
+    const missing = POLL_CONFIG.map((entry) => entry.key).filter((key) => !listed.has(key));
+    assert.deepEqual(
+      missing, [],
+      "these sources are polled and record fetch coverage, but the overlay does not know about "
+        + "them -- so the one layer whose job is to say where this map has looked would quietly "
+        + "omit them, which is the exact failure it exists to prevent"
+    );
+  });
+
+  await t.test("no listed key is a source that does not exist", () => {
+    // The other direction: a key removed from POLL_CONFIG but left here would
+    // render forever as "unknown", inventing a source the app no longer has.
+    // The one-shot fetches are legitimately absent from POLL_CONFIG, so they
+    // are named rather than inferred.
+    const ONE_SHOT = new Set([
+      "cableLandings", "infra", "railways", "powerLines", "water",
+    ]);
+    const polled = new Set(POLL_CONFIG.map((entry) => entry.key));
+    const orphaned = [...listed].filter((key) => !polled.has(key) && !ONE_SHOT.has(key));
+    assert.deepEqual(
+      orphaned, [],
+      "these keys are in the overlay's list but are neither polled nor a known one-shot fetch"
+    );
+  });
+
+  await t.test("every entry carries a label a reader can actually read", () => {
+    for (const entry of COVERAGE_OVERLAY_SOURCES) {
+      assert.ok(
+        typeof entry.label === "string" && entry.label.trim().length > 0,
+        `${entry.key} has no label, so the legend would show a bare source key`
+      );
+    }
+  });
+});
