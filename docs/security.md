@@ -9,8 +9,11 @@ Two doors into the same app, and they are the whole access model:
 
 | Door | Reached by | Who gets it | Can write |
 |------|-----------|-------------|-----------|
-| `:8080` → nginx `:80` | `ssh -L 8080:localhost:8080` **over the tailnet** | whoever holds the server's SSH key **and a node you approved** | yes, admin panel included |
+| `:8080` → nginx `:80` | `http://osint-server:8080` on the tailnet, or `ssh -L` over it | **any node you approved** — no key needed since 2026-08-14 | yes, admin panel included |
 | `:8081` | the Cloudflare tunnel, public URL | anyone with the link | no |
+
+Grafana (`:3000`) and Prometheus (`:9090`) are reachable the same way, at
+`http://osint-server:3000` and `:9090`.
 
 Everything else published by `docker-compose.yml` — Postgres 5432, the replica
 5433, the backend 8000, Prometheus 9090, Grafana 3000 — binds `127.0.0.1` on the
@@ -94,8 +97,8 @@ independent layers say so:
 
 *The policy* (`ops/tailscale/policy.hujson`, applied at
 <https://login.tailscale.com/admin/acls>) contains exactly one grant —
-`autogroup:owner` → `tag:server` on `tcp:22` — and names `tag:server` as the
-source of nothing. The filter is stateful, so replies inside a session the PC
+`autogroup:owner` → `tag:server` on `tcp:22`, `tcp:3000`, `tcp:8080` and
+`tcp:9090` — and names `tag:server` as the source of nothing. The filter is stateful, so replies inside a session the PC
 opened flow back, while a connection the server tries to open on its own matches
 no rule. What the server actually receives from the control plane is a single
 inbound rule: the PC's address, this server's address, port 22, TCP.
@@ -120,6 +123,42 @@ compromised Tailscale control plane — is deliberately off: the two are mutuall
 exclusive, and lock wants two or more signing nodes plus ten disablement secrets
 that make the tailnet unrecoverable if lost. With one client device that trade
 is not worth taking. Worth revisiting if a second permanent machine joins.
+
+### The panels on the tailnet
+
+Since 2026-08-14 the three panels are reachable directly, without an `ssh -L`
+forward:
+
+| | |
+|---|---|
+| `http://osint-server:3000` | Grafana |
+| `http://osint-server:8080` | the app, admin panel included |
+| `http://osint-server:9090` | Prometheus |
+
+These are `tailscale serve` proxies — tailscaled's own listeners, bound to the
+tailnet address `100.74.206.20` rather than `0.0.0.0`, forwarding to the
+existing loopback ports. **Docker's bindings did not change**: every service
+still publishes on `127.0.0.1`, and none of these ports answers on
+`37.27.38.223`. Verified by asking the public address for each of 3000, 8080,
+9090 and 22, and getting nothing.
+
+The `ssh -L` forwards still work and `Open Map - Admin.bat` still uses one.
+Nothing was taken away; a shorter path was added.
+
+**What this cost.** `:8080` writes and has no authentication of its own — see
+"Writes are refused on the public listener" above, which protects the *public*
+door only. Reaching it used to require the server's SSH private key. It now
+requires being on the tailnet, which means an approved device. That is a real
+reduction in defence-in-depth, taken deliberately: the key was one factor and
+device approval is another, but they are not the same factor, and a laptop
+already logged into Tailscale is a lower bar than a private key.
+
+Grafana (`:3000`) has its own login. Prometheus (`:9090`) has none but is
+read-only. `:8080` is the one that matters.
+
+If that trade stops looking right, drop `"tcp:8080"` from the grant in
+`ops/tailscale/policy.hujson` and re-apply. Grafana and Prometheus keep working
+and the admin panel goes back to arriving over `ssh -L`, key required.
 
 **If you lose the tailnet, the way back in is the Hetzner Cloud console** —
 noVNC and rescue mode, out of band, independent of the network configuration.
