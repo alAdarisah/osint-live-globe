@@ -10,8 +10,8 @@
 // sanctionsBoardLogic.js/SanctionsBoard.jsx already establishes.
 import { useEffect, useMemo, useState } from "react";
 import {
-  EXPORT_LAYERS, buildExportAnalysis, buildExportRows, buildGeoJSON, buildCSV,
-  estimateExportBytes, exceedsWarningThreshold, sizeWarningMessage, layerStatusReason,
+  EXPORT_LAYERS, LAYER_STATUS, buildExportAnalysis, buildExportRows, buildGeoJSON, buildCSV,
+  estimateExportBytes, exceedsWarningThreshold, sizeWarningMessage, layerReasonText,
   layerCountLabel, exportSummaryLine, downloadButtonLabel,
 } from "../map/exportBuilder";
 
@@ -22,10 +22,20 @@ import {
 // of array filters over data already in memory.
 const REFRESH_INTERVAL_MS = 5000;
 
+// A NOT_EXPORTABLE row (currently only satellites -- see exportBuilder.js's
+// EXCLUDED_LAYERS) has no checkbox to tick: it is never selectable, whatever
+// the reader does, so the row renders disabled with its own stated reason as
+// the tooltip rather than pretending it is one more layer choice.
 function LayerRow({ layer, checked, onToggle }) {
+  const notExportable = layer.status === LAYER_STATUS.NOT_EXPORTABLE;
   return (
-    <label className="export-layer-row" title={layerStatusReason(layer.status)}>
-      <input type="checkbox" checked={checked} onChange={(e) => onToggle(layer.key, e.target.checked)} />
+    <label className={`export-layer-row${notExportable ? " export-layer-row-disabled" : ""}`} title={layerReasonText(layer)}>
+      <input
+        type="checkbox"
+        checked={notExportable ? false : checked}
+        disabled={notExportable}
+        onChange={(e) => onToggle(layer.key, e.target.checked)}
+      />
       <span className="export-layer-label">{layer.label}</span>
       <span className={`export-layer-count export-layer-status-${layer.status}`}>{layerCountLabel(layer)}</span>
     </label>
@@ -138,8 +148,8 @@ export default function ExportDialog({ mapApi, health, onClose }) {
           <p className="export-note">
             Every row in this file carries its own source, publisher, licence and evidence type (measured / reported
             / derived / inferred) -- see the file's own leading lines (CSV) or its <code>provenance</code> field
-            (GeoJSON). A layer left out below is either switched off on the map, its feed has not loaded, or you have
-            unchecked it -- each row here says which.
+            (GeoJSON). A layer with no rows below is switched off on the map, its feed has not loaded, you have
+            unchecked it, or -- greyed out, unticked -- it cannot be exported at all; hover a row for which.
           </p>
           <div className="export-format-row">
             <label>
@@ -159,8 +169,9 @@ export default function ExportDialog({ mapApi, health, onClose }) {
             ))}
           </div>
           <p className="export-scope-note">
-            Point layers only -- shipping lanes, cables, railways, power lines, water bodies and administrative
-            boundaries are line/polygon geometry this export does not yet cover.
+            Point layers only -- shipping lanes, submarine cable routes, railways, power lines, water bodies and
+            administrative boundaries are line/polygon geometry this export does not yet cover. Every other point
+            layer this map draws is listed above, including the ones with nothing to export right now.
           </p>
           {nothingSelected && (
             <p className="export-warning">Select at least one layer to export.</p>

@@ -5003,6 +5003,10 @@ tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
 .export-layer-status-included { color: var(--text-bright); }
 .export-layer-status-down, .export-layer-status-off { color: var(--text-dim); }
 .export-layer-status-empty { color: #ff9500; }
+.export-layer-status-not_exportable { color: var(--text-dim); font-style: italic; }
+/* A NOT_EXPORTABLE row (see ExportDialog.jsx's LayerRow) -- never selectable,
+   so it reads as unavailable rather than as one more choice sitting unticked. */
+.export-layer-row-disabled { opacity: 0.55; cursor: default; }
 .export-scope-note {
   margin: 0;
   color: var(--text-dim);

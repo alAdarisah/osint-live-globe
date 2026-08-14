@@ -29,16 +29,29 @@
 //    That is deliberate and stated, not an oversight: see buildCSV's own
 //    note on why a leading comment block alone would not be enough.
 //
-// **Scope**: only layers whose records already carry the map's own uniform
+// **Scope**: every layer whose records already carry the map's own uniform
 // point shape -- a numeric `.lat`/`.lon` directly on the item, the same
 // contract createMapController.js's renderMarkerLayer relies on (see its own
-// `typeof item.lat !== "number"` guard). Line and polygon layers (shipping
-// lanes, cables, railways, power lines, water bodies, country/admin
-// boundaries) are out of scope for this task -- exporting them honestly would
-// mean GeoJSON LineString/Polygon geometry and a CSV shape (WKT? one row per
+// `typeof item.lat !== "number"` guard) and the same contract ID_FIELD/
+// DECORATORS (createMapController.js:377-419) already use to decide which
+// layers that generic renderer draws. That table -- plus ais/adsb, which have
+// their own renderers but the identical item shape -- is the actual boundary
+// of this file's EXPORT_LAYERS below, checked one by one against those two
+// tables rather than asserted. `satellites` is the one candidate deliberately
+// left out, and it is left out *visibly*: see EXCLUDED_LAYERS and its own
+// comment for why, and layers()/computeProvenanceHeader for how that reason
+// reaches the dialog and the exported file rather than staying only in this
+// comment.
+//
+// Line and polygon layers (shipping lanes, cables' own routes, railways,
+// power lines, water bodies, country/admin boundaries) are out of scope for
+// this task for a different reason -- exporting them honestly would mean
+// GeoJSON LineString/Polygon geometry and a CSV shape (WKT? one row per
 // vertex?) this task's brief does not ask for, and inventing one under time
 // pressure risks the exact silent-corruption failure this whole feature
-// exists to prevent. Left out, not hidden: ExportDialog.jsx says so.
+// exists to prevent. `cableLandings` (the point half of the same module) is
+// included below; the line geometry it comes paired with is not, and
+// ExportDialog.jsx's own scope note says so.
 
 // ---------------------------------------------------------------------------
 // The four-word vocabulary, exactly as this project's own rule states it
@@ -51,6 +64,14 @@ export const INFERRED = "inferred";
 
 const NOT_STATED = "not stated in the source";
 
+// The control panel's own idea of which /api/health key answers "when did
+// this layer's data last land" for a given layer key -- imported, not
+// re-typed, so this module's notion of "is this feed down" cannot silently
+// drift from LayerCheck.jsx's freshness badge the way a hand-copied string
+// could after either file renamed a key. See that file's own header note for
+// which layers it deliberately omits (curated/static feeds with no poller).
+import { LAYER_HEALTH_KEY } from "../components/controlPanel/layerHealthKeys.js";
+
 /**
  * One entry per exportable layer. Every `source` field below was read out of
  * the codebase, not typed from memory -- see the comment on each entry for
@@ -61,11 +82,36 @@ const NOT_STATED = "not stated in the source";
  * guess.
  *
  * `healthKey` is the /api/health key this layer's freshness is tracked
- * under -- reused from frontend/src/components/controlPanel/layerHealthKeys.js
- * rather than re-derived, so this module's idea of "is this feed down" can
- * never drift from the control panel's own freshness badge. null where that
- * table has no entry (a layer with no background poller of its own).
+ * under. Pulled from LAYER_HEALTH_KEY above wherever that table has an entry
+ * for this exact key or an equivalent one (aisNavy/aisTanker/aisCivilian all
+ * name the same "ais" health entry, so any one of them is as good as another
+ * as the import site -- see the `ais`/`adsb` entries below for which). A
+ * five-entry gap in LAYER_HEALTH_KEY -- `cableLandings`, `railwayPoints`,
+ * `outagePoints`, `outageRegionPoints` have no row there at all, and that
+ * table's own header note says a missing key means "no background poller",
+ * which is not true for these four -- so those five (four keys, five
+ * comments) are verified directly against the backend module's own
+ * `registry.register("<name>", ...)` call instead, cited per entry, rather
+ * than imported from a table that does not cover them.
  */
+// OSM's own licence, stated once here rather than repeated on every one of
+// the five Overpass-derived entries below (osmInfra, railwayPoints,
+// powerPlants, airDefense all read the identical parse_overpass() output --
+// see createMapController.js's applyData, which redraws all three of the
+// split-out layers together whenever "a fresh OSM sweep lands"). Not
+// asserted from memory: backend/sources/deflock.py's own module docstring
+// states it in full for OpenStreetMap data ("Underlying data is
+// OpenStreetMap under ODbL 1.0"), and osm_infra.py's own docstring names
+// OpenStreetMap as this module's source too -- same upstream database,
+// fetched by the same kind of Overpass query, so the licence that already
+// applies to one applies to the other. None of these four modules restate it
+// themselves (osm_infra.py has no "licence"/"ODbL" text of its own), which
+// is exactly why this comment exists instead of four copies each claiming to
+// have found it locally.
+const OSM_OVERPASS_SOURCE = {
+  name: "OpenStreetMap contributors (via Overpass)", publisher: "OpenStreetMap contributors", licence: "ODbL", url: null,
+};
+
 export const EXPORT_LAYERS = [
   {
     key: "events",
@@ -80,7 +126,7 @@ export const EXPORT_LAYERS = [
     // the fused record's other named input (see backend/sources/acled.py's
     // own "ucdp" source tag). Neither module states a licence.
     source: { name: "ACLED / UCDP", publisher: null, licence: null, url: null },
-    healthKey: "events",
+    healthKey: LAYER_HEALTH_KEY.events,
   },
   {
     key: "gdelt",
@@ -88,7 +134,7 @@ export const EXPORT_LAYERS = [
     provenance: REPORTED,
     // Attribution.jsx: "GDELT Project". No licence stated in backend/sources/gdelt.py.
     source: { name: "GDELT Project", publisher: null, licence: null, url: null },
-    healthKey: "gdelt",
+    healthKey: LAYER_HEALTH_KEY.gdelt,
   },
   {
     key: "officials",
@@ -99,7 +145,7 @@ export const EXPORT_LAYERS = [
     // -- read per-row where present, same as events above. No single
     // publisher or licence applies to the whole layer.
     source: { name: null, publisher: null, licence: null, url: null },
-    healthKey: "officials",
+    healthKey: LAYER_HEALTH_KEY.officials,
   },
   {
     key: "firms",
@@ -109,7 +155,7 @@ export const EXPORT_LAYERS = [
     provenance: MEASURED,
     // Attribution.jsx: "NASA FIRMS". No licence stated in backend/sources/firms.py.
     source: { name: "NASA FIRMS", publisher: "NASA", licence: null, url: null },
-    healthKey: "firms",
+    healthKey: LAYER_HEALTH_KEY.firms,
   },
   {
     key: "ais",
@@ -118,7 +164,10 @@ export const EXPORT_LAYERS = [
     provenance: MEASURED,
     // Attribution.jsx: "aisstream.io". No licence stated in backend/ingest's ais module.
     source: { name: "aisstream.io", publisher: null, licence: null, url: null },
-    healthKey: "ais",
+    // LAYER_HEALTH_KEY has no bare "ais" row -- only the three drawn splits
+    // (aisNavy/aisTanker/aisCivilian), which all name the same "ais" health
+    // entry. aisNavy is picked arbitrarily among equals as the import site.
+    healthKey: LAYER_HEALTH_KEY.aisNavy,
   },
   {
     key: "adsb",
@@ -126,7 +175,10 @@ export const EXPORT_LAYERS = [
     provenance: MEASURED,
     // Attribution.jsx: "OpenSky Network". No licence stated in the ingest module.
     source: { name: "OpenSky Network", publisher: null, licence: null, url: null },
-    healthKey: "adsb",
+    // Same "no bare key" situation as ais above -- adsbMilitary is one of
+    // three equally-valid splits (adsbMilitary/adsbCivilian/adsbFlagged),
+    // all naming the same "adsb" health entry.
+    healthKey: LAYER_HEALTH_KEY.adsbMilitary,
   },
   {
     key: "jamming",
@@ -141,7 +193,7 @@ export const EXPORT_LAYERS = [
       name: "gpsjam.org (derived from ADS-B Exchange GPS-quality reports)",
       publisher: null, licence: null, url: "https://gpsjam.org",
     },
-    healthKey: "jamming",
+    healthKey: LAYER_HEALTH_KEY.jamming,
   },
   {
     key: "airports",
@@ -157,7 +209,7 @@ export const EXPORT_LAYERS = [
       name: "OurAirports", publisher: "OurAirports", licence: "Public domain",
       url: "https://davidmegginson.github.io/ourairports-data/airports.csv",
     },
-    healthKey: "airports",
+    healthKey: LAYER_HEALTH_KEY.airports,
   },
   {
     key: "ports",
@@ -167,7 +219,7 @@ export const EXPORT_LAYERS = [
     // embedded per record -- read per-row in buildExportRow when present,
     // this is the static fallback.
     source: { name: "NGA World Port Index (Pub 150)", publisher: "NGA World Port Index (Pub 150)", licence: "US Government work, public domain", url: null },
-    healthKey: "ports",
+    healthKey: LAYER_HEALTH_KEY.ports,
   },
   {
     key: "dams",
@@ -178,7 +230,7 @@ export const EXPORT_LAYERS = [
       name: "Global Dam Watch (GDW v1.0)", publisher: "Global Dam Watch (GDW v1.0)",
       licence: "CC BY 4.0 (creativecommons.org/licenses/by/4.0)", url: null,
     },
-    healthKey: "dams",
+    healthKey: LAYER_HEALTH_KEY.dams,
   },
   {
     key: "deflock",
@@ -189,7 +241,7 @@ export const EXPORT_LAYERS = [
     // carries that attribution ... so it reaches the reader"), so this is
     // read per-row almost every time; this is only the fallback.
     source: { name: "OpenStreetMap contributors (via DeFlock)", publisher: null, licence: "ODbL", url: null },
-    healthKey: "deflock",
+    healthKey: LAYER_HEALTH_KEY.deflock,
   },
   {
     key: "czib",
@@ -197,7 +249,235 @@ export const EXPORT_LAYERS = [
     provenance: REPORTED,
     // backend/sources/czib.py's own PUBLISHER constant, embedded per record. No licence stated.
     source: { name: "EASA Conflict Zone Information Bulletins", publisher: "EASA", licence: null, url: null },
-    healthKey: "czib",
+    healthKey: LAYER_HEALTH_KEY.czib,
+  },
+  // ---- added on review: the rest of createMapController.js's ID_FIELD/
+  // DECORATORS point-layer contract (lines 377-419), plus ais/adsb above --
+  // every layer that table lists and this file had not yet covered. ------
+  {
+    key: "conflictHistory",
+    label: "Verified conflict record (UCDP GED Candidate)",
+    // Same UCDP candidate file as events' "ucdp" rows, parsed a second time
+    // as the full reviewed record rather than a live window -- see
+    // backend/sources/acled.py's _fetch_ucdp_history and _parse_ucdp_csv,
+    // which stamps "source": "ucdp" per record just as the live half does.
+    // A compiled incident report, not an instrument reading -- REPORTED.
+    provenance: REPORTED,
+    source: { name: "UCDP GED Candidate dataset", publisher: null, licence: null, url: null },
+    healthKey: LAYER_HEALTH_KEY.conflictHistory,
+  },
+  {
+    key: "hazards",
+    label: "Earthquakes & volcanic activity (USGS / Smithsonian GVP)",
+    // Two publishers under one layer, split by `kind` -- see
+    // backend/sources/hazards.py's own module docstring. An earthquake is a
+    // seismometer-network reading (MEASURED); a volcano entry is Smithsonian
+    // GVP's weekly written report, explicitly "a report about a week, not a
+    // live sensor reading" in that module's own words (REPORTED). Handled
+    // per-row in buildExportRow via PROVENANCE_OVERRIDE below, not by a
+    // single default here.
+    provenance: MEASURED,
+    // Each record carries its own "publisher" ("USGS" or "Smithsonian GVP /
+    // USGS") -- hazards.py:148/264 -- read per-row; this is only the
+    // fallback for the unlikely case a record arrives without one.
+    source: { name: null, publisher: null, licence: null, url: null },
+    healthKey: LAYER_HEALTH_KEY.hazards,
+  },
+  {
+    key: "darkVessels",
+    label: "Dark vessels & ship-to-ship transfers (this map's own inference)",
+    // backend/sources/dark_vessels.py's own docstring, in full: "So every
+    // record carries `inferred: True`". Every row therefore takes the
+    // INFERRED override in buildExportRow regardless of this default -- kept
+    // as INFERRED here too so the two can never read differently.
+    provenance: INFERRED,
+    // Not a third-party publisher: this layer is built entirely from AIS
+    // history this backend already recorded (that module's own words: "This
+    // module fetches nothing"), so there is no external source/licence to
+    // cite -- the source *is* this map.
+    source: { name: "This map's own recorded AIS history (backend/sources/dark_vessels.py)", publisher: null, licence: null, url: null },
+    healthKey: LAYER_HEALTH_KEY.darkVessels,
+  },
+  {
+    key: "cableLandings",
+    label: "Submarine cable landing points (TeleGeography)",
+    provenance: REPORTED,
+    // backend/sources/cables.py's own module docstring: "TeleGeography
+    // publish the map behind submarinecablemap.com as plain GeoJSON with no
+    // key". No licence stated in that module.
+    source: {
+      name: "TeleGeography (submarinecablemap.com)", publisher: "TeleGeography", licence: null,
+      url: "https://www.submarinecablemap.com/api/v3/landing-point/landing-point-geo.json",
+    },
+    // Not in LAYER_HEALTH_KEY -- see this file's own header note. Verified
+    // directly: backend/sources/cables.py:124 registers one health entry,
+    // `registry.register("cables", ...)`, shared by both the cable routes
+    // (out of this export's scope, see the file-level scope note) and these
+    // landing points, since both come from the same poller.
+    healthKey: "cables",
+  },
+  {
+    key: "launches",
+    label: "Orbital launches (Launch Library 2)",
+    provenance: REPORTED,
+    // backend/sources/launches.py's own module docstring: "The Launch
+    // Library 2 API is public and keyless". No licence stated.
+    source: {
+      name: "Launch Library 2 (The Space Devs)", publisher: null, licence: null,
+      url: "https://ll.thespacedevs.com/2.3.0/launches",
+    },
+    healthKey: LAYER_HEALTH_KEY.launches,
+  },
+  {
+    key: "osmInfra",
+    label: "Infrastructure (OpenStreetMap)",
+    provenance: REPORTED,
+    source: OSM_OVERPASS_SOURCE,
+    healthKey: LAYER_HEALTH_KEY.osmInfra,
+  },
+  {
+    key: "railwayPoints",
+    label: "Railway stations, halts, yards & border crossings (OpenStreetMap)",
+    provenance: REPORTED,
+    source: OSM_OVERPASS_SOURCE,
+    // Not in LAYER_HEALTH_KEY under this key (that table lists osmInfra/
+    // powerPlants/airDefense as sharing "osm_infra" but omits railwayPoints,
+    // which comes from the identical Overpass sweep -- see
+    // createMapController.js's applyData: "railwayPoints/powerPlants/
+    // airDefense have just been rebuilt above; redraw all three whenever a
+    // fresh OSM sweep lands"). Verified directly against that comment rather
+    // than imported.
+    healthKey: "osm_infra",
+  },
+  {
+    key: "powerPlants",
+    label: "Power plants (OpenStreetMap)",
+    provenance: REPORTED,
+    source: OSM_OVERPASS_SOURCE,
+    healthKey: LAYER_HEALTH_KEY.powerPlants,
+  },
+  {
+    key: "airDefense",
+    label: "Air defence & radar sites (OpenStreetMap)",
+    provenance: REPORTED,
+    source: OSM_OVERPASS_SOURCE,
+    healthKey: LAYER_HEALTH_KEY.airDefense,
+  },
+  {
+    key: "gfwGaps",
+    label: "AIS disabling events (Global Fishing Watch)",
+    // backend/sources/gfw_gaps.py's own docstring: "every record carries
+    // `inferred: True`" (line 275: "inferred": True) -- same convention as
+    // darkVessels above, and every row takes the override regardless.
+    provenance: INFERRED,
+    // gfw_gaps.py embeds "publisher"/"license" per record already
+    // ("Global Fishing Watch" / "CC BY-NC 4.0", lines 270-271) -- this is
+    // the fallback.
+    source: { name: "Global Fishing Watch", publisher: "Global Fishing Watch", licence: "CC BY-NC 4.0", url: null },
+    healthKey: LAYER_HEALTH_KEY.gfwGaps,
+  },
+  {
+    key: "gfwDetections",
+    label: "Satellite vessel detections (Global Fishing Watch)",
+    // A satellite detection -- "the first thing in this map's maritime stack
+    // entitled to say 'detected'" (this layer's own on-screen "About this
+    // layer" text). No `inferred` flag set (unlike the two GFW/dark-vessel
+    // layers above), so MEASURED is this layer's real default, not merely a
+    // fallback.
+    provenance: MEASURED,
+    // gfw_detections.py's own PUBLISHER/LICENSE constants (lines 123-124),
+    // embedded per record -- this is the fallback.
+    source: {
+      name: "Global Fishing Watch", publisher: "Global Fishing Watch",
+      licence: "CC BY-NC 4.0 (creativecommons.org/licenses/by-nc/4.0)", url: null,
+    },
+    healthKey: LAYER_HEALTH_KEY.gfwDetections,
+  },
+  {
+    key: "floods",
+    label: "Flood alerts (GDACS)",
+    // backend/sources/floods.py's own docstring: "A GDACS flood point is a
+    // modelled centroid over an affected basin -- GDACS labels it Centroid
+    // itself". A model output over the underlying hydrological signal, not a
+    // direct reading -- DERIVED, the same word this file already uses for
+    // jamming's own model-computed centroid.
+    provenance: DERIVED,
+    // floods.py embeds "publisher": "GDACS (European Commission JRC / UN)"
+    // per record (line 283) -- this is the fallback. No licence stated.
+    source: { name: "GDACS (European Commission JRC / UN)", publisher: "GDACS (European Commission JRC / UN)", licence: null, url: null },
+    healthKey: LAYER_HEALTH_KEY.floods,
+  },
+  {
+    key: "railLive",
+    label: "Live trains (Digitraffic, Finland only)",
+    // A GPS position report from a live train, the same kind of claim as
+    // AIS/ADS-B above -- MEASURED.
+    provenance: MEASURED,
+    // digitraffic_rail.py's own PUBLISHER/LICENSE constants, embedded per record.
+    source: { name: "Fintraffic / digitraffic.fi", publisher: "Fintraffic / digitraffic.fi", licence: "CC 4.0 BY (Source: Fintraffic / digitraffic.fi)", url: null },
+    healthKey: LAYER_HEALTH_KEY.railLive,
+  },
+  {
+    key: "railStations",
+    label: "Train stations (Digitraffic, Finland only)",
+    // A station registry entry -- REPORTED, not a live reading.
+    provenance: REPORTED,
+    source: { name: "Fintraffic / digitraffic.fi", publisher: "Fintraffic / digitraffic.fi", licence: "CC 4.0 BY (Source: Fintraffic / digitraffic.fi)", url: null },
+    healthKey: LAYER_HEALTH_KEY.railStations,
+  },
+  {
+    key: "outagePoints",
+    label: "Internet outages by country (IODA) -- plotted at a country-representative point, not a location IODA reports",
+    // backend/sources/outages.py's own docstring: IODA's score is "a
+    // composite" across three independent detectors (BGP withdrawals, active
+    // probing, darknet traffic) -- arithmetic combining several measured/
+    // reported signals into one figure, which this project's vocabulary
+    // defines as DERIVED. The plotted position is this map's own choice
+    // (createMapController.js's rebuildOutagePoints uses each country's
+    // representative point, not a coordinate IODA supplies), which is why
+    // the label itself carries that caveat rather than leaving it implicit.
+    provenance: DERIVED,
+    // outages.py embeds "publisher": "IODA (Georgia Tech)" per record
+    // (lines 283/326) -- this is the fallback. No licence stated.
+    source: { name: "IODA (Georgia Tech)", publisher: "IODA (Georgia Tech)", licence: null, url: null },
+    // Not in LAYER_HEALTH_KEY. Verified directly:
+    // backend/sources/outages.py:342 registers `registry.register("outages", ...)`
+    // for the country pass raw.outagePoints is built from.
+    healthKey: "outages",
+  },
+  {
+    key: "outageRegionPoints",
+    label: "Internet outages by region (IODA) -- plotted at a region-representative point, not a location IODA reports",
+    provenance: DERIVED,
+    source: { name: "IODA (Georgia Tech)", publisher: "IODA (Georgia Tech)", licence: null, url: null },
+    // Verified directly: backend/sources/outages.py:348 registers
+    // `registry.register("outages_regions", ...)` for the region pass
+    // raw.outageRegionPoints is built from.
+    healthKey: "outages_regions",
+  },
+];
+
+/**
+ * Layers with the identical `.lat`/`.lon` point contract every EXPORT_LAYERS
+ * entry above shares, but left out of the export anyway -- for a stated
+ * reason, shown to the reader in both ExportDialog.jsx (a disabled row) and
+ * the exported file's own header (see layers() below and csvHeaderLines'
+ * "not represented, and why" section), not only in this comment. Review
+ * finding on this task: a stated-but-invisible exclusion is the same failure
+ * this task's own brief names -- "found nothing" indistinguishable from "did
+ * not look" -- applied to a whole layer rather than a row.
+ */
+export const EXCLUDED_LAYERS = [
+  {
+    key: "satellites",
+    label: "Satellites (stations + military)",
+    reason:
+      "Its position is computed client-side via SGP4 from CelesTrak's orbital elements at render time "
+      + "(decorateSatellite/tickSatElementLayer in map/decorators.js and createMapController.js), not fetched as "
+      + "a record with a stored coordinate the way every other layer here is. raw.satellites holds catalogue "
+      + "metadata, not a lat/lon this export's row model can read -- exporting a position would mean freezing a "
+      + "propagated moment this map does not otherwise persist, which is a different feature from \"what's on "
+      + "screen\" and out of scope for this task.",
   },
 ];
 
@@ -218,6 +498,18 @@ export function metaForLayer(key) {
   return LAYER_META_BY_KEY[key] || unknownLayerMeta(key);
 }
 
+/**
+ * Per-layer provenance rules finer than "every row gets the same default
+ * word" -- currently only `hazards`, whose two kinds are two different
+ * claims (see that entry's own comment above). Checked in buildExportRow
+ * *after* the `item.inferred === true` override (which always wins -- an
+ * explicit inference flag outranks a kind-based guess) and *before* falling
+ * back to the layer's own `provenance` default.
+ */
+const PROVENANCE_OVERRIDE = {
+  hazards: (item) => (item?.kind === "volcano" ? REPORTED : MEASURED),
+};
+
 // ---------------------------------------------------------------------------
 // Per-layer status -- the four-facts-not-one ruling this task's brief states
 // explicitly: a layer that is switched off, a layer that is on but has
@@ -230,6 +522,10 @@ export const LAYER_STATUS = {
   DOWN: "down",         // included, but nothing has ever loaded for this layer's feed
   EMPTY: "empty",       // included, has data, but none of it falls inside the current viewport
   INCLUDED: "included", // included, and at least one row is inside the current viewport
+  // EXCLUDED_LAYERS only -- not selectable at all, for a stated architectural
+  // reason (see that table's own `reason` field), not a viewport/feed fact
+  // any of the five states above describes.
+  NOT_EXPORTABLE: "not_exportable",
 };
 
 /**
@@ -263,9 +559,20 @@ export function layerStatusReason(status) {
       return "Included, but nothing from this layer falls inside the current viewport.";
     case LAYER_STATUS.INCLUDED:
       return "Included.";
+    case LAYER_STATUS.NOT_EXPORTABLE:
+      return "Not available for export.";
     default:
       return "";
   }
+}
+
+/** The free-text reason a reader sees for a non-included layer -- an
+ * EXCLUDED_LAYERS entry's own stated `reason` when it has one (always, for
+ * NOT_EXPORTABLE), otherwise the generic per-status sentence above. One
+ * function so every caller (the dialog's row title, the CSV/GeoJSON "not
+ * represented, and why" section) reads the same words. */
+export function layerReasonText(layer) {
+  return layer?.reason || layerStatusReason(layer?.status);
 }
 
 /**
@@ -274,21 +581,30 @@ export function layerStatusReason(status) {
  * createMapController's exportLayerRecords -- see that method's own note for
  * why { rows, total } rather than just an array.
  *
+ * Includes EXCLUDED_LAYERS too, always LAYER_STATUS.NOT_EXPORTABLE and never
+ * selectable -- see this module's header note on why an excluded layer has
+ * to be visible in the analysis rather than simply absent from it.
+ *
  * @param {Set<string>} selectedKeys
  * @param {Record<string, boolean>} mapOn   layerState.on
  * @param {object} health                   the whole /api/health body
  * @param {(key: string) => {rows: object[], total: number}} recordsFor
  */
 export function buildExportAnalysis({ selectedKeys, mapOn, health, recordsFor }) {
-  return EXPORT_LAYERS.map((meta) => {
+  const exportable = EXPORT_LAYERS.map((meta) => {
     const included = selectedKeys.has(meta.key);
     const { rows, total } = included ? (recordsFor(meta.key) || { rows: [], total: 0 }) : { rows: [], total: 0 };
     const healthEntry = meta.healthKey ? health?.[meta.healthKey] : null;
     const status = classifyLayerStatus({
       included, mapOn: !!mapOn?.[meta.key], total, viewportCount: rows.length, healthEntry,
     });
-    return { key: meta.key, label: meta.label, status, count: rows.length, total, rows, healthEntry };
+    return { key: meta.key, label: meta.label, status, count: rows.length, total, rows, healthEntry, reason: null };
   });
+  const excluded = EXCLUDED_LAYERS.map((l) => ({
+    key: l.key, label: l.label, status: LAYER_STATUS.NOT_EXPORTABLE,
+    count: 0, total: 0, rows: [], healthEntry: null, reason: l.reason,
+  }));
+  return [...exportable, ...excluded];
 }
 
 // ---------------------------------------------------------------------------
@@ -327,11 +643,16 @@ export function buildExportRow(item, layerKey, { generatedAt, healthEntry } = {}
     properties[k] = flattenValue(v);
   }
   // Global-constraints' own rule: a record carrying an inferred value sets
-  // `inferred: true`. When it does, that outranks this layer's default word
-  // -- an inferred position exported next to a measured one from the same
-  // layer must not read identically, which is this task's own named failure
-  // case.
-  const provenance = item?.inferred === true ? INFERRED : (meta.provenance || null);
+  // `inferred: true`. When it does, that outranks everything else -- an
+  // inferred position exported next to a measured one from the same layer
+  // must not read identically, which is this task's own named failure case.
+  // Next, a layer-specific override (currently only hazards' earthquake-vs-
+  // volcano split -- see PROVENANCE_OVERRIDE's own comment); only then the
+  // layer's flat default.
+  const override = PROVENANCE_OVERRIDE[layerKey];
+  const provenance = item?.inferred === true
+    ? INFERRED
+    : (override ? override(item) : null) || meta.provenance || null;
   return {
     lat: item?.lat,
     lon: item?.lon,
@@ -470,7 +791,7 @@ function csvHeaderLines({ generatedAt, viewport, provenance, analysis }) {
   if (notIncluded.length) {
     lines.push("# Layers with no rows in this file, and why:");
     for (const l of notIncluded) {
-      lines.push(`#   ${l.label} -- ${layerStatusReason(l.status)}`);
+      lines.push(`#   ${l.label} -- ${layerReasonText(l)}`);
     }
   }
   lines.push(
@@ -598,6 +919,7 @@ export function layerCountLabel(layer) {
     case LAYER_STATUS.EXCLUDED: return "excluded";
     case LAYER_STATUS.DOWN: return "feed down";
     case LAYER_STATUS.EMPTY: return "0 in view";
+    case LAYER_STATUS.NOT_EXPORTABLE: return "not exportable";
     default: return "";
   }
 }

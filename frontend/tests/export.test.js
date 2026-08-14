@@ -9,10 +9,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  EXPORT_LAYERS, LAYER_STATUS, MEASURED, REPORTED, DERIVED, INFERRED,
+  EXPORT_LAYERS, EXCLUDED_LAYERS, LAYER_STATUS, MEASURED, REPORTED, DERIVED, INFERRED,
   classifyLayerStatus, buildExportAnalysis, buildExportRow, buildExportRows, computeProvenanceHeader,
   buildGeoJSON, buildCSV, csvField, estimateExportBytes, exceedsWarningThreshold, LARGE_EXPORT_ROW_THRESHOLD,
-  layerCountLabel, exportSummaryLine, downloadButtonLabel,
+  layerCountLabel, exportSummaryLine, downloadButtonLabel, layerReasonText,
 } from "../src/map/exportBuilder.js";
 
 // --- fixtures ---------------------------------------------------------
@@ -84,18 +84,57 @@ test("classifyLayerStatus: INCLUDED when at least one row is in view", () => {
   assert.equal(status, LAYER_STATUS.INCLUDED);
 });
 
-test("buildExportAnalysis: every EXPORT_LAYERS entry gets exactly one analysis row, in order", () => {
+test("buildExportAnalysis: every EXPORT_LAYERS entry, plus every EXCLUDED_LAYERS entry, gets exactly one analysis row, in order", () => {
   const analysis = buildExportAnalysis({
     selectedKeys: new Set(["events"]),
     mapOn: { events: true },
     health: { events: { last_success: 1786000000 } },
     recordsFor: (key) => (key === "events" ? { rows: [eventItem()], total: 1 } : { rows: [], total: 0 }),
   });
-  assert.equal(analysis.length, EXPORT_LAYERS.length);
-  assert.deepEqual(analysis.map((l) => l.key), EXPORT_LAYERS.map((l) => l.key));
+  assert.equal(analysis.length, EXPORT_LAYERS.length + EXCLUDED_LAYERS.length);
+  assert.deepEqual(
+    analysis.map((l) => l.key),
+    [...EXPORT_LAYERS.map((l) => l.key), ...EXCLUDED_LAYERS.map((l) => l.key)]
+  );
   const events = analysis.find((l) => l.key === "events");
   assert.equal(events.status, LAYER_STATUS.INCLUDED);
   assert.equal(events.count, 1);
+});
+
+test("EXPORT_LAYERS: no key is duplicated, and every entry names a real provenance word", () => {
+  const keys = EXPORT_LAYERS.map((l) => l.key);
+  assert.equal(new Set(keys).size, keys.length, "duplicate key in EXPORT_LAYERS");
+  const valid = new Set([MEASURED, REPORTED, DERIVED, INFERRED]);
+  for (const layer of EXPORT_LAYERS) {
+    assert.ok(valid.has(layer.provenance), `${layer.key} has an invalid provenance default: ${layer.provenance}`);
+    assert.ok(layer.healthKey, `${layer.key} has no healthKey -- every candidate layer here has a real background poller`);
+  }
+});
+
+test("EXPORT_LAYERS: every layer createMapController.js's ID_FIELD/DECORATORS tables list (plus ais/adsb) is covered, or explicitly excluded", () => {
+  // The exact set the review flagged as missing -- read straight off
+  // createMapController.js:377-419's ID_FIELD/DECORATORS keys, plus ais/adsb
+  // (their own renderers, same item shape) and satellites (the one
+  // deliberate, stated exclusion). Not derived from EXPORT_LAYERS itself --
+  // a hand-copied list from the source of truth this review pointed at, so
+  // this test would have caught the original gap.
+  const CONTRACT_KEYS = [
+    "events", "ais", "gdelt", "adsb", "conflictHistory", "officials", "hazards", "airports", "darkVessels",
+    "cableLandings", "launches", "osmInfra", "outagePoints", "outageRegionPoints", "gfwGaps", "gfwDetections",
+    "czib", "floods", "ports", "dams", "deflock", "railwayPoints", "railLive", "railStations", "powerPlants",
+    "airDefense", "satellites",
+  ];
+  const covered = new Set([...EXPORT_LAYERS.map((l) => l.key), ...EXCLUDED_LAYERS.map((l) => l.key)]);
+  for (const key of CONTRACT_KEYS) {
+    assert.ok(covered.has(key), `${key} shares the point-layer contract but is neither exported nor explicitly excluded`);
+  }
+});
+
+test("EXCLUDED_LAYERS: every entry states a non-empty reason, surfaced by layerReasonText", () => {
+  for (const l of EXCLUDED_LAYERS) {
+    assert.ok(l.reason && l.reason.length > 20, `${l.key} has no real reason string`);
+    assert.equal(layerReasonText({ status: LAYER_STATUS.NOT_EXPORTABLE, reason: l.reason }), l.reason);
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -142,6 +181,55 @@ test("buildExportRow: nested object/array values survive as JSON text rather tha
   const row = buildExportRow({ lat: 1, lon: 2, tags: { foo: "bar" }, list: [1, 2] }, "dams", { generatedAt: "x" });
   assert.equal(row.properties.tags, JSON.stringify({ foo: "bar" }));
   assert.equal(row.properties.list, JSON.stringify([1, 2]));
+});
+
+test("buildExportRow: hazards splits by kind -- earthquake is MEASURED, volcano is REPORTED, never the same word", () => {
+  const quake = buildExportRow({ lat: 1, lon: 2, kind: "earthquake", publisher: "USGS" }, "hazards", { generatedAt: "x" });
+  const volcano = buildExportRow({ lat: 1, lon: 2, kind: "volcano", publisher: "Smithsonian GVP / USGS" }, "hazards", { generatedAt: "x" });
+  assert.equal(quake.export_provenance, MEASURED);
+  assert.equal(volcano.export_provenance, REPORTED);
+  assert.notEqual(quake.export_provenance, volcano.export_provenance);
+});
+
+test("buildExportRow: an inferred:true hazards row still outranks the kind-based override", () => {
+  // The global `inferred` flag has to win over PROVENANCE_OVERRIDE too, not
+  // only over the plain layer default -- hazards.py does not currently set
+  // it, but the ordering itself is what this test pins down.
+  const row = buildExportRow({ lat: 1, lon: 2, kind: "earthquake", inferred: true }, "hazards", { generatedAt: "x" });
+  assert.equal(row.export_provenance, INFERRED);
+});
+
+test("buildExportRow: darkVessels and gfwGaps both carry inferred:true in real records, and this module reads it", () => {
+  // backend/sources/dark_vessels.py and backend/sources/gfw_gaps.py both set
+  // `"inferred": True` on every record they emit -- this asserts against
+  // that exact real shape, not just a synthetic flag anywhere.
+  const dark = buildExportRow({ lat: 1, lon: 2, inferred: true, kind: "ais_gap" }, "darkVessels", { generatedAt: "x" });
+  const gap = buildExportRow({ lat: 1, lon: 2, inferred: true, publisher: "Global Fishing Watch", license: "CC BY-NC 4.0" }, "gfwGaps", { generatedAt: "x" });
+  assert.equal(dark.export_provenance, INFERRED);
+  assert.equal(gap.export_provenance, INFERRED);
+  assert.equal(gap.export_licence, "CC BY-NC 4.0");
+});
+
+test("buildExportRow: the four Overpass-derived layers (osmInfra, railwayPoints, powerPlants, airDefense) all cite OpenStreetMap/ODbL", () => {
+  for (const key of ["osmInfra", "railwayPoints", "powerPlants", "airDefense"]) {
+    const row = buildExportRow({ lat: 1, lon: 2 }, key, { generatedAt: "x" });
+    assert.equal(row.export_publisher, "OpenStreetMap contributors", key);
+    assert.equal(row.export_licence, "ODbL", key);
+    assert.equal(row.export_provenance, REPORTED, key);
+  }
+});
+
+test("buildExportRow: outagePoints/outageRegionPoints are DERIVED (IODA's own composite score) and read IODA's per-record publisher", () => {
+  for (const key of ["outagePoints", "outageRegionPoints"]) {
+    const row = buildExportRow({ lat: 1, lon: 2, publisher: "IODA (Georgia Tech)", scores: { overall: 42 } }, key, { generatedAt: "x" });
+    assert.equal(row.export_provenance, DERIVED, key);
+    assert.equal(row.export_publisher, "IODA (Georgia Tech)", key);
+  }
+});
+
+test("buildExportRow: floods is DERIVED, per GDACS's own 'modelled centroid' claim", () => {
+  const row = buildExportRow({ lat: 1, lon: 2, publisher: "GDACS (European Commission JRC / UN)" }, "floods", { generatedAt: "x" });
+  assert.equal(row.export_provenance, DERIVED);
 });
 
 // ---------------------------------------------------------------------
@@ -332,7 +420,9 @@ test("empty selection: no layers selected produces a zero-row, well-formed GeoJS
   const analysis = buildExportAnalysis({
     selectedKeys: new Set(), mapOn: { events: true }, health: {}, recordsFor: () => ({ rows: [], total: 0 }),
   });
-  assert.ok(analysis.every((l) => l.status === LAYER_STATUS.OFF || l.status === LAYER_STATUS.EXCLUDED));
+  assert.ok(analysis.every((l) => (
+    l.status === LAYER_STATUS.OFF || l.status === LAYER_STATUS.EXCLUDED || l.status === LAYER_STATUS.NOT_EXPORTABLE
+  )));
   const rows = buildExportRows(analysis, { generatedAt: "x" });
   assert.deepEqual(rows, []);
   const geo = buildGeoJSON(rows, { generatedAt: "x", analysis });
@@ -340,8 +430,9 @@ test("empty selection: no layers selected produces a zero-row, well-formed GeoJS
   assert.deepEqual(geo.provenance, []);
   // The layer list still reports every candidate's status, even though none
   // of them contributed rows -- "found nothing" from an empty selection must
-  // say why, not render as an indistinguishable blank file.
-  assert.equal(geo.layers.length, EXPORT_LAYERS.length);
+  // say why, not render as an indistinguishable blank file. Includes
+  // EXCLUDED_LAYERS too: satellites is never selectable, selection or not.
+  assert.equal(geo.layers.length, EXPORT_LAYERS.length + EXCLUDED_LAYERS.length);
 });
 
 test("empty selection: the CSV still carries a header explaining nothing was selected, with no data rows", () => {
@@ -354,9 +445,14 @@ test("empty selection: the CSV still carries a header explaining nothing was sel
   // No column-header row and no data row: only the comment block.
   assert.ok(!csv.includes("export_layer,export_provenance"));
   // But every candidate layer's own reason is still listed, so a reader can
-  // tell "you excluded everything" apart from "every feed is down".
+  // tell "you excluded everything" apart from "every feed is down" apart
+  // from "this one was never exportable at all" -- all three, by name.
   for (const layer of EXPORT_LAYERS) {
     assert.ok(csv.includes(layer.label), `missing ${layer.label} in empty-selection CSV header`);
+  }
+  for (const layer of EXCLUDED_LAYERS) {
+    assert.ok(csv.includes(layer.label), `missing excluded layer ${layer.label} in empty-selection CSV header`);
+    assert.ok(csv.includes(layer.reason), `missing excluded layer ${layer.key}'s own reason text in the CSV header`);
   }
 });
 
@@ -413,6 +509,36 @@ test("downloadButtonLabel: asks for a second confirm only on a large, non-empty 
   assert.equal(downloadButtonLabel({ isLarge: true, confirmedLarge: true, nothingSelected: false }), "Download");
   assert.equal(downloadButtonLabel({ isLarge: false, confirmedLarge: false, nothingSelected: false }), "Download");
   assert.equal(downloadButtonLabel({ isLarge: true, confirmedLarge: false, nothingSelected: true }), "Download");
+});
+
+test("layerCountLabel: NOT_EXPORTABLE reads as 'not exportable', distinct from every other empty state", () => {
+  const label = layerCountLabel({ status: LAYER_STATUS.NOT_EXPORTABLE });
+  assert.equal(label, "not exportable");
+  assert.notEqual(label, layerCountLabel({ status: LAYER_STATUS.OFF }));
+  assert.notEqual(label, layerCountLabel({ status: LAYER_STATUS.EMPTY }));
+});
+
+test("satellites can never contribute a row, even if a caller puts it in selectedKeys", () => {
+  // buildExportAnalysis only calls recordsFor for keys in EXPORT_LAYERS --
+  // "satellites" lives in EXCLUDED_LAYERS instead, so selecting it (a stray
+  // key a caller should never send, but this pins the defence anyway) must
+  // not somehow make it INCLUDED with real rows.
+  let calledWithSatellites = false;
+  const analysis = buildExportAnalysis({
+    selectedKeys: new Set(["satellites"]),
+    mapOn: { satellites: true },
+    health: { satellites: { last_success: 1786000000 } },
+    recordsFor: (key) => {
+      if (key === "satellites") calledWithSatellites = true;
+      return { rows: [{ lat: 1, lon: 2 }], total: 1 };
+    },
+  });
+  assert.equal(calledWithSatellites, false);
+  const satellites = analysis.find((l) => l.key === "satellites");
+  assert.equal(satellites.status, LAYER_STATUS.NOT_EXPORTABLE);
+  assert.equal(satellites.count, 0);
+  const rows = buildExportRows(analysis, { generatedAt: "x" });
+  assert.equal(rows.some((r) => r.export_layer_key === "satellites"), false);
 });
 
 test("size measurement: 5,000 representative rows land within the bytes/row range LARGE_EXPORT_*_THRESHOLD's own comment cites", () => {
