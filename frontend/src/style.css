@@ -4908,6 +4908,136 @@ tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
   .compare-col-country { min-width: 96px; }
 }
 
+/* --- Task 43: export dialog --------------------------------------------
+   Same backdrop/aside/header shape as #countryCompare above (see that
+   block's own rules) -- this project's one other centred modal, so the two
+   share the identical overlay treatment rather than a second one-off. */
+.export-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+#exportDialog {
+  width: min(94vw, 560px);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  animation: popup-in var(--t-ui) var(--e-out);
+}
+.export-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--panel-border);
+  flex: none;
+}
+.export-title {
+  flex: 1 1 auto;
+  font-size: calc(11px * var(--ui-text-scale));
+  letter-spacing: 1.2px;
+  color: var(--text-bright);
+  text-transform: uppercase;
+}
+.export-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.export-close:hover { color: var(--text-bright); }
+.export-body {
+  overflow-y: auto;
+  padding: 10px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.export-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--ui-text-scale));
+}
+.export-format-row {
+  display: flex;
+  gap: 16px;
+  font-size: calc(11.5px * var(--ui-text-scale));
+}
+.export-layer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.export-layer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: calc(11.5px * var(--ui-text-scale));
+}
+.export-layer-label { flex: 1 1 auto; }
+.export-layer-count {
+  color: var(--text-dim);
+  font-size: calc(10px * var(--ui-text-scale));
+  white-space: nowrap;
+}
+.export-layer-status-included { color: var(--text-bright); }
+.export-layer-status-down, .export-layer-status-off { color: var(--text-dim); }
+.export-layer-status-empty { color: #ff9500; }
+.export-scope-note {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: calc(9.5px * var(--ui-text-scale));
+  font-style: italic;
+}
+.export-warning {
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid #ff9500;
+  border-radius: 4px;
+  background: rgba(255, 149, 0, 0.08);
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--ui-text-scale));
+}
+.export-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--panel-border);
+}
+.export-summary {
+  color: var(--text-dim);
+  font-size: calc(10.5px * var(--ui-text-scale));
+}
+.export-download:disabled { opacity: 0.5; cursor: not-allowed; }
+
+@media (max-width: 720px) {
+  .export-backdrop { padding: 0; }
+  #exportDialog { width: 100%; height: 100%; max-height: none; border-radius: 0; }
+}
+
 /* --- text size -------------------------------------------------------
    Admin Mode's text scale, applied to the HUD's own type.
    Every size in this stylesheet is an absolute px (the panels are dense,

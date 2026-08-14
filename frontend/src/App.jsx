@@ -47,6 +47,7 @@ import DistrictInfoCard from "./components/DistrictInfoCard";
 import EventDetailCard from "./components/EventDetailCard";
 import CountrySelectionBar from "./components/CountrySelectionBar";
 import CountryCompareView from "./components/CountryCompareView";
+import ExportDialog from "./components/ExportDialog";
 import BorderEditBar from "./components/BorderEditBar";
 import AdminPanel from "./components/admin/AdminPanel";
 import UrlStateNotice from "./components/UrlStateNotice";
@@ -826,6 +827,13 @@ export default function App() {
     if (compareOpen && mapApi.countrySelection.length === 0) setCompareOpen(false);
   }, [compareOpen, mapApi.countrySelection.length]);
 
+  // Task 43: viewport export's own dialog -- see TitleBar.jsx's own note on
+  // why the button lives next to Copy link rather than in the control
+  // drawer. No auto-close condition of its own (unlike compareOpen above):
+  // nothing about the export dialog's own inputs (layer checkboxes, format)
+  // becomes invalid just because something else on the page changed.
+  const [exportOpen, setExportOpen] = useState(false);
+
   return (
     <>
       <LoadingScreen sources={dataApi.bootSources} />
@@ -850,6 +858,7 @@ export default function App() {
         onLocatePlace={onLocatePlace}
         getShareUrl={buildShareUrl}
         readOnly={readOnly}
+        onOpenExport={() => setExportOpen(true)}
       />
 
       {/* The reader's way in. Picking a theatre is not an operator's adjustment
@@ -1125,6 +1134,17 @@ export default function App() {
           getRows={mapApi.countryCompareRows}
           onClose={() => setCompareOpen(false)}
           onFocusCountry={mapApi.focusCountry}
+        />
+      )}
+
+      {/* Task 43: mounted only while open, same as CountryCompareView above --
+          its own 5s refresh interval (see ExportDialog.jsx) is not ticking
+          for a reader who has never opened it. */}
+      {exportOpen && (
+        <ExportDialog
+          mapApi={mapApi}
+          health={health}
+          onClose={() => setExportOpen(false)}
         />
       )}
 

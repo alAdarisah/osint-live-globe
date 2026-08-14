@@ -8256,6 +8256,36 @@ export function createMapController(container, initial, callbacks) {
       return Array.isArray(value) ? value : [];
     },
 
+    /**
+     * Task 43: viewport export. `raw[key]`, split into what viewportFilter()
+     * currently considers in view (the same padded "in view" every rendered
+     * point layer already uses -- map.getBounds().pad(0.25), see
+     * viewportFilter's own note) and the feed's full current total.
+     *
+     * Returning both rather than only the filtered array is the point: `total`
+     * is what tells frontend/src/map/exportBuilder.js's classifyLayerStatus
+     * apart "this feed has never returned anything" (total === 0, paired with
+     * /api/health showing no success -- LAYER_STATUS.DOWN) from "it returned
+     * plenty, just none of it is on screen right now" (total > 0, rows.length
+     * === 0 -- LAYER_STATUS.EMPTY). Neither fact is visible from the filtered
+     * array alone, and conflating them is exactly the "found nothing must
+     * never render the same as did not look" failure that task's brief names.
+     *
+     * Items without a numeric lat/lon are dropped rather than crashing --
+     * this export only ever handles the map's uniform point shape (see
+     * exportBuilder.js's own scope note), and a malformed row here should
+     * disappear from the count, not the export.
+     */
+    exportLayerRecords(key) {
+      const items = raw[key];
+      if (!Array.isArray(items)) return { rows: [], total: 0 };
+      const inView = viewportFilter();
+      const rows = items.filter(
+        (item) => typeof item.lat === "number" && typeof item.lon === "number" && inView(item.lat, item.lon)
+      );
+      return { rows, total: items.length };
+    },
+
     setCityZones(next) {
       const previousScale = cityZoneSettings.radiusScale;
       cityZoneSettings = { ...cityZoneSettings, ...(next || {}) };
