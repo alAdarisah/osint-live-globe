@@ -12,6 +12,8 @@
 //            its zoom gate, and the colour of every kind of pin in it. Grouped
 //            by layer rather than split across two sections, because split is
 //            how the same dial ended up offered twice (see LayerBlock)
+//   Reader   which of the three panels that render outside Admin Mode this
+//   panels   deployment carries
 //   Data     the records themselves (see DataEditor.jsx)
 //   Display  panel opacity, accent, text size, motion, leader lines
 //   Config   export / import / reset, and the panel layout
@@ -23,7 +25,7 @@
 import { useRef, useState } from "react";
 import { PALETTE_GROUPS, DEFAULT_COLORS, TOKEN_LAYER, tokenHasSize, tokenHasZoom, glyphChoicesFor } from "../../map/iconTheme";
 import { shippedDrawZoom } from "../../map/scene";
-import { SETTINGS_LAYERS, defaultSettings } from "../../settings/defaults";
+import { SETTINGS_LAYERS, COUNTRY_ONLY_LAYERS, defaultSettings } from "../../settings/defaults";
 import { borderStats } from "../../settings/borderOverrides";
 import { useAccordion } from "../../hooks/useAccordion";
 import { useDraggablePanel, clearAllPanelPositions } from "../../hooks/useDraggablePanel";
@@ -108,6 +110,35 @@ export default function AdminPanel({ settings, actions, recordsFor, sync, staleB
             />
           ))}
           <SharedColours settings={settings} actions={actions} />
+        </PanelGroup>
+
+        <PanelGroup id="adm-public" title="Reader panels" open={isOpen("adm-public")} onToggle={setOpen}>
+          <div className="admin-note">
+            The three panels that are the reader&rsquo;s rather than the operator&rsquo;s: they render
+            outside Admin Mode, because each answers a question about the world rather than about the
+            map. Switch one off and this deployment stops carrying it.
+            <b> Off means off here too</b> &mdash; Admin Mode is this page plus instruments, not a
+            different page, so an operator who has taken the ticker away from readers sees the page
+            readers get. Ticking it back is how you look at it again.
+          </div>
+          <CheckField
+            label="News ticker"
+            note="Live headlines for whatever is in view, or for the selected country. Names its outlet and its age on every line."
+            checked={settings.publicPanels.newsTicker}
+            onChange={(value) => actions.setPublicPanels({ newsTicker: value })}
+          />
+          <CheckField
+            label="Notable activity board"
+            note="Ranks the same conflict data the map draws, through the same filter — so the two cannot disagree. Renders nothing on a quiet day."
+            checked={settings.publicPanels.notableEvents}
+            onChange={(value) => actions.setPublicPanels({ notableEvents: value })}
+          />
+          <CheckField
+            label="Conflict briefing card"
+            note="Opened by picking a theatre in the region bar. Switching it off leaves that click with nothing to show."
+            checked={settings.publicPanels.briefingCard}
+            onChange={(value) => actions.setPublicPanels({ briefingCard: value })}
+          />
         </PanelGroup>
 
         <PanelGroup id="adm-zones" title="City zones" open={isOpen("adm-zones")} onToggle={setOpen}>
@@ -546,6 +577,17 @@ function LayerBlock({ layer, settings, actions, open, onToggle }) {
             actions.setLayerStyle(layer.key, { maxZoom: value >= 19 ? null : value })
           }
         />
+        {/* Offered only on the layers that draw individual pins -- see
+            COUNTRY_ONLY_LAYERS for the four kinds of layer left out and why
+            there is nothing here for them to clip. */}
+        {COUNTRY_ONLY_LAYERS.has(layer.key) && (
+          <CheckField
+            label="Only with a country selected"
+            note="Hidden until a country is clicked, then clipped to that country's borders. Its own zoom gate still applies — a selection makes the layer eligible, it does not bring it below the zoom above."
+            checked={style.countryOnly === true}
+            onChange={(value) => actions.setLayerStyle(layer.key, { countryOnly: value })}
+          />
+        )}
 
         {tokens.length > 0 && (
           <>

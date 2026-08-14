@@ -136,6 +136,23 @@ export default function App() {
     return ceilings;
   }, [settings.layers]);
 
+  // The layers Admin Mode has told to draw only for a selected country, as
+  // { [key]: true }. Sparse, and the sparseness is what the controller checks to
+  // decide whether a selection change is worth a re-render at all -- a
+  // deployment using none of this pays nothing for it.
+  //
+  // Not threaded into the fetch layer, unlike the zoom floors above: this gate
+  // decides what is drawn out of a payload, not whether the payload is worth
+  // asking for. Clearing the selection has to put the full picture back
+  // immediately, and it cannot do that if the data was never fetched.
+  const layerCountryOnly = useMemo(() => {
+    const gated = {};
+    for (const [key, layer] of Object.entries(settings.layers)) {
+      if (layer.countryOnly === true) gated[key] = true;
+    }
+    return gated;
+  }, [settings.layers]);
+
   const dataApi = useOsintData({
     onData: (key, data) => {
       if (!replayActiveRef.current) mapApi.applyData(key, data);
@@ -246,6 +263,10 @@ export default function App() {
   useEffect(() => {
     mapApi.setLayerZoomMaxOverrides(layerZoomMaxOverrides);
   }, [layerZoomMaxOverrides, mapApi.setLayerZoomMaxOverrides]);
+
+  useEffect(() => {
+    mapApi.setLayerCountryOnly(layerCountryOnly);
+  }, [layerCountryOnly, mapApi.setLayerCountryOnly]);
 
   // The saved layer states, replayed whenever the configuration itself is
   // replaced rather than only at mount: the backend's copy landing on top of the
@@ -597,30 +618,40 @@ export default function App() {
           cannot disagree. Both collapse to their header, and the board renders
           nothing at all when no event clears its severity floor -- so on a quiet
           day they take no room rather than asserting significance that is not
-          there. */}
-      <NewsBroadcastPanel
-        gdeltRaw={dataApi.gdeltRaw}
-        mapBounds={mapApi.mapBounds}
-        regionLabel={dataApi.currentRegionLabel}
-        countryScope={countryScope}
-        onLocate={onLocateNewsItem}
-      />
+          there.
 
-      <NotableEventsPanel
-        eventsRaw={dataApi.eventsRaw}
-        eventFilter={eventFilter}
-        escalation={dataApi.escalation}
-        countryScope={countryScope}
-        onLocate={onLocateNewsItem}
-        isMobile={isMobileViewport}
-      />
+          Each can still be switched off for a deployment, under Reader panels in
+          Admin Mode. That gate hides the panel from everyone, an operator
+          included: Admin Mode is this page plus instruments rather than a
+          different page, and an operator who has taken the ticker away from
+          readers should be looking at the page readers get. */}
+      {settings.publicPanels.newsTicker && (
+        <NewsBroadcastPanel
+          gdeltRaw={dataApi.gdeltRaw}
+          mapBounds={mapApi.mapBounds}
+          regionLabel={dataApi.currentRegionLabel}
+          countryScope={countryScope}
+          onLocate={onLocateNewsItem}
+        />
+      )}
+
+      {settings.publicPanels.notableEvents && (
+        <NotableEventsPanel
+          eventsRaw={dataApi.eventsRaw}
+          eventFilter={eventFilter}
+          escalation={dataApi.escalation}
+          countryScope={countryScope}
+          onLocate={onLocateNewsItem}
+          isMobile={isMobileViewport}
+        />
+      )}
 
       {/* Opened by picking a theatre in the RegionBar above, which is a public
           control -- so gating this behind Admin Mode meant a reader could make
           the gesture and get nothing back. It follows the two panels out for
           that reason rather than as a separate decision: it is the same
           "what is happening here" question, asked of one zone. */}
-      {briefingZone && (
+      {settings.publicPanels.briefingCard && briefingZone && (
         <ConflictBriefingCard
           zone={briefingZone}
           eventsRaw={dataApi.eventsRaw}

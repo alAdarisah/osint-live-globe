@@ -478,6 +478,17 @@ export function useAppSettings() {
     [update]
   );
 
+  /**
+   * Which of the three reader panels the public page carries.
+   *
+   * A patch rather than a whole table, same as setUi above: the panel toggles
+   * one checkbox at a time and has no business restating the other two.
+   */
+  const setPublicPanels = useCallback(
+    (patch) => update((prev) => ({ ...prev, publicPanels: { ...prev.publicPanels, ...patch } })),
+    [update]
+  );
+
   /** Merge a field patch into one record's overrides. Passing {} is a no-op edit. */
   const editRecord = useCallback(
     (sourceKey, id, patch) =>
@@ -654,7 +665,7 @@ export function useAppSettings() {
     () => ({
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
       setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
-      moveLayerInStack, resetLayerStack, setUi, setCityZones,
+      moveLayerInStack, resetLayerStack, setUi, setCityZones, setPublicPanels,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,
@@ -662,7 +673,7 @@ export function useAppSettings() {
     [
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
       setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
-      moveLayerInStack, resetLayerStack, setUi, setCityZones,
+      moveLayerInStack, resetLayerStack, setUi, setCityZones, setPublicPanels,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       resetAll, exportSettings, importSettings,

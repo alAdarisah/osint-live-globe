@@ -122,7 +122,31 @@ const SUPERSEDED_PIN_STACKS = [
   ],
 ];
 
-const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null };
+const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null, countryOnly: false };
+
+/**
+ * The layers that can be told to draw only for a selected country.
+ *
+ * Every layer that draws individual pins, minus four kinds of thing that have
+ * no pin to clip:
+ *
+ *   cities    already country-scoped by its own renderer, on country_code. A
+ *             second gate saying the same thing in a different vocabulary is
+ *             how the two end up disagreeing.
+ *   firms,    density canvases rather than pins, and a quarter of a million
+ *   jamming   rows apiece. There is no individual mark to keep or drop.
+ *   cables,   polylines. A cable is only legible as a whole line -- clipping
+ *   railways  one to a border draws a fragment that claims the cable ends
+ *             there.
+ *
+ * A layer outside this set gets no checkbox at all, rather than a checkbox that
+ * half works.
+ */
+const NO_COUNTRY_GATE = new Set(["cities", "firms", "jamming", "cables", "railways"]);
+
+export const COUNTRY_ONLY_LAYERS = new Set(
+  SETTINGS_LAYERS.map((l) => l.key).filter((key) => !NO_COUNTRY_GATE.has(key))
+);
 
 /**
  * Every key a checkbox in the control drawer can address.
@@ -405,6 +429,17 @@ export function defaultSettings() {
     // On by default: the pile-up it addresses is the ordinary case in every city
     // this map is used to look at, and the grouping is reversible per pin.
     cityZones: { group: true, show: true, radiusScale: 1 },
+    // Which of the three reader panels the public page carries. Written in full
+    // rather than sparsely, unlike layerWish: there is no resolver to hand a
+    // panel back to, so an absent key has no third state to mean.
+    //
+    // These are the panels that render outside the Admin Mode gate (see the
+    // note above them in App.jsx) -- the news ticker, the notable-activity
+    // board and the conflict briefing card. Switching one off hides it from
+    // everyone, an operator included: Admin Mode is the reader's map plus
+    // instruments, not a different app, and the checkbox that hid it is the way
+    // back.
+    publicPanels: { newsTicker: true, notableEvents: true, briefingCard: true },
     ui: {
       textScale: 1,
       panelOpacity: 0.94,
@@ -540,7 +575,22 @@ export function mergeSettings(stored) {
         opacity: pickNumber(value.opacity, 1, 0.1, 1),
         minZoom: Number.isFinite(value.minZoom) ? pickNumber(value.minZoom, null, 0, 18) : null,
         maxZoom: Number.isFinite(value.maxZoom) ? pickNumber(value.maxZoom, null, 0, 18) : null,
+        // A strict boolean, and only for a layer that has the gate on offer.
+        // The same rule layerWish uses below, for the same reason: a truthy
+        // string in a hand-edited file would blank a layer until somebody found
+        // the checkbox, and that is too large a consequence for a guess.
+        countryOnly: value.countryOnly === true && COUNTRY_ONLY_LAYERS.has(key),
       };
+    }
+  }
+
+  if (isPlainObject(stored.publicPanels)) {
+    // Default-on, so anything but an explicit `false` leaves the panel showing
+    // -- the rule ui.showLeaderLines uses, and for the same reason: a
+    // configuration written before this setting existed must not switch a
+    // reader's panel off by not mentioning it.
+    for (const key of Object.keys(base.publicPanels)) {
+      base.publicPanels[key] = stored.publicPanels[key] !== false;
     }
   }
 

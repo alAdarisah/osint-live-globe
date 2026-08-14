@@ -13,7 +13,7 @@
 
 import { L } from "./leafletGlobal";
 import {
-  passesEventFilter, DEFAULT_EVENT_FILTER, ageHoursFromDateAdded, NEWS_WINDOW_HOURS,
+  passesEventFilter, DEFAULT_EVENT_FILTER, ageDays, ageHoursFromDateAdded, NEWS_WINDOW_HOURS,
   confidenceDimmed, positionUncertain, uncertaintyRadiusMetres, verdictBucket,
   severityBand, severityColor,
 } from "./severity";
@@ -121,9 +121,14 @@ import {
   AIRFIELD_MATCH_KM, DAM_MATCH_KM, buildTwinIndex, buildAbsorbedArticles,
   normalizeArticleUrl,
 } from "./crossSource";
-import { resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST } from "./scene";
+import {
+  resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST,
+  hasAgeWindow, withinAgeWindow,
+} from "./scene";
 import { profileViewport } from "./viewportProfile";
-import { buildCountryIndex, findCountryAt, representativePointOf } from "./countryHitTest";
+import {
+  buildCountryIndex, findCountryAt, representativePointOf, countryContainsPoint,
+} from "./countryHitTest";
 import { createBorderEditor } from "./borderEdit";
 import { countryFingerprints } from "../settings/borderOverrides";
 import { countryCardSections, cityPopupHtml, normalizeCountryName } from "./popups";
@@ -710,6 +715,19 @@ export function createMapController(container, initial, callbacks) {
   // this is applied in applyScene after it, as an additional limit.
   let layerZoomMaxOverrides = {};
 
+  // Admin Mode's "only with a country selected" gate: { [layerKey]: true },
+  // sparse. Two things follow from it, and they answer different questions --
+  // applyScene takes the layer off the map entirely while nothing is selected,
+  // and countryClipFor below drops the pins outside the selection once
+  // something is. See COUNTRY_ONLY_LAYERS in settings/defaults.js for which
+  // layers are offered it and why the rest are not.
+  let layerCountryOnly = {};
+
+  // The selection applyScene last resolved for, as a joined key list. Read by
+  // reportCountrySelection to tell a selection change that needs a redraw from
+  // one setFocus has already handled -- see the note there.
+  let sceneSelectionSignature = "";
+
   // Admin Mode's "ignore the scene resolver" switch. Session-scoped and
   // deliberately not persisted: an admin who forgot to switch it off would be
   // permanently looking at a different app from every reader, which is exactly
@@ -980,11 +998,32 @@ export function createMapController(container, initial, callbacks) {
         const ceiling = layerZoomMaxOverrides[key];
         if (Number.isFinite(ceiling) && map.getZoom() > ceiling) want = false;
       }
+      // "Only with a country selected", the first of its two stages: nothing
+      // selected, so the layer is not on the map at all. The second stage is
+      // countryClipFor, which drops the pins outside the selection once there
+      // is one.
+      //
+      // An AND on top of the gates above rather than a promotion, and that is
+      // the whole reading of it: selecting a country makes a gated layer
+      // eligible, it does not drag the layer below its own zoom floor. A layer
+      // given both conditions shows nothing until the reader has picked a
+      // country and zoomed in, which is what two controls each stating a
+      // condition should do.
+      //
+      // Skipped under the bypass, like both gates above it.
+      if (want && !sceneBypass && layerCountryOnly[key] && selectedCountryKeys.size === 0) {
+        want = false;
+      }
       // Only on a real change: setLayerVisible re-renders the layer it switches
       // on, and calling it for every key on every pan would undo the whole
       // point of the early returns in the renderers.
       if (layerOnMap[key] !== want) setLayerVisible(key, want);
     }
+
+    // Recorded after the loop, so the selection this scene was resolved for is
+    // whatever the gate above just read. reportCountrySelection compares
+    // against it rather than re-rendering on every selection change.
+    sceneSelectionSignature = [...selectedCountryKeys].join(",");
 
     reportLayerState();
   }
@@ -1188,12 +1227,73 @@ export function createMapController(container, initial, callbacks) {
     return false;
   }
 
-  const LAYER_ITEM_FILTER = {
+  // Filters a layer's own renderer cannot express as a manifest entry, because
+  // each reads something outside the item -- what the reader asked for, what
+  // another layer is currently drawing, what has already been absorbed.
+  const BESPOKE_ITEM_FILTER = {
     events: (item) => passesEventFilter(item, eventFilter, ageNow()),
     gdelt: passesNewsFilter,
     officials: passesOfficialsFilter,
     osmInfra: passesOsmInfraFilter,
   };
+
+  /**
+   * Per-item filters, per layer: the bespoke ones above, plus the display age
+   * window any layer can opt into by declaring `age` in map/scene.js.
+   *
+   * Composed rather than written out, so a layer gains an age window by editing
+   * the manifest and nothing else -- the same way it gains a cap or a collapse
+   * rule. A layer that has both runs both, and both must pass.
+   *
+   * `events` deliberately has no manifest entry: its window is the reader's, set
+   * through eventFilter, so it arrives here inside passesEventFilter instead.
+   * Two gates on one layer would be a second window a reader widening the first
+   * could not reach past.
+   */
+  const LAYER_ITEM_FILTER = Object.fromEntries(
+    [...new Set([...Object.keys(BESPOKE_ITEM_FILTER), ...Object.keys(LAYER_MANIFEST)])]
+      .map((key) => {
+        const bespoke = BESPOKE_ITEM_FILTER[key];
+        if (!hasAgeWindow(key)) return [key, bespoke];
+        const recent = (item) => withinAgeWindow(key, item, ageNow());
+        return [key, bespoke ? (item) => bespoke(item) && recent(item) : recent];
+      })
+      .filter(([, fn]) => fn)
+  );
+
+  /**
+   * How many of a layer's records this render is holding back as too old.
+   *
+   * Counted over the layer's *whole payload* rather than over what survived the
+   * viewport, and that is the same argument the arrival set makes a few lines
+   * down: a number computed from `visible` would change on every pan and mean
+   * nothing. "Sixty events older than the window" is a fact about the feed; the
+   * reader's pan is not part of it.
+   *
+   * Reported rather than applied silently, for the reason capByRank's note
+   * gives: a layer showing a fraction of its own count with no explanation
+   * reads as a broken feed rather than as a deliberately thinned one, and that
+   * misreading is exactly what an unexplained age window would produce on a
+   * quiet day.
+   */
+  function countAgedOut(key, items) {
+    if (key === "events") {
+      const max = eventFilter.maxAgeDays;
+      if (max == null) return 0;
+      const now = ageNow();
+      let n = 0;
+      for (const item of items) {
+        const age = ageDays(item, now);
+        if (Number.isFinite(age) && age > max) n += 1;
+      }
+      return n;
+    }
+    if (!hasAgeWindow(key)) return 0;
+    const now = ageNow();
+    let n = 0;
+    for (const item of items) if (!withinAgeWindow(key, item, now)) n += 1;
+    return n;
+  }
 
   /**
    * Thin a layer to the most significant N, per band.
@@ -1291,6 +1391,32 @@ export function createMapController(container, initial, callbacks) {
     // migrated, so generalising the cap changes no UI in the same commit.
     zoomNotes.eventsCapped = cappedCounts.events || 0;
     scheduleReports({ notes: true });
+  }
+
+  // The same arrangement for the age window: { [layerKey]: howManyHeldBack },
+  // absent for a layer holding nothing back. Kept as its own object for the
+  // same reason cappedCounts is -- zoomNotes.aged is handed to React, and a
+  // fresh object on every render would re-render the panel continuously.
+  const agedCounts = {};
+  function publishAged() {
+    zoomNotes.aged = { ...agedCounts };
+    zoomNotes.eventsAged = agedCounts.events || 0;
+    scheduleReports({ notes: true });
+  }
+
+  /** Record how many `key` is holding back, and publish only on a change. */
+  function noteAgedOut(key, n) {
+    if (!n) {
+      if (agedCounts[key]) {
+        delete agedCounts[key];
+        publishAged();
+      }
+      return;
+    }
+    if (agedCounts[key] !== n) {
+      agedCounts[key] = n;
+      publishAged();
+    }
   }
 
   // News is the one layer that groups rather than merely spreading out -- see
@@ -1701,6 +1827,37 @@ export function createMapController(container, initial, callbacks) {
     return countryIndex.find((e) => normalizeCountryName(e.name) === wanted) || null;
   }
 
+  /** Is any layer currently gated on a country selection? */
+  function countryGateActive() {
+    return !sceneBypass && Object.keys(layerCountryOnly).length > 0;
+  }
+
+  /**
+   * The country clip for `key`, or null when this layer is not gated.
+   *
+   * Done in geometry against the shapes the reader actually clicked, using the
+   * same test map/countryScope.js applies for the reading panels -- so the map
+   * and the panels cannot disagree about what is inside Sudan. Matching on a
+   * feed's own country string would: ACLED writes names, GDELT writes FIPS
+   * codes, and the two differ about exactly the contested places this map is
+   * for.
+   *
+   * A selection whose geometry has not landed yet draws nothing rather than
+   * everything. Passing the world through until the shapes arrive would flash
+   * every pin across the screen for one poll, which is the opposite of what the
+   * setting was switched on to do.
+   */
+  function countryClipFor(key) {
+    if (sceneBypass || !layerCountryOnly[key]) return null;
+    const entries = [];
+    for (const key_ of selectedCountryKeys) {
+      const entry = countryEntryFor(key_);
+      if (entry?.bbox && entry.polygons?.length) entries.push(entry);
+    }
+    if (!entries.length) return () => false;
+    return (lat, lon) => entries.some((entry) => countryContainsPoint(entry, lat, lon));
+  }
+
   /**
    * Tell React which countries are selected, in click order.
    *
@@ -1710,6 +1867,20 @@ export function createMapController(container, initial, callbacks) {
    * why that is done in geometry rather than by country name.
    */
   function reportCountrySelection() {
+    // A gated layer's clip is part of what the renderers draw, so a selection
+    // change has to reach them. setFocus covers the two changes that move the
+    // focus -- picking the first country, dropping the last -- and returns
+    // early otherwise, so adding a second country to a selection or removing
+    // one of three would leave the clip showing the previous country's pins.
+    //
+    // Guarded twice, so a deployment with no gated layer pays nothing: nothing
+    // happens unless some layer is gated, and nothing happens unless the
+    // selection has actually moved since the scene was last resolved.
+    if (countryGateActive() && sceneSelectionSignature !== [...selectedCountryKeys].join(",")) {
+      applyScene();
+      renderAll();
+    }
+
     callbacks.onCountrySelectionChange?.(
       [...selectedCountryKeys].map((key) => {
         const entry = countryEntryFor(key);
@@ -2553,6 +2724,11 @@ export function createMapController(container, initial, callbacks) {
     // useLeafletMap's EMPTY_ZOOM_NOTES read it, and generalising the cap should
     // not drag a UI change into the same commit.
     eventsCapped: 0,
+    // And the same shape again for the display age window (see map/scene.js):
+    // { [layerKey]: howManyHeldBack } for every layer currently withholding
+    // something as too old, absent for every layer that is not.
+    aged: {},
+    eventsAged: 0,
   };
 
   // Layers that report a breakdown as well as a total, so the control panel can
@@ -3102,6 +3278,9 @@ export function createMapController(container, initial, callbacks) {
       scheduleReports({ notes: true });
     }
     const itemFilter = LAYER_ITEM_FILTER[key];
+    // Null unless this layer is gated on a country selection, which is the
+    // uncommon case -- see countryClipFor.
+    const countryClip = countryClipFor(key);
     // Only asked when some pin type in this layer has been given a zoom of its
     // own, which is the uncommon case -- see pinDrawsAt.
     const perPinZoom = layerHasTokenZoom(key) || layerHasTokenZoomMax(key);
@@ -3109,6 +3288,10 @@ export function createMapController(container, initial, callbacks) {
     // entirely when it has no history for it, and an undefined here used to
     // take the whole render down rather than drawing an empty layer.
     const items = raw[key] || [];
+    // Before the viewport pass below, and against `items` rather than what
+    // survives it -- see countAgedOut for why the number has to be a fact about
+    // the feed rather than about where the reader is looking.
+    noteAgedOut(key, countAgedOut(key, items));
     // Computed from `items` -- the layer's full payload -- and never from
     // `visible` below. `visible` is the viewport-filtered, capped, collapsed
     // slice that gets rebuilt on every pan and zoom; an arrival set built from
@@ -3154,6 +3337,7 @@ export function createMapController(container, initial, callbacks) {
       for (const item of items) {
         if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
         if (!inView(item.lat, item.lon)) continue;
+        if (countryClip && !countryClip(item.lat, item.lon)) continue;
         if (itemFilter && !itemFilter(item)) continue;
         if (perPinZoom && !pinDrawsAt(key, item, zoom, minZoom)) continue;
         visible.push(item);
@@ -3226,6 +3410,13 @@ export function createMapController(container, initial, callbacks) {
     const belowTankerPinZoom = zoom < (tokenZoom("ship.tanker") ?? -Infinity);
     const belowCivilianPinZoom = zoom < (tokenZoom("ship.other") ?? -Infinity);
 
+    // Asked per bucket rather than per payload: one AIS feed feeds three
+    // toggleable layers, and each of them carries its own "only with a country
+    // selected" setting.
+    const navyClip = countryClipFor("aisNavy");
+    const tankerClip = countryClipFor("aisTanker");
+    const civilianClip = countryClipFor("aisCivilian");
+
     let civilianVisible = [];
     const tankerVisible = [];
     const navyVisible = [];
@@ -3234,10 +3425,14 @@ export function createMapController(container, initial, callbacks) {
       if (!inView(item.lat, item.lon)) continue;
       const type = classifyShip(item);
       if (type === "navy") {
-        if (!belowNavyPinZoom) navyVisible.push(item);
+        if (!belowNavyPinZoom && (!navyClip || navyClip(item.lat, item.lon))) navyVisible.push(item);
       } else if (type === "tanker") {
-        if (!belowTankerMinZoom && !belowTankerPinZoom) tankerVisible.push(item);
-      } else if (!belowAisMinZoom && !belowCivilianPinZoom) {
+        if (!belowTankerMinZoom && !belowTankerPinZoom
+            && (!tankerClip || tankerClip(item.lat, item.lon))) {
+          tankerVisible.push(item);
+        }
+      } else if (!belowAisMinZoom && !belowCivilianPinZoom
+                 && (!civilianClip || civilianClip(item.lat, item.lon))) {
         civilianVisible.push(item);
       }
     }
@@ -3378,10 +3573,13 @@ export function createMapController(container, initial, callbacks) {
       other: zoom < (tokenZoom("ship.other") ?? -Infinity),
     };
 
+    const countryClip = countryClipFor("aisDigitraffic");
+
     let visible = [];
     for (const item of raw.aisDigitraffic) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!inView(item.lat, item.lon)) continue;
+      if (countryClip && !countryClip(item.lat, item.lon)) continue;
       const type = classifyShip(item);
       if (belowPinZoom[type]) continue;
       // Warships keep the same exemption from the layer gate that renderAisLayer
@@ -3487,19 +3685,27 @@ export function createMapController(container, initial, callbacks) {
     // bucket has no zoom gate, because "somewhere in the world an aircraft is
     // squawking 7500" is worth seeing at world zoom.
     const flaggedVisible = [];
+    // Per bucket, for the reason renderAisLayer gives: one ADS-B feed feeds
+    // three toggleable layers, each with its own country gate.
+    const flaggedClip = countryClipFor("adsbFlagged");
+    const militaryClip = countryClipFor("adsbMilitary");
+    const civilianClip = countryClipFor("adsbCivilian");
     for (const item of raw.adsb) {
       if (typeof item.lat !== "number" || typeof item.lon !== "number") continue;
       if (!inView(item.lat, item.lon)) continue;
       if (flagOf(item)) {
-        if (!flaggedPerPin || pinDrawsAt("adsbFlagged", item, zoom, minZoomFor("adsbFlagged"))) {
+        if ((!flaggedPerPin || pinDrawsAt("adsbFlagged", item, zoom, minZoomFor("adsbFlagged")))
+            && (!flaggedClip || flaggedClip(item.lat, item.lon))) {
           flaggedVisible.push(item);
         }
       } else if (classifyAircraft(item) === "military") {
-        if (!militaryPerPin || pinDrawsAt("adsbMilitary", item, zoom, minZoomFor("adsbMilitary"))) {
+        if ((!militaryPerPin || pinDrawsAt("adsbMilitary", item, zoom, minZoomFor("adsbMilitary")))
+            && (!militaryClip || militaryClip(item.lat, item.lon))) {
           militaryVisible.push(item);
         }
       } else if (!belowAdsbMinZoom) {
-        if (!civilianPerPin || pinDrawsAt("adsbCivilian", item, zoom, minZoomFor("adsbCivilian"))) {
+        if ((!civilianPerPin || pinDrawsAt("adsbCivilian", item, zoom, minZoomFor("adsbCivilian")))
+            && (!civilianClip || civilianClip(item.lat, item.lon))) {
           civilianVisible.push(item);
         }
       }
@@ -3740,11 +3946,13 @@ export function createMapController(container, initial, callbacks) {
     // stations at every zoom" and the reverse are both configurable here.
     const zoom = map.getZoom();
     const satellitesPerPin = (layerHasTokenZoom("satellites") || layerHasTokenZoomMax("satellites"));
+    const countryClip = countryClipFor("satellites");
     const visible = pool.filter(
       (s) =>
         typeof s.lat === "number" &&
         typeof s.lon === "number" &&
         inView(s.lat, s.lon) &&
+        (!countryClip || countryClip(s.lat, s.lon)) &&
         (!satellitesPerPin || pinDrawsAt("satellites", s, zoom, minZoomFor("satellites")))
     );
     registerPlacement(
@@ -4726,9 +4934,11 @@ export function createMapController(container, initial, callbacks) {
     // they are worth reading while nuclear sites and fabs keep the layer's own.
     const zoom = map.getZoom();
     const infraPerPin = (layerHasTokenZoom("infra") || layerHasTokenZoomMax("infra"));
+    const countryClip = countryClipFor("infra");
     const visible = raw.infra.filter(
       (s) =>
         inView(s.lat, s.lon) &&
+        (!countryClip || countryClip(s.lat, s.lon)) &&
         (!needle || s.name.toLowerCase().includes(needle)) &&
         (!infraPerPin || pinDrawsAt("infra", s, zoom, minZoomFor("infra")))
     );
@@ -5653,6 +5863,21 @@ export function createMapController(container, initial, callbacks) {
      */
     setLayerZoomMaxOverrides(next) {
       layerZoomMaxOverrides = next || {};
+      applyScene();
+      renderAll();
+    },
+
+    /**
+     * The layers that draw only for a selected country: { [layerKey]: true },
+     * sparse.
+     *
+     * Sparse rather than a boolean per layer, and it is read as a presence test
+     * throughout -- countryGateActive asks whether the table has anything in it
+     * at all to decide whether a selection change is worth a redraw, which is
+     * what keeps this free for a deployment that uses none of it.
+     */
+    setLayerCountryOnly(next) {
+      layerCountryOnly = next || {};
       applyScene();
       renderAll();
     },
