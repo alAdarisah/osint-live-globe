@@ -20,6 +20,9 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 # everything in that directory is loaded as a top-level config, and a file of
 # bare proxy directives is not valid there.
 COPY api-proxy.conf /etc/nginx/api-proxy.conf
+# The response headers both listeners send, in a file for the same reason:
+# included from several locations, and not valid as a top-level config.
+COPY security-headers.conf /etc/nginx/security-headers.conf
 # 80 is the private entry point (SSH tunnel), 8081 the public read-only one that
 # the Cloudflare tunnel points at. See nginx.conf.
 EXPOSE 80 8081
