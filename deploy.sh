@@ -134,9 +134,22 @@ CODE_WRITE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
 
 # Read the bundle name out of the running container rather than off the page: it
 # is the one thing that proves the *new* build is what is being served.
-BUNDLE=$(docker compose exec -T frontend sh -c \
-          'ls /usr/share/nginx/html/assets/index-*.js 2>/dev/null' | tr -d '\r' | tail -1)
-BUNDLE=$(basename "${BUNDLE:-none}")
+#
+# Taken from index.html's own <script src>, not from `ls assets/index-*.js`.
+# The build emits more than one index-*.js -- the entry point and a chunk it
+# imports later -- and `ls | tail -1` returned whichever sorted last, which is
+# not the one the browser loads. It printed a real file from a real build, so it
+# looked right every time and was wrong about half of them, which is the worst
+# way for a proof line to fail. index.html names exactly one entry, and that is
+# the file whose hash changing means the deploy reached the browser.
+#
+# Parsed here rather than inside `sh -c` so the quoting stays readable: the
+# container only has to hand back the file.
+BUNDLE=$(docker compose exec -T frontend cat /usr/share/nginx/html/index.html 2>/dev/null \
+          | tr -d '\r' \
+          | grep -o 'src="/assets/index-[A-Za-z0-9_-]*\.js"' \
+          | head -1 | sed 's|.*/||; s|"$||')
+BUNDLE=${BUNDLE:-none}
 
 SOURCES=$(curl -s --max-time 15 http://localhost:8080/api/health \
           | tr ',' '\n' | grep -c '"item_count":[1-9]' || echo '?')
