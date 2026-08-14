@@ -19,7 +19,7 @@ import time
 
 import httpx
 
-from backend import cachestore, config, ingest, mirror, refine, storage
+from backend import admin_config, alert_rules, cachestore, config, ingest, mirror, refine, storage
 from backend.cacheworker import SERVER, Probe, evaluate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -108,11 +108,51 @@ async def _notify(client: httpx.AsyncClient, text: str) -> None:
         log.warning("Could not deliver the alert webhook: %s", exc)
 
 
+async def _rule_alerts() -> tuple[list, int]:
+    """Task 42's reader-defined rules, evaluated once per worker tick.
+
+    Rules live in admin_config (see backend/alert_rules.py's own module
+    docstring for why they are evaluated here rather than on the backend's
+    request path), so this is a plain synchronous file read -- the same
+    admin_config.load() the backend's own /api/admin-config GET makes --
+    followed by whatever entity_latest reads the enabled rules actually need.
+    A rule alert is an ordinary cacheworker.Alert, tagged with
+    alert_rules.SUBJECT_PREFIX on its subject, so run_once below folds it into
+    the exact same record_alert/resolve_alerts/_notify pipeline source-health
+    alerts already go through -- no second dedup, no second webhook path.
+
+    Returns the alerts plus how many enabled rules were actually evaluated,
+    the second half of what run_once records as this engine's own heartbeat.
+    """
+    try:
+        payload = admin_config.load()
+        rules = payload.get("alertRules")
+        enabled_count = sum(
+            1 for r in alert_rules.parse_rules(rules or []) if r.enabled
+        )
+        return await alert_rules.gather_and_evaluate(rules), enabled_count
+    except Exception:  # noqa: BLE001 - a bad rule must not take the health probe down with it
+        log.exception("Alert rule evaluation failed")
+        return [], 0
+
+
 async def run_once(
     http: httpx.AsyncClient, previous_evicted: int | None, uncached_streak: dict
 ) -> int | None:
     probe = await _probe(previous_evicted, uncached_streak)
-    alerts = evaluate(probe)
+    rule_alerts, enabled_rule_count = await _rule_alerts()
+    alerts = evaluate(probe) + rule_alerts
+    # A heartbeat for the rule engine itself, read back by /api/health's own
+    # alert_rules block (see app.py) -- the signal that lets the frontend
+    # distinguish "this rule has never been evaluated" (no row at all, or a
+    # stale one) from "it was evaluated and nothing matched" (a fresh row,
+    # nothing in `alerts` for it). Recorded even when there are zero rules,
+    # so the light stays green while the engine itself is running with an
+    # empty rule set, and only goes stale if the worker itself stops.
+    # item_count is how many *enabled* rules this pass actually evaluated, the
+    # same "what did the last successful run see" reading item_count carries
+    # for every polled source.
+    await storage.record_source_health("alert_rules", enabled_rule_count, True)
 
     for alert in alerts:
         level = logging.ERROR if alert.severity == "critical" else logging.WARNING

@@ -2081,6 +2081,28 @@ async def entity_latest(kind: str, order_by_recency: bool = False) -> list[dict]
     return [json.loads(r["payload"]) for r in rows]
 
 
+async def entity_latest_with_ids(kind: str) -> list[tuple[str, dict]]:
+    """entity_latest rows as (entity_id, payload) pairs.
+
+    entity_id is entity_latest's own primary-key half (see the CREATE TABLE at
+    the top of this module) and is not reliably duplicated inside payload
+    itself -- a caller that needs a stable identity for a row cannot assume
+    which of a kind's own fields ("mmsi" for ais, "icao24" for adsb, ...)
+    happens to carry it. Task 42's alert rules are exactly this caller: firing
+    one alert per matching entity needs a key that is always right rather than
+    guessed per kind, so this reads it from the column instead. Same shape as
+    entity_latest_with_times just above -- one extra column alongside the
+    payload, not a different query path.
+    """
+    if _pool is None:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT entity_id, payload FROM entity_latest WHERE kind = $1 ORDER BY entity_id", kind
+        )
+    return [(r["entity_id"], json.loads(r["payload"])) for r in rows]
+
+
 async def entity_latest_one(kind: str, entity_id: str) -> dict | None:
     """One entity's current entity_latest payload, or None if it isn't tracked.
 

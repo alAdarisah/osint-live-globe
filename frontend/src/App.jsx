@@ -28,6 +28,7 @@ import MapView from "./components/MapView";
 import TitleBar from "./components/TitleBar";
 import RegionBar from "./components/RegionBar";
 import SquawkAlertStrip from "./components/SquawkAlertStrip";
+import AlertToast from "./components/AlertToast";
 import IntelPanel from "./components/IntelPanel";
 import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
 import CableOutagePanel from "./components/CableOutagePanel";
@@ -876,6 +877,11 @@ export default function App() {
         panelOpen={panelOpen}
       />
 
+      {/* Task 42: the toast half of "tell me when X happens here" -- see
+          AlertToast.jsx's own module note. Rides the same /api/health poll
+          `health` already is (useHealth, above), so no second connection. */}
+      <AlertToast alerts={health.alerts} />
+
       {/* The reading panel, and it is the reader's rather than the operator's.
 
           It was gated with the instruments for a while, on the argument that
@@ -1138,6 +1144,11 @@ export default function App() {
           onVesselFilterChange={onVesselFilterChange}
           aircraftFilter={aircraftFilter}
           onAircraftFilterChange={onAircraftFilterChange}
+          health={health}
+          regions={dataApi.regions}
+          mapBounds={mapApi.mapBounds}
+          countrySelection={mapApi.countrySelection}
+          selectedWater={mapApi.selectedWater}
         />
       )}
     </>

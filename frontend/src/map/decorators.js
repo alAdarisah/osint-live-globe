@@ -3627,6 +3627,14 @@ const EMERGENCY_SQUAWK_LABEL = {
   "7700": "general emergency",
 };
 
+// The three codes above, as a plain list -- exported so a squawk-equals
+// alert rule (Task 42's AlertRulesSection) can offer exactly these three as
+// its picker options rather than a free-text field that could be typed as
+// any of the 4,096 possible transponder codes almost none of which mean
+// anything. One source of truth for "which codes are reserved emergency
+// codes" rather than a second copy of EMERGENCY_SQUAWK_LABEL's own keys.
+export const EMERGENCY_SQUAWK_CODES = Object.keys(EMERGENCY_SQUAWK_LABEL);
+
 /** What a squawk means, if it is one of the three reserved emergency codes --
  *  null for every other code, which is the overwhelming majority and carries
  *  no meaning on its own. */

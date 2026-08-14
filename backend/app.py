@@ -282,6 +282,43 @@ async def _derived_job_health() -> dict:
     return out
 
 
+async def _alert_rules_health() -> dict:
+    """A heartbeat for Task 42's rule engine, shaped like every other
+    SourceStatusSection row (see _derived_job_health's own note on that
+    shape) so the generic renderer picks it up without a change of its own.
+
+    This is what lets the frontend tell apart the four states the rule
+    engine can be in, none of which the `alerts` block below can distinguish
+    on its own: a rule that has *never* been evaluated (this key absent or
+    stale -- the worker itself is not running), one evaluated and not met
+    (this key fresh, nothing for that rule's subject in `alerts`), one
+    whose *layer* is unhealthy (cross-reference this response's own entry
+    for that layer's source name), and one currently firing (a `rule:<id>`
+    entry in `alerts`). Read from backend/cacheworker/__main__.py's own
+    record_source_health("alert_rules", ...) heartbeat, written every tick
+    whether or not any rule is enabled -- the same "a heartbeat this age
+    apart means the producer stopped" reasoning mirror.health_verdict
+    already gives every polled source, applied to a monitor rather than a
+    collector.
+    """
+    now = time.time()
+    newest, newest_ok = await storage.source_health_latest("alert_rules")
+    last_success, last_error = mirror.health_verdict(
+        newest, newest_ok, config.CACHE_WORKER_INTERVAL, now, "the cache worker"
+    )
+    return {
+        "alert_rules": {
+            "name": "alert_rules",
+            "key_configured": True,
+            "item_count": (newest_ok or {}).get("item_count") or 0,
+            "version": 0,
+            "last_success": last_success,
+            "seconds_since_success": round(now - last_success) if last_success else None,
+            "last_error": last_error,
+        }
+    }
+
+
 @app.get("/api/health")
 async def health():
     """Per-source status, plus whatever the cache worker is currently reporting.
@@ -289,12 +326,14 @@ async def health():
     The `alerts` block is the part no registry state can carry: conditions about
     the infrastructure between the processes rather than about a source -- Redis
     evicting, a cached kind the backend has stopped following, a producer that
-    stopped producing. Read from the alerts table rather than recomputed here,
-    so the API and the worker cannot disagree about what is wrong.
+    stopped producing, or a Task 42 rule the reader defined. Read from the
+    alerts table rather than recomputed here, so the API and the worker cannot
+    disagree about what is wrong.
     """
     return {
         **registry.health(),
         **(await _derived_job_health()),
+        **(await _alert_rules_health()),
         "alerts": await storage.active_alerts(),
     }
 

@@ -20,6 +20,7 @@ import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../utils/entityF
 import { DEFAULT_EVENT_FILTER } from "../map/severity";
 import { mergeInferenceMode } from "./inferenceProducts";
 import { CARD_TYPES, CARD_SECTIONS } from "./cardSections";
+import { sanitizeAlertRules } from "./alertRules";
 
 // Bumped only when a saved config could no longer be merged onto the defaults
 // safely. Every load runs through mergeSettings below, which takes the shipped
@@ -47,7 +48,14 @@ import { CARD_TYPES, CARD_SECTIONS } from "./cardSections";
 // above it: a config saved before this task has no `stored.units` at all, so
 // mergeSettings leaves defaultSettings()' shipped `{ system: "metric",
 // timezone: "utc" }` in place for it.
-export const SETTINGS_VERSION = 4;
+//
+// 5 (Task 42): added `alertRules` -- "tell me when X happens here", stored
+// as a plain array and evaluated by the cache worker (see
+// backend/alert_rules.py). Additive again: a config saved before this task
+// has no `stored.alertRules` at all, and mergeSettings' own
+// Array.isArray(stored.alertRules) guard below leaves the shipped empty
+// list in place for it, same as every bump above.
+export const SETTINGS_VERSION = 5;
 
 /**
  * The layers whose appearance can be configured, in the order the admin panel
@@ -600,6 +608,12 @@ export function defaultSettings() {
     // { [countryKey]: { fp, rings: { "<polygon>:<ring>": [[lon, lat], ...] } } }
     // See settings/borderOverrides.js for the schema and why it is that shape.
     borders: {},
+    // Task 42: "tell me when X happens here" -- see settings/alertRules.js
+    // for the full shape and backend/alert_rules.py for how it is evaluated.
+    // Empty by default, the same "nothing chosen yet" state every other
+    // reader-authored list in this file (filters.presets, data.*.added)
+    // ships with.
+    alertRules: [],
   };
 }
 
@@ -980,6 +994,17 @@ export function mergeSettings(stored) {
   // ceiling that keeps the whole configuration inside what the backend will
   // accept. See settings/borderOverrides.js.
   if (isPlainObject(stored.borders)) base.borders = sanitizeBorders(stored.borders).borders;
+
+  // Task 42's alert rules. No live REGIONS set is available at merge time
+  // (this runs synchronously from localStorage before /api/regions has ever
+  // been fetched -- see useAppSettings.js's own load order), so a stored
+  // region-keyed geofence is accepted here on shape alone; a key this build
+  // no longer recognises is caught downstream instead, the same "repair at
+  // read time" deferral base.cards.order takes above for a section id --
+  // and backend/alert_rules.py's own parse_rules refuses it outright before
+  // it could ever fire, so an unrecognised key never does anything worse
+  // than sit inert in the rule list.
+  if (Array.isArray(stored.alertRules)) base.alertRules = sanitizeAlertRules(stored.alertRules);
 
   return base;
 }

@@ -2817,6 +2817,67 @@ details[open] > .layer-details-body {
 }
 .squawk-alert-dismiss:hover { color: var(--text-bright); }
 
+/* ---------- rule alert toasts (Task 42, AlertToast.jsx) ---------------
+   Bottom-right, above the map and its panes but under #controlPanel (Admin
+   Mode's drawer) and #adminPanel -- an operator editing a rule should still
+   be able to reach every control while a toast from that very rule is
+   showing. Anchored opposite #squawkAlertStrip (top) so the two independent
+   alert surfaces this map now has never compete for the same corner. */
+#alertToastStack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 970; /* same band as #squawkAlertStrip, for the same reason */
+  display: flex;
+  flex-direction: column-reverse; /* newest toast lowest, growing upward */
+  gap: 8px;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+}
+
+.alert-toast {
+  pointer-events: auto;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 149, 0, 0.55);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.alert-toast-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.alert-toast-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-dim, #8f9bb3);
+}
+
+.alert-toast-dismiss {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #8f9bb3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.alert-toast-dismiss:hover { color: var(--text-bright); }
+
+.alert-toast-detail {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--text-bright);
+  line-height: 1.4;
+}
+
 /* How long ago a ship or aircraft last reported its position (see
    lastPingDetail in map/decorators.js). Dim by default -- on a healthy feed it
    is a few seconds old and is context, not news. */
