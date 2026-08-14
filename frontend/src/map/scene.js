@@ -143,7 +143,6 @@ export const FETCH_ALWAYS_BECAUSE = {
   energyFlows: "the country card",
   foodTrade: "the country card",
   foodPriceIndex: "the country card",
-  firms: "the country card's live picture counts fires in the country bbox",
   jamming: "the country card's live picture counts jamming cells in the country bbox",
   ais: "the country card counts navy hulls and tankers; Navy is ungated anyway",
   adsb: "the country card counts military aircraft; flagged and military are ungated anyway",
@@ -613,6 +612,47 @@ export const LAYER_MANIFEST = {
     fetch: FETCH_ALWAYS,
     disposition: AUTO,
   },
+  pipelines: {
+    // Not a layer anyone can toggle: the pipeline lines ride the infrastructure
+    // layer's own group (infraLayer wraps infraGroup + pipelinesGroup), so this
+    // entry is a cap holder, the same shape firmsPoints and airfieldActivity
+    // have. No `draw`, because `infra` above is what decides whether any of this
+    // is on the map at all.
+    //
+    // It needs a cap because Task 28 changed what this layer is without changing
+    // how it draws. It used to be backend/infrastructure.py's ten hand-written
+    // schematic routes; it is now those ten plus 16,739 real OSM ways, and
+    // renderPipelines built one Leaflet polyline per route per world copy, each
+    // with a bound tooltip and a bound popup. At THEATRE band with three copies
+    // of the world in view that is ~50,000 SVG paths in the document, for a
+    // layer that is on by default.
+    //
+    // Ranked by vertex count, which is the closest thing to "how much pipeline
+    // is this" that the record actually carries -- a trunk line runs to hundreds
+    // of points (the longest is 1,857) where a yard stub is two or three. Not
+    // length in kilometres, and the popup does not claim it is.
+    //
+    // The numbers rise with the band because the question narrows: a theatre
+    // view wants the trunk network legible, a town view wants what is actually
+    // under it. Measured against the served document, that is also where they
+    // stop mattering -- routes whose extent falls in the padded viewport:
+    //
+    //   zoom 4, Europe and the Middle East   12,131   capped to 600
+    //   zoom 6, Ukraine                       4,152   capped to 1,500
+    //   zoom 9, one town                        226   uncapped, all drawn
+    //
+    // which is the shape to keep if these are ever retuned: the bounds filter
+    // does all the work where the detail is wanted, and the cap only bites at
+    // the zooms where no individual line could be read anyway.
+    //
+    // Only the OSM half is ever capped or bounds-filtered -- see renderPipelines
+    // for why the ten curated routes are exempt from both.
+    cap: { THEATRE: 600, COUNTRY: 1500, LOCAL: 3000 },
+    rank: (d) => (Array.isArray(d.path) ? d.path.length : 0),
+    fetch: FETCH_ALWAYS,
+    disposition: AUTO,
+    virtual: true,
+  },
   osmInfra: {
     // Unchanged at 9, and this entry is the precedent the whole file
     // generalises rather than an exception to it: crowd-sourced geometry
@@ -881,11 +921,30 @@ export const LAYER_MANIFEST = {
     // THEATRE rather than WORLD: at world zoom a global thermal feed is mostly
     // agricultural burning, which is a smear rather than a signal. Over one
     // theatre it is the layer that shows something burning that should not be.
-    // The fetch cannot be gated at all -- the country card counts fires inside
-    // the country bbox -- which is precisely why this feed earns a viewport
-    // bbox instead of a band gate.
+    //
+    // The fetch used to be FETCH_ALWAYS, on the argument that the country card
+    // counts fires inside the country bbox and a band gate would take that row
+    // away -- with `scoped` standing in for the gate. Measured against the
+    // running backend, the bbox was not standing in for anything at the one band
+    // where it mattered: a WORLD viewport *is* the whole world, so `bboxCell`
+    // resolves to null there (see useOsintData.js) and the poll ships the
+    // unclipped feed. That is 184,770 records and 28.2 MB of JSON parsed every
+    // three minutes, from the moment the map opens, at the one band where this
+    // layer draws nothing at all. A theatre-sized box over Europe and the Middle
+    // East is 1.8 MB; a country box over Ukraine is 435 kB.
+    //
+    // So the gate is the same THEATRE the layer draws at, and the two cards that
+    // count fires keep their rows through FOCUS_FETCH_ONLY below rather than
+    // through a permanent global poll: focusing a country fetches the fires
+    // inside that country's bounds however far out the camera is.
+    //
+    // Below the gate with nothing focused, the fires row does not silently read
+    // zero. firms has no coverage record until it has fetched, so
+    // coverageStateFor returns "not_loaded" and both buildLivePicture and
+    // buildAdminLive say so in the words they already had for it: an empty
+    // section here is "not checked", not "checked and empty".
     draw: { band: "THEATRE" },
-    fetch: FETCH_ALWAYS,
+    fetch: "THEATRE",
     disposition: AUTO,
     scoped: true,
   },
@@ -1079,6 +1138,16 @@ const HOT_PROMOTE = [
 // which no camera position may do.
 const FOCUS_PROMOTE = ["cities", "conflictHistory", "infra", "osmInfra"];
 
+// A focus lifts these layers' *fetch* gate and nothing else -- no band
+// promotion, so what draws at a given zoom is unchanged by clicking a country.
+//
+// Separate from FOCUS_PROMOTE because the two answer different questions, and
+// firms is the case that separates them. The cards need the fire counts for the
+// country the reader just clicked, which is a fetch. They do not need the global
+// thermal heat canvas painted over a world view, which is what a band promotion
+// would also do -- and what the layer's own entry argues against.
+const FOCUS_FETCH_ONLY = ["firms"];
+
 /**
  * @param {object} ctx
  * @param {number} ctx.zoom            current Leaflet zoom
@@ -1180,6 +1249,7 @@ function fetchZoomOf(key, entry, { focus, bypass }) {
   // A focused country is a request for that country's whole picture, so its
   // feeds are fetched regardless of how far out the camera happens to be.
   if (focus?.kind === "country" && FOCUS_PROMOTE.includes(key)) return null;
+  if (focus?.kind === "country" && FOCUS_FETCH_ONLY.includes(key)) return null;
   return floorOf(entry.fetch);
 }
 

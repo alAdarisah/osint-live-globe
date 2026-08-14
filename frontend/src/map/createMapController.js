@@ -167,7 +167,7 @@ import {
 } from "./crossSource";
 import {
   resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST,
-  REFERENCE_ONLY_FEEDS,
+  REFERENCE_ONLY_FEEDS, bandFor, bboxSnapDegrees,
 } from "./scene";
 import { reachLineEnds, reachContourRings, reachOnScreen } from "./reachGeometry";
 import { profileViewport } from "./viewportProfile";
@@ -203,6 +203,7 @@ import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } 
 import {
   nearestLon, unwrapPath, boundsContainsPoint,
   worldCopyOffsets, worldCopyDraws, worldCopyKey, worldCopyPlacer, shiftPathLon,
+  pathExtent, extentInView,
 } from "../utils/geo";
 import { createGenerationGuard } from "../utils/fetchGeneration";
 import { fetchJson, vesselDetailUrl, portCallsUrl, aircraftDetailUrl } from "../api";
@@ -3383,9 +3384,13 @@ export function createMapController(container, initial, callbacks) {
    * the key comparison and costs a string compare per layer.
    */
   function renderWorldCopyLayers() {
-    const key = worldCopies().join(",");
+    const offsets = worldCopies();
+    const key = offsets.join(",");
     if (worldCopyKeys.cables !== key) renderCables();
-    if (worldCopyKeys.pipelines !== key) renderPipelines();
+    // Its own key, not the shared one: pipelines is the only line layer here
+    // that is bounds-filtered and capped, so a pan or a zoom can change what it
+    // draws while the copy count sits still. See pipelineDrawKey.
+    if (worldCopyKeys.pipelines !== pipelineDrawKey(offsets)) renderPipelines();
     if (worldCopyKeys.railways !== key) renderRailways();
     if (worldCopyKeys.powerLines !== key) renderPowerLines();
     if (worldCopyKeys.shippingLanes !== key) renderShippingLanes();
@@ -6725,23 +6730,119 @@ export function createMapController(container, initial, callbacks) {
     settlePlacement();
   }
 
+  // The per-route extents the viewport test below compares against, computed
+  // once per route and held off to the side rather than stamped onto the record.
+  // A WeakMap because Admin Mode's override transform hands the renderer a fresh
+  // copy of an edited feed (see applyOverrides): a bbox cached on the object
+  // would either outlive the geometry it described or keep the old copies alive.
+  const pipelineExtents = new WeakMap();
+
+  function pipelineExtentOf(route) {
+    if (pipelineExtents.has(route)) return pipelineExtents.get(route);
+    // Cached even when null -- "this route has no usable geometry" is an answer
+    // worth not recomputing sixteen thousand times a pan.
+    const box = pathExtent(route.path);
+    pipelineExtents.set(route, box);
+    return box;
+  }
+
+  /**
+   * Is this route's own extent anywhere in the padded viewport?
+   *
+   * A box test rather than viewportFilter's per-point containment, because the
+   * two answer different questions once the record is a line: a segment can
+   * cross the whole screen with both of its endpoints off it, and a per-vertex
+   * test would drop exactly that route -- the long trunk lines this layer most
+   * wants to keep. Built once per render pass, like viewportFilter, for the same
+   * reason its own comment gives.
+   *
+   * Padded by the same 0.25 every point layer uses, so a route just off-screen
+   * is already drawn by the time the reader pans onto it.
+   */
+  function pipelineInViewFilter() {
+    const bounds = map.getBounds().pad(0.25);
+    const view = {
+      south: bounds.getSouth(), north: bounds.getNorth(),
+      west: bounds.getWest(), east: bounds.getEast(),
+    };
+    const refLon = map.getCenter().lng;
+    return (route) => extentInView(pipelineExtentOf(route), view, refLon);
+  }
+
+  /**
+   * What renderWorldCopyLayers compares to decide whether pipelines needs
+   * redrawing.
+   *
+   * The other line layers key on the copy count alone, which is all they need:
+   * nothing else about the camera changes what they draw. This one is
+   * bounds-filtered and capped per band, so it has to notice a pan and a zoom as
+   * well -- snapped to the same grid the fetch bboxes use (see bboxSnapDegrees),
+   * so ordinary panning inside one cell still redraws nothing. Without the
+   * snapping this would rebuild sixteen thousand records' worth of filtering on
+   * every pixel of drag, which is the cost the filter exists to avoid.
+   */
+  function pipelineDrawKey(offsets = worldCopies()) {
+    const view = map.getBounds().pad(0.25);
+    const band = bandFor(map.getZoom());
+    const snap = bboxSnapDegrees(band);
+    const cell = [
+      Math.floor(view.getSouth() / snap), Math.floor(view.getWest() / snap),
+      Math.ceil(view.getNorth() / snap), Math.ceil(view.getEast() / snap),
+    ].join(",");
+    // The band is in the key in its own right, not left implied by the cell: the
+    // cap is a function of the band, so crossing a band boundary changes what is
+    // drawn even when the snapped cell happens not to move.
+    return `${offsets.join(",")}|${band}|${cell}`;
+  }
+
   // Pipeline routes -- backend/infrastructure.py's curated PIPELINE_ROUTES,
   // plus (Task 28) real OSM pipeline geometry, merged server-side by
   // app.py's infrastructure_list into one `raw.pipelines` array, each entry
   // stamped `source: "curated" | "osm"`. Fetched once (see useOsintData.js),
-  // so this just draws every route once rather than diff-syncing
-  // per-viewport like the point layers.
+  // so this redraws from the held array rather than diff-syncing per record the
+  // way the point layers do.
   //
   // Drawn on every copy of the world in view, same as the cables below: a route
   // is a line across the globe, not a point, so it has to repeat where the
   // basemap repeats or it stops dead at the seam. See worldCopies above.
+  //
+  // The two halves are drawn under different rules, and the split is the whole
+  // point of this function. renderCables states the argument this layer used to
+  // share: "a polyline is already clipped by Leaflet and a cable only makes
+  // sense as a whole line, so cropping it to the viewport would cut cables in
+  // half at the edge of the screen for no saving." That is true of 718
+  // globe-spanning cables and it is true of the ten curated schematic pipeline
+  // routes, which are the same kind of object -- Druzhba drawn from Samara to
+  // Hungary, six waypoints, meaningless in pieces. Those ten keep the cables
+  // treatment exactly: never filtered, never capped, every copy, always.
+  //
+  // It was never true of the 16,739 OSM ways Task 28 merged in beside them.
+  // Those average twelve vertices and sit inside the eleven conflict theatres;
+  // dropping one that is four thousand kilometres off-screen cuts nothing in
+  // half, it just declines to build a DOM node nobody can see. So the OSM half
+  // is bounds-filtered and then capped by rank, which is what every other dense
+  // layer on this map already does.
   function renderPipelines() {
     pipelinesGroup.clearLayers();
     const offsets = worldCopies();
-    worldCopyKeys.pipelines = offsets.join(",");
+    worldCopyKeys.pipelines = pipelineDrawKey(offsets);
+
+    const curated = [];
+    const osm = [];
     for (const route of raw.pipelines) {
+      if (!Array.isArray(route?.path) || route.path.length < 2) continue;
+      (route.source === "osm" ? osm : curated).push(route);
+    }
+    // Filter before capping, not after: a cap applied to the whole world and
+    // then clipped to the view would hand back whatever survived both, which on
+    // a quiet theatre is far less than the cap allows and on a busy one is the
+    // wrong 600. Filtering first means the cap always describes what is on
+    // screen, which is the only thing the panel's note can honestly be about.
+    const inView = pipelineInViewFilter();
+    const drawn = curated.concat(capByRank("pipelines", osm.filter(inView)));
+
+    for (const route of drawn) {
       const path = route.path;
-      if (!Array.isArray(path) || path.length < 2) continue;
       const isOsm = route.source === "osm";
       const label = route.name ? esc(route.name) : "Pipeline";
       const popupHtml = isOsm
@@ -6778,7 +6879,12 @@ export function createMapController(container, initial, callbacks) {
     }
     // Per route, not per drawn line. A copy of a pipeline is the same pipeline,
     // and a count that triples when the reader zooms out would be a lie.
-    counts.pipelineRoutes = raw.pipelines.length;
+    //
+    // `counts` is now what is actually drawn and `totals` what the feed holds,
+    // which is the split every other layer here already reports -- before the
+    // bounds filter the two were necessarily the same number, because
+    // everything in the feed was always drawn.
+    counts.pipelineRoutes = drawn.length;
     totals.pipelineRoutes = raw.pipelines.length;
     // Review fix (Task 28, Critical): same "a cap that truncates silently is
     // a defect" treatment railways'/powerLines' own truncated-region notes
@@ -7439,8 +7545,9 @@ export function createMapController(container, initial, callbacks) {
     // viewport's positions -- eight passes per pan, most of them wrong.
     // Before the marker layers, and outside the placement suspension: these three
     // are polylines, so they take no part in the declutter pass at all. Almost
-    // always a no-op -- it only does work on the pan or zoom that changes how many
-    // copies of the world are on screen.
+    // always a no-op -- the copy-count layers only do work on the pan or zoom
+    // that changes how many copies of the world are on screen, and pipelines only
+    // when the snapped viewport cell or the band moves (see pipelineDrawKey).
     renderWorldCopyLayers();
     settleSuspended += 1;
     try {

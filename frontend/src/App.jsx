@@ -409,6 +409,20 @@ export default function App() {
   // now moves layers as the camera moves, and a copy like that would be wrong
   // within one pan.
   const layerVisibility = mapApi.layerState.on;
+
+  // The other routes an on-demand document can be needed by, none of which go
+  // through onToggleLayer: a stored configuration that already has the layer
+  // switched on, and a followed link whose ?layers= override does the same.
+  // Reads what is actually on the map rather than either wish table, so it
+  // covers both without having to know which one asked. ensureOneShot is
+  // idempotent, which is what lets this run on every layer-state change.
+  const { ensureOneShot } = dataApi;
+  useEffect(() => {
+    for (const [key, on] of Object.entries(layerVisibility || {})) {
+      if (on) ensureOneShot(key);
+    }
+  }, [layerVisibility, ensureOneShot]);
+
   // Saved, not just applied. The control drawer exists only in Admin Mode (see
   // panelOpen above), so a checkbox here is an operator deciding what this
   // deployment shows rather than a reader adjusting their own view for a
@@ -421,6 +435,11 @@ export default function App() {
   // trip to reach the map.
   const onToggleLayer = useCallback(
     (key, visible) => {
+      // Before the calls below, so the document is already in flight while the
+      // map is switching the layer on. A no-op for every key that is not an
+      // on-demand document, and for one already fetched -- see ONE_SHOT in
+      // useOsintData.js.
+      if (visible) ensureOneShot(key);
       mapApi.setLayerVisible(key, visible);
       actions.setLayerWish(key, visible);
       // Review fix: this is the reader's own explicit choice for this key,
@@ -430,7 +449,7 @@ export default function App() {
       // own note in urlState.js.
       setLayerOverride((prev) => applyLayerOverrideChange(prev, key, visible));
     },
-    [mapApi.setLayerVisible, actions]
+    [mapApi.setLayerVisible, actions, ensureOneShot]
   );
 
   // One record, opened from a row in the country card. Held as resolved HTML

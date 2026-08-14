@@ -176,13 +176,21 @@ const LAYER_LABEL = {
   powerPlants: "Power plants (OSM)",
   // Task 29: same reasoning again -- airDefense carries the identical cap.
   airDefense: "Air defence & radar (OSM)",
+  // The OSM half of the pipeline layer, which gained a per-band cap when it
+  // gained 16,739 real ways beside the ten curated schematic routes (see
+  // LAYER_MANIFEST and renderPipelines). Named for the half that is capped: the
+  // curated ten are never thinned, so "Pipelines (n)" would overstate it.
+  pipelines: "Pipelines (OSM)",
 };
 
 // Task 27: railwayPoints has no checkbox of its own -- it mirrors "railways"'
 // visibility exactly (see setLayerVisible in createMapController.js) -- so
 // the cap note below has to ask about its *parent's* checkbox, not one that
 // will never exist. Every other capped layer answers for itself.
-const CAP_NOTE_VISIBILITY_KEY = { railwayPoints: "railways" };
+// pipelines is the second such case and arrives the same way: the lines ride the
+// infrastructure layer's own group, so "is this thinning visible to anyone right
+// now" is a question about the infrastructure checkbox.
+const CAP_NOTE_VISIBILITY_KEY = { railwayPoints: "railways", pipelines: "infra" };
 
 export default function LayersSection({
   counts, zoomNotes, layerVisibility, layerWish, onToggleLayer, infraFilterText, onInfraFilterChange,
