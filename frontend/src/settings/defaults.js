@@ -14,12 +14,47 @@ import { shippedDrawZoom, SCENE_APPLY_KEYS, TRAIL_PARENT } from "../map/scene";
 import { CURSOR_STYLES } from "../map/cursor";
 import { glyphChoicesFor } from "../map/iconTheme";
 import { sanitizeBorders } from "./borderOverrides";
+import { DEFAULT_TILE_DIAL, mergeTileDial } from "../map/tileTint";
+import { MARINE_CLASSES } from "../map/water";
+import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../utils/entityFilter";
+import { DEFAULT_EVENT_FILTER } from "../map/severity";
+import { mergeInferenceMode } from "./inferenceProducts";
+import { CARD_TYPES, CARD_SECTIONS } from "./cardSections";
 
 // Bumped only when a saved config could no longer be merged onto the defaults
 // safely. Every load runs through mergeSettings below, which takes the shipped
 // default for anything missing or malformed, so an older file is normally just
 // a subset rather than a migration problem.
-export const SETTINGS_VERSION = 1;
+//
+// 2 (Task 30): added ui.tiles (basemap/imagery/weather filter dials, see
+// map/tileTint.js). No destructive change to migrate -- a config saved before
+// this key existed simply has no `stored.ui.tiles`, and mergeSettings' own
+// `isPlainObject(stored.ui.tiles)` guard below leaves defaultSettings()'
+// shipped dials in place for it, the same "additive key, absence means
+// unset" rule every other field in this file already follows. The bump is a
+// record of the shape changing, not a sign a converter had to be written.
+//
+// 3 (Task 31): added `water`, `filters`, `inference` and `cards`, plus
+// `performance` -- five wholly new top-level keys, every one additive for
+// the identical reason ui.tiles was: a config saved before this task has no
+// `stored.water` etc. at all, so mergeSettings' own isPlainObject guards
+// leave defaultSettings()' shipped values in place rather than needing a
+// converter. The bump is the same kind of record 2's own note describes.
+//
+// 4 (Task 32): added `units` -- the metric/imperial/nautical and UTC/local/
+// browser preference (see utils/format.js's formatDistanceKm/formatSpeedKmh/
+// formatAltitudeM/formatClockAt). Additive for the same reason as every bump
+// above it: a config saved before this task has no `stored.units` at all, so
+// mergeSettings leaves defaultSettings()' shipped `{ system: "metric",
+// timezone: "utc" }` in place for it.
+//
+// 5: added `publicPanels` -- which of the intel panel's four tabs, and the
+// conflict briefing card, a deployment carries -- and `countryOnly` on each
+// entry in `layers`. Additive for the same reason as every bump above it, and
+// both are default-permissive besides: an absent publicPanels leaves all five
+// showing, and an absent countryOnly leaves the layer ungated, so a config
+// saved before this task describes exactly the behaviour it had.
+export const SETTINGS_VERSION = 5;
 
 /**
  * The layers whose appearance can be configured, in the order the admin panel
@@ -42,6 +77,15 @@ export const SETTINGS_LAYERS = [
   { key: "cities", label: "Cities" },
   { key: "infra", label: "Critical infrastructure" },
   { key: "satellites", label: "Satellites" },
+  // Task 24: client-propagated satellite layers -- see map/scene.js's own
+  // entries for which are on by default and why.
+  { key: "satNavigation", label: "Satellites: navigation (GPS/Galileo/GLONASS/Beidou)" },
+  { key: "satWeather", label: "Satellites: weather" },
+  { key: "satImaging", label: "Satellites: Earth imaging" },
+  { key: "satScience", label: "Satellites: science" },
+  { key: "satGeo", label: "Satellites: geostationary" },
+  { key: "satStarlink", label: "Satellites: Starlink" },
+  { key: "satOneweb", label: "Satellites: OneWeb" },
   { key: "aisNavy", label: "Navy & MSC ships" },
   { key: "aisTanker", label: "Oil tankers" },
   { key: "aisCivilian", label: "Civilian ships" },
@@ -55,6 +99,14 @@ export const SETTINGS_LAYERS = [
   { key: "cables", label: "Submarine cables" },
   { key: "launches", label: "Orbital launches" },
   { key: "osmInfra", label: "Infrastructure (OpenStreetMap)" },
+  // Task 28: its own row -- power plants have an independent toggle (unlike
+  // railwayPoints, which mirrors "railways"), so they need their own
+  // zoom-gate/colour dials the same as any other layer.
+  { key: "powerPlants", label: "Power plants (OpenStreetMap)" },
+  // Task 29: radar/bunker/checkpoint, off by default with its own
+  // completeness caveat (see decorateOsmInfra's "airDefense" branch) --
+  // same independent-toggle treatment as powerPlants above.
+  { key: "airDefense", label: "Air defence & radar (OpenStreetMap, off by default)" },
   { key: "gfwGaps", label: "AIS disabling (GFW)" },
   { key: "gfwDetections", label: "Satellite vessel detections (GFW)" },
   { key: "czib", label: "Airspace warnings (EASA CZIB)" },
@@ -62,9 +114,18 @@ export const SETTINGS_LAYERS = [
   { key: "ports", label: "Ports (NGA WPI)" },
   { key: "dams", label: "Dams & reservoirs (GDW)" },
   { key: "deflock", label: "ALPR cameras (DeFlock)" },
-  { key: "railways", label: "Railways (Natural Earth)" },
+  { key: "railways", label: "Railways (Natural Earth + OpenStreetMap)" },
+  // Task 27: its own row -- railwayPoints has none (mirrors "railways", see
+  // EXTRA_TOKENS_UNDER in components/admin/sections/shared.jsx) because it
+  // has no independent toggle, but railLive does have one and needs its own
+  // zoom-gate/colour dials the same as any other layer.
+  { key: "railLive", label: "Live trains (Digitraffic, Finland)" },
+  { key: "powerLines", label: "Transmission lines (OpenStreetMap)" },
+  { key: "water", label: "Water bodies (Natural Earth)" },
   { key: "firms", label: "Fires / thermal anomalies (FIRMS)" },
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
+  { key: "shippingLanes", label: "Shipping corridors (schematic)" },
+  { key: "laneDensity", label: "AIS traffic density (this map's own coverage)" },
 ].map((layer) => ({ ...layer, zoomGate: shippedDrawZoom(layer.key) }));
 
 /**
@@ -134,19 +195,41 @@ const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null
  *             second gate saying the same thing in a different vocabulary is
  *             how the two end up disagreeing.
  *   firms,    density canvases rather than pins, and a quarter of a million
- *   jamming   rows apiece. There is no individual mark to keep or drop.
- *   cables,   polylines. A cable is only legible as a whole line -- clipping
- *   railways  one to a border draws a fragment that claims the cable ends
- *             there.
+ *   jamming,  rows apiece. There is no individual mark to keep or drop.
+ *   laneDensity
+ *   cables,   polylines and polygons. A cable, a transmission line or a
+ *   railways, shipping corridor is only legible as a whole line -- clipping one
+ *   powerLines, to a border draws a fragment that claims the cable ends there --
+ *   water,    and a lake or a sea is a shape, not a mark on one.
+ *   shippingLanes
+ *
+ * The satellite layers are deliberately in rather than out. A satellite is a
+ * pin with a real position, and "only the passes over the country I am reading
+ * about" is exactly the question the gate exists for -- see renderSatellites,
+ * which applies the clip to the propagated position like any other point.
  *
  * A layer outside this set gets no checkbox at all, rather than a checkbox that
  * half works.
  */
-const NO_COUNTRY_GATE = new Set(["cities", "firms", "jamming", "cables", "railways"]);
+const NO_COUNTRY_GATE = new Set([
+  "cities", "firms", "jamming", "laneDensity",
+  "cables", "railways", "powerLines", "water", "shippingLanes",
+]);
 
 export const COUNTRY_ONLY_LAYERS = new Set(
   SETTINGS_LAYERS.map((l) => l.key).filter((key) => !NO_COUNTRY_GATE.has(key))
 );
+
+/**
+ * The intel panel's tabs, in the order it draws them, as `publicPanels` keys.
+ *
+ * Named here rather than imported from IntelPanel.jsx because this is the
+ * settings shape: the panel owns what a tab looks like and what it lists, and
+ * this file owns which of them a deployment carries. They have to agree on the
+ * key, and the panel takes the list it is given (see its `tabs` prop) rather
+ * than reading a settings object, so there is one direction to the dependency.
+ */
+export const INTEL_TAB_KEYS = ["escalation", "events", "news", "officials"];
 
 /**
  * Every key a checkbox in the control drawer can address.
@@ -160,11 +243,18 @@ export const COUNTRY_ONLY_LAYERS = new Set(
  * manages SCENE_APPLY_KEYS; the three trail toggles and the military-satellite
  * row are sub-tickers of a parent layer, which is exactly why map/scene.js keeps
  * them out of the manifest.
+ *
+ * waterLakes/waterRivers join the hand-added end of that list for the same
+ * reason: neither has an independent existence a manifest entry could gate --
+ * both ride the single `water` layer key, filtering what is currently synced
+ * into it rather than adding or removing a Leaflet layer of their own (see
+ * setLayerVisible in createMapController.js).
  */
 export const TOGGLEABLE_LAYER_KEYS = new Set([
   ...SCENE_APPLY_KEYS,
   ...Object.keys(TRAIL_PARENT),
   "satellitesMilitary",
+  "waterLakes", "waterRivers",
 ]);
 
 /**
@@ -237,6 +327,11 @@ export const UNEDITABLE_SOURCES = [
     label: "Country shapes & the choropleth",
     reason: "Geometry, not records. Boundaries have their own editor -- select a country and"
       + " use Edit border -- and the choropleth is computed from the country-keyed feeds.",
+  },
+  {
+    label: "Water bodies",
+    reason: "Geometry, not records, for the same reason as the country shapes above -- a sea,"
+      + " lake or river is a shape from Natural Earth, not a row with fields to correct.",
   },
   {
     label: "Internet disruption (IODA)",
@@ -429,17 +524,24 @@ export function defaultSettings() {
     // On by default: the pile-up it addresses is the ordinary case in every city
     // this map is used to look at, and the grouping is reversible per pin.
     cityZones: { group: true, show: true, radiusScale: 1 },
-    // Which of the three reader panels the public page carries. Written in full
-    // rather than sparsely, unlike layerWish: there is no resolver to hand a
-    // panel back to, so an absent key has no third state to mean.
+    // What the reader's own panels carry. Written in full rather than sparsely,
+    // unlike layerWish: there is no resolver to hand a panel back to, so an
+    // absent key has no third state to mean.
     //
-    // These are the panels that render outside the Admin Mode gate (see the
-    // note above them in App.jsx) -- the news ticker, the notable-activity
-    // board and the conflict briefing card. Switching one off hides it from
-    // everyone, an operator included: Admin Mode is the reader's map plus
-    // instruments, not a different app, and the checkbox that hid it is the way
-    // back.
-    publicPanels: { newsTicker: true, notableEvents: true, briefingCard: true },
+    // The first four are the intel panel's tabs (see IntelPanel.jsx). They are
+    // named per tab rather than per panel because the panel is four readings of
+    // four different feeds behind one header -- "carry the news ticker but not
+    // the officials wire" is a real editorial decision about a deployment, and
+    // a single on/off for the whole panel could not say it. Switch all four off
+    // and the panel does not render at all; there is nothing left in it.
+    //
+    // Switching one off hides it from everyone, an operator included: Admin
+    // Mode is the reader's map plus instruments, not a different app, and the
+    // checkbox that hid it is the way back.
+    publicPanels: {
+      escalation: true, events: true, news: true, officials: true,
+      briefingCard: true,
+    },
     ui: {
       textScale: 1,
       panelOpacity: 0.94,
@@ -459,6 +561,110 @@ export function defaultSettings() {
       cursorStyle: "reticle", // see CURSOR_STYLES
       cursorScale: 1,
       cursorColor: null, // null == follow the UI accent
+      // Task 30: filter + colour-overlay dials for the raster tile panes --
+      // basemap, GIBS imagery and the weather rasters, kept independent
+      // because tinting a road map and tinting a satellite mosaic are
+      // different jobs (see map/tileTint.js and BasemapSection.jsx). Every
+      // dial ships at DEFAULT_TILE_DIAL, i.e. inert -- Admin Mode's own
+      // "Default" preset button and this shipped state are the same object.
+      tiles: {
+        // Off by default -- see map/tileTintMotion.js's own note on what
+        // this trades away and why it does not need to be on for a map that
+        // ships with blur at 0 everywhere.
+        applyAtRest: false,
+        basemap: { ...DEFAULT_TILE_DIAL },
+        imagery: { ...DEFAULT_TILE_DIAL },
+        weather: { ...DEFAULT_TILE_DIAL },
+      },
+    },
+    // Task 32 item 4: the units/timezone preference every card's numbers and
+    // clocks read through (see utils/format.js's formatDistanceKm/
+    // formatSpeedKmh/formatAltitudeM/formatClockAt). `system` is the reader's
+    // choice of unit family; `timezone` is "utc" (fixed), "browser" (follow
+    // this device's own zone) or an IANA zone name an operator names
+    // directly -- validated against Intl at merge time below rather than
+    // against a fixed list, since the set of valid zone names is Intl's own
+    // and not this app's to maintain a second copy of.
+    units: {
+      system: "metric",
+      timezone: "utc",
+    },
+    // Task 31's Water section -- fill/outline weight and which marine
+    // classes draw. Colours are not repeated here: water.fill/water.outline/
+    // water.selected already live in icons.colors like every other palette
+    // token (see map/iconTheme.js's "water" PALETTE_GROUPS entry), and the
+    // Water section reuses that same action rather than opening a second
+    // place to store the same three hexes. hiddenClasses covers only the
+    // marine sub-kinds in map/water.js's MARINE_CLASSES -- lake/river
+    // already have their own independent control-drawer toggles
+    // (waterLakes/waterRivers) and are not repeated here for the same reason
+    // the colours are not.
+    //
+    // No `showLabels`: water carries no hover tooltip and no persistent
+    // label layer for a switch to gate (see WaterSection.jsx's own note on
+    // why "label visibility" was declined rather than shipped as a dial that
+    // moves nothing) -- an earlier revision of this task shipped one anyway,
+    // caught in review as dead schema, and removed.
+    water: {
+      hoverFillOpacity: 0.22,
+      selectedFillOpacity: 0.32,
+      outlineWeight: 1,
+      hiddenClasses: [],
+    },
+    // Task 31's Filters section: saved combinations of the vessel/aircraft
+    // filter bars (Task 18) and the conflict event filter, captured and
+    // restored as one snapshot each -- see FiltersSection.jsx. Empty by
+    // default; the live filters themselves stay App.jsx's own React state,
+    // exactly as they always have (see DEFAULT_VESSEL_FILTER/
+    // DEFAULT_AIRCRAFT_FILTER/DEFAULT_EVENT_FILTER, the shape a saved
+    // preset's three sub-objects are validated against below), because a
+    // filter typed in is a session's own working state, not a standing
+    // configuration every reader of this deployment should open into.
+    filters: {
+      presets: [],
+    },
+    // Task 31's Inference section: the three-state switch (hide/labelled/
+    // show) per inferred product -- see settings/inferenceProducts.js for
+    // the full product table and what each state does.
+    inference: {
+      mode: mergeInferenceMode(null),
+    },
+    // Task 31's Cards section: which PlaceInfoCard-based sections show, in
+    // what order, and whether each starts open -- see settings/
+    // cardSections.js for the per-card-type section tables this indexes and
+    // components/placeInfoCardGrouping.js's applyCardSettings for how a
+    // stored choice reaches the card. Every sub-object is keyed by
+    // CARD_TYPES' own keys and sparse by default -- an empty `hidden` array,
+    // an empty `order` array (meaning "the shipped order") and an empty
+    // `defaultOpen` map (meaning "whatever that card's own wrapper already
+    // says") are all the same "nothing chosen yet" state layerWish uses
+    // elsewhere in this file.
+    cards: {
+      hidden: Object.fromEntries(CARD_TYPES.map((c) => [c.key, []])),
+      order: Object.fromEntries(CARD_TYPES.map((c) => [c.key, []])),
+      defaultOpen: Object.fromEntries(CARD_TYPES.map((c) => [c.key, {}])),
+    },
+    // Task 31's Performance section. Every value here shipped as a bare
+    // constant inside map/createMapController.js until this task -- see that
+    // file's own note by SHIP_TRAIL_MAX_POINTS and setPerformanceOptions for
+    // which five of these six move a `let` binding live, and which one
+    // (satRedrawMs is deliberately absent) is baked into a setInterval and
+    // cannot be. `pollIntervalMultiplier`/`pausePollingWhenHidden` reach
+    // useOsintData.js instead -- see App.jsx's own useOsintData call.
+    // `webglSpriteCap: null` is the one dial with no prior constant to carry
+    // forward (there was no cap at all before this task); null means exactly
+    // that -- no cap -- so a deployment that never opens this section draws
+    // precisely as it always has.
+    performance: {
+      shipTrailPoints: 300,
+      aircraftTrailPoints: 400,
+      satelliteTrailPoints: 36,
+      tankerTrailPoints: 60,
+      satSmallCadenceMs: 10_000,
+      satLargeCadenceMs: 60_000,
+      webglSpriteCap: null,
+      pollIntervalMultiplier: 1,
+      pausePollingWhenHidden: true,
     },
     // { [sourceKey]: { edits: { [id]: {field: value, __hidden?: true} }, added: [record] } }
     data: Object.fromEntries(EDITABLE_SOURCES.map((s) => [s.key, { edits: {}, added: [] }])),
@@ -480,6 +686,69 @@ function sameOrder(a, b) {
 function pickNumber(value, fallback, min, max) {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(Math.max(value, min), max);
+}
+
+// --- Task 31's Filters section: saved presets --------------------------
+//
+// A preset is a snapshot of the three filter shapes App.jsx already owns as
+// React state (vesselFilter/aircraftFilter/eventFilter -- see entityFilter.js
+// and map/severity.js for where each one's own shape and shipped default
+// come from). Sanitized field by field against those same defaults rather
+// than accepted as written, for the same reason every other stored value in
+// this file is: a hand-edited or imported file can carry anything.
+
+function sanitizeVesselFilterPatch(value) {
+  if (!isPlainObject(value)) return { ...DEFAULT_VESSEL_FILTER };
+  return {
+    text: typeof value.text === "string" ? value.text.slice(0, 200) : "",
+    sanctionedOnly: value.sanctionedOnly === true,
+    watchlistedOnly: value.watchlistedOnly === true,
+  };
+}
+
+function sanitizeAircraftFilterPatch(value) {
+  if (!isPlainObject(value)) return { ...DEFAULT_AIRCRAFT_FILTER };
+  return {
+    text: typeof value.text === "string" ? value.text.slice(0, 200) : "",
+    militaryOnly: value.militaryOnly === true,
+  };
+}
+
+function sanitizeEventFilterPatch(value) {
+  if (!isPlainObject(value)) return { ...DEFAULT_EVENT_FILTER };
+  return {
+    maxAgeDays: Number.isFinite(value.maxAgeDays) ? Math.min(Math.max(value.maxAgeDays, 0), 3650) : null,
+    minSeverity: pickNumber(value.minSeverity, 0, 0, 100),
+    showImprecise: value.showImprecise === true,
+    minConfidence: pickNumber(value.minConfidence, DEFAULT_EVENT_FILTER.minConfidence, 0, 1),
+  };
+}
+
+/**
+ * A stored `filters.presets` array, with every malformed entry dropped
+ * rather than repaired -- unlike layerStack or a card order, a preset with
+ * no name or no id is not a recognisable thing to repair into, it is just
+ * not a preset.
+ */
+function sanitizeFilterPresets(stored) {
+  if (!Array.isArray(stored)) return [];
+  const out = [];
+  const seenIds = new Set();
+  for (const entry of stored) {
+    if (!isPlainObject(entry)) continue;
+    if (typeof entry.id !== "string" || !entry.id || seenIds.has(entry.id)) continue;
+    if (typeof entry.name !== "string" || !entry.name.trim()) continue;
+    seenIds.add(entry.id);
+    out.push({
+      id: entry.id,
+      name: entry.name.trim().slice(0, 80),
+      createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now(),
+      vesselFilter: sanitizeVesselFilterPatch(entry.vesselFilter),
+      aircraftFilter: sanitizeAircraftFilterPatch(entry.aircraftFilter),
+      eventFilter: sanitizeEventFilterPatch(entry.eventFilter),
+    });
+  }
+  return out;
 }
 
 /**
@@ -634,6 +903,127 @@ export function mergeSettings(stored) {
     base.ui.cursorColor = typeof stored.ui.cursorColor === "string" && /^#[0-9a-f]{6}$/i.test(stored.ui.cursorColor)
       ? stored.ui.cursorColor
       : null;
+    // Task 30 (see SETTINGS_VERSION's own note above). A config saved before
+    // this key existed has no `stored.ui.tiles` at all, isPlainObject fails
+    // the guard, and base.ui.tiles is left exactly as defaultSettings() set
+    // it -- every dial shipped and inert. mergeTileDial applies the same
+    // per-field range-checking every other stored value in this function
+    // gets, so a hand-edited file with e.g. `"blur": 99` clamps to 3 rather
+    // than reaching the pane at all.
+    if (isPlainObject(stored.ui.tiles)) {
+      base.ui.tiles.applyAtRest = stored.ui.tiles.applyAtRest === true;
+      base.ui.tiles.basemap = mergeTileDial(stored.ui.tiles.basemap);
+      base.ui.tiles.imagery = mergeTileDial(stored.ui.tiles.imagery);
+      base.ui.tiles.weather = mergeTileDial(stored.ui.tiles.weather);
+    }
+  }
+
+  // Task 32 item 4: the units/timezone preference. `system` is checked
+  // against UNIT_SIZES' own three values; `timezone` against Intl directly
+  // (constructing a DateTimeFormat with an unrecognised zone name throws),
+  // which is also what formatClockAt itself falls back on for a zone that
+  // slips through -- this is the earlier, preferred point to catch it, but
+  // that fallback stays as the second line of defence for a value that
+  // reaches formatClockAt some other way.
+  if (isPlainObject(stored.units)) {
+    base.units.system = ["metric", "imperial", "nautical"].includes(stored.units.system)
+      ? stored.units.system
+      : "metric";
+    if (stored.units.timezone === "utc" || stored.units.timezone === "browser") {
+      base.units.timezone = stored.units.timezone;
+    } else if (typeof stored.units.timezone === "string" && stored.units.timezone) {
+      try {
+        // eslint-disable-next-line no-new -- constructed only to validate; Intl throws on an unknown zone
+        new Intl.DateTimeFormat("en-US", { timeZone: stored.units.timezone });
+        base.units.timezone = stored.units.timezone;
+      } catch {
+        base.units.timezone = "utc";
+      }
+    }
+  }
+
+  // Task 31's Water section. A config saved before this key existed has no
+  // `stored.water` at all, so every field below is left exactly as
+  // defaultSettings() shipped it -- the same additive contract ui.tiles
+  // above follows.
+  if (isPlainObject(stored.water)) {
+    base.water.hoverFillOpacity = pickNumber(stored.water.hoverFillOpacity, 0.22, 0, 1);
+    base.water.selectedFillOpacity = pickNumber(stored.water.selectedFillOpacity, 0.32, 0, 1);
+    base.water.outlineWeight = pickNumber(stored.water.outlineWeight, 1, 0.2, 6);
+    if (Array.isArray(stored.water.hiddenClasses)) {
+      const known = new Set(MARINE_CLASSES);
+      base.water.hiddenClasses = [
+        ...new Set(stored.water.hiddenClasses.filter((c) => typeof c === "string" && known.has(c))),
+      ];
+    }
+  }
+
+  // Task 31's Filters section: saved vessel/aircraft/event filter presets.
+  if (isPlainObject(stored.filters)) {
+    base.filters.presets = sanitizeFilterPresets(stored.filters.presets);
+  }
+
+  // Task 31's Inference section. mergeInferenceMode already returns the
+  // full shipped default for anything missing or unrecognised, so there is
+  // nothing else to guard here -- see that function's own docstring.
+  base.inference.mode = mergeInferenceMode(isPlainObject(stored.inference) ? stored.inference.mode : null);
+
+  // Task 31's Cards section.
+  if (isPlainObject(stored.cards)) {
+    for (const { key } of CARD_TYPES) {
+      const known = new Set((CARD_SECTIONS[key] || []).map((s) => s.id));
+      const hidden = stored.cards.hidden?.[key];
+      if (Array.isArray(hidden)) {
+        base.cards.hidden[key] = [...new Set(hidden.filter((id) => typeof id === "string" && known.has(id)))];
+      }
+      // Not filtered against `known` here the way hidden/defaultOpen are --
+      // orderedCardSections (settings/cardSections.js) already drops an
+      // unknown id and appends whatever it left out, the identical repair
+      // layerStack's own merge block above performs at read time rather
+      // than at store time. Non-string entries are dropped either way, since
+      // nothing downstream could match one to a section id.
+      const order = stored.cards.order?.[key];
+      if (Array.isArray(order)) {
+        base.cards.order[key] = order.filter((id) => typeof id === "string");
+      }
+      const defaultOpen = stored.cards.defaultOpen?.[key];
+      if (isPlainObject(defaultOpen)) {
+        const cleaned = {};
+        for (const [id, value] of Object.entries(defaultOpen)) {
+          if (known.has(id) && typeof value === "boolean") cleaned[id] = value;
+        }
+        base.cards.defaultOpen[key] = cleaned;
+      }
+    }
+  }
+
+  // Task 31's Performance section. Ranges are generous rather than tight --
+  // these are performance dials for a reader tuning their own machine, not
+  // safety rails against a value that could break rendering, so the guard
+  // here is "a real, sane number", not "the exact range the UI slider
+  // offers".
+  if (isPlainObject(stored.performance)) {
+    const p = stored.performance;
+    base.performance.shipTrailPoints = Math.round(pickNumber(p.shipTrailPoints, 300, 20, 2000));
+    base.performance.aircraftTrailPoints = Math.round(pickNumber(p.aircraftTrailPoints, 400, 20, 2000));
+    base.performance.satelliteTrailPoints = Math.round(pickNumber(p.satelliteTrailPoints, 36, 5, 500));
+    base.performance.tankerTrailPoints = Math.round(pickNumber(p.tankerTrailPoints, 60, 10, 1000));
+    base.performance.satSmallCadenceMs = Math.round(pickNumber(p.satSmallCadenceMs, 10_000, 1000, 300_000));
+    base.performance.satLargeCadenceMs = Math.round(pickNumber(p.satLargeCadenceMs, 60_000, 1000, 600_000));
+    // null (no cap, the shipped default) is a real, meaningful value here,
+    // not a malformed one -- so unlike every pickNumber field above, this
+    // has to distinguish "absent/invalid" from "explicitly no cap".
+    base.performance.webglSpriteCap = Number.isFinite(p.webglSpriteCap)
+      ? Math.round(pickNumber(p.webglSpriteCap, null, 50, 20_000))
+      : null;
+    base.performance.pollIntervalMultiplier = pickNumber(p.pollIntervalMultiplier, 1, 0.25, 10);
+    // Default-on, so anything but an explicit `false` leaves it on -- the
+    // same rule ui.showLeaderLines uses above, and for the same reason: this
+    // is the behaviour every deployment already has, so a missing key in an
+    // older configuration (there is no older configuration with this key at
+    // all yet, but the same rule holds for a hand-edited file that simply
+    // omits it) must not switch it off.
+    base.performance.pausePollingWhenHidden = p.pausePollingWhenHidden !== false;
   }
 
   // Repaired rather than validated: an order that has lost a layer is worse than

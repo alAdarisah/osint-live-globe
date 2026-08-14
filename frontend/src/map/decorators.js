@@ -6,7 +6,12 @@
 
 import { L } from "./leafletGlobal";
 import { SVG, OFFICIALS_KIND_ICON, buildDivIcon } from "./svgIcons";
-import { esc, fmtNumber, safeUrl, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix } from "../utils/format";
+import {
+  esc, fmtNumber, formatAisEta, timeAgoFromDateAdded, timeAgoFromUnix, utcClockFromUnix,
+  formatDistanceKm, formatSpeedKmh, formatAltitudeM, nmToKm, feetToMeters,
+} from "../utils/format";
+import { flagForMmsi } from "../utils/mmsi";
+import { aisNetwork, shipPingSeconds } from "./aisNetwork";
 import {
   severityBand, severityColor, CORROBORATED_COLOR, isImprecise, PRECISION_NOTE, ageHours, ageOpacity,
   placementDoubtful, positionUncertain, VERDICT_NOTE,
@@ -15,7 +20,9 @@ import {
   ageHoursFromDateAdded, newsAgeOpacity, newsAgeScale,
 } from "./severity";
 import { paletteColor, paletteGlyph, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
-import { aisNetwork, shipPingSeconds } from "./aisNetwork";
+import { footprintRadiusKm } from "./groundTrack";
+import { inferenceHidden } from "./inferenceVisibility";
+import { REFINE_PANEL_STATUS_TEXT, REFINE_PANEL_STATUS } from "../components/refinePanelStatus";
 
 // --- level of detail -------------------------------------------------------
 //
@@ -482,7 +489,7 @@ function coverageBlock(d) {
     const meta = [c.outlet, when].filter(Boolean).map(esc).join(" &middot; ");
     const title = esc(c.title || "");
     const link = c.url
-      ? `<a href="${esc(safeUrl(c.url))}" target="_blank" rel="noopener noreferrer">${title}</a>`
+      ? `<a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${title}</a>`
       : title;
     return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
   }).join("");
@@ -668,7 +675,7 @@ export function decorateEvent(d, { offset, dimmed } = {}) {
     </div>
     ${editedNote(d)}
     ${coverageBlock(d)}
-    ${!d.coverage?.length && d.source_url ? `<div><a href="${esc(safeUrl(d.source_url))}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
+    ${!d.coverage?.length && d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     ${!d.notes && d.summary ? '<p class="meta">Sentence above is assembled from the event’s coded fields, not quoted from an article.</p>' : ""}
     ${provenance ? `<p class="meta">${esc(provenance)}</p>` : ""}
     ${intensity ? `<div class="meta" title="CAMEO Goldstein scale, ${d.goldstein}">Coded intensity: ${esc(intensity)}</div>` : ""}
@@ -791,7 +798,7 @@ const HAZARD_SEVERITY_BASIS = {
 function decorateEarthquake(d) {
   const magnitude = Number.isFinite(d.magnitude) ? `M${d.magnitude.toFixed(1)}` : "Magnitude unknown";
   const when = timeAgoFromUnix(d.time);
-  const depth = Number.isFinite(d.depth_km) ? `${Math.round(d.depth_km)} km deep` : "depth unknown";
+  const depth = Number.isFinite(d.depth_km) ? `${formatDistanceKm(d.depth_km)} deep` : "depth unknown";
   const tooltip = `<b>${esc(magnitude)}</b> earthquake &middot; ${esc(depth)}<br/>` +
     `${esc(d.place || "")}${when ? ` &middot; ${esc(when)}` : ""}`;
   const detail = `
@@ -803,7 +810,7 @@ function decorateEarthquake(d) {
     ${Number.isFinite(d.felt) ? `<div>${fmtNumber(d.felt)} "Did You Feel It?" reports</div>` : ""}
     <p class="meta">${HAZARD_SEVERITY_BASIS[d.severity_basis] || ""}</p>
     <div class="meta">Source: ${esc(d.publisher || "USGS")}${
-      d.url ? ` &middot; <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">event page</a>` : ""
+      d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">event page</a>` : ""
     }</div>`;
   return { tooltip, detail };
 }
@@ -825,7 +832,7 @@ function decorateVolcano(d) {
         : ""
     }
     <div class="meta">Source: ${esc(d.publisher || "Smithsonian GVP / USGS")}${
-      d.url ? ` &middot; <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">weekly report</a>` : ""
+      d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">weekly report</a>` : ""
     }</div>`;
   return { tooltip, detail };
 }
@@ -916,10 +923,10 @@ export function decorateFlood(d, { offset } = {}) {
     <div class="meta">Source: ${esc(d.publisher || "GDACS")} &mdash; a modelled alert from
       ${esc(d.model_source || "GLOFAS")}, a curated hydrological model run rather than an observed
       water level.${
-        d.url ? ` &middot; <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">event report</a>` : ""
+        d.url ? ` &middot; <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">event report</a>` : ""
       }${
         d.footprint_url
-          ? ` &middot; <a href="${esc(safeUrl(d.footprint_url))}" target="_blank" rel="noopener noreferrer">affected-area polygon</a>`
+          ? ` &middot; <a href="${esc(d.footprint_url)}" target="_blank" rel="noopener noreferrer">affected-area polygon</a>`
           : ""
       }</div>`;
   return {
@@ -965,7 +972,7 @@ function newsLine(item) {
   }
   const meta = bits.join(" &middot; ");
   const link = item.source_url
-    ? `<a href="${esc(safeUrl(item.source_url))}" target="_blank" rel="noopener noreferrer">${headline}</a>`
+    ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener noreferrer">${headline}</a>`
     : headline;
   return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
 }
@@ -1022,7 +1029,7 @@ export function decorateGdelt(d, { offset } = {}) {
     </div>`
     : `
     <h3>${esc(headline)}</h3>
-    ${d.source_url ? `<div><a href="${esc(safeUrl(d.source_url))}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
+    ${d.source_url ? `<div><a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Open source article</a></div>` : ""}
     ${editedNote(d)}
     <div class="meta">Source: ${agency ? esc(agency) : "GDELT"} &middot; ${esc(when)}${corroboratedNote}</div>
     ${reliabilityBlock(d)}`;
@@ -1161,7 +1168,7 @@ function officialsLine(item) {
     item.origin === "official_feed" ? "official source" : null,
   ].filter(Boolean).map(esc).join(" &middot; ");
   const link = item.url
-    ? `<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">${lead}</a>`
+    ? `<a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${lead}</a>`
     : lead;
   return `<li>${link}${meta ? `<span class="coverage-meta">${meta}</span>` : ""}</li>`;
 }
@@ -1203,7 +1210,7 @@ export function decorateOfficials(d, { offset } = {}) {
       ? `<div class="meta">Carried by ${d.outlet_count} independent outlets</div>` : ""}
     ${d.corroborated_by_primary_source
       ? '<div class="meta evidence">Also published by the government itself — primary source and news reporting agree.</div>' : ""}
-    ${d.url ? `<div><a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">${primary ? "Read the statement" : "Open source article"}</a></div>` : ""}
+    ${d.url ? `<div><a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">${primary ? "Read the statement" : "Open source article"}</a></div>` : ""}
     ${editedNote(d)}
     <p class="meta">${esc(officialsProvenance(d))}</p>
     <div class="meta">${esc(officialsPlacement(d))}</div>`;
@@ -1376,7 +1383,7 @@ function watchlistDetail(d) {
   const rows = listings.map((l) => {
     const cls = WATCHLIST_CLASS_LABEL[l.evidence] || WATCHLIST_CLASS_LABEL.unclassified;
     const who = (l.publishers || []).filter(Boolean);
-    const link = l.url ? ` <a href="${esc(safeUrl(l.url))}" target="_blank" rel="noopener noreferrer">source</a>` : "";
+    const link = l.url ? ` <a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">source</a>` : "";
     return `<li><b>${esc(cls)}</b>${who.length ? ` &mdash; ${esc(who.join("; "))}` : ""}${link}</li>`;
   }).join("");
   return `
@@ -1397,7 +1404,7 @@ function watchlistDetail(d) {
         w.licence ? ` (${esc(w.licence)})` : ""
       }${
         w.source_url
-          ? ` &middot; <a href="${esc(safeUrl(w.source_url))}" target="_blank" rel="noopener noreferrer">dataset</a>`
+          ? ` &middot; <a href="${esc(w.source_url)}" target="_blank" rel="noopener noreferrer">dataset</a>`
           : ""
       }</div>
     </div>`;
@@ -1459,19 +1466,94 @@ export function lastPingTooltip(seconds) {
 const MILITARY_SHIP_TYPE = 35;
 const TANKER_SHIP_TYPE_MIN = 80;
 const TANKER_SHIP_TYPE_MAX = 89;
+// Cargo (70-79) and fishing (30) are not distinguished by classifyShip below --
+// the map icon only ever needs navy/tanker/other -- but the water body card's
+// traffic tally (map/popups.js's buildWaterTraffic) does break them out, so
+// the two extra ranges live here, next to the ranges they're the same kind of
+// fact as, rather than being reinvented in a module with no other reason to
+// know an AIS type code from any other number.
+const CARGO_SHIP_TYPE_MIN = 70;
+const CARGO_SHIP_TYPE_MAX = 79;
+const FISHING_SHIP_TYPE = 30;
 
 export function isNavyVessel(d) {
   if (d.ship_type === MILITARY_SHIP_TYPE) return true;
   return /^(USS|USNS)\b/i.test((d.name || "").trim());
 }
 
-function isTanker(d) {
+export function isTanker(d) {
   return typeof d.ship_type === "number" && d.ship_type >= TANKER_SHIP_TYPE_MIN && d.ship_type <= TANKER_SHIP_TYPE_MAX;
+}
+
+function isCargoVessel(d) {
+  return typeof d.ship_type === "number" && d.ship_type >= CARGO_SHIP_TYPE_MIN && d.ship_type <= CARGO_SHIP_TYPE_MAX;
+}
+
+function isFishingVessel(d) {
+  return d.ship_type === FISHING_SHIP_TYPE;
+}
+
+// The AIS "Type of ship and cargo type" code, in the reader's words -- the
+// ranges ITU-R M.1371 defines, at the granularity a popup is worth (it
+// further subdivides several of these by hazard category in the last digit,
+// which is more than a reader deciding "is this worth a second look" needs).
+// Deliberately not merged into classifyShip's three-way split above: this is
+// for showing the code the map identified a ship from, so a reader can check
+// it -- the classifier's job is drawing the right icon, not explaining itself.
+const SHIP_TYPE_RANGES = [
+  [20, 29, "Wing in ground (WIG)"],
+  [30, 30, "Fishing"],
+  [31, 32, "Towing"],
+  [33, 33, "Dredging or underwater operations"],
+  [34, 34, "Diving operations"],
+  [35, 35, "Military operations"],
+  [36, 36, "Sailing"],
+  [37, 37, "Pleasure craft"],
+  [40, 49, "High-speed craft"],
+  [50, 50, "Pilot vessel"],
+  [51, 51, "Search and rescue vessel"],
+  [52, 52, "Tug"],
+  [53, 53, "Port tender"],
+  [54, 54, "Anti-pollution equipment"],
+  [55, 55, "Law enforcement"],
+  [56, 57, "Local vessel"],
+  [58, 58, "Medical transport"],
+  [59, 59, "Noncombatant ship (RR Resolution 18)"],
+  [60, 69, "Passenger"],
+  [70, 79, "Cargo"],
+  [80, 89, "Tanker"],
+  [90, 99, "Other type"],
+];
+
+/**
+ * The AIS type code's label, or null for a reserved/unassigned code (1-19)
+ * or for 0, AIS's own "not available" value.
+ */
+function shipTypeLabel(code) {
+  if (typeof code !== "number" || !Number.isInteger(code)) return null;
+  if (code === 0) return null; // AIS's own "not available"
+  const hit = SHIP_TYPE_RANGES.find(([lo, hi]) => code >= lo && code <= hi);
+  return hit ? hit[2] : null;
 }
 
 export function classifyShip(d) {
   if (isNavyVessel(d)) return "navy";
   if (isTanker(d)) return "tanker";
+  return "other";
+}
+
+// The five-way split the water body card's traffic tally uses (map/popups.js),
+// where a "cargo" or "fishing" line is worth its own row. classifyShip above
+// stays three-way (navy/tanker/other) because that is all the map icon ever
+// needs, and widening it would recolour markers nobody asked to recolour.
+// Same priority order as classifyShip: a vessel that is both navy-flagged and
+// coded as a tanker (it happens -- some navies code auxiliaries that way) is
+// counted as navy, not double-counted.
+export function classifyVesselTraffic(d) {
+  if (isNavyVessel(d)) return "navy";
+  if (isTanker(d)) return "tanker";
+  if (isCargoVessel(d)) return "cargo";
+  if (isFishingVessel(d)) return "fishing";
   return "other";
 }
 
@@ -1494,10 +1576,162 @@ export const SHIP_STYLE = {
 /** Which layer key a ship class belongs to -- its opacity/scale settings. */
 export const SHIP_LAYER_KEY = { navy: "aisNavy", tanker: "aisTanker", other: "aisCivilian" };
 
-// Which network heard a hull, and when it last reported, both live in
+// ---------- vessel detail (Task 17: GET /api/vessel/{mmsi}) ----------------
+//
+// Two sections beyond Identity/Voyage/Flags above, fed by a second fetch
+// (createMapController.js's loadVesselDetail) that lands after the ship's
+// popup is already open -- selectShip cannot wait for it, so both sections
+// have to read honestly from every state that fetch can be in: absent or
+// "loading" while it's in flight, "error" if it failed (the brief is
+// explicit that a failure must say "unavailable", never silently vanish),
+// "ready" once /api/vessel/{mmsi} has answered. `vesselDetail` is only ever
+// passed for the selected hull -- see decorateAis below -- so every other
+// ship's popup (built lazily, on its own open) never pays for this.
+
+const CARGO_CLASS_LABEL = {
+  tanker: "Tanker", cargo: "Cargo", fishing: "Fishing", passenger: "Passenger",
+  tug: "Tug / towing", naval: "Naval", other: "Other",
+};
+
+const LADEN_LABEL = { laden: "Laden", ballast: "Ballast", unknown: "Unknown" };
+
+function fmtDraughtM(value) {
+  return typeof value === "number" && Number.isFinite(value) ? formatAltitudeM(value) : "n/a";
+}
+
+// port_calls_for/port_calls_at never carry a distance -- only the tier that
+// distance produced (see backend/refine/port_calls.py's _classify, which
+// discards it once the tier is picked). The radius each tier actually means
+// travels on the response instead (app.py's PORT_CALL_CONFIDENCE_KM), so this
+// reads it from there rather than hardcoding the same three numbers again.
+const CONFIDENCE_NOTE = {
+  exact: (km) => `within ${formatDistanceKm(km)} of the charted point`,
+  proximity: (km) => `within ${formatDistanceKm(km)} &mdash; an outer anchorage or approach, not necessarily alongside`,
+  inferred: (km) => `attributed to the nearest known port, up to ${formatDistanceKm(km)} away`,
+};
+
+function confidenceCell(confidence, radii) {
+  const km = radii?.[confidence];
+  const note = km != null && CONFIDENCE_NOTE[confidence] ? CONFIDENCE_NOTE[confidence](km) : null;
+  return `${esc(confidence || "n/a")}${note ? `<div class="meta">${note}</div>` : ""}`;
+}
+
+function fmtDwell(arrivedAt, departedAt) {
+  if (!Number.isFinite(arrivedAt)) return "n/a";
+  if (!Number.isFinite(departedAt)) return "still in port";
+  const hours = (departedAt - arrivedAt) / 3600;
+  if (hours < 1) return `${Math.round(hours * 60)} min`;
+  if (hours < 48) return `${hours.toFixed(1)} h`;
+  return `${(hours / 24).toFixed(1)} d`;
+}
+
+/** The cargo-class/laden-state fold. Opens with the honesty caveat the brief
+ * requires verbatim: AIS never carries cargo, so everything below it is a
+ * guess with its working shown, not a fact. */
+function cargoSection(vesselDetail) {
+  // Task 31: the Inference section's "Cargo class & laden/ballast draught"
+  // switch, set to "hide". "labelled"/"show" fall through unchanged -- see
+  // inferenceVisibility.js's own note on why only "hide" is ever checked.
+  if (inferenceHidden("cargoProfile")) return "";
+  const head = '<div class="csection-h">Cargo (inferred)</div>' +
+    '<p class="meta">AIS does not broadcast cargo. What follows is inferred from vessel class, ' +
+    "draught and port calls &mdash; never a manifest.</p>";
+  if (!vesselDetail || vesselDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (vesselDetail.status === "error") {
+    return `${head}<p class="meta"><b>Cargo inference unavailable</b> &mdash; the vessel-detail request failed.</p>`;
+  }
+  const profile = vesselDetail.data?.profile;
+  if (!profile) {
+    return `${head}<p class="meta">No inferred profile held for this hull yet &mdash; it takes a few
+      AIS movement reports before this app's own vessel-profile job builds one.</p>`;
+  }
+  const cclass = profile.cargo_class ? (CARGO_CLASS_LABEL[profile.cargo_class] || profile.cargo_class) : null;
+  const ladenLabel = LADEN_LABEL[profile.laden_state] || "Unknown";
+  const ladenPct = Math.round((profile.laden_threshold ?? 0) * 100);
+  const ballastPct = Math.round((profile.ballast_threshold ?? 0) * 100);
+  return `
+    ${head}
+    <div>Cargo class: ${cclass
+      ? `<b>${esc(cclass)}</b> <span class="meta">&mdash; derived from the AIS ship-type code</span>`
+      : '<span class="meta">not derivable &mdash; no ship-type code decoded for this hull</span>'}</div>
+    <div class="inferred-block">
+      <div>Laden state: <b>${esc(ladenLabel)}</b>${
+        profile.laden_state_reason === "insufficient_samples"
+          ? ' <span class="meta">(insufficient draught samples)</span>' : ""
+      }</div>
+      <div class="meta">Current draught ${fmtDraughtM(profile.draught_current)}, observed
+        ${fmtDraughtM(profile.draught_min_seen)}&ndash;${fmtDraughtM(profile.draught_max_seen)} over
+        ${esc(profile.sample_count ?? 0)} sample${profile.sample_count === 1 ? "" : "s"} of this hull's
+        own history. Called laden above ${ladenPct}% of the observed maximum, ballast below
+        ${ballastPct}%, and unknown in between or with fewer than
+        ${esc(profile.min_sample_threshold ?? "?")} samples.</div>
+    </div>
+    ${profile.implied_trade ? `<p class="meta">${esc(profile.implied_trade)}</p>` : ""}
+    <div class="meta">Source: this app's own vessel-profile job, over aisstream.io AIS positions and
+      static data &mdash; cargo class <i>derived</i> from the ship-type code, laden state <i>inferred</i>
+      from this hull's own draught history${
+        profile.updated ? ` &middot; last refined ${esc(utcClockFromUnix(profile.updated))}` : ""
+      }</div>`;
+}
+
+function vesselPortCallRow(row, radii) {
+  const port = row.port_name || row.port_id || "Unknown port";
+  return `<tr>
+    <td>${esc(utcClockFromUnix(row.arrived_at))}</td>
+    <td>${esc(port)}</td>
+    <td>${esc(row.port_country || "n/a")}</td>
+    <td>${esc(fmtDwell(row.arrived_at, row.departed_at))}</td>
+    <td>${fmtDraughtM(row.draught_in)} / ${fmtDraughtM(row.draught_out)}</td>
+    <td>${confidenceCell(row.confidence, radii)}</td>
+  </tr>`;
+}
+
+/** The last-ten-port-calls table, plus a standing "currently in port" line
+ * from `open_call` when there is one -- a fact worth stating on its own
+ * rather than making a reader spot it as the one row in the table with no
+ * departure time. */
+function portCallsSection(vesselDetail) {
+  // Task 31: the Inference section's "Port calls" switch, set to "hide".
+  if (inferenceHidden("portCalls")) return "";
+  const head = '<div class="csection-h">Port calls</div>';
+  if (!vesselDetail || vesselDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (vesselDetail.status === "error") {
+    return `${head}<p class="meta"><b>Port-call history unavailable</b> &mdash; the vessel-detail request failed.</p>`;
+  }
+  const data = vesselDetail.data || {};
+  const radii = data.confidence_radius_km;
+  const rows = data.port_calls || [];
+  if (!rows.length) {
+    return `${head}<p class="meta">No AIS-inferred port calls recorded for this hull.</p>`;
+  }
+  const openCall = data.open_call;
+  const openNote = openCall
+    ? `<p class="meta"><b>Currently in port:</b> ${esc(openCall.port_name || openCall.port_id || "unknown port")}${
+        openCall.port_country ? `, ${esc(openCall.port_country)}` : ""
+      }, arrived ${esc(utcClockFromUnix(openCall.arrived_at))} &mdash; ${confidenceCell(openCall.confidence, radii)}</p>`
+    : "";
+  return `
+    ${head}
+    ${openNote}
+    <table class="food-estimates port-calls-table">
+      <tr><th>Arrived</th><th>Port</th><th>Country</th><th>Dwell</th><th>Draught in/out</th><th>Confidence</th></tr>
+      ${rows.slice(0, 10).map((r) => vesselPortCallRow(r, radii)).join("")}
+    </table>
+    <p class="meta">Arrival and departure are inferred from AIS speed and position sustained near a
+      charted port &mdash; never a berth confirmation. See each row's confidence for how sure the
+      attribution is.</p>
+    <div class="meta">Source: this app's own port-call job, over aisstream.io AIS position history
+      &mdash; <i>inferred</i>, not a port authority record</div>`;
+}
+
+// Which network heard a hull, and when it last reported, live in
 // map/aisNetwork.js -- see the note at the top of that file for why they are
 // not in here.
-export function decorateAis(d, { selectedMmsi, layerKey } = {}) {
+export function decorateAis(d, { selectedMmsi, vesselDetail, layerKey } = {}) {
   const type = classifyShip(d);
   const network = aisNetwork(d);
   const pinged = shipPingSeconds(d);
@@ -1511,40 +1745,93 @@ export function decorateAis(d, { selectedMmsi, layerKey } = {}) {
     // Names the class, never a generic "flagged": a designation, a detention and
     // an allegation are three different claims (see watchlistDetail).
     `${watchlisted ? `<br/><span class="watchlist-flag">Watchlist: ${esc(WATCHLIST_CLASS_LABEL[watchlisted.evidence] || "listed")}</span>` : ""}` +
-    `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${esc(d.speed ?? "?")} kn` +
+    `<br/>MMSI ${esc(d.mmsi)}<br/>Speed ${d.speed != null ? esc(formatSpeedKn(d.speed)) : "?"}` +
     // On the hover tooltip, not only in the popup: which network heard a hull
     // is part of reading the pin, and a reader scanning a coastline should not
     // have to click to find out that one layer stops at the Baltic.
     `<br/><span class="meta">via ${esc(network.label)}</span>` +
     lastPingTooltip(pinged);
+
+  // Everything below is stored, and until this task nothing read it back:
+  // length_m/beam_m (ais.py:185,187), the raw eta dict, and the flag a MID
+  // implies. See frontend/src/utils/mmsi.js for why flagForMmsi can return
+  // nothing rather than a wrong country, and utils/format.js's formatAisEta
+  // for why AIS's own ETA never becomes a date with a guessed year.
+  const flag = flagForMmsi(d.mmsi);
+  // 0 is treated the same as the field being absent: it is AIS's own "not
+  // available" value (shipTypeLabel returns null for it too), not a real
+  // classification, so a ship broadcasting 0 and a ship whose static data
+  // hasn't arrived yet read the same way here rather than as two different
+  // "unclassified" labels for the same underlying fact.
+  const shipTypeCode = typeof d.ship_type === "number" && d.ship_type !== 0 ? d.ship_type : null;
+  const shipLabel = shipTypeCode !== null ? shipTypeLabel(shipTypeCode) : null;
+  const etaText = d.eta ? formatAisEta(d.eta) : null;
+  const headingKnown = Number.isFinite(d.heading) && d.heading !== 511; // 511 is AIS's own "not available"
+
   const detail = `
     <h3>${esc(d.name || "Unknown vessel")}</h3>
+
+    <div class="csection-h">Identity</div>
     <div class="meta">MMSI ${esc(d.mmsi)}${d.imo ? ` &middot; IMO ${esc(d.imo)}` : ""}${
       d.callsign ? ` &middot; call sign ${esc(d.callsign)}` : ""
     }</div>
-    ${sanctionDetail(d)}
-    ${watchlistDetail(d)}
-    <div>Speed: ${esc(d.speed ?? "n/a")} kn &middot; Course: ${esc(d.course ?? "n/a")}&deg;</div>
-    <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
+    <div>${flag
+      ? `Flag state: <b>${esc(flag.country)}</b> <span class="meta">&mdash; derived from the MMSI's MID
+          (${esc(flag.mid)}); reassigned if the hull reflags, and not necessarily what it flies today.</span>`
+      : '<span class="meta">Flag state: not derivable from this MMSI</span>'}</div>
+    ${(d.length_m || d.beam_m)
+      ? `<div>Dimensions: ${d.length_m ? esc(formatAltitudeM(d.length_m)) : "length n/a"} &times; ${
+          d.beam_m ? esc(formatAltitudeM(d.beam_m)) : "beam n/a"
+        } <span class="meta">(LOA &times; beam) &mdash; derived from the static message's antenna-offset
+          fields, not a measurement of the hull</span></div>`
+      : ""}
+    <div>Ship type: ${shipTypeCode !== null
+      ? `${shipLabel ? esc(shipLabel) : "unclassified"} <span class="meta">(AIS code ${esc(shipTypeCode)})</span>`
+      : '<span class="meta">not stated by AIS</span>'}</div>
+
+    <div class="csection-h">Voyage</div>
     ${d.destination
       ? `<div class="meta">Declared destination: <b>${esc(d.destination)}</b> &mdash; crew-typed free
-        text in AIS, and frequently inaccurate. A declaration, not an observation.</div>`
-      : ""}
+        text in AIS, often not a real port name, and frequently stale. A declaration, not an observation.</div>`
+      : '<div class="meta">Destination: not stated</div>'}
+    ${d.eta
+      ? (etaText
+          ? `<div>Reported ETA: <b>${esc(etaText)}</b> <span class="meta">&mdash; AIS's ETA field carries
+              no year, only month/day (and a time, when broadcast); crew-entered, and as reliable as the
+              destination above.</span></div>`
+          : '<div class="meta">ETA broadcast but encoded as "not available"</div>')
+      : '<div class="meta">ETA: not stated</div>'}
     ${Number.isFinite(Number(d.draught)) && Number(d.draught) > 0
-      ? `<div>Reported draught: ${esc(d.draught)} m <span class="meta">&mdash; crew-set in AIS static
+      ? `<div>Reported draught: ${esc(formatAltitudeM(Number(d.draught)))} <span class="meta">&mdash; crew-set in AIS static
         data, not a measurement</span></div>`
       : ""}
+    <div>Nav status code: ${esc(d.nav_status ?? "n/a")}</div>
+    <div>Speed: ${d.speed != null ? esc(formatSpeedKn(d.speed)) : "n/a"} &middot; Course: ${esc(d.course ?? "n/a")}&deg; &middot;
+      Heading: ${headingKnown ? `${esc(d.heading)}&deg;` : "n/a"}</div>
     ${lastPingDetail(pinged)}
+
+    <div class="csection-h">Flags</div>
+    ${sanctionDetail(d)}
+    ${watchlistDetail(d)}
+    ${gfwPriorDetail(d.gfw_prior)}
+    ${gfwPriorCredit(d.gfw_prior)}
+
     ${navy ? '<p class="meta">Identified as US Navy / Military Sealift Command from its AIS ship-type code (or USS/USNS naming when static data hasn\'t arrived yet). Most warships run AIS off underway for OPSEC -- this only shows vessels that broadcast it.</p>' : ""}
     ${tanker ? '<p class="meta">Identified as an oil/chemical tanker from its AIS ship-type code.</p>' : ""}
     ${network.coverage ? `<p class="meta">${esc(network.coverage)}</p>` : ""}
-    <div class="meta">Source: ${esc(network.label)} (AIS)${
-      // The licence the record carries, not one restated here: Digitraffic's
-      // CC-BY attribution string travels on every row and has to be shown
-      // verbatim, and a second copy in this file would be a second thing to
-      // keep in step with the feed.
-      d.license ? ` &middot; ${esc(d.license)}` : ""
-    }${designated ? " &middot; designations: US Treasury OFAC" : ""}</div>`;
+    <div class="meta">Source: ${esc(network.label)} (AIS) &mdash; position, speed, course and heading <i>measured</i> by
+      the vessel's own transponder; identity, destination, ETA, draught, dimensions and ship type
+      <i>reported</i> by the crew via AIS static data; flag state <i>derived</i> from the MMSI's MID${
+        // The licence the record carries, not one restated here: Digitraffic's
+        // CC-BY attribution string travels on every row and has to be shown
+        // verbatim, and a second copy in this file would be a second thing to
+        // keep in step with the feed.
+        d.license ? ` &middot; ${esc(d.license)}` : ""
+      }${
+        designated ? " &middot; designations: US Treasury OFAC" : ""
+      }</div>
+    ${d.mmsi === selectedMmsi ? cargoSection(vesselDetail) : ""}
+    ${d.mmsi === selectedMmsi ? portCallsSection(vesselDetail) : ""}`;
   const heading = Number.isFinite(d.heading) && d.heading !== 511 ? d.heading : d.course;
   let cls = "ship-marker";
   if (navy) cls += " navy-marker";
@@ -1572,8 +1859,23 @@ export function decorateAis(d, { selectedMmsi, layerKey } = {}) {
 export const OSM_INFRA_STYLE = {
   military_airfield: { svg: SVG.airfieldMilitary, color: "#ff8c3a", size: 16, label: "Military airfield", token: "osm.military_airfield" },
   military_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 14, label: "Military area", token: "osm.military_area" },
+  // power_plant is listed here for _kind_of/_fallback_name's own completeness
+  // (a power-plant record can still pass through this generic table, e.g. in
+  // an older cached payload), but it is drawn nowhere: Task 28 pulled it onto
+  // its own layer (see decoratePowerPlant below), and createMapController.js's
+  // applyData never lets a power_plant kind reach raw.osmInfra any more.
   power_plant: { svg: SVG.powerPlant, color: "#9be15d", size: 14, label: "Power plant", token: "osm.power" },
   border_control: { svg: SVG.borderCrossing, color: "#c9b6ff", size: 13, label: "Border crossing", token: "osm.border" },
+  // Task 28: four more OpenStreetMap point classes, siblings of power_plant/
+  // border_control above -- refineries/terminals/storage "merged with the
+  // curated INFRA_SITES" per the brief means presented beside them in the
+  // country card (see buildEnergyInfrastructure in popups.js), never blended
+  // into the curated infra layer's own data -- see this module's own note on
+  // decorateInfra vs decorateOsmInfra for why that promise matters.
+  power_substation: { svg: SVG.powerPlant, color: "#c9b6ff", size: 12, label: "Substation", token: "osm.power_substation" },
+  refinery: { svg: SVG.refinery, color: "#ff9500", size: 14, label: "Refinery", token: "osm.refinery" },
+  storage_tank: { svg: SVG.desalination, color: "#ffb347", size: 11, label: "Storage tank", token: "osm.storage_tank" },
+  oil_well: { svg: SVG.refinery, color: "#c17a4a", size: 10, label: "Oil/gas well", token: "osm.oil_well" },
   // Railway nodes the osm_infra sweep now also carries (see osm_infra.py's
   // _RAILWAY_KINDS). One shared *glyph*, because four near-identical station
   // shapes would be a distinction nobody can read at 12px -- but a token each,
@@ -1583,19 +1885,48 @@ export const OSM_INFRA_STYLE = {
   railway_halt: { svg: SVG.railway, color: "#8aa0c4", size: 12, label: "Railway halt", token: "osm.railway_halt" },
   railway_yard: { svg: SVG.railway, color: "#8aa0c4", size: 13, label: "Railway yard", token: "osm.railway_yard" },
   railway_border: { svg: SVG.railway, color: "#8aa0c4", size: 13, label: "Railway border crossing", token: "osm.railway_border" },
+  // Task 29: five more military=* base classes -- backend/infrastructure.py's
+  // merge_military_bases pairs these against the curated MILITARY_BASES list
+  // for the country card, but the pins themselves stay on this generic OSM
+  // layer, same as military_airfield/military_area above, reusing the
+  // curated list's own subtype glyphs (see MILITARY_SUBTYPE_STYLE) rather
+  // than inventing a second set for the same kind of installation.
+  military_base: { svg: SVG.armyBase, color: "#ff8c3a", size: 15, label: "Military base", token: "osm.military_base" },
+  military_naval_base: { svg: SVG.navalBase, color: "#ff8c3a", size: 15, label: "Naval base", token: "osm.military_naval_base" },
+  military_training_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 13, label: "Military training area", token: "osm.military_training_area" },
+  military_barracks: { svg: SVG.logisticsBase, color: "#ff8c3a", size: 13, label: "Barracks", token: "osm.military_barracks" },
+  military_danger_area: { svg: SVG.armyBase, color: "#ff8c3a", size: 13, label: "Danger area", token: "osm.military_danger_area" },
+  // Task 29: the three air-defence/radar classes -- a separate default-off
+  // layer (see LAYER_MANIFEST's airDefense entry in scene.js and
+  // decorateOsmInfra's own "airDefense" completeness caveat above), drawn in
+  // red rather than the base orange so a reader who has switched this layer
+  // on can tell it apart from an ordinary installation pin at a glance.
+  radar_station: { svg: SVG.radarBase, color: "#ff4d4d", size: 14, label: "Radar station", token: "osm.radar_station" },
+  military_bunker: { svg: SVG.bunker, color: "#ff4d4d", size: 12, label: "Bunker", token: "osm.military_bunker" },
+  military_checkpoint: { svg: SVG.borderCrossing, color: "#ff4d4d", size: 12, label: "Checkpoint", token: "osm.military_checkpoint" },
 };
 const OSM_INFRA_FALLBACK = OSM_INFRA_STYLE.military_area;
 export const OSM_INFRA_ORDER = [
   "military_airfield", "military_area", "power_plant", "border_control",
   "railway_station", "railway_halt", "railway_yard", "railway_border",
+  "power_substation", "refinery", "storage_tank", "oil_well",
+  "military_base", "military_naval_base", "military_training_area",
+  "military_barracks", "military_danger_area",
+  "radar_station", "military_bunker", "military_checkpoint",
 ];
 
-export function osmInfraStyle(kind) {
-  return themedStyle(OSM_INFRA_STYLE[kind] || OSM_INFRA_FALLBACK, "osmInfra");
+// `layerKey` picks which layer's admin opacity/theme dial applies (see
+// themedStyle) -- defaulted to "osmInfra" for every existing caller, and
+// overridden to "railwayPoints" by the two wrappers below it. Same style
+// table and the same glyphs either way: moving the four railway kinds onto
+// their own layer (Task 27) is about which checkbox and which dial governs
+// them, not about how they are drawn.
+export function osmInfraStyle(kind, layerKey = "osmInfra") {
+  return themedStyle(OSM_INFRA_STYLE[kind] || OSM_INFRA_FALLBACK, layerKey);
 }
 
-export function osmInfraIconSize(d) {
-  return osmInfraStyle(d?.kind).size;
+export function osmInfraIconSize(d, layerKey = "osmInfra") {
+  return osmInfraStyle(d?.kind, layerKey).size;
 }
 
 /**
@@ -1630,26 +1961,142 @@ function osmTwinBlock(twin, { what }) {
       }${osm.operator ? ` Operator, per OSM: ${esc(osm.operator)}.` : ""}</p>`;
 }
 
-export function decorateOsmInfra(d, { offset } = {}) {
-  const style = osmInfraStyle(d.kind);
+export function decorateOsmInfra(d, { offset, layerKey = "osmInfra" } = {}) {
+  const style = osmInfraStyle(d.kind, layerKey);
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)} &middot; OpenStreetMap`;
+  // The one line that reads differently depending on which layer this pin
+  // rides: under Infrastructure it is contrasted with the curated site list,
+  // under Railways with the Natural Earth linework it sits beside instead.
+  // Both are the same claim -- "crowd-sourced, not checked by hand" -- said
+  // against whichever neighbour a reader actually sees it next to.
+  const context = layerKey === "railwayPoints"
+    ? "The rail linework beside it is Natural Earth's coarser basemap context, a different, unattributed source."
+    // Task 29: the completeness caveat the brief requires for the
+    // air-defence/radar layer, stated on every one of its pins rather than
+    // only once in a legend a reader may never open -- absence of a radar
+    // site here means nobody has mapped one, not that none exists, and
+    // OpenStreetMap's coverage of military sites is uneven in exactly the
+    // theatres this map watches.
+    : layerKey === "airDefense"
+      ? "This layer is off by default and its coverage is patchy: OpenStreetMap's mapping of radar sites, bunkers and checkpoints is uneven and politically contested in exactly the theatres this map watches. A pin here is a real, mapped feature; the absence of one anywhere is not evidence that nothing is there."
+      : "The separate Critical Infrastructure layer is the curated one; this is the wider, noisier picture.";
   const detail = `
     <h3>${esc(d.name)}</h3>
     <div class="meta">${esc(style.label)}${d.operator ? ` &middot; ${esc(d.operator)}` : ""}</div>
     ${Number.isFinite(d.output_mw) ? `<div>Output: ${esc(Math.round(d.output_mw))} MW</div>` : ""}
     ${d.source_tag ? `<div>Generating from: ${esc(d.source_tag)}</div>` : ""}
     ${!d.named ? '<p class="meta">Unnamed in OpenStreetMap &mdash; the label above is its type, not its name.</p>' : ""}
-    <p class="meta">From <b>OpenStreetMap</b>, contributed by its mappers and not checked by hand. The
-      separate Critical Infrastructure layer is the curated one; this is the wider, noisier picture.
+    <p class="meta">From <b>OpenStreetMap</b>, contributed by its mappers and not checked by hand. ${context}
       Position is the feature's computed centre, so for a large site it is the middle of the area rather
       than any particular building.</p>
     <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass &middot;
       <a href="https://www.openstreetmap.org/${esc(d.osm_type)}/${esc(d.osm_id)}" target="_blank" rel="noopener noreferrer">view the raw feature</a></div>`;
   return {
-    icon: icon(style, style.color, style.size, 0, "osm-infra-marker", 0.75 * layerOpacity("osmInfra"), "", offset),
+    icon: icon(style, style.color, style.size, 0, "osm-infra-marker", 0.75 * layerOpacity(layerKey), "", offset),
     tooltip,
     detail,
   };
+}
+
+// ---------- power plants, riding their own layer (Task 28) ------------------
+//
+// Pulled off OSM infrastructure at render time (see createMapController.js's
+// applyData, the same split Task 27 used for railwayPoints) and given their
+// own table rather than reusing OSM_INFRA_STYLE.power_plant's one shared
+// glyph: the brief asks for a glyph *and* a size that both track something
+// about the plant itself (its fuel, its output), which a single shared style
+// object cannot express eight ways.
+//
+// Keyed by the backend's own normalised `fuel` field (osm_infra.py's
+// _fuel_category), not by the raw `source_tag` -- the backend already did
+// the keyword matching once, and re-parsing "gas;oil" here would be a second,
+// possibly disagreeing copy of that logic.
+export const POWER_PLANT_FUEL_STYLE = {
+  nuclear: { svg: SVG.nuclear, color: "#ffd60a", label: "Nuclear", token: "powerPlant.nuclear" },
+  coal: { svg: SVG.flame, color: "#6b6f76", label: "Coal", token: "powerPlant.coal" },
+  gas: { svg: SVG.flame, color: "#ff8c3a", label: "Gas", token: "powerPlant.gas" },
+  hydro: { svg: SVG.dam, color: "#4a9fd8", label: "Hydro", token: "powerPlant.hydro" },
+  wind: { svg: SVG.wind, color: "#7ee0c9", label: "Wind", token: "powerPlant.wind" },
+  solar: { svg: SVG.solarPanel, color: "#ffe066", label: "Solar", token: "powerPlant.solar" },
+  biomass: { svg: SVG.flame, color: "#9be15d", label: "Biomass/waste", token: "powerPlant.biomass" },
+  other: { svg: SVG.powerPlant, color: "#8aa0ad", label: "Other/unspecified fuel", token: "powerPlant.other" },
+};
+
+const POWER_PLANT_BASE_SIZE = 13;
+// Three size steps rather than a continuous scale off output_mw -- the same
+// "size means something coarse and legible, not a precise ruler" choice most
+// of this map's magnitude-sized glyphs already make. A plant with no
+// output_mw at all (the majority -- see summarizePowerPlants' own tagged
+// fraction in popups.js) draws at the base size rather than the smallest
+// one: absence of a capacity figure is not evidence of a small plant.
+function powerPlantSizeStep(outputMw) {
+  if (!Number.isFinite(outputMw)) return 0;
+  if (outputMw >= 1000) return 2; // gigawatt-class
+  if (outputMw >= 100) return 1;
+  return 0;
+}
+
+export function powerPlantIconSize(d) {
+  return POWER_PLANT_BASE_SIZE + powerPlantSizeStep(d?.output_mw) * 3;
+}
+
+function powerPlantStyle(d) {
+  const base = POWER_PLANT_FUEL_STYLE[d?.fuel] || POWER_PLANT_FUEL_STYLE.other;
+  return themedStyle({ ...base, size: powerPlantIconSize(d) }, "powerPlants");
+}
+
+export function decoratePowerPlant(d, { offset } = {}) {
+  const style = powerPlantStyle(d);
+  const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)} power plant &middot; OpenStreetMap`;
+  const detail = `
+    <h3>${esc(d.name)}</h3>
+    <div class="meta">${esc(style.label)}${d.operator ? ` &middot; ${esc(d.operator)}` : ""}</div>
+    ${Number.isFinite(d.output_mw) ? `<div>Capacity: <b>${esc(Math.round(d.output_mw))} MW</b></div>`
+      : '<div class="meta">No generation capacity tagged in OpenStreetMap for this plant.</div>'}
+    ${d.commissioning_year ? `<div>Commissioned: ${esc(d.commissioning_year)}</div>` : ""}
+    ${d.source_tag ? `<div class="meta">Raw OSM fuel tag: ${esc(d.source_tag)}</div>` : ""}
+    ${!d.named ? '<p class="meta">Unnamed in OpenStreetMap &mdash; the label above is its type, not its name.</p>' : ""}
+    <p class="meta">From <b>OpenStreetMap</b>, contributed by its mappers and not checked by hand.
+      Fuel and capacity are only as complete as OpenStreetMap's own tagging -- see the country
+      card's Energy infrastructure section for what fraction of plants in view actually carry a
+      capacity figure, and why a sum over only those must never be read as this country's
+      generation capacity.</p>
+    <div class="meta">Source: OpenStreetMap contributors (ODbL), via Overpass &middot;
+      <a href="https://www.openstreetmap.org/${esc(d.osm_type)}/${esc(d.osm_id)}" target="_blank" rel="noopener noreferrer">view the raw feature</a></div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "power-plant-marker", 0.8 * layerOpacity("powerPlants"), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- railway points, riding the Railways layer (Task 27) ------------
+//
+// Thin wrappers over decorateOsmInfra/osmInfraIconSize above: same table, same
+// glyphs, same "crowd-sourced, not checked by hand" honesty -- only the layer
+// key (and so the admin opacity dial and the zoom-gate lookup it feeds) moves,
+// from osmInfra to railwayPoints. See LAYER_MANIFEST's own note in scene.js on
+// why these four kinds now ride the rail linework's toggle instead.
+export function decorateRailwayPoint(d, opts = {}) {
+  return decorateOsmInfra(d, { ...opts, layerKey: "railwayPoints" });
+}
+
+export function railwayPointIconSize(d) {
+  return osmInfraIconSize(d, "railwayPoints");
+}
+
+// ---------- air-defence / radar, riding its own default-off layer (Task 29) -
+//
+// Same thin-wrapper treatment as railway points above: same table, same
+// glyphs, only the layer key (and so the admin opacity dial, the zoom-gate
+// lookup and the completeness caveat decorateOsmInfra's own "airDefense"
+// branch states) moves from osmInfra to airDefense.
+export function decorateAirDefense(d, opts = {}) {
+  return decorateOsmInfra(d, { ...opts, layerKey: "airDefense" });
+}
+
+export function airDefenseIconSize(d) {
+  return osmInfraIconSize(d, "airDefense");
 }
 
 // ---------- EASA conflict-zone bulletins (backend/sources/czib.py) ----------
@@ -1728,7 +2175,7 @@ export function decorateCzib(d, { offset } = {}) {
       is deliberately not read.</p>
     <div class="meta">Source: ${esc(d.publisher || "EASA")} Conflict Zone Information Bulletin
       &mdash; a primary source, a named regulator's own document with a quotable reference.${
-        d.url ? ` <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">Read the bulletin</a>.` : ""
+        d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Read the bulletin</a>.` : ""
       }</div>`;
   return {
     icon: icon(
@@ -1781,7 +2228,62 @@ export function portIconSize(d) {
   return scaledSize(px, "ports", PORT_STYLE.token);
 }
 
-export function decoratePort(d, { offset } = {}) {
+// Shared verbatim with the water body card's "Traffic now" section
+// (map/popups.js's buildWaterTraffic) -- both are the same claim, "this is
+// water we actually hear AIS from", and pulling it out here is what keeps the
+// two from drifting into two slightly different promises about the same
+// thing.
+export const AIS_COVERAGE_CAVEAT =
+  '<p class="meta">Inside the water this map receives AIS from. Two vessels sitting alongside ' +
+  "each other <i>here</i> are in a port, which is most of why this record exists: the Dark " +
+  "Vessels layer excludes ship-to-ship candidates near a listed port, and before this " +
+  "gazetteer arrived almost every real harbour on earth was open water to that detector.</p>";
+
+function portTrafficRow(row, radii) {
+  const vessel = row.vessel_name || `MMSI ${row.mmsi}`;
+  return `<tr>
+    <td>${esc(utcClockFromUnix(row.arrived_at))}</td>
+    <td>${esc(vessel)}</td>
+    <td>${esc(fmtDwell(row.arrived_at, row.departed_at))}</td>
+    <td>${fmtDraughtM(row.draught_in)} / ${fmtDraughtM(row.draught_out)}</td>
+    <td>${confidenceCell(row.confidence, radii)}</td>
+  </tr>`;
+}
+
+/** The port card's "recent arrivals and departures", fed by a second fetch
+ * (createMapController.js's loadPortTraffic, GET /api/vessel/port/{port_id})
+ * that lands after this popup is already open -- same {status, data}
+ * contract as the ship card's vesselDetail above, for the same reason: the
+ * gazetteer entry itself is reference data (see the caveat below), but
+ * whether AIS has actually seen a vessel call here is not, and has to be
+ * able to say "loading" or "unavailable" rather than silently show nothing. */
+function portTrafficSection(portDetail) {
+  const head = '<div class="csection-h">Recent arrivals and departures</div>';
+  if (!portDetail || portDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (portDetail.status === "error") {
+    return `${head}<p class="meta"><b>Recent traffic unavailable</b> &mdash; the request failed.</p>`;
+  }
+  const rows = portDetail.data?.port_calls || [];
+  const radii = portDetail.data?.confidence_radius_km;
+  if (!rows.length) {
+    return `${head}<p class="meta">No AIS-inferred port calls recorded here.</p>`;
+  }
+  return `
+    ${head}
+    <table class="food-estimates port-calls-table">
+      <tr><th>Arrived</th><th>Vessel</th><th>Dwell</th><th>Draught in/out</th><th>Confidence</th></tr>
+      ${rows.slice(0, 10).map((r) => portTrafficRow(r, radii)).join("")}
+    </table>
+    <p class="meta">Arrival and departure are inferred from AIS speed and position sustained near this
+      charted point &mdash; never a berth confirmation. See each row's confidence for how sure the
+      attribution is.</p>
+    <div class="meta">Source: this app's own port-call job, over aisstream.io AIS position history
+      &mdash; <i>inferred</i>, not a port authority record</div>`;
+}
+
+export function decoratePort(d, { offset, portDetail } = {}) {
   const style = portStyle();
   const name = d.name || "Port";
   const size = d.harbor_size_label || "Harbour size not coded";
@@ -1796,19 +2298,15 @@ export function decoratePort(d, { offset } = {}) {
     <div>${esc(size)} &middot; ${esc(type)}</div>
     ${d.oil_terminal ? "<div><b>Has an oil terminal.</b></div>" : ""}
     ${d.nav_area ? `<div class="meta">NGA navigational area ${esc(d.nav_area)}.</div>` : ""}
-    ${d.ais_watch
-      ? '<p class="meta">Inside the water this map receives AIS from. Two vessels sitting alongside ' +
-        "each other <i>here</i> are in a port, which is most of why this record exists: the Dark " +
-        "Vessels layer excludes ship-to-ship candidates near a listed port, and before this " +
-        "gazetteer arrived almost every real harbour on earth was open water to that detector.</p>"
-      : ""}
+    ${d.ais_watch ? AIS_COVERAGE_CAVEAT : ""}
     <p class="meta"><b>Reference data, not a feed. Nothing here is current.</b>${
       d.vintage ? ` ${esc(d.vintage)}.` : ""
     } For a port gazetteer that is acceptable &mdash; harbours are not built and demolished on a
       news cycle. It would not be acceptable for anything time-sensitive, and this layer makes no
       time-sensitive claim.</p>
     <div class="meta">Source: ${esc(d.publisher || "NGA World Port Index")} &mdash; a curated
-      dataset${d.license ? `, ${esc(d.license)}` : ""}.</div>`;
+      dataset${d.license ? `, ${esc(d.license)}` : ""}.</div>
+    ${d.id != null ? portTrafficSection(portDetail) : ""}`;
   return {
     icon: icon(style, style.color, portIconSize(d), 0, "port-marker", 0.85 * layerOpacity("ports"), "", offset),
     tooltip,
@@ -1879,15 +2377,21 @@ export function decorateDam(d, { offset, twin } = {}) {
         "itself, not a river-network snap.</p>"}
     ${d.quality
       ? `<p class="meta">The publisher grades its own record <b>${esc(d.quality)}</b>${
-          poor ? " &mdash; the bottom of its own five-point scale." : "."
-        }</p>`
+          d.quality_rank ? ` (${esc(d.quality_rank)} of 5, 1 best)` : ""
+        }${poor ? " &mdash; the bottom of its own five-point scale." : "."}</p>`
       : ""}
     ${osmTwinBlock(twin, { what: "barrier" })}
     <div class="meta">Source: ${esc(d.publisher || "Global Dam Watch")} &mdash; a curated dataset${
       d.license ? `, ${esc(d.license)}` : ""
     }.${d.orig_src ? ` Absorbed from ${esc(d.orig_src)}.` : ""}${
-      d.grand_id ? ` GRanD ${esc(d.grand_id)}.` : ""
-    }${d.url ? ` <a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">Record</a>.` : ""}${
+      d.grand_id ? ` Cross-referenced in GRanD as #${esc(d.grand_id)}.` : ""
+    }${
+      // HydroLAKES' own reservoir-polygon id -- a link to a lake this barrier
+      // impounds, not a claim this app has fetched that polygon (see
+      // dams.py's own note: the reservoir shapefile is deliberately not
+      // parsed here).
+      d.hylak_id ? ` Reservoir cross-referenced in HydroLAKES as #${esc(d.hylak_id)}.` : ""
+    }${d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Record</a>.` : ""}${
       d.attribution ? `<br/>${esc(d.attribution)}` : ""
     }</div>`;
   return {
@@ -1969,7 +2473,7 @@ export function decorateDeflock(d, { offset } = {}) {
       d.licence ? ` (${esc(d.licence)})` : ""
     }${
       d.source_url
-        ? ` &middot; <a href="${esc(safeUrl(d.source_url))}" target="_blank" rel="noopener noreferrer">view the raw feature</a>`
+        ? ` &middot; <a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">view the raw feature</a>`
         : ""
     }</div>`;
   return {
@@ -2067,11 +2571,26 @@ export function cableRouteColor() {
   return paletteColor("cable.route", CABLE_ROUTE_COLOR);
 }
 
+// Task 28: transmission-line colour -- one token, not one per voltage tier.
+// The brief asks for the line to render "through the same polyline path as
+// railways", not for a voltage-coloured grid map, so this stays as simple as
+// cableRouteColor above; voltage/operator/cables are still stated in the
+// line's own popup for a reader who wants them.
+export const GRID_LINE_COLOR = "#e8b64f";
+
+export function gridLineColor() {
+  return paletteColor("grid.line", GRID_LINE_COLOR);
+}
+
 // ---------- railway linework (backend/sources/railways.py) ----------
 //
-// Coarse basemap context under the OSM railway *points* (which ride the
-// osm-infrastructure layer). Natural Earth 1:10m, 2021, unnamed and static --
-// it will NOT sit exactly on the station pins, and the legend and popup say so.
+// Coarse basemap context under the OSM railway *points* (railwayPoints, which
+// rides this same "railways" layer as of Task 27 -- see LAYER_MANIFEST's own
+// note in scene.js for why they moved off the OSM infrastructure layer).
+// Natural Earth 1:10m, 2021, unnamed and static -- it will NOT sit exactly on
+// the station pins, and the legend and popup say so. Also, like the OSM
+// overlay layered over it, clipped to this map's eleven conflict theatres --
+// not a step wider -- see railways.py's own module docstring.
 // A muted grey and a hairline weight, deliberately subordinate to real data.
 // A colour-only token, like cable.route above: this is a polyline, not a pin.
 export const RAILWAY_ROUTE_COLOR = "#6f7d92";
@@ -2082,6 +2601,268 @@ export const RAILWAY_STYLE = {
 export function railwayRouteColor() {
   return paletteColor("railway.line", RAILWAY_ROUTE_COLOR);
 }
+
+// ---------- OSM rail-line overlay (Task 27) ----------
+//
+// Layered over the Natural Earth linework above, sharing its layer key -- both
+// halves ride the one "railways" toggle and the one opacity dial -- but drawn
+// with their own weight and dash by class and their own colour by
+// electrification, the two per-feature claims the brief asked this overlay to
+// carry. Every OSM record also states name/operator/gauge/usage/service (see
+// backend/sources/osm_infra.py's parse_rail_lines), which the popup reads;
+// none of that changes how the line itself is drawn.
+export const RAILWAY_ELECTRIFIED_COLOR = "#e8b64f";
+export const RAILWAY_NONELECTRIFIED_COLOR = "#8fa876";
+export const RAILWAY_NARROW_GAUGE_COLOR = "#c17a4a";
+export const RAILWAY_OSM_STYLE = {
+  electrified: { color: RAILWAY_ELECTRIFIED_COLOR, label: "Electrified", token: "railway.electrified" },
+  nonElectrified: { color: RAILWAY_NONELECTRIFIED_COLOR, label: "Not electrified / unknown", token: "railway.nonElectrified" },
+  narrowGauge: { color: RAILWAY_NARROW_GAUGE_COLOR, label: "Narrow gauge", token: "railway.narrowGauge" },
+};
+export const RAILWAY_OSM_ORDER = ["electrified", "nonElectrified", "narrowGauge"];
+
+/**
+ * "main" | "branch" | "narrowGauge" -- what weight and dash differ by.
+ * Colour does not follow this split (see railwayLineColor below) except for
+ * narrow gauge, which is the one class distinct enough on the ground to earn
+ * its own colour as well as its own dash. `usage=branch` is OSM's own tag for
+ * a secondary line; `railway=light_rail` reads as a branch too, on the same
+ * "not the mainline" logic. Everything else -- railway=rail with usage=main
+ * or no usage tag at all -- is the mainline default.
+ */
+export function railwayOsmClass(line) {
+  if (line?.railway === "narrow_gauge") return "narrowGauge";
+  if (line?.usage === "branch" || line?.railway === "light_rail") return "branch";
+  return "main";
+}
+
+/**
+ * OSM's `electrified` tag is freehand-ish but converges on a few values:
+ * "yes"/"contact_line"/"rail" all mean current reaches the line; "no", and
+ * everything else (usually just an absent tag), does not. Absent is read as
+ * *not* electrified rather than as unknown -- the same "never assert a fact a
+ * source did not supply" rule everything else on this map follows. An
+ * unmarked line drawn as electrified would be this app's guess, not OSM's.
+ */
+export function railwayIsElectrified(line) {
+  const value = String(line?.electrified || "").toLowerCase();
+  return value === "yes" || value === "contact_line" || value === "rail";
+}
+
+const RAILWAY_OSM_CLASS_WEIGHT = { main: 2, branch: 1.3, narrowGauge: 1.3 };
+// null reads as "no dash" to Leaflet's own polyline options -- the mainline
+// class is drawn solid, the two others dashed, in different patterns so they
+// can be told apart without a legend.
+const RAILWAY_OSM_CLASS_DASH = { main: null, branch: "6 3", narrowGauge: "1 3" };
+
+/**
+ * The colour a merged railway line record draws in. `source` is read off the
+ * record rather than re-derived -- both halves of the merge stamp it at the
+ * point of collection (osm_infra.parse_rail_lines and railways.ne_line_records)
+ * so there is exactly one place that decision is made.
+ */
+export function railwayLineColor(line) {
+  if (line?.source !== "osm") return railwayRouteColor(); // Natural Earth: unchanged
+  if (railwayOsmClass(line) === "narrowGauge") {
+    return paletteColor("railway.narrowGauge", RAILWAY_NARROW_GAUGE_COLOR);
+  }
+  return railwayIsElectrified(line)
+    ? paletteColor("railway.electrified", RAILWAY_ELECTRIFIED_COLOR)
+    : paletteColor("railway.nonElectrified", RAILWAY_NONELECTRIFIED_COLOR);
+}
+
+/** Base weight in px, before the "railways" layer's own scale dial -- the
+ * caller applies scaledWeight(railwayLineBaseWeight(line), "railways"),
+ * matching how the Natural Earth line's weight was already scaled. */
+export function railwayLineBaseWeight(line) {
+  return line?.source === "osm" ? RAILWAY_OSM_CLASS_WEIGHT[railwayOsmClass(line)] : 1;
+}
+
+export function railwayLineDash(line) {
+  return line?.source === "osm" ? RAILWAY_OSM_CLASS_DASH[railwayOsmClass(line)] : "4 4";
+}
+
+// ---------- Digitraffic live trains (Task 27, backend/sources/digitraffic_rail.py) ----------
+//
+// Finland only -- Fintraffic's own coverage, not a gap in this map's. Every
+// popup says so, because a lone glyph over Finland with nothing said about
+// why would otherwise read as "this map only tracks trains in Finland" rather
+// than as "this is the one country with a live feed for this map to show".
+export const RAILWAY_LIVE_COLOR = "#ff5fa8";
+export const RAILWAY_LIVE_STYLE = {
+  svg: SVG.railway, color: RAILWAY_LIVE_COLOR, size: 13, label: "Live train (Digitraffic, Finland)",
+  token: "railway.live",
+};
+
+export function railLiveStyle() {
+  return themedStyle(RAILWAY_LIVE_STYLE, "railLive");
+}
+
+export function railLiveIconSize() {
+  return railLiveStyle().size;
+}
+
+export function decorateRailLive(d, { offset } = {}) {
+  const style = railLiveStyle();
+  const label = `Train ${esc(d.train_number)}`;
+  const tooltip = `<b>${label}</b><br/>Live position &middot; Digitraffic (Finland)`;
+  const detail = `
+    <h3>${label}</h3>
+    <div class="meta">Departure date: ${esc(d.departure_date)}</div>
+    ${Number.isFinite(d.speed) ? `<div>Speed: ${esc(formatSpeedKmh(d.speed))}</div>` : ""}
+    ${Number.isFinite(d.accuracy) ? `<div class="meta">GPS accuracy: &plusmn;${esc(formatAltitudeM(d.accuracy))}</div>` : ""}
+    <p class="meta"><b>Finland only.</b> Fintraffic/Digitraffic publishes live positions for Finnish
+      rail traffic; no other country is covered by this layer, and that is a fact about their feed,
+      not a gap in this map's coverage elsewhere.</p>
+    <div class="meta">Source: ${esc(d.publisher || "Fintraffic / digitraffic.fi")},
+      ${esc(d.license || "license CC 4.0 BY")}</div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "rail-live-marker", style.opacity, "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- Digitraffic rail stations (Task 27 fix, backend/sources/digitraffic_rail.py) ----------
+//
+// Wired in after the initial review: railLive's trains need something
+// stationary to orient against, and OpenStreetMap can never supply it here --
+// Finland sits entirely outside every one of the eleven conflict-theatre
+// boxes osm_infra.py sweeps (the nearest, russia_ukraine, tops out at 56N;
+// Finland runs 60-70N), so railwayPoints structurally cannot ever place a
+// station there, in this or any future sweep. This Digitraffic gazetteer
+// (563 stations) is the only dataset that ever could.
+//
+// Mirrors railLive's own visibility exactly the way railwayPoints mirrors
+// railways' (see createMapController.js's setLayerVisible) -- one toggle,
+// live trains and the network they move on together. Shares railLive's own
+// colour token rather than earning a fifth one: a station and the trains
+// calling at it are one claim ("this is what Digitraffic's Finland feed
+// covers"), not two, and an admin recolouring one recolours both on purpose.
+// Told apart from a live train by size and by shape context (a fixed point
+// vs. a moving one), not by colour.
+const RAILWAY_STATION_SIZE = 10;
+
+export function railStationStyle() {
+  const live = railLiveStyle();
+  // Smaller and a touch more transparent than the live marker it shares a
+  // token with -- a station is the background a train is read against, not
+  // the thing itself, the same figure/ground choice railway.line's own
+  // subordinate hairline makes against real data.
+  return { ...live, size: RAILWAY_STATION_SIZE, opacity: live.opacity * 0.8 };
+}
+
+export function railStationIconSize() {
+  return railStationStyle().size;
+}
+
+export function decorateRailStation(d, { offset } = {}) {
+  const style = railStationStyle();
+  const label = esc(d.name || d.short_code || "Station");
+  const tooltip = `<b>${label}</b><br/>Railway station &middot; Digitraffic (Finland)`;
+  const detail = `
+    <h3>${label}</h3>
+    <div class="meta">Short code: ${esc(d.short_code)}${d.uic_code ? ` &middot; UIC ${esc(d.uic_code)}` : ""}</div>
+    <div>${d.passenger_traffic ? "Passenger traffic" : "No scheduled passenger traffic"}</div>
+    <p class="meta">Static reference gazetteer, not a live feed &mdash; the stationary context the live
+      trains above need to mean anything. Finland only, for the same reason the trains are: it is
+      Fintraffic/Digitraffic's own coverage, not a gap in this map's.</p>
+    <div class="meta">Source: ${esc(d.publisher || "Fintraffic / digitraffic.fi")},
+      ${esc(d.license || "license CC 4.0 BY")}</div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "rail-station-marker", style.opacity, "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+// ---------- shipping lanes (backend/infrastructure.py's SHIPPING_LANES) ----------
+//
+// Task 20b. The ten named corridors -- hand-drawn schematic waypoints, not a
+// surveyed route and not derived from anything this map has observed. Same
+// "colour-only token, polyline not a pin" treatment as RAILWAY_STYLE above.
+export const SHIPPING_LANE_ROUTE_COLOR = "#5fb8c9";
+export const SHIPPING_LANE_STYLE = {
+  svg: SVG.shippingLane, color: SHIPPING_LANE_ROUTE_COLOR,
+  label: "Shipping corridor (schematic)", token: "lanes.route",
+};
+
+export function shippingLaneColor() {
+  return paletteColor("lanes.route", SHIPPING_LANE_ROUTE_COLOR);
+}
+
+// ---------- AIS traffic density (GET /api/lanes, backend/refine/lane_density.py) ----------
+//
+// Task 20a. Where this map's own AIS coverage has actually seen a hull over
+// the last thirty days -- never a claim about where shipping lanes run in
+// general (see lane_density.py's own module docstring and the `note` GET
+// /api/lanes serves, both reused verbatim in the layer's legend and popups
+// below). Colour-only, the same "legend swatch and click-target colour, not
+// a marker" role railway.line's token plays -- the heat gradient itself
+// stays a fixed multi-stop ramp (see createLaneDensityLayers in layers.js),
+// the same as FIRMS/jamming's own gradients, which the palette system has
+// never driven either.
+export const LANE_DENSITY_COLOR = "#5cc4f2";
+export const LANE_DENSITY_STYLE = {
+  svg: SVG.laneDensity, color: LANE_DENSITY_COLOR,
+  label: "AIS traffic density (this map's own coverage)", token: "lanes.density",
+};
+
+export function laneDensityColor() {
+  return paletteColor("lanes.density", LANE_DENSITY_COLOR);
+}
+
+/**
+ * How many recorded `sightings` in a lane_cells row map to "fully lit" on
+ * the density wash, clamped to [0, 1] the way leaflet.heat's own weight
+ * parameter expects.
+ *
+ * Log-scaled rather than linear, and this is the answer to the question the
+ * brief asked to be raised before writing this: `sightings` is a hit count
+ * across however many hourly passes have touched a cell (see
+ * backend/refine/lane_density.py's own docstring), so a lone hull sitting
+ * still for a month racks up roughly the number of hits an hour a busy
+ * strait crossed once every hour would -- a linear scale would let that
+ * loiterer paint its cell at exactly the strength of real, distinct
+ * traffic, which is precisely the false precision `sightings` (not
+ * `transits`) exists to avoid claiming. Log compresses the gap between
+ * "seen a handful of times" and "seen on nearly every pass" without
+ * pretending the two ever become the same claim -- that distinction is
+ * carried in words, by the layer's legend and every cell's popup, not by
+ * this function; this only keeps one loitering hull from maxing out the
+ * whole colour scale by itself.
+ *
+ * `cap` is the sightings count at which the wash reaches full intensity --
+ * exposed as a parameter (rather than a bare module constant) so this stays
+ * testable as a pure function of its inputs alone.
+ */
+export const LANE_DENSITY_CAP = 500;
+
+export function laneDensityIntensity(sightings, cap = LANE_DENSITY_CAP) {
+  const n = Number(sightings);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  if (!Number.isFinite(cap) || cap <= 1) return 1;
+  return Math.min(Math.log1p(n) / Math.log1p(cap), 1);
+}
+
+// ---- water bodies (Natural Earth, via backend/sources/water_bodies.py) ----
+//
+// Three colour-only tokens rather than one: a marine/lake polygon reads as
+// "fill" while hovered and "selected" once picked, and both share the same
+// "outline" stroke. Unlike every other layer here, none of the three is read
+// through paletteColor() at draw time -- water.js's own style function bakes
+// nothing but whether a feature is a line or a fill, and the actual colours
+// live in CSS custom properties instead (see style.css's `.water-shape` rules
+// and useAppSettings.js for how those three properties are kept in step with
+// these tokens). That is deliberate: a baked colour only reaches a shape the
+// next time it is synced, and a river draws visibly at rest with no
+// hover/selected class ever available to override a stale one.
+export const WATER_FILL_COLOR = "#4fd1ff";
+export const WATER_OUTLINE_COLOR = "#8be9ff";
+export const WATER_SELECTED_COLOR = "#0ea5e9";
+export const WATER_STYLE = {
+  svg: SVG.wave, color: WATER_FILL_COLOR, label: "Water bodies (Natural Earth)", token: "water.fill",
+};
 
 export function cableLandingStyle(d) {
   return themedStyle(d?.planned ? CABLE_PLANNED_STYLE : CABLE_LANDING_STYLE, "cables");
@@ -2169,6 +2950,54 @@ export function decorateOutage(d, { offset } = {}) {
   };
 }
 
+// ---------- sub-national internet outages (outages.py's region pass) ------
+//
+// A small badge, one admin level finer than OUTAGE_STYLE above, at the
+// state's own representative point (see rebuildOutageRegionPoints in
+// createMapController.js). Deliberately smaller than the country pin: this is
+// the detail a reader reaches by zooming in, not the headline the country pin
+// already is, and drawing it the same size would claim equal weight for a
+// reading IODA itself scores no differently in kind, only in scope.
+export const OUTAGE_REGION_STYLE = {
+  svg: SVG.connectivityLoss, color: "#38bdf8", size: 13,
+  label: "Internet disruption (IODA, sub-national)", token: "outage.region",
+};
+
+export function outageRegionStyle() {
+  return themedStyle(OUTAGE_REGION_STYLE, "outageRegionPoints");
+}
+
+export function outageRegionIconSize() {
+  return outageRegionStyle().size;
+}
+
+export function decorateOutageRegion(d, { offset } = {}) {
+  const style = outageRegionStyle();
+  const name = d.name || d.entity_code || "Unknown region";
+  const signals = Object.keys(d.signals || {}).map((key) => key.split(".")[0]);
+  const matchWord = d.matched === "exact" ? "an exact" : "a fuzzy (name-normalised)";
+  const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)}`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(style.label)}</div>
+    <div>IODA composite score: ${fmtNumber(Math.round(d.score || 0))}${
+      d.event_count ? ` &middot; ${esc(d.event_count)} event(s)` : ""
+    }</div>
+    ${signals.length ? `<div class="meta">Seen in: ${signals.map((s) => esc(s)).join(", ")}</div>` : ""}
+    <p class="meta"><b>Matched to this state by ${matchWord} name match</b> between IODA's own region name
+      and this admin-1 shape's own name (see backend/sources/outages.py). This pin sits at the state's own
+      representative point, not at the location of anything specific inside it.</p>
+    <p class="meta">The score is IODA's own composite and is unbounded &mdash; it is a comparison against the
+      same region's normal and against other regions in the same window, not a share of the region offline,
+      and it cannot distinguish a shutdown from a cable fault.</p>
+    <div class="meta">Source: IODA (Internet Outage Detection and Analysis, Georgia Tech)</div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "outage-region-marker", layerOpacity("outageRegionPoints"), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
 // ---------- dark vessels (backend/sources/dark_vessels.py) ----------
 //
 // The only layer on this map derived from our own recorded history rather than
@@ -2230,10 +3059,57 @@ function gfwPriorCredit(prior) {
   return `<div class="meta">Prior from: Global Fishing Watch AIS disabling events (CC BY-NC 4.0)</div>`;
 }
 
+// The reachability region's own numbers, in words -- see
+// backend/sources/dark_vessels.py's module docstring for the model in full.
+// Its own block, kept apart from the plain gap facts above it, so the
+// self-score (the one line the brief treats as non-optional -- "a model that
+// reports its own accuracy is worth more than one that does not") is never
+// buried inside them.
+function reachabilityDetail(d) {
+  if (!Number.isFinite(Number(d.reach_radius_km))) return "";
+  const basis = d.speed_basis === "own_history"
+    ? "this hull's own recent speed history"
+    : "a generic ceiling for its vessel class (its own speed history was too thin to trust)";
+  const scored = Number.isFinite(Number(d.prediction_error_km))
+    ? `<div>The model's own dead-reckoned guess landed <b>${esc(formatDistanceKm(Number(d.prediction_error_km)))}</b>
+        from where the vessel actually reappeared.</div>`
+    : "";
+  const dest = d.destination_prior_used
+    ? `<div class="meta">Nudged toward its declared destination, ${esc(d.destination_prior_used.port)},
+        at ${esc(Math.round(d.destination_prior_used.weight * 100))}% weight.</div>`
+    : "";
+  return `
+    <div class="inferred-block">
+      <div>Could have reached up to <b>${esc(formatDistanceKm(Number(d.reach_radius_km)))}</b> away in a straight
+        line at its own top speed, using ${basis}.</div>
+      <div class="meta">The shaded region on the map is narrower than that outer figure -- it is built from
+        the course and speed this hull was actually holding when it went quiet, not the full circle its top
+        speed alone would allow.</div>
+      ${scored}
+      ${d.masked_by_land
+        ? '<div class="meta">The region shown is pulled back off dry land using Natural Earth\'s sea/lake outlines.</div>'
+        : ""}
+      ${dest}
+    </div>`;
+}
+
+// AIS's own speed-over-ground field, and dark_vessels.py/gfw_gaps.py's
+// derived `implied_speed_kn`, are both already reported in knots -- so this
+// converts *into* the reader's chosen system rather than out of one, going
+// through the same km/h formatter every other speed on this map does
+// (nmToKm's own linear conversion applies identically to a rate as to a
+// distance). One function rather than one per call site: a vessel's
+// broadcast speed and an inferred implied speed are different claims, but
+// they are the same unit and the same conversion.
+function formatSpeedKn(kn) {
+  const n = Number(kn);
+  return Number.isFinite(n) ? formatSpeedKmh(nmToKm(n)) : "n/a";
+}
+
 function decorateAisGap(d) {
   const vessel = d.name || `MMSI ${d.mmsi}`;
   const tooltip = `<b>${esc(vessel)}</b> &middot; went dark<br/>` +
-    `${esc(d.gap_hours)} h silent &middot; reappeared ${esc(d.resumed_km_away)} km away`;
+    `${esc(d.gap_hours)} h silent &middot; reappeared ${esc(formatDistanceKm(Number(d.resumed_km_away)))} away`;
   // An implied speed a merchant hull cannot make is the one number here that
   // rules out the innocent explanation, so it is called out rather than listed.
   const impossible = Number(d.implied_speed_kn) > 25;
@@ -2243,11 +3119,13 @@ function decorateAisGap(d) {
     ${sanctionDetail(d)}
     <div class="inferred-block">
       <div><b>${esc(d.gap_hours)} hours</b> with no position reported.</div>
-      <div>Reappeared ${esc(d.resumed_km_away)} km away, implying ${esc(d.implied_speed_kn)} knots${
+      <div>Reappeared ${esc(formatDistanceKm(Number(d.resumed_km_away)))} away, implying
+        ${esc(formatSpeedKn(d.implied_speed_kn))}${
         impossible ? " &mdash; faster than a merchant vessel makes" : ""
       }.</div>
       <div class="meta">Last heard ${esc(timeAgoFromUnix(d.went_dark_at))}, back ${esc(timeAgoFromUnix(d.resumed_at))}.</div>
     </div>
+    ${reachabilityDetail(d)}
     ${gfwPriorDetail(d.gfw_prior)}
     <p class="meta"><b>This is an inference from our own AIS history, not a detection.</b> A receiver or
       upstream outage produces the identical signature; gaps spanning a measured drop in our own feed are
@@ -2261,12 +3139,12 @@ function decorateStsPair(d) {
   const vessels = d.vessels || [];
   const names = vessels.map((v) => v.name || `MMSI ${v.mmsi}`);
   const tooltip = `<b>Possible ship-to-ship transfer</b><br/>${esc(names.join(" + "))}<br/>` +
-    `${esc(d.separation_m)} m apart for ${esc(d.together_hours)} h`;
+    `${esc(formatAltitudeM(Number(d.separation_m)))} apart for ${esc(d.together_hours)} h`;
   const detail = `
     <h3>Possible ship-to-ship transfer</h3>
     ${sanctionDetail(d)}
     <div class="inferred-block">
-      <div>${esc(d.separation_m)} m apart, both under way at almost zero speed, for <b>${esc(d.together_hours)} hours</b>.</div>
+      <div>${esc(formatAltitudeM(Number(d.separation_m)))} apart, both under way at almost zero speed, for <b>${esc(d.together_hours)} hours</b>.</div>
       <ul class="coverage-list">
         ${vessels.map((v) => `<li>${esc(v.name || "Unknown vessel")} &middot; MMSI ${esc(v.mmsi)}${
           v.imo ? ` &middot; IMO ${esc(v.imo)}` : ""
@@ -2285,6 +3163,16 @@ function decorateStsPair(d) {
     <div class="meta">Derived from: aisstream.io position history recorded by this backend</div>
     ${gfwPriorCredit(vessels.map((v) => v.gfw_prior).find((p) => p && p.events))}`;
   return { tooltip, detail };
+}
+
+// One token for the reachability geometry both this layer's ais_gap records
+// and gfw_gaps' ais_disabling records can draw -- see iconTheme.js's
+// "reach.contour" and createMapController.js's renderReachGeometry. Read as a
+// function, not a module-level constant, because the palette can change at
+// runtime (see setIconTheme) and a constant captured at import time would
+// freeze the shipped colour regardless of what Admin Mode set it to.
+export function reachContourColor() {
+  return paletteColor("reach.contour", "#9d8bf0");
 }
 
 export function decorateDarkVessel(d, { offset } = {}) {
@@ -2348,17 +3236,17 @@ export function decorateGfwGap(d, { offset } = {}) {
         d.resumed_at ? `, back ${esc(timeAgoFromUnix(d.resumed_at))}` : ""
       }.</div>
       ${Number.isFinite(Number(d.distance_km))
-        ? `<div>Reappeared ${esc(fmtNumber(Number(d.distance_km)))} km away, implying
-            ${esc(d.implied_speed_kn)} knots.</div>`
+        ? `<div>Reappeared ${esc(formatDistanceKm(Number(d.distance_km)))} away, implying
+            ${esc(formatSpeedKn(d.implied_speed_kn))}.</div>`
         : ""}
       ${Number.isFinite(Number(d.positions_per_day_sat))
         ? `<div class="meta">GFW normally hears this hull about
             ${esc(Math.round(Number(d.positions_per_day_sat)))} times a day by satellite.</div>`
         : ""}
       ${Number.isFinite(Number(d.distance_from_shore_km))
-        ? `<div class="meta">${esc(Math.round(Number(d.distance_from_shore_km)))} km from shore${
+        ? `<div class="meta">${esc(formatDistanceKm(Number(d.distance_from_shore_km)))} from shore${
             Number.isFinite(Number(d.distance_from_port_km))
-              ? `, ${esc(Math.round(Number(d.distance_from_port_km)))} km from the nearest port`
+              ? `, ${esc(formatDistanceKm(Number(d.distance_from_port_km)))} from the nearest port`
               : ""
           } when it stopped.</div>`
         : ""}
@@ -2432,6 +3320,12 @@ export function gfwDetectionIconSize(d) {
 
 const GFW_SENSOR_LABEL = { sar: "Radar (SAR)", optical: "Optical (Sentinel-2)" };
 
+// Shared verbatim with the water body card's "Sources & caveats" section
+// (map/popups.js) -- the same warning against reading a quiet layer as a
+// finding, restated here for maritime imagery and there for AIS/news/
+// infrastructure coverage generally.
+export const EMPTY_WATER_HEADLINE = "<b>Empty water on this layer is not evidence of empty water.</b>";
+
 export function decorateGfwDetection(d, { offset } = {}) {
   const style = gfwDetectionStyle(d);
   const sensor = GFW_SENSOR_LABEL[(d.sensor || "").toLowerCase()] || d.sensor || "Sensor not stated";
@@ -2454,7 +3348,7 @@ export function decorateGfwDetection(d, { offset } = {}) {
         "Fishing Watch's conclusion, not this map's. It does not mean the transponder was off: it " +
         "means their correlation found nothing to pair this return with.</div>"}
     ${d.match_basis ? `<div class="meta">Matching basis: ${esc(d.match_basis)}</div>` : ""}
-    <p class="meta"><b>Empty water on this layer is not evidence of empty water.</b> There is no
+    <p class="meta">${EMPTY_WATER_HEADLINE} There is no
       coverage or footprint dataset in the API, so this map cannot tell "imaged, nothing there" from
       "not imaged at all". Never read a gap here the way you would read an AIS gap.</p>
     <p class="meta">${age !== null ? `This scene is <b>${esc(age)} days old</b>` : "This scene is not live"}${
@@ -2468,7 +3362,7 @@ export function decorateGfwDetection(d, { offset } = {}) {
         d.attribution ? ` ${esc(d.attribution)}` : ""
       }${
         d.source_url
-          ? ` <a href="${esc(safeUrl(d.source_url))}" target="_blank" rel="noopener noreferrer">Methodology</a>.`
+          ? ` <a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">Methodology</a>.`
           : ""
       }</div>`;
   return {
@@ -2724,18 +3618,420 @@ function icaoHexDetail(d) {
   return parts.join("");
 }
 
-const AIRCRAFT_FLAG_NOTE = {
+// The display-limited half of this used to live here too; it is now
+// displayLimitedNote below, in the brief's own wording, with the programme
+// named rather than folded into one generic sentence.
+//
+// Exported so the emergency squawk alert strip (Task 33,
+// components/SquawkAlertStrip.jsx) prints this exact caveat rather than a
+// second sentence that says the same thing slightly differently -- 7500 is
+// far more often a mis-set transponder than a hijacking, and that has to read
+// identically everywhere the map says so.
+export const AIRCRAFT_FLAG_NOTE = {
   emergency:
     "Reserved emergency transponder codes: 7500 unlawful interference, 7600 radio failure, 7700 general " +
     "emergency. Squawks are occasionally set by mistake and cleared moments later &mdash; this is what the " +
     "aircraft is broadcasting, not a confirmed incident.",
-  displayLimited:
-    "The operator has asked for this aircraft to be limited in public feeds, or it is flying under a " +
-    "rotating temporary address. airplanes.live publishes it anyway. That request is a fact about the " +
-    "registry entry and says nothing about the flight itself.",
 };
 
-export function decorateAdsb(d, { selectedIcao } = {}) {
+// ---------- squawk decoding ----------
+//
+// The three internationally reserved emergency codes. Decoded here rather
+// than trusted solely from backend/sources/adsb.py's own emergency_squawk
+// field, which is only ever computed for a record built from airplanes.live
+// (see normalize_airplanes_live's _SQUAWK_PATHS) -- keeping the mapping here
+// too makes it directly testable and means the card does not depend on which
+// upstream happened to do the decoding.
+const EMERGENCY_SQUAWK_LABEL = {
+  "7500": "unlawful interference (hijack)",
+  "7600": "radio failure",
+  "7700": "general emergency",
+};
+
+/** What a squawk means, if it is one of the three reserved emergency codes --
+ *  null for every other code, which is the overwhelming majority and carries
+ *  no meaning on its own. */
+export function decodeSquawk(squawk) {
+  const code = squawk === null || squawk === undefined ? "" : String(squawk).trim();
+  return code ? EMERGENCY_SQUAWK_LABEL[code] || null : null;
+}
+
+/** Which reserved-code meaning applies to this record's squawk right now --
+ *  backend/sources/adsb.py's own `emergency_squawk` when the merged record
+ *  carries one, or decodeSquawk(d.squawk) as a fallback for a feed that never
+ *  populated that field (see decorateAdsb below for why both are checked).
+ *  Exported so the alert strip (Task 33) asks the identical question rather
+ *  than re-deriving its own answer. */
+export function squawkEmergencyMeaning(d) {
+  return (d && (d.emergency_squawk || decodeSquawk(d.squawk))) || null;
+}
+
+/**
+ * The Emergency line's own text, e.g. "squawk 7700 &mdash; general emergency;
+ * transponder reports general emergency" -- shared between decorateAdsb's
+ * aircraft card and the emergency squawk alert strip (Task 33), so one
+ * emergency is never described in two sentences that happen to say slightly
+ * different things. Empty string when neither signal is present, so callers
+ * can use it directly as a falsy check.
+ */
+export function aircraftEmergencyLine(d) {
+  if (!d) return "";
+  const squawkEmergencyLabel = squawkEmergencyMeaning(d);
+  return [
+    squawkEmergencyLabel ? `squawk ${esc(d.squawk)} &mdash; ${esc(squawkEmergencyLabel)}` : null,
+    d.emergency ? `transponder reports ${esc(d.emergency)}` : null,
+  ].filter(Boolean).join("; ");
+}
+
+// ---------- display-limited wording (LADD / PIA) ----------
+//
+// Named per backend/sources/adsb.py's _DISPLAY_LIMITED_PATHS, but in the
+// reader's words rather than the FAA's: the brief's own wording ("this
+// aircraft's operator has requested limited display") is what goes on the
+// card, with the programme itself named alongside it rather than folded into
+// one sentence -- LADD is a request not to be shown, PIA is a rotating
+// address, and calling both "requested limited display" while still naming
+// which one keeps the sentence honest without pretending they are the same
+// mechanism.
+const DISPLAY_LIMITED_PROGRAMME = {
+  ladd: "LADD, the FAA's Limited Aircraft Data Displayed programme",
+  pia: "PIA, a rotating Privacy ICAO Address",
+};
+
+/** The Flags-section line for a display-limited aircraft, or null. */
+export function displayLimitedNote(d) {
+  if (!d?.display_limited) return null;
+  const programme = DISPLAY_LIMITED_PROGRAMME[d.display_limited] || d.display_limited_note || d.display_limited;
+  return `This aircraft's operator has requested limited display, under ${programme}. airplanes.live ` +
+    "publishes it anyway; the request is a fact about the registry entry and says nothing about this flight.";
+}
+
+// ---------- vertical trend (from the recorded track) ----------
+//
+// Neither feed's merged record carries a rate of climb or descent (see
+// backend/sources/adsb.py) -- the honest source for "is this aircraft
+// climbing" is the altitude actually recorded for it over time, which is
+// exactly what /api/track/{kind}/{id} answers (backend/app.py's
+// TRACK_FIELDS includes "altitude" for adsb). createMapController.js's
+// selectAircraft fetches that endpoint on selection via loadRecordedTrack --
+// the same request that already seeds the trail -- and its onPoints callback
+// hands the raw points to decorateAdsb as `track`. This function stays pure
+// and reads nothing of its own: no module-held history, so no state that can
+// outlive a selection, survive a viewport exit and reappear stale, or need a
+// cache eviction policy.
+//
+// `track` is oldest-first, each point shaped `{altitude, ts, ...}` (`ts` a
+// unix-seconds timestamp -- see backend/storage.py's entity_track).
+//
+// entity_history only gains a row when an entity actually moved, so the
+// track can have real holes in it (out of range, or simply not airborne):
+// pairing an altitude from before a hole with one from after it would derive
+// a climb or descent that never happened. This walks backward from the
+// newest point and stops at the first gap wider than
+// VERTICAL_TREND_MAX_GAP_SECONDS, so only a genuinely contiguous run of
+// recent fixes ever contributes to the delta -- and stops altogether once it
+// reaches something older than VERTICAL_TREND_MAX_GAP_SECONDS behind the
+// newest point, so a trend from an hour ago never reads as "now" just
+// because every fix in between happened to be closely spaced.
+//
+// One constant serves both jobs on purpose, rather than two similarly-named
+// numbers that could drift apart: it is set comfortably above the slow end
+// of the ADS-B poll cadence (config.ADSB_POLL_INTERVAL_ANON = 900s, when no
+// OpenSky credentials are configured) so an ordinary poll-to-poll gap is
+// never mistaken for a hole in coverage, with headroom for one missed poll.
+const VERTICAL_TREND_MAX_GAP_SECONDS = 20 * 60;
+// A real climb or descent moves altitude hundreds of feet a minute; readsb's
+// barometric altitude is quantised to 25 ft and jitters well under 100 ft
+// fix-to-fix at a steady cruise. 60 m (~200 ft) clears that noise floor with
+// room to spare while still catching a genuine trend within a handful of
+// polls -- the brief leaves the window and threshold unfixed, and this is the
+// value chosen; there was nothing upstream to derive it from.
+const VERTICAL_TREND_THRESHOLD_M = 60;
+
+/**
+ * "climbing" | "descending" | "level" | null (not enough recently, contiguously
+ * recorded track to say).
+ *
+ * Pure -- takes the track directly, so it is testable with a synthetic array
+ * and carries no state of its own between calls.
+ */
+export function verticalTrend(track) {
+  const points = (Array.isArray(track) ? track : [])
+    .filter((p) => Number.isFinite(p?.altitude) && Number.isFinite(p?.ts))
+    .sort((a, b) => a.ts - b.ts);
+  if (points.length < 2) return null;
+  const latest = points[points.length - 1];
+  let start = points.length - 1;
+  for (let i = points.length - 2; i >= 0; i--) {
+    const sinceLatest = latest.ts - points[i].ts;
+    const gapToNext = points[i + 1].ts - points[i].ts;
+    if (sinceLatest > VERTICAL_TREND_MAX_GAP_SECONDS || gapToNext > VERTICAL_TREND_MAX_GAP_SECONDS) break;
+    start = i;
+  }
+  if (start === points.length - 1) return null; // nothing else survived the walk
+  const delta = latest.altitude - points[start].altitude;
+  if (Math.abs(delta) < VERTICAL_TREND_THRESHOLD_M) return "level";
+  return delta > 0 ? "climbing" : "descending";
+}
+
+const VERTICAL_TREND_LABEL = { climbing: "Climbing", descending: "Descending", level: "Level" };
+
+// ---------- flight legs (Task 23: GET /api/aircraft/{icao24}) --------------
+//
+// Same fetch-after-the-popup-opens shape as vessel detail above (Task 17):
+// createMapController.js's loadAircraftDetail fetches this once selectAircraft
+// has already drawn the popup from the live ADS-B record, so every state that
+// fetch can be in has to render honestly here too -- absent/"loading" while
+// in flight, "error" on failure (the brief requires "unavailable", never a
+// silent gap), "ready" once it lands. `flightDetail` is only ever passed for
+// the selected airframe -- see decorateAdsb below -- so no other aircraft's
+// popup (built lazily, on its own open) pays for this.
+
+const LEG_CONFIDENCE_LABEL = {
+  observed_both: "Both ends observed",
+  observed_one: "One end observed",
+  inferred: "Neither end observed (inferred)",
+};
+
+// leg.max_alt_ft (backend/refine/flight_legs.py) is natively feet -- ADS-B's
+// own reporting unit -- so this goes metres-and-back through formatAltitudeM
+// rather than printing the source figure directly, the same "reader's
+// preference, not the source's own unit" rule every other measurement on
+// this map now follows.
+function fmtAltFt(value) {
+  return typeof value === "number" && Number.isFinite(value) ? formatAltitudeM(feetToMeters(value)) : "n/a";
+}
+
+function fmtDistanceKm(value) {
+  return typeof value === "number" && Number.isFinite(value) ? formatDistanceKm(value) : "n/a";
+}
+
+function flightLegRow(leg) {
+  const origin = leg.origin_code || "Unknown";
+  const dest = leg.dest_code || (leg.arrived_at ? "Unknown" : "In progress");
+  return `<tr>
+    <td>${esc(utcClockFromUnix(leg.departed_at))}</td>
+    <td>${esc(origin)}</td>
+    <td>${esc(dest)}</td>
+    <td>${leg.arrived_at ? esc(utcClockFromUnix(leg.arrived_at)) : '<span class="meta">still open</span>'}</td>
+    <td>${fmtAltFt(leg.max_alt_ft)}</td>
+    <td>${fmtDistanceKm(leg.distance_km)}</td>
+    <td>${esc(LEG_CONFIDENCE_LABEL[leg.confidence] || leg.confidence || "n/a")}</td>
+  </tr>`;
+}
+
+/** The Route fold. Opens with the honesty caveat the brief requires verbatim:
+ * ADS-B carries no flight plan, so every origin/destination below it is read
+ * off where this airframe was actually seen, never a filed route.
+ *
+ * `updated` is the aircraft's own live "last position report" age -- the
+ * same field lastPingDetail already renders elsewhere on this card -- so the
+ * "Currently airborne" callout below can be qualified against it (Task 23
+ * review, Important 2): the header above already promises this section is
+ * never more certain than each leg's own confidence, and a present-tense
+ * "currently" for an airframe that stopped reporting the same STALE_PING_SECONDS
+ * ago the rest of the card already flags is exactly the overclaim that
+ * promise rules out. */
+function routeSection(flightDetail, updated) {
+  // Task 31: the Inference section's "Flight legs" switch, set to "hide".
+  if (inferenceHidden("flightLegs")) return "";
+  const head = '<div class="csection-h">Route</div>' +
+    '<p class="meta">ADS-B broadcasts no flight plan. Origin and destination below are inferred from ' +
+    "where this airframe was seen leaving or returning to the ground (or crossing 1,500 ft near a known " +
+    "airfield) &mdash; never a filed route, and never more certain than each leg's own confidence says.</p>";
+  if (!flightDetail || flightDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (flightDetail.status === "error") {
+    return `${head}<p class="meta"><b>Flight-leg history unavailable</b> &mdash; the aircraft-detail request failed.</p>`;
+  }
+  const data = flightDetail.data || {};
+  const legs = data.legs || [];
+  const current = data.current_leg;
+  if (!legs.length) {
+    return `${head}<p class="meta">No flight legs recorded for this airframe yet.</p>`;
+  }
+  let currentNote = "";
+  if (current) {
+    const age = pingAgeSeconds(updated);
+    const stale = age !== null && age > STALE_PING_SECONDS;
+    const label = stale ? "Last known open leg" : "Currently airborne";
+    currentNote = `<p class="meta"><b>${label}:</b> departed ${esc(utcClockFromUnix(current.departed_at))}` +
+      `${current.origin_code ? ` from ${esc(current.origin_code)}` : " from an unknown origin"} &mdash; ` +
+      `${esc(LEG_CONFIDENCE_LABEL[current.confidence] || current.confidence || "n/a")}` +
+      (stale
+        ? ` <span class="stale-ping">&mdash; last position report was ${esc(timeAgoFromUnix(updated))}; ` +
+          "this airframe may already have landed or gone out of range</span>"
+        : "") +
+      "</p>";
+  }
+  return `
+    ${head}
+    ${currentNote}
+    <table class="food-estimates flight-legs-table">
+      <tr><th>Departed</th><th>Origin</th><th>Dest</th><th>Arrived</th><th>Max alt</th><th>Distance</th><th>Confidence</th></tr>
+      ${legs.slice(0, 10).map(flightLegRow).join("")}
+    </table>
+    ${data.cargo_hint ? `<p class="meta">${esc(data.cargo_hint)}</p>` : ""}
+    <div class="meta">Source: this app's own flight-leg job, over OpenSky Network + airplanes.live ADS-B
+      position history &mdash; <i>inferred</i>, never a filed flight plan</div>`;
+}
+
+// ---------- Task 39: jamming/ADS-B cross-check ------------------------------
+//
+// Same fetch-after-the-popup-opens shape as routeSection just above -- this
+// reads `data.jam_crosscheck`/`data.jam_crosscheck_note`, both riding the
+// same GET /api/aircraft/{icao24} response flightDetail already carries, not
+// a second fetch. See backend/refine/jam_crosscheck.py's own docstring for
+// why an airframe that has never sat inside one of gpsjam's currently-
+// tracked worst-hundred cells has no `jam_crosscheck` entry at all (`null`
+// here) rather than a fabricated "checked, clean" one -- that is a third,
+// genuinely different state from "checked, clean" and "flagged", and this
+// section renders all three with different wording, never collapsing "did
+// not look" into "found nothing".
+
+const JAM_FLAG_TYPE_LABEL = {
+  speed: "Implausible speed",
+  heading_reversal: "Heading-inconsistent reversal",
+};
+
+function jamFlagLine(flag) {
+  const label = JAM_FLAG_TYPE_LABEL[flag.type] || flag.type;
+  const detail = flag.type === "speed"
+    ? `${Math.round(flag.speed_kmh).toLocaleString()} km/h implied over ${Math.round(flag.distance_km)} km`
+    : `track disagreed with reported heading by ${Math.round(flag.deviation_deg)}&deg;`;
+  return `<li>${esc(utcClockFromUnix(flag.ts))} &mdash; <b>${esc(label)}</b>: ${detail}</li>`;
+}
+
+/** Seconds -> "24h"/"90m"/"45s", for the rolling-window qualifier every
+ * jam-crosscheck count now carries (Task 39 review, Important 1: a count
+ * with no stated window is exactly the kind of unqualified number this plan
+ * keeps catching). Deliberately coarse -- this labels *which* number the
+ * reader is looking at, not a precise duration; contrast timeAgoFromUnix,
+ * which answers a different question ("how long has this cell been
+ * watched at all") for jamCellCrosscheckNote's own `trackedFor`. */
+function windowDurationText(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  if (seconds >= 3600) return `${Math.round(seconds / 3600)}h`;
+  if (seconds >= 60) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds)}s`;
+}
+
+/**
+ * The jamming *cell*'s own half of the cross-check, for renderJamming's
+ * popup (createMapController.js) -- the mirror of jamCrosscheckSection just
+ * below, which is the *aircraft*'s half. `doc` is `raw.jamCrosscheck` as
+ * polled (see map/scene.js's REFERENCE_ONLY_FEEDS); `hex` is the jamming
+ * point's own H3 cell id (backend/sources/jamming.py's `hex` field).
+ *
+ * Three real states, never collapsed into each other (global-constraints.md's
+ * own repeated defect: "found nothing" must never render the same as "did
+ * not look"): the whole document missing (this job has not written a first
+ * pass at all -- REFINE_PANEL_STATUS_TEXT's own wording, not a second copy
+ * of it), this one cell missing from an otherwise-real document (gpsjam's
+ * own top hundred changed since this document was built, or a snapshot
+ * predates Task 39's own `hex` field), and the cell's own three-way
+ * `status` once it is present.
+ *
+ * Task 39 review, Important 2: the backend only calls a cell's own status
+ * "flagged" once the flagged fraction clears JAM_CROSSCHECK_MIN_FLAG_RATIO,
+ * not merely `aircraft_flagged >= 1` -- but `aircraft_flagged` itself is
+ * never hidden either way, so a cell that stayed "clean" despite one noisy
+ * aircraft still shows that aircraft's own count here, not a silent zero. A
+ * reader who sees "flagged" must not have to go looking for the
+ * denominator, so the "N of M" ratio is printed in every branch that has
+ * any aircraft at all, whichever word carries it.
+ */
+export function jamCellCrosscheckNote(doc, hex) {
+  if (!doc || !doc.cells) {
+    return `<p class="meta">Aircraft cross-check: ${esc(REFINE_PANEL_STATUS_TEXT[REFINE_PANEL_STATUS.MISSING])}</p>`;
+  }
+  const cell = hex ? doc.cells[hex] : null;
+  if (!cell) {
+    return '<p class="meta">Aircraft cross-check: not available for this cell right now.</p>';
+  }
+  const trackedSince = Number.isFinite(doc.as_of) && Number.isFinite(cell.tracked_seconds)
+    ? doc.as_of - cell.tracked_seconds
+    : null;
+  const trackedFor = trackedSince !== null ? timeAgoFromUnix(trackedSince).replace(/ ago$/, "") : null;
+  const trackedNote = trackedFor ? ` (cell tracked for ${esc(trackedFor)})` : "";
+  const windowText = windowDurationText(doc.window_seconds);
+  const windowNote = windowText ? ` in the last ${esc(windowText)}` : "";
+  if (cell.status === "no_traffic") {
+    return `<p class="meta">Aircraft cross-check: no aircraft recorded here by this map's own ADS-B ` +
+      `coverage${windowNote}${trackedNote} &mdash; not evidence either way, only that this map saw no traffic ` +
+      `to check.</p>`;
+  }
+  const ratioLine = `<b>${cell.aircraft_flagged} of ${cell.aircraft_observed} aircraft</b> showed a position ` +
+    `anomaly here${windowNote}${trackedNote}`;
+  if (cell.status === "flagged") {
+    return `<p class="meta">Aircraft cross-check: ${ratioLine}. That the anomaly coincided with this cell is ` +
+      `derived; that jamming explains it is an inference, never an observation.</p>`;
+  }
+  if (cell.aircraft_flagged > 0) {
+    // "clean", but not a bare zero -- see the module-level note above: the
+    // word "clean" must not quietly erase a real, if statistically weak,
+    // signal just because it fell under the ratio this map requires before
+    // calling a whole cell flagged.
+    return `<p class="meta">Aircraft cross-check: ${ratioLine} -- below this map's own noise-vs-signal ratio to ` +
+      `call the cell itself flagged; most flagged jumps anywhere on this map turn out to be ordinary tracking ` +
+      `noise (see the source note below).</p>`;
+  }
+  return `<p class="meta">Aircraft cross-check: <b>${cell.aircraft_observed} aircraft</b> observed here` +
+    `${windowNote}${trackedNote}, none showed a position anomaly.</p>`;
+}
+
+/** The jamming cross-check fold. Opens with the same honesty caveat every
+ * reader of this product gets, regardless of which of the three states the
+ * airframe is in -- an inference is never presented as an observation, see
+ * this project's own rule (global-constraints.md). */
+function jamCrosscheckSection(flightDetail) {
+  // Task 31: the Inference section's own switch for this product.
+  if (inferenceHidden("jamCrosscheck")) return "";
+  const head = '<div class="csection-h">GPS jamming cross-check</div>';
+  if (!flightDetail || flightDetail.status === "loading") {
+    return `${head}<p class="meta">Loading&hellip;</p>`;
+  }
+  if (flightDetail.status === "error") {
+    return `${head}<p class="meta"><b>Cross-check unavailable</b> &mdash; the aircraft-detail request failed.</p>`;
+  }
+  const data = flightDetail.data || {};
+  const jc = data.jam_crosscheck;
+  if (!data.jam_crosscheck_note) {
+    // The refine job itself has never written a pass -- distinct from "it
+    // ran and this airframe simply has no entry" just below, which is a
+    // real, checked fact rather than an absence of computation.
+    return `${head}<p class="meta">${esc(REFINE_PANEL_STATUS_TEXT[REFINE_PANEL_STATUS.MISSING])}</p>`;
+  }
+  const note = data.jam_crosscheck_note;
+  if (!jc) {
+    return `${head}<p class="meta">This airframe has not been recorded inside one of gpsjam.org's currently ` +
+      `tracked worst-hundred cells &mdash; not evidence of anything either way, since that list covers only ` +
+      `a tiny fraction of the globe.</p><p class="meta">${esc(note)}</p>`;
+  }
+  // Task 39 review, Important 1: sample_count/flag_count are a true rolling
+  // window, not a since-first-seen total, so every rendered count below
+  // carries the window it covers rather than an unqualified number.
+  const windowText = windowDurationText(data.jam_crosscheck_window_seconds);
+  const windowNote = windowText ? ` in the last ${esc(windowText)}` : "";
+  let body;
+  if (jc.status === "flagged") {
+    body = `<p class="meta">${jc.flag_count} position anomal${jc.flag_count === 1 ? "y" : "ies"} recorded while ` +
+      `this airframe sat inside a tracked jamming cell${windowNote} (${jc.sample_count} ` +
+      `sample${jc.sample_count === 1 ? "" : "s"} checked). That the jump coincided with the cell is derived; ` +
+      `that jamming explains it is an inference, not an observation.</p>` +
+      `<ul class="meta">${jc.flags.slice(0, 10).map(jamFlagLine).join("")}</ul>`;
+  } else if (jc.status === "checked_clean") {
+    body = `<p class="meta">Checked while inside a tracked jamming cell${windowNote} ` +
+      `(${jc.sample_count} sample${jc.sample_count === 1 ? "" : "s"}) &mdash; no position anomaly found.</p>`;
+  } else {
+    body = `<p class="meta">Positioned inside a tracked jamming cell, but too few samples` +
+      `${windowNote} (${jc.sample_count}) yet to call this airframe's track clean or anomalous.</p>`;
+  }
+  return `${head}${body}<p class="meta">${esc(note)}</p>`;
+}
+
+export function decorateAdsb(d, { selectedIcao, track, flightDetail } = {}) {
   const type = classifyAircraft(d);
   const base = (type === "military" && d.military_role && MILITARY_ROLE_STYLE[d.military_role]) || AIRCRAFT_STYLE[type];
   const style = withAircraftFlag(themedStyle(base, AIRCRAFT_LAYER_KEY[type]), d);
@@ -2751,43 +4047,105 @@ export function decorateAdsb(d, { selectedIcao } = {}) {
   // the squawk is a code the aircraft is transmitting, the decoded status is a
   // separate transponder field only newer units send. Naming both, when both
   // are present, is the difference between "it says 7700" and "we inferred".
-  const emergencyLine = [
-    d.emergency_squawk ? `squawk ${esc(d.squawk)} &mdash; ${esc(d.emergency_squawk)}` : null,
-    d.emergency ? `transponder reports ${esc(d.emergency)}` : null,
-  ].filter(Boolean).join("; ");
+  // decodeSquawk runs regardless of whether the backend already computed
+  // emergency_squawk, so a squawk read off a feed that never populates that
+  // field still gets named for what it is. Both lines now come from the
+  // shared helpers above squawkEmergencyMeaning/aircraftEmergencyLine, which
+  // the alert strip (Task 33) calls too -- one sentence, not a second one
+  // that happens to say the same thing differently.
+  const squawkEmergencyLabel = squawkEmergencyMeaning(d);
+  const emergencyLine = aircraftEmergencyLine(d);
   const airfield = d.nearest_airfield;
+  const displayLimitedText = displayLimitedNote(d);
+
+  // The vertical trend only ever applies to the aircraft whose card is open:
+  // `track` is the recorded history createMapController.js's selectAircraft
+  // fetched for *this* selection, never every visible aircraft's (that would
+  // be a per-request fetch storm, not a detail route). isSelected also
+  // distinguishes "not selected, trend not
+  // applicable" from "selected, still waiting on the fetch" below.
+  const isSelected = d.icao24 === selectedIcao;
+  const trend = !d.on_ground && Array.isArray(track) ? verticalTrend(track) : null;
+
   const tooltip = `<b>${esc(d.callsign || d.icao24)}</b>${aircraftLine ? ` &middot; ${esc(aircraftLine)}` : ` &middot; ${esc(label)}`}` +
     `${emergencyLine ? `<br/><span class="aircraft-emergency">${emergencyLine}</span>` : ""}` +
-    `<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(Math.round(d.altitude || 0))} m &middot; ${esc(Math.round((d.velocity || 0) * 3.6))} km/h` +
+    `<br/>${esc(d.origin_country || "")}<br/>Alt ${esc(formatAltitudeM(d.altitude || 0))} &middot; ${esc(formatSpeedKmh((d.velocity || 0) * 3.6))}` +
     lastPingTooltip(d.updated);
+
   const detail = `
     <h3>${esc(d.callsign || d.icao24)}</h3>
-    ${emergencyLine ? `<div class="aircraft-emergency"><b>Emergency:</b> ${emergencyLine}</div>` : ""}
-    ${sanctionDetail(d)}
-    ${aircraftLine ? `<div class="meta">Aircraft: ${esc(aircraftLine)}</div>` : ""}
-    <div class="meta">Type: ${esc(label)} &middot; ${esc(d.origin_country || "")} &middot; ICAO24 ${esc(d.icao24)}</div>
-    ${icaoHexDetail(d)}
-    ${d.registration ? `<div>Registration: ${esc(d.registration)}</div>` : ""}
-    ${d.operator ? `<div>Operator: ${esc(d.operator)}</div>` : ""}
-    <div>Altitude: ${esc(Math.round(d.altitude || 0))} m</div>
-    <div>Ground speed: ${esc(Math.round((d.velocity || 0) * 3.6))} km/h</div>
-    <div>On ground: ${d.on_ground ? "yes" : "no"}</div>
-    ${lastPingDetail(d.updated)}
-    ${d.squawk && !d.emergency_squawk ? `<div>Squawk: ${esc(d.squawk)}</div>` : ""}
-    ${d.display_limited ? `<div class="meta">Listed as: ${esc(d.display_limited_note || d.display_limited)}</div>` : ""}
-    ${airfield
-      ? `<div>Nearest airfield: ${esc(airfield.name)}${airfield.code ? ` (${esc(airfield.code)})` : ""} &middot; ${esc(airfield.km)} km` +
-        `${airfield.military_name ? " &middot; military by name" : ""}</div>` +
-        '<p class="meta">Nearest airfield is our own proximity lookup against the OurAirports index, not a ' +
-        "filed origin or destination. Only shown below 10,000 ft or on the ground, where it means something.</p>"
-      : ""}
+    ${emergencyLine ? `<div class="aircraft-emergency"><b>Emergency:</b> ${emergencyLine}</div><p class="meta">${AIRCRAFT_FLAG_NOTE.emergency}</p>` : ""}
+
+    <div class="csection-h">Identity</div>
+    <div class="meta">ICAO24 ${esc(d.icao24)}${d.registration ? ` &middot; registration ${esc(d.registration)}` : ""}</div>
+    <div>${hasRealType
+      ? `Aircraft: ${esc(d.type_desc)}${d.type_code ? ` <span class="meta">(type code ${esc(d.type_code)})</span>` : ""}`
+      : (d.type_code
+          ? `Aircraft: <span class="meta">type code ${esc(d.type_code)}, no description on file</span>`
+          : '<span class="meta">Aircraft type: not on file</span>')}</div>
     ${hasRealType
       ? '<p class="meta">Aircraft type/description from airplanes.live reference data.</p>'
-      : '<p class="meta">Aircraft type is a best-effort guess from callsign pattern and ADS-B category when no confirmed source flag is available.</p>'}
-    ${flag ? `<p class="meta">${AIRCRAFT_FLAG_NOTE[flag]}</p>` : ""}
-    <div class="meta">Source: OpenSky Network + airplanes.live (ADS-B)${
-      airfield ? " &middot; airfields: OurAirports" : ""
-    }</div>`;
+      : ""}
+    ${d.operator ? `<div>Operator: ${esc(d.operator)}</div>` : ""}
+    <div>${d.origin_country
+      ? `Origin country per the feed: <b>${esc(d.origin_country)}</b>`
+      : '<span class="meta">Origin country: not stated by the feed</span>'}</div>
+    ${icaoHexDetail(d)}
+    <div>Classification: ${esc(label)}${roleLabel ? ` &middot; role: ${esc(roleLabel)}` : ""}</div>
+    ${type === "military"
+      ? `<p class="meta">${d.military === true
+          ? "Military status is a real flag from airplanes.live's own database (dbFlags), not a guess."
+          : "No confirmed military flag on this airframe &mdash; classified from its callsign prefix instead, which can be wrong in either direction."
+        }${roleLabel ? ` The role (${esc(roleLabel)}) is a best-effort read of the type description or callsign, not a confirmed mission type.` : ""}</p>`
+      : `<p class="meta">Classification (${esc(label)}) is a best-effort guess from callsign pattern and ADS-B ` +
+        "emitter category, not a confirmed identification -- see classifyAircraft in map/decorators.js.</p>"}
+
+    <div class="csection-h">Flight now</div>
+    <div>Callsign: ${d.callsign ? esc(d.callsign) : '<span class="meta">not broadcast</span>'}</div>
+    <div>Altitude: ${esc(formatAltitudeM(d.altitude || 0))}</div>
+    ${!d.on_ground && isSelected
+      ? `<div>Vertical trend: ${
+          Array.isArray(track)
+            ? (trend
+                ? `<b>${esc(VERTICAL_TREND_LABEL[trend])}</b> <span class="meta">&mdash; derived from this aircraft's recorded track (server-side position history), not the transponder's own rate</span>`
+                : '<span class="meta">not enough recently, contiguously recorded track to say</span>')
+            : '<span class="meta">recorded track loading&hellip;</span>'
+        }</div>`
+      : ""}
+    <div>Ground speed: ${esc(formatSpeedKmh((d.velocity || 0) * 3.6))} &middot; Heading: ${
+      Number.isFinite(d.heading) ? `${esc(Math.round(d.heading))}&deg;` : "n/a"
+    }</div>
+    <div>On ground: ${d.on_ground ? "yes" : "no"}</div>
+    ${lastPingDetail(d.updated)}
+    <div>Squawk: ${d.squawk
+      ? `${esc(d.squawk)}${
+          squawkEmergencyLabel
+            ? ' <span class="meta">(see Emergency, above)</span>'
+            : ' <span class="meta">(no special meaning)</span>'
+        }`
+      : '<span class="meta">not broadcast</span>'}</div>
+
+    <div class="csection-h">Flags</div>
+    ${sanctionDetail(d)}
+    ${displayLimitedText ? `<p class="meta">${displayLimitedText}</p>` : ""}
+    ${!isSanctioned(d) && !displayLimitedText && !emergencyLine ? '<p class="meta">No flags on this aircraft.</p>' : ""}
+
+    <div class="csection-h">Provenance</div>
+    ${airfield
+      ? `<div>Nearest airfield: ${esc(airfield.name)}${airfield.code ? ` (${esc(airfield.code)})` : ""} &middot; ${esc(formatDistanceKm(airfield.km))}` +
+        `${airfield.military_name ? " &middot; military by name" : ""}</div>` +
+        '<p class="meta">Nearest airfield is our own proximity lookup against the OurAirports index &mdash; ' +
+        "<b>not a filed origin or destination</b>. ADS-B carries no flight plan, so this is proximity only; " +
+        "shown below 10,000 ft or on the ground, where distance means something.</p>"
+      : ""}
+    <div class="meta">Source: ${esc(
+      Array.isArray(d.data_sources) && d.data_sources.length ? d.data_sources.join(" + ") : "OpenSky Network + airplanes.live"
+    )} (ADS-B) &mdash; position, altitude, speed and heading <i>measured</i> by the aircraft's own transponder;
+      identity fields (registration, operator, type) <i>reported</i> by airplanes.live's reference data, where it
+      has an entry; ICAO allocation country <i>derived</i> from the Mode-S address block; vertical trend
+      <i>derived</i> from this aircraft's own recorded track${airfield ? "; airfields: OurAirports" : ""}</div>
+    ${d.icao24 === selectedIcao ? routeSection(flightDetail, d.updated) : ""}
+    ${d.icao24 === selectedIcao ? jamCrosscheckSection(flightDetail) : ""}`;
   let cls = "aircraft-marker";
   if (type === "military") cls += " military-marker";
   if (flag) cls += ` aircraft-flagged aircraft-${flag === "emergency" ? "emergency" : "hidden"}`;
@@ -2952,8 +4310,27 @@ export const INFRA_STYLE = {
 // unrelated things.
 export const PIPELINE_ROUTE_COLOR = "#ffb347";
 
-export function pipelineRouteColor() {
-  return paletteColor("infra.pipeline", PIPELINE_ROUTE_COLOR);
+// Task 28: OpenStreetMap's `substance` tag, colour by substance -- fixed
+// rather than a themeable palette token, unlike almost everything else on
+// this map: the brief's ask here is "tell a gas line from an oil line at a
+// glance", not "let an operator recolour a substance", and eight more
+// PALETTE_GROUPS rows for a distinction only ever drawn on an OSM-sourced
+// route (the curated schematic below carries no substance at all) felt like
+// more admin-panel surface than the ask. A substance this map has not seen
+// falls back to the curated route's own colour, so an unfamiliar OSM tag
+// reads as "pipeline", the honest default, rather than as an invented hue.
+const PIPELINE_SUBSTANCE_COLOR = {
+  oil: "#c17a4a",
+  gas: "#5cc4f2",
+  water: "#4fd1ff",
+  sewage: "#8fa876",
+  chemicals: "#c9b6ff",
+};
+
+export function pipelineRouteColor(substance) {
+  const base = paletteColor("infra.pipeline", PIPELINE_ROUTE_COLOR);
+  if (!substance) return base;
+  return PIPELINE_SUBSTANCE_COLOR[substance.toLowerCase()] || base;
 }
 
 // Military bases share the "infra" data shape/toggle but pick their icon
@@ -3015,23 +4392,351 @@ export function isMilitarySatellite(d) {
   return d.group === "military";
 }
 
-export function decorateSatellite(d, { offset } = {}) {
+// --- epoch age and orbital detail shared by every satellite card (Task 25) ---
+//
+// A card, a ground track, a footprint and an overpass prediction are all
+// arithmetic over the same reported orbit, and all four are only as good as
+// that orbit is current -- see backend/sources/sat_passes.py's own module
+// docstring for the same point made about the pass search. This is the one
+// place that arithmetic lives on the frontend, so decorateSatellite
+// (server-propagated stations/military) and decorateSatElement (the seven
+// client-propagated layers) can never quietly disagree about how old "old"
+// is, or use a different footprint formula from each other.
+
+// A day old is still perfectly usable for a position; a week old is where
+// SGP4's own error growth stops being a rounding matter. Neither threshold
+// is exact -- accuracy really depends on the object's drag environment --
+// but both are the right order of magnitude and, unlike a false precision,
+// are said as what they are: a caution, not a guarantee.
+const EPOCH_AGE_AGING_HOURS = 24;
+const EPOCH_AGE_STALE_HOURS = 24 * 7;
+
+/**
+ * Hours between an element set's EPOCH and `now` (ms since epoch, default
+ * real now), or null if EPOCH is missing or unparsable -- never NaN, so a
+ * caller can test `!= null` instead of Number.isFinite everywhere this is
+ * read. CelesTrak's EPOCH string has no trailing "Z" (e.g.
+ * "2026-08-09T20:37:29.985312"), so one is added before Date.parse when
+ * the string does not already carry its own UTC offset -- without it, some
+ * runtimes read the bare string as local time instead of UTC.
+ */
+export function epochAgeHours(epochIso, now = Date.now()) {
+  if (!epochIso) return null;
+  const iso = /[Zz]|[+-]\d\d:?\d\d$/.test(epochIso) ? epochIso : `${epochIso}Z`;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return (now - t) / 3_600_000;
+}
+
+/**
+ * The epoch-age sentence a card shows -- always present when the epoch is
+ * known, since the brief is explicit that this is "never shown today" and
+ * matters. The two thresholds above turn into a caution appended to the
+ * plain age, not a second number.
+ */
+export function epochAgeLabel(hours) {
+  if (hours == null || !Number.isFinite(hours)) return "element set age unknown";
+  const shown = hours < 0 ? "0 min" // a clock skew or a just-refreshed set -- never a negative age
+    : hours < 1 ? `${Math.round(hours * 60)} min`
+    : hours < 48 ? `${hours.toFixed(1)} h`
+    : `${(hours / 24).toFixed(1)} days`;
+  if (hours >= EPOCH_AGE_STALE_HOURS) {
+    return `${shown} old -- stale; treat this position, ground track and any overpass prediction as approximate`;
+  }
+  if (hours >= EPOCH_AGE_AGING_HOURS) return `${shown} old -- aging, propagation error is growing`;
+  return `${shown} old`;
+}
+
+/**
+ * The Orbit section every satellite card shares, built from whichever
+ * fields the item actually carries.
+ *
+ * `item` is either a server-propagated position record (decorateSatellite's
+ * `d`, which already carries every one of these fields -- see backend/
+ * sources/satellites.py's _summary_fields and _positions' velocity_km_s) or
+ * a client-propagated one (decorateSatElement's `item`, enriched by
+ * createMapController.js's satElementPositions with the same static field
+ * names off the stored OMM element set).
+ *
+ * `extra` is what only a currently-*open* card computes fresh, because it
+ * is not worth paying for on every rendered marker:
+ *  - footprintKm: overrides the plain footprintRadiusKm(item.alt_km)
+ *    fallback -- both read the same formula, so this only matters when a
+ *    caller wants the card to state the exact number the drawn circle used.
+ *  - groundTrackAvailable: whether this satellite's layer has the orbital
+ *    elements needed to draw a track at all (see decorateSatellite/
+ *    decorateSatElement's own notes on which layers do and don't).
+ */
+function satelliteOrbitSections(item, extra = {}) {
+  const parts = [];
+  if (item.intl_designator) {
+    parts.push(
+      `<div class="meta">International designator: ${esc(item.intl_designator)}` +
+      `${item.launch_year ? ` &middot; launched ${esc(item.launch_year)}` : ""}</div>`
+    );
+  }
+  const orbital = [];
+  if (Number.isFinite(item.inclination_deg)) orbital.push(`inclination ${item.inclination_deg.toFixed(1)}&deg;`);
+  if (Number.isFinite(item.period_min)) orbital.push(`period ${item.period_min.toFixed(1)} min`);
+  if (Number.isFinite(item.apogee_km) && Number.isFinite(item.perigee_km)) {
+    orbital.push(`apogee/perigee ${formatDistanceKm(item.apogee_km)} / ${formatDistanceKm(item.perigee_km)}`);
+  }
+  if (orbital.length) parts.push(`<div>${orbital.join(" &middot; ")} (derived)</div>`);
+
+  const speed = Number.isFinite(extra.velocityKmS) ? extra.velocityKmS : item.velocity_km_s;
+  if (Number.isFinite(speed)) parts.push(`<div>Velocity: ${speed.toFixed(2)} km/s (derived)</div>`);
+
+  if (item.epoch) {
+    parts.push(`<div class="meta">Element set epoch: ${esc(item.epoch)} UTC &middot; ${epochAgeLabel(epochAgeHours(item.epoch))}</div>`);
+  }
+
+  const footprintKm = Number.isFinite(extra.footprintKm) ? extra.footprintKm : footprintRadiusKm(item.alt_km);
+  if (footprintKm > 0) {
+    parts.push(
+      `<div class="meta">Visibility footprint: ~${formatDistanceKm(footprintKm)} radius (derived -- standard ` +
+      `horizon geometry from altitude), drawn on the map while this card is open.</div>`
+    );
+  }
+  if (extra.groundTrackAvailable) {
+    parts.push(
+      '<div class="meta">Ground track (previous/next 90 min) drawn on the map while this card is open -- ' +
+      "derived by re-running the same propagation forwards and backwards from now, not a recorded path.</div>"
+    );
+  }
+  return parts.join("");
+}
+
+export function decorateSatellite(d, { offset, velocityKmS, footprintKm } = {}) {
   const style = satelliteStyle(d.group);
   const military = isMilitarySatellite(d);
-  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${Math.round(d.alt_km || 0)} km`;
+  const tooltip = `<b>${esc(d.name || `NORAD ${d.norad_id}`)}</b><br/>${esc(style.label)} &middot; ${esc(formatDistanceKm(d.alt_km || 0))}`;
   const detail = `
     <h3>${esc(d.name || `NORAD ${d.norad_id}`)}</h3>
     <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(d.norad_id)}</div>
-    <div>Altitude: ${Math.round(d.alt_km || 0)} km</div>
+    <div>Altitude: ${esc(formatDistanceKm(d.alt_km || 0))}</div>
+    ${satelliteOrbitSections(d, { velocityKmS, footprintKm, groundTrackAvailable: false })}
     ${military ? '<p class="meta">Listed in CelesTrak\'s public "Miscellaneous Military" group (e.g. SAR-Lupe reconnaissance satellites) -- a catalogue classification, not a claim about what it is doing right now.</p>' : ""}
-    <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- a real orbit, not a live telemetry confirmation.</p>
-    <div class="meta">Source: CelesTrak (NORAD GP data)</div>`;
+    <p class="meta">Position computed from CelesTrak's public orbital elements via SGP4 propagation -- derived, not a live telemetry confirmation.</p>
+    <p class="meta">No orbital elements are sent to your browser for this satellite (stations/military stay
+    propagated on the server -- see backend/sources/satellites.py); its ground track cannot be drawn client-side,
+    only its current position and visibility footprint.</p>
+    <div class="meta">Source: CelesTrak (NORAD GP data), publicly published, no formal licence stated &middot; derived</div>`;
   const cls = `satellite-marker${military ? " satellite-military-marker" : ""}`;
   return {
     icon: icon(style, style.color, style.size, 0, cls, layerOpacity("satellites"), "", offset),
     tooltip,
     detail,
   };
+}
+
+// ---------- client-propagated satellite layers (Task 24) ----------
+//
+// stations/military above are this map's own server-side SGP4 (see
+// backend/sources/satellites.py's GROUPS, unchanged by this task);
+// everything below is propagated in the browser instead (see
+// map/satPropagate.js) from stored CelesTrak element sets fetched through
+// /api/satellites/elements. One toggle per group of CelesTrak groups -- see
+// satellites.py's ELEMENT_LAYER_GROUPS, the same seven keys as here, just
+// spelled satX so the family reads as one in this file and in the control
+// panel.
+//
+// One shared glyph (SVG.satellite) rather than seven new silhouettes: none
+// of these needs a shape of its own the way military's downward sensor cone
+// does -- what tells them apart is which toggle drew them, which is a
+// colour and a label, not a shape. `dom: false` marks the four groups drawn
+// on the WebGL entity path (webglLayer.js) instead of as Leaflet DOM
+// markers -- see createMapController.js's own note on that split and why.
+export const SAT_ELEMENT_LAYERS = {
+  satNavigation: {
+    svg: SVG.satellite, label: "Navigation satellite", color: "#8ad1ff", size: 18, name: "sat-navigation",
+    token: "satellite.navigation", dom: true,
+  },
+  satWeather: {
+    svg: SVG.satellite, label: "Weather satellite", color: "#ffd166", size: 18, name: "sat-weather",
+    token: "satellite.weather", dom: true,
+  },
+  satImaging: {
+    svg: SVG.satellite, label: "Earth-imaging satellite", color: "#9ee6a8", size: 12, name: "sat-imaging",
+    token: "satellite.imaging", dom: false,
+  },
+  satScience: {
+    svg: SVG.satellite, label: "Science satellite", color: "#c9b6ff", size: 18, name: "sat-science",
+    token: "satellite.science", dom: true,
+  },
+  satGeo: {
+    svg: SVG.satellite, label: "Geostationary satellite", color: "#ff9f6f", size: 12, name: "sat-geo",
+    token: "satellite.geo", dom: false,
+  },
+  satStarlink: {
+    svg: SVG.satellite, label: "Starlink satellite", color: "#7ee0c9", size: 8, name: "sat-starlink",
+    token: "satellite.starlink", dom: false,
+  },
+  satOneweb: {
+    svg: SVG.satellite, label: "OneWeb satellite", color: "#6fe3ff", size: 8, name: "sat-oneweb",
+    token: "satellite.oneweb", dom: false,
+  },
+};
+
+/** One of the seven client-propagated layers' style, themed -- also what
+ *  webglLayer's texture cache and createMapController's placement pass read. */
+export function satElementStyle(layerKey) {
+  return themedStyle(SAT_ELEMENT_LAYERS[layerKey], layerKey);
+}
+
+/**
+ * DOM/WebGL-shared decorator for the seven client-propagated layers (see
+ * SAT_ELEMENT_LAYERS). `item` is the propagation tracker's output
+ * (map/satPropagate.js's positionAt: {norad_id, name, lat, lon, alt_km}),
+ * enriched by createMapController.js's satElementPositions with the static
+ * orbital fields off the matching stored OMM element set
+ * (intl_designator/launch_year/inclination_deg/period_min/apogee_km/
+ * perigee_km/epoch) -- the same field names decorateSatellite reads off its
+ * own server-propagated `d`, so satelliteOrbitSections above serves both
+ * without caring which one it was handed.
+ *
+ * `velocityKmS`/`footprintKm`/`groundTrackAvailable` are only ever supplied
+ * for the one card currently open -- see createMapController.js's
+ * satellite popupopen handler, which is also what actually draws the
+ * ground track and footprint this text describes. `groundTrackAvailable`
+ * defaults true: every one of these seven layers holds a real client-side
+ * element set (unlike stations/military above, which do not), so the
+ * ground track is available unless the specific caller says otherwise (an
+ * element set this particular NORAD id's fetch never returned, say).
+ */
+export function decorateSatElement(item, layerKey, { offset, velocityKmS, footprintKm, groundTrackAvailable = true } = {}) {
+  const style = satElementStyle(layerKey);
+  const name = item.name || `NORAD ${item.norad_id}`;
+  const tooltip = `<b>${esc(name)}</b><br/>${esc(style.label)} &middot; ${esc(formatDistanceKm(item.alt_km || 0))}`;
+  const detail = `
+    <h3>${esc(name)}</h3>
+    <div class="meta">${esc(style.label)} &middot; NORAD catalog ID ${esc(item.norad_id)}</div>
+    <div>Altitude: ${esc(formatDistanceKm(item.alt_km || 0))}</div>
+    ${satelliteOrbitSections(item, { velocityKmS, footprintKm, groundTrackAvailable })}
+    <p class="meta">Position propagated in your browser (SGP4, via satellite.js) from CelesTrak's public orbital elements -- derived, not a live telemetry confirmation.</p>
+    <div class="meta">Source: CelesTrak (NORAD GP data), publicly published, no formal licence stated &middot; derived</div>`;
+  return {
+    icon: icon(style, style.color, style.size, 0, "satellite-marker", layerOpacity(layerKey), "", offset),
+    tooltip,
+    detail,
+  };
+}
+
+/** Minutes from `now` until `iso` (negative if `iso` is already past), or
+ *  null if `iso` is missing/unparsable -- the satellite-passes card's own
+ *  small twin of epochAgeHours above, kept separate because it answers a
+ *  different question (how long *until*, not how long *since*) and mixing
+ *  the two by sign-flipping one into the other reads as a trick rather
+ *  than a plain calculation. */
+function minutesFromNow(iso, now = Date.now()) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? (t - now) / 60_000 : null;
+}
+
+function relativePassTiming(minutes) {
+  if (minutes == null) return "";
+  if (minutes <= 0) return "rising now";
+  if (minutes < 60) return `in ${Math.round(minutes)} min`;
+  return `in ${(minutes / 60).toFixed(1)} h`;
+}
+
+/**
+ * The body of Task 25's overpass-prediction content, shared by the two
+ * places it now appears: as a `satellitePasses` section inside the
+ * country/water PlaceInfoCard (see satellitePassesSectionHtml, wired
+ * through popups.js's countryCardSections/waterCardSections) and as a
+ * fold appended to a marker's own popup for a plain map click
+ * (satellitePassesPopupHtml, the brief's third case -- "a point" -- which
+ * has no sidebar card to fold into, so it rides the marker's existing
+ * popup instead of opening a second one; see createMapController.js's
+ * buildMarker). No `<h3>` here: the card supplies its own section title,
+ * and the popup variant adds its own header on top of this body instead
+ * of duplicating it in two different card systems that would then have to
+ * be kept in step by hand.
+ *
+ * `result` is {status: "gated"|"loading"|"error"|"ready", data}, where
+ * `data` -- only present when ready -- is exactly what
+ * GET /api/satellites/passes returns; see backend/sources/sat_passes.py's
+ * compute_passes for every field read here. "gated" is the fourth state,
+ * not three: the imaging layer being switched off is not a fetch failure
+ * and not "still loading" -- it is a plain, nameable reason there is
+ * nothing to show, the same three-state-plus-a-named-reason discipline
+ * Task 9's coverageStateFor already established for this card.
+ *
+ * Every pass is derived, and says so twice: once in the per-pass caption
+ * (the age of *that* satellite's own element set -- each pass can be built
+ * from a different satellite with a different epoch, so one card-wide
+ * caveat would hide which passes are the trustworthy ones) and once in the
+ * closing paragraph, for the search as a whole.
+ */
+function satellitePassesBodyHtml(result) {
+  if (!result || result.status === "gated") {
+    return '<p class="meta">The imaging satellites layer is switched off, so there is nothing to check overpasses against. Turn it on to see predictions here.</p>';
+  }
+  if (result.status === "loading") return '<div class="meta">Checking...</div>';
+  if (result.status === "error") return '<p class="meta">Could not reach the pass-prediction service.</p>';
+
+  const data = result.data || {};
+  const passes = data.passes || [];
+  const minElevation = Number.isFinite(data.min_elevation_deg) ? data.min_elevation_deg : 10;
+  const hours = Number.isFinite(data.hours) ? Math.round(data.hours) : 24;
+  const coverage = data.satellites_capped
+    ? `<p class="meta">Checked the ${fmtNumber(data.satellites_considered)} closest (right now) of ${fmtNumber(data.satellites_reachable)} ` +
+      `imaging satellites whose orbit can reach this latitude at all (of ${fmtNumber(data.satellites_total)} tracked) -- capped ` +
+      "to bound the work one request does; see backend/sources/sat_passes.py's own note on the cap.</p>"
+    : `<p class="meta">Checked all ${fmtNumber(data.satellites_reachable)} imaging satellites whose orbit can reach this ` +
+      `latitude (of ${fmtNumber(data.satellites_total)} tracked).</p>`;
+  const truncatedNote = data.passes_truncated
+    ? '<p class="meta">More passes were found than are listed here; only the soonest are shown.</p>' : "";
+
+  if (!passes.length) {
+    return (
+      `<div>No passes above ${minElevation}&deg; elevation in the next ${hours} hours.</div>${coverage}` +
+      '<p class="meta">Derived: SGP4 propagation plus a horizon search over CelesTrak\'s public orbital elements, not an observation.</p>'
+    );
+  }
+  const rows = passes
+    .map((p) => {
+      const when = relativePassTiming(minutesFromNow(p.rise));
+      const elevation = Number.isFinite(p.max_elevation_deg) ? `up to ${p.max_elevation_deg.toFixed(0)}&deg;` : "elevation n/a";
+      const duration = Number.isFinite(p.duration_s) ? `${Math.round(p.duration_s)}s` : "";
+      return (
+        `<div>${esc(p.name || `NORAD ${p.norad_id}`)} &middot; ${when} &middot; ${elevation} &middot; ${duration}` +
+        `<div class="meta">element set ${epochAgeLabel(epochAgeHours(p.epoch))}</div></div>`
+      );
+    })
+    .join("");
+  return (
+    `${rows}${coverage}${truncatedNote}` +
+    '<p class="meta">Derived: SGP4 propagation plus a horizon search over CelesTrak\'s public orbital elements, not an ' +
+    "observation. Each pass's own accuracy depends on how recent that satellite's element set is (shown per pass above).</p>"
+  );
+}
+
+/** The `satellitePasses` section inside the country/water PlaceInfoCard
+ *  (see popups.js's countryCardSections/waterCardSections) -- just the
+ *  body, since the section's own `title` ("Satellite overpasses") is
+ *  supplied by the {id, title, html} entry those functions build. */
+export function satellitePassesSectionHtml(result) {
+  return satellitePassesBodyHtml(result);
+}
+
+/**
+ * The overpass fold appended to a marker's own popup -- the brief's third
+ * case, "a point", which (unlike a country or a water body) has no
+ * sidebar card for this to fold into (see createMapController.js's
+ * buildMarker, the only caller: it appends this to lazyDecorate's own
+ * `.detail`, rather than opening a second, competing popup). Carries its
+ * own header (unlike satellitePassesSectionHtml above, which does not)
+ * since it is being added onto an existing popup, not slotted into a
+ * {title, html} section entry that already supplies one. `label` is the
+ * clicked item's own name when it has one ("Rotterdam", a specific port);
+ * undefined reads as "this location" rather than showing nothing.
+ */
+export function satellitePassesPopupHtml(result, label) {
+  const place = label ? esc(label) : "this location";
+  const header = `<h3>Satellite overpasses</h3><div class="meta">Next passes of enabled imaging satellites over ${place}</div>`;
+  return header + satellitePassesBodyHtml(result);
 }
 
 // ---------- which kind of pin is this? ----------
@@ -3073,6 +4778,16 @@ export const TOKEN_FOR = {
   cities: (d) => cityDrawTier(d).token,
   infra: (d) => infraBaseStyle(d)?.token ?? null,
   satellites: (d) => (isMilitarySatellite(d) ? "satellite.military" : "satellite.stations"),
+  // The seven client-propagated layers (Task 24) each draw one token, always
+  // -- unlike stations/military above there is no per-object distinction
+  // inside one of these layers for a token to pick between.
+  satNavigation: () => "satellite.navigation",
+  satWeather: () => "satellite.weather",
+  satImaging: () => "satellite.imaging",
+  satScience: () => "satellite.science",
+  satGeo: () => "satellite.geo",
+  satStarlink: () => "satellite.starlink",
+  satOneweb: () => "satellite.oneweb",
   aisNavy: () => "ship.navy",
   aisTanker: () => "ship.tanker",
   aisCivilian: () => "ship.other",
@@ -3101,4 +4816,10 @@ export const TOKEN_FOR = {
   launches: (d) => (d?.upcoming ? "launch.upcoming" : "launch.flown"),
   cableLandings: (d) => (d?.planned ? "cable.planned" : "cable.landing"),
   osmInfra: (d) => OSM_INFRA_STYLE[d?.kind]?.token ?? null,
+  // Task 27: same lookup osmInfra uses just above -- the four railway kinds
+  // moved layers, not tables (see decorateRailwayPoint's own note).
+  railwayPoints: (d) => OSM_INFRA_STYLE[d?.kind]?.token ?? null,
+  railLive: () => "railway.live",
+  // Shares railLive's own token -- see decorateRailStation's own note on why.
+  railStations: () => "railway.live",
 };

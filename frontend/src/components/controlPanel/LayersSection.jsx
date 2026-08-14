@@ -7,10 +7,16 @@ import {
   LAUNCH_STYLE, LAUNCH_ORDER, OSM_INFRA_STYLE, OSM_INFRA_ORDER, OUTAGE_STYLE,
   GFW_GAP_STYLE, GFW_DETECTION_STYLE, GFW_DETECTION_ORDER,
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
+  RAILWAY_OSM_STYLE, RAILWAY_LIVE_STYLE,
+  WATER_STYLE, SHIPPING_LANE_STYLE, LANE_DENSITY_STYLE, SAT_ELEMENT_LAYERS,
+  POWER_PLANT_FUEL_STYLE,
 } from "../../map/decorators";
-import { SEVERITY_BANDS, CORROBORATED_COLOR, CONFIDENCE_THRESHOLD } from "../../map/severity";
+import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
+import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
+import { countryForCallsign } from "../../utils/callsignPrefix";
 import LayerIcon from "./LayerIcon";
 import LayerCheck from "./LayerCheck";
+import FilterBar from "./FilterBar";
 import { PanelGroup, LayerDetails } from "./Collapsible";
 import CountUp from "../CountUp";
 
@@ -76,6 +82,31 @@ const INFRA_ROWS = [
 
 const MILITARY_SUBTYPE_ORDER = ["air", "naval", "army", "missile", "joint", "logistics", "radar"];
 
+// Task 24: the seven client-propagated satellite toggles, in the order the
+// panel lists them.
+//
+// `hardGate`, where present, is the object-count warning shown under the
+// row -- only starlink and oneweb carry one, per the task brief. Written as
+// an order-of-magnitude word ("thousands"/"hundreds") rather than a specific
+// figure like "~7,000": a constellation's real count drifts as satellites
+// launch and decay, and the row already shows the live total once the layer
+// has loaded (the "N (total)" figure next to the checkbox) -- restating a
+// number here would just be a second, staler copy of that same fact.
+//
+// `gated: true` marks the three groups THEATRE-gated in map/scene.js
+// (navigation/weather/imaging, all on by default) -- see
+// createMapController.js's SAT_ELEMENT_ZOOM_NOTE_KEYS for why only these
+// three ever set zoomNotes[key].
+const SAT_ELEMENT_ROWS = [
+  { key: "satNavigation", label: "Navigation (GPS, Galileo, GLONASS, Beidou)", gated: true },
+  { key: "satWeather", label: "Weather", gated: true },
+  { key: "satImaging", label: "Earth imaging", gated: true },
+  { key: "satScience", label: "Science" },
+  { key: "satGeo", label: "Geostationary" },
+  { key: "satStarlink", label: "Starlink", hardGate: "thousands of" },
+  { key: "satOneweb", label: "OneWeb", hardGate: "hundreds of" },
+];
+
 // How many of a group's layers are currently on, shown on the group's own
 // heading so a collapsed group still reports whether it is doing anything.
 function activeCount(layerVisibility, keys) {
@@ -96,13 +127,20 @@ const GROUP_LAYERS = {
   // Airfields sit with infrastructure rather than with the aircraft layers:
   // it is a place layer, and the aircraft that need it already get their
   // nearest field named inside their own popup.
-  ground: ["infra", "osmInfra", "airports", "ports", "dams", "deflock", "railways", "cables", "firms", "jamming"],
+  ground: [
+    "infra", "osmInfra", "powerPlants", "airDefense", "airports", "ports", "dams", "deflock",
+    "railways", "railLive", "powerLines", "shippingLanes",
+    "water", "cables", "firms", "jamming", "laneDensity",
+  ],
   // Its own group rather than a ninth row under traffic: a regulator's ruling
   // about a volume of airspace is neither traffic nor infrastructure, and
   // traffic already carries nine layers.
   airspace: ["czib"],
   hazards: ["hazards", "floods"],
-  space: ["satellites", "launches"],
+  space: [
+    "satellites", "satNavigation", "satWeather", "satImaging", "satScience",
+    "satGeo", "satStarlink", "satOneweb", "launches",
+  ],
 };
 
 // Per-kind rows under the hazards toggle. Same "the swatch is the real glyph"
@@ -126,11 +164,31 @@ const LAYER_LABEL = {
   gfwGaps: "AIS disabling", gfwDetections: "Vessel detections",
   aisCivilian: "Civilian ships", adsbCivilian: "Civilian aircraft",
   aisDigitraffic: "Baltic ships",
+  // Task 27: railwayPoints carries the same LOCAL cap osmInfra's own points
+  // did before the move (see LAYER_MANIFEST), so it needs a name here too.
+  railwayPoints: "Railway points (OSM)",
+  // Task 28: powerPlants carries the same LOCAL cap osmInfra's own points do
+  // (see LAYER_MANIFEST), so it needs a name here too.
+  powerPlants: "Power plants (OSM)",
+  // Task 29: same reasoning again -- airDefense carries the identical cap.
+  airDefense: "Air defence & radar (OSM)",
 };
+
+// Task 27: railwayPoints has no checkbox of its own -- it mirrors "railways"'
+// visibility exactly (see setLayerVisible in createMapController.js) -- so
+// the cap note below has to ask about its *parent's* checkbox, not one that
+// will never exist. Every other capped layer answers for itself.
+const CAP_NOTE_VISIBILITY_KEY = { railwayPoints: "railways" };
 
 export default function LayersSection({
   counts, zoomNotes, layerVisibility, layerWish, onToggleLayer, infraFilterText, onInfraFilterChange,
   eventFilter, onEventFilterChange, historyAsOf,
+  // Defaulted the same way infraFilterText's onChange pair isn't (it always
+  // arrives from App.jsx) -- vesselFilter/aircraftFilter are new enough that
+  // a stale caller (an old test render, a half-applied hot reload) should
+  // see "match everything" rather than throw reading .text off undefined.
+  vesselFilter = DEFAULT_VESSEL_FILTER, onVesselFilterChange = () => {},
+  aircraftFilter = DEFAULT_AIRCRAFT_FILTER, onAircraftFilterChange = () => {},
   // See Collapsible.jsx: defaulted so a half-applied hot reload cannot take the
   // whole panel down through the error boundary.
   isOpen = () => true, setOpen = () => {},
@@ -147,7 +205,7 @@ export default function LayersSection({
   // operator wants to know *that* something is thinned and which, and the
   // per-layer count is already in the ticker next to it.
   const cappedElsewhere = Object.entries(zoomNotes.capped || {})
-    .filter(([key, n]) => key !== "events" && n && layerVisibility[key])
+    .filter(([key, n]) => key !== "events" && n && layerVisibility[CAP_NOTE_VISIBILITY_KEY[key] || key])
     .map(([key, n]) => `${LAYER_LABEL[key] || key} (${n})`);
 
   return (
@@ -191,41 +249,9 @@ export default function LayersSection({
           Zoom in to show news
         </div>
 
-        {/* The window/severity selects stay outside the fold: they are controls,
-            not reference, and burying a control is how a panel gets worse. */}
+        {/* The remaining select stays outside the fold: it's a control, not
+            reference, and burying a control is how a panel gets worse. */}
         <div className="event-filters">
-          {/* Whole dates, not hours. Every source behind this layer dates
-              events to the day and nothing finer (see event_fusion.py's
-              _parse_gdelt_dt and _parse_structured_dt), so an hours-based
-              window was a control the data could not honour: "last 6 hours"
-              excluded every ACLED/UCDP event unless the UTC hour happened to
-              be under 6. */}
-          <label>
-            Window
-            <select
-              value={eventFilter.maxAgeDays ?? "all"}
-              onChange={(e) => onEventFilterChange({
-                maxAgeDays: e.target.value === "all" ? null : Number(e.target.value),
-              })}
-            >
-              <option value="0">Today</option>
-              <option value="1">Last 2 days</option>
-              <option value="2">Last 3 days</option>
-              <option value="all">All available</option>
-            </select>
-          </label>
-          <label>
-            Minimum severity
-            <select
-              value={eventFilter.minSeverity}
-              onChange={(e) => onEventFilterChange({ minSeverity: Number(e.target.value) })}
-            >
-              <option value="0">Any</option>
-              <option value="40">Moderate and above</option>
-              <option value="55">High and above</option>
-              <option value="75">Critical only</option>
-            </select>
-          </label>
           <label className="event-filter-check">
             <input
               type="checkbox"
@@ -234,22 +260,26 @@ export default function LayersSection({
             />
             Show approximate locations
           </label>
-          {/* Fades rather than hides, which is why it is a separate control
-              from the one above rather than another value on it. Nearly every
-              event scores below the threshold (the backend checks a coordinate
-              only when the reporting gives it something to check against), so
-              hiding on this would empty the layer and read as a broken feed
-              instead of as an answer. */}
-          <label className="event-filter-check">
-            <input
-              type="checkbox"
-              checked={eventFilter.minConfidence >= CONFIDENCE_THRESHOLD}
-              onChange={(e) => onEventFilterChange({
-                minConfidence: e.target.checked ? CONFIDENCE_THRESHOLD : 0,
-              })}
-            />
-            Fade weakly-placed events
-          </label>
+        </div>
+        {/* Window, Minimum severity and the verification floor ("Fade
+            weakly-placed events") all used to live here as three more
+            selects/checkboxes on `eventFilter`, gated behind Admin Mode.
+            Task 12 moved them up into IntelPanel's own header, so a reader
+            can reach them without finding Admin Mode first -- see App.jsx's
+            note by IntelPanel's mount point. Window used to be a genuine
+            second copy (this select set `eventFilter.maxAgeDays` directly,
+            independently of whatever IntelPanel's own Window control was
+            set to), which is exactly the kind of drift map/severity.js's own
+            note on this object warns against -- Task 12's review caught it,
+            and it is why Window moved rather than merely being duplicated up
+            there too. All three still write into this exact `eventFilter`
+            object (App.jsx holds the one copy), so raising any of them from
+            IntelPanel is the same control this page used to have, just
+            relocated -- there is nothing left to set on this page for any
+            of the three. */}
+        <div className="sublegend">
+          Window, Minimum severity and the verification floor moved to the Intel panel's own header (bottom-right)
+          -- reachable there without Admin Mode.
         </div>
 
         {/* Where each pin's *coordinate* stands, as opposed to how severe or
@@ -388,6 +418,57 @@ export default function LayersSection({
 
       <PanelGroup id="grp-traffic" title="Air & Sea Traffic" count={groupCount("traffic")}
         open={isOpen("grp-traffic")} onToggle={setOpen}>
+        {/* Vessel filter bar (Task 18): free text against callsign, name,
+            mmsi and imo -- `*` as an explicit wildcard, an implicit prefix
+            match otherwise (see entityFilter.js's matchQuery) -- plus the
+            two flags the vessel record already carries a field for. Applied
+            client-side inside createMapController.js's renderAisLayer,
+            before the navy/tanker/civilian split below, so it combines with
+            those three toggles and with the sanction ring rather than
+            fighting either. A ship this filter rejects simply never reaches
+            any of the three buckets underneath.
+
+            The callsign-prefix "grouping" the brief asks for is this same
+            box: typing (or clearing to) a real ITU call sign prefix both
+            narrows the fleet by it (implicit prefix matching, above) and
+            resolves the flag state it points to, shown as the line below
+            the box -- no separate control, since a second box would just be
+            two ways to write the same query. */}
+        <FilterBar
+          text={vesselFilter.text}
+          onTextChange={(text) => onVesselFilterChange({ text })}
+          matched={counts.vesselFilterMatch}
+          total={counts.vesselFilterMatchTotal}
+          placeholder="Filter ships: callsign, name, MMSI, IMO..."
+        >
+          {/* Reuses the conflict-filter checkbox styling (.event-filters
+              label) rather than inventing a second one -- same visual
+              register the infra name filter already borrows it for. */}
+          <div className="event-filters">
+            <label className="event-filter-check">
+              <input
+                type="checkbox"
+                checked={vesselFilter.sanctionedOnly}
+                onChange={(e) => onVesselFilterChange({ sanctionedOnly: e.target.checked })}
+              />
+              OFAC-designated only
+            </label>
+            <label className="event-filter-check">
+              <input
+                type="checkbox"
+                checked={vesselFilter.watchlistedOnly}
+                onChange={(e) => onVesselFilterChange({ watchlistedOnly: e.target.checked })}
+              />
+              Watchlisted only
+            </label>
+          </div>
+          {(() => {
+            const country = countryForCallsign(vesselFilter.text);
+            return country ? (
+              <div className="sublegend entity-filter-prefix">Callsign prefix: {country}</div>
+            ) : null;
+          })()}
+        </FilterBar>
         <label className="layer-row" data-layer="aisNavy">
           <LayerCheck
             layerKey="aisNavy"
@@ -631,6 +712,30 @@ export default function LayersSection({
           </div>
         </LayerDetails>
 
+        {/* Aircraft filter bar (Task 18): free text against callsign,
+            registration, ICAO hex, operator, type code and squawk, plus a
+            military-only toggle. Same application point as the vessel bar
+            above -- inside renderAdsbLayer, before the military/flagged/
+            civilian split -- so it combines with those toggles rather than
+            overriding them. */}
+        <FilterBar
+          text={aircraftFilter.text}
+          onTextChange={(text) => onAircraftFilterChange({ text })}
+          matched={counts.aircraftFilterMatch}
+          total={counts.aircraftFilterMatchTotal}
+          placeholder="Filter aircraft: callsign, registration, ICAO, operator..."
+        >
+          <div className="event-filters">
+            <label className="event-filter-check">
+              <input
+                type="checkbox"
+                checked={aircraftFilter.militaryOnly}
+                onChange={(e) => onAircraftFilterChange({ militaryOnly: e.target.checked })}
+              />
+              Military only
+            </label>
+          </div>
+        </FilterBar>
         <label className="layer-row" data-layer="adsbMilitary">
           <LayerCheck
             layerKey="adsbMilitary"
@@ -778,6 +883,21 @@ export default function LayersSection({
             </div>
           ))}
         </div>
+        {/* Review fix (Task 28, Critical): Pipeline Routes above is the
+            curated schematic *and* real OSM pipeline geometry merged at
+            /api/infrastructure's own read time (see app.py's
+            infrastructure_list) -- the same MAX_PIPELINE_WAYS cap the
+            transmission-line note above already surfaces applies to the OSM
+            half of this one too, and was being computed and stored by
+            osm_infra.py and then silently dropped before it ever reached
+            here. Same mechanism, reused a third time, not reinvented. */}
+        <div
+          id="pipelinesCappedNote"
+          className={`sublegend${(zoomNotes.pipelinesTruncated || []).length ? " visible" : ""}`}
+        >
+          OSM pipeline coverage hit its per-sweep limit in: {(zoomNotes.pipelinesTruncated || []).join(", ")}
+          {" "}&mdash; showing a partial network there, not the whole thing OSM has.
+        </div>
         <LayerDetails id="det-infra" open={isOpen("det-infra")} onToggle={setOpen}>
           <div className="sublegend">
             Publicly documented sites relevant to the selected conflict zone; flares when a nearby event is reported.
@@ -790,6 +910,13 @@ export default function LayersSection({
               </span>
             ))}
           </div>
+          <div className="sublegend">
+            <b>Pipeline Routes is two claims sharing one line style.</b> The curated schematic
+            (backend/infrastructure.py) stays exactly what it always was; OpenStreetMap's real pipeline
+            geometry, swept daily and only across this map&apos;s eleven conflict theatres, is layered
+            over it and coloured by substance where OSM tags one. Every line&apos;s own popup says which
+            of the two it is.
+          </div>
         </LayerDetails>
 
         <label className="layer-row" data-layer="osmInfra">
@@ -799,7 +926,10 @@ export default function LayersSection({
             wish={layerWish?.osmInfra}
             onToggle={onToggleLayer}
           />
-          <LayerIcon svg={SVG.powerPlant} color={OSM_INFRA_STYLE.power_plant.color} token={OSM_INFRA_STYLE.power_plant.token} />
+          {/* Task 28: power plants moved to their own layer below, so this
+              row's icon no longer borrows their glyph -- military areas are
+              this layer's single largest remaining class. */}
+          <LayerIcon svg={OSM_INFRA_STYLE.military_area.svg} color={OSM_INFRA_STYLE.military_area.color} token={OSM_INFRA_STYLE.military_area.token} />
           {" "}Infrastructure (OpenStreetMap)
           <span className="count"><CountUp value={counts.osmInfra} /> (<CountUp value={counts.osmInfraTotal} />)</span>
         </label>
@@ -810,19 +940,29 @@ export default function LayersSection({
             <span className="count"><CountUp value={counts.osmMilitary} /> (<CountUp value={counts.osmMilitaryTotal} />)</span>
           </div>
           <div className="subticker-row">
-            <LayerIcon svg={OSM_INFRA_STYLE.power_plant.svg} color={OSM_INFRA_STYLE.power_plant.color} token={OSM_INFRA_STYLE.power_plant.token} />
-            Power plants
-            <span className="count"><CountUp value={counts.osmPower} /> (<CountUp value={counts.osmPowerTotal} />)</span>
+            {/* Power plants used to sit here; Task 28 moved them to their own
+                layer (see the note below and the powerPlants row). Substations
+                stayed behind, so this slot is theirs -- with main's CountUp,
+                which the rows either side of it already use. */}
+            <LayerIcon svg={OSM_INFRA_STYLE.power_substation.svg} color={OSM_INFRA_STYLE.power_substation.color} token={OSM_INFRA_STYLE.power_substation.token} />
+            Substations
+            <span className="count"><CountUp value={counts.osmSubstation} /> (<CountUp value={counts.osmSubstationTotal} />)</span>
           </div>
           <div className="subticker-row">
             <LayerIcon svg={OSM_INFRA_STYLE.border_control.svg} color={OSM_INFRA_STYLE.border_control.color} token={OSM_INFRA_STYLE.border_control.token} />
             Border crossings
             <span className="count"><CountUp value={counts.osmBorder} /> (<CountUp value={counts.osmBorderTotal} />)</span>
           </div>
+          {/* Task 28: refineries/storage tanks/wellheads, one bucket -- see
+              buildEnergyInfrastructure in popups.js for where they are
+              presented beside the curated refineries/terminals count. */}
           <div className="subticker-row">
-            <LayerIcon svg={OSM_INFRA_STYLE.railway_station.svg} color={OSM_INFRA_STYLE.railway_station.color} token={OSM_INFRA_STYLE.railway_station.token} />
-            Railways (stations, halts, yards, crossings)
-            <span className="count"><CountUp value={counts.osmRailway} /> (<CountUp value={counts.osmRailwayTotal} />)</span>
+            {/* Railway points used to sit here; Task 27 moved them to the
+                Railways layer (see the note below). This slot is Task 28's
+                energy bucket -- with main's CountUp, as above. */}
+            <LayerIcon svg={OSM_INFRA_STYLE.refinery.svg} color={OSM_INFRA_STYLE.refinery.color} token={OSM_INFRA_STYLE.refinery.token} />
+            Refineries, storage &amp; wells
+            <span className="count"><CountUp value={counts.osmEnergyOther} /> (<CountUp value={counts.osmEnergyOtherTotal} />)</span>
           </div>
         </div>
         <div id="osmInfraZoomNote" className={`sublegend${zoomNotes.osmInfra ? " visible" : ""}`}>
@@ -849,6 +989,94 @@ export default function LayersSection({
             three quarters of the OSM military airfields here are one of those. Nothing is discarded
             &mdash; the surviving pin names the OSM record, its own name for the place and how far apart
             the two sources put it. Switch the other layer off and these pins come back.
+          </div>
+          <div className="sublegend">
+            <b>Railway stations, halts, yards and border crossings moved to the Railways layer below</b>,
+            next to the linework they sit on, rather than staying scattered in this one.
+          </div>
+          <div className="sublegend">
+            <b>Power plants moved to their own layer below</b>, glyphed and sized by fuel and
+            capacity where OpenStreetMap tags them, rather than sharing one shared power-plant pin here.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="powerPlants">
+          <LayerCheck
+            layerKey="powerPlants"
+            on={layerVisibility.powerPlants}
+            wish={layerWish?.powerPlants}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SVG.powerPlant} color={POWER_PLANT_FUEL_STYLE.other.color} token={POWER_PLANT_FUEL_STYLE.other.token} />
+          {" "}Power plants (OpenStreetMap)
+          <span className="count">{counts.powerPlants} ({counts.powerPlantsTotal})</span>
+        </label>
+        <div id="powerPlantsZoomNote" className={`sublegend${zoomNotes.powerPlants ? " visible" : ""}`}>
+          Zoom in to show power plants
+        </div>
+        <LayerDetails id="det-powerPlants" open={isOpen("det-powerPlants")} onToggle={setOpen}>
+          <div className="sublegend">
+            Split out of the OpenStreetMap infrastructure sweep above, same crowd-sourced provenance and
+            the same daily, eleven-theatre-only sweep. Glyph and colour follow the plant's tagged fuel
+            (nuclear/coal/gas/hydro/wind/solar/biomass, or &ldquo;other&rdquo; where OSM tags none); size
+            follows its tagged output where OpenStreetMap has one &mdash; most plants do not, and the
+            country card&apos;s Energy infrastructure section states what fraction does before summing
+            anything.
+          </div>
+        </LayerDetails>
+
+        {/* Task 29: same split-out-of-osmInfra treatment as powerPlants
+            above, off by default -- the brief's own requirement, and the
+            reason is stated in the layer's own detail panel below rather
+            than only here. */}
+        <label className="layer-row" data-layer="airDefense">
+          <LayerCheck
+            layerKey="airDefense"
+            on={layerVisibility.airDefense}
+            wish={layerWish?.airDefense}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SVG.radarBase} color="#ff4d4d" token="osm.radar_station" />
+          {" "}Air defence &amp; radar (OpenStreetMap)
+          <span className="count">{counts.airDefense} ({counts.airDefenseTotal})</span>
+        </label>
+        <div id="airDefenseZoomNote" className={`sublegend${zoomNotes.airDefense ? " visible" : ""}`}>
+          Zoom in to show air defence &amp; radar sites
+        </div>
+        <LayerDetails id="det-airDefense" open={isOpen("det-airDefense")} onToggle={setOpen}>
+          <div className="sublegend">
+            Radar stations, bunkers and checkpoints from the same daily OpenStreetMap sweep -- off by
+            default, deliberately, and different from every other layer in this group in one way:
+            OpenStreetMap&apos;s coverage of these sites is patchy and politically uneven in exactly the
+            theatres this map watches. A pin here is a real, mapped feature; the absence of one anywhere
+            is not evidence that nothing is there.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="powerLines">
+          <LayerCheck
+            layerKey="powerLines"
+            on={layerVisibility.powerLines}
+            wish={layerWish?.powerLines}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SVG.railway} color="#e8b64f" token="grid.line" />
+          {" "}Transmission lines (OpenStreetMap)
+          <span className="count">{counts.powerLines} ({counts.powerLinesTotal})</span>
+        </label>
+        <div
+          id="powerLinesCappedNote"
+          className={`sublegend${(zoomNotes.powerLinesTruncated || []).length ? " visible" : ""}`}
+        >
+          OSM power-line coverage hit its per-sweep limit in: {(zoomNotes.powerLinesTruncated || []).join(", ")}
+          {" "}&mdash; showing a partial grid there, not the whole thing OSM has.
+        </div>
+        <LayerDetails id="det-powerLines" open={isOpen("det-powerLines")} onToggle={setOpen}>
+          <div className="sublegend">
+            Transmission-line geometry from the same daily OpenStreetMap sweep, swept only across this
+            map&apos;s eleven conflict theatres, not worldwide &mdash; pan away from them and this layer
+            has nothing to draw. Voltage, cable count and operator are shown in each line&apos;s popup
+            where OSM tags them.
           </div>
         </LayerDetails>
 
@@ -1023,19 +1251,189 @@ export default function LayersSection({
             onToggle={onToggleLayer}
           />
           <LayerIcon svg={RAILWAY_STYLE.svg} color={RAILWAY_STYLE.color} token={RAILWAY_STYLE.token} />
-          {" "}Railways (Natural Earth)
+          {/* "Natural Earth + OpenStreetMap", not main's "Natural Earth":
+              Task 27 gave this layer its second source, so naming only the
+              first would now understate what is drawn. CountUp is main's. */}
+          {" "}Railways (Natural Earth + OpenStreetMap)
           <span className="count"><CountUp value={counts.railways} /> (<CountUp value={counts.railwaysTotal} />)</span>
         </label>
+        {/* Task 27: the station/halt/yard/border points, moved here from OSM
+            infrastructure above -- a readout, not a toggle of its own, the
+            same "sub-ticker of its parent" treatment osmInfra's own rows get
+            (see EXTRA_TOKENS_UNDER in components/admin/sections/shared.jsx
+            for where its colours live in the admin panel). */}
+        <div className="subticker-list">
+          <div className="subticker-row">
+            <LayerIcon
+              svg={OSM_INFRA_STYLE.railway_station.svg}
+              color={OSM_INFRA_STYLE.railway_station.color}
+              token={OSM_INFRA_STYLE.railway_station.token}
+            />
+            Stations, halts, yards &amp; border crossings (OpenStreetMap)
+            <span className="count">{counts.railwayPoints} ({counts.railwayPointsTotal})</span>
+          </div>
+        </div>
+        {/* Its own row, not a sub-ticker: a reader may want the network
+            without the (live, Finland-only) trains riding along with it, or
+            the reverse -- see LAYER_MANIFEST's own note on why this is not
+            tied to the checkbox above it. */}
+        <label className="layer-row sub-row" data-layer="railLive">
+          <LayerCheck
+            layerKey="railLive"
+            on={layerVisibility.railLive}
+            wish={layerWish?.railLive}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={RAILWAY_LIVE_STYLE.svg} color={RAILWAY_LIVE_STYLE.color} token={RAILWAY_LIVE_STYLE.token} />
+          {" "}Live trains (Digitraffic, Finland only)
+          <span className="count">{counts.railLive} ({counts.railLiveTotal})</span>
+        </label>
+        {/* Task 27 fix (post-review): Finland sits outside every conflict
+            theatre, so the OSM sweep above can never place a station there --
+            without this readout, switching on live trains showed moving dots
+            over an empty map with nothing named to orient against. */}
+        <div className="subticker-list">
+          <div className="subticker-row">
+            <LayerIcon svg={RAILWAY_LIVE_STYLE.svg} color={RAILWAY_LIVE_STYLE.color} token={RAILWAY_LIVE_STYLE.token} />
+            Stations (Digitraffic)
+            <span className="count">{counts.railStations} ({counts.railStationsTotal})</span>
+          </div>
+        </div>
+        {/* Task 27 fix (post-review): a capped theatre's OSM lines are real,
+            just partial -- Overpass' `out ... N;` truncates with no marker of
+            its own, so osm_infra.py flags it heuristically (see
+            _rail_lines_truncated) and this is where that flag has to reach a
+            reader, visibly, not just inside the fold. Named by region key
+            rather than a prettier label: no client-side region-label table
+            exists to translate it, and the raw key is still honest. */}
+        <div
+          id="railwaysCappedNote"
+          className={`sublegend${(zoomNotes.railwaysTruncated || []).length ? " visible" : ""}`}
+        >
+          OSM rail coverage hit its per-sweep limit in: {(zoomNotes.railwaysTruncated || []).join(", ")}
+          {" "}&mdash; showing a partial network there, not the whole thing OSM has.
+        </div>
         <LayerDetails id="det-railways" open={isOpen("det-railways")} onToggle={setOpen}>
           <div className="sublegend">
-            <b>Coarse basemap linework, 2021.</b> Natural Earth 1:10m railroads &mdash; public domain,
-            unchanged since 2021, with no names, no operator and no gauge. It is drawn as a muted,
-            dashed hairline because it is context, not survey data.
+            <b>Neither source is worldwide.</b> Both Natural Earth and OpenStreetMap are clipped to this
+            map&apos;s eleven conflict theatres &mdash; pan away from them and this layer has nothing to
+            draw. Natural Earth 1:10m railroads (public domain, unchanged since 2021, no names, no
+            operator, no gauge) is the muted dashed hairline, the coarser of the two but not a step wider:
+            it carries every railroad Natural Earth has inside a theatre, not just running lines, but it
+            stops at the same theatre edge OpenStreetMap does. Layered over it is OpenStreetMap&apos;s
+            attributed running-line network &mdash; name, operator, gauge and electrification where its
+            mappers recorded them, swept daily alongside the station points above.
           </div>
           <div className="sublegend">
-            <b>It will not sit exactly on the railway station points.</b> Those come from OpenStreetMap
-            (the Infrastructure layer above); this linework is a different, coarser source and the two
-            are not aligned. Clipped to this map&apos;s conflict theatres rather than drawn worldwide.
+            <LayerIcon svg={RAILWAY_STYLE.svg} color={RAILWAY_STYLE.color} token={RAILWAY_STYLE.token} />
+            Natural Earth (conflict theatres only, unattributed)
+            <LayerIcon svg={SVG.railway} color={RAILWAY_OSM_STYLE.electrified.color} token={RAILWAY_OSM_STYLE.electrified.token} />
+            {RAILWAY_OSM_STYLE.electrified.label} (OpenStreetMap)
+            <LayerIcon svg={SVG.railway} color={RAILWAY_OSM_STYLE.nonElectrified.color} token={RAILWAY_OSM_STYLE.nonElectrified.token} />
+            {RAILWAY_OSM_STYLE.nonElectrified.label}
+            <LayerIcon svg={SVG.railway} color={RAILWAY_OSM_STYLE.narrowGauge.color} token={RAILWAY_OSM_STYLE.narrowGauge.token} />
+            {RAILWAY_OSM_STYLE.narrowGauge.label}
+          </div>
+          <div className="sublegend">
+            Main lines draw heaviest and solid; branch lines and narrow-gauge track are thinner and
+            dashed, in different patterns, so the three can be told apart without opening a popup.
+          </div>
+          <div className="sublegend">
+            <b>Neither line sits exactly on the station points above.</b> The linework and the points come
+            from the same daily OpenStreetMap sweep but different feature classes, and Natural Earth is a
+            different, coarser source again -- none of the three is surveyed to line up with another.
+          </div>
+          {/* Task 27 fix (post-review): the coverage note above replaces a
+              version of this fold that wrongly called Natural Earth
+              worldwide. It has always been theatre-clipped, same as OSM --
+              see railways.py's module docstring for the fix and what an
+              honest fix to the *coverage* itself (not just the words) would
+              need before it could be taken on. */}
+          <div className="sublegend">
+            <LayerIcon svg={RAILWAY_LIVE_STYLE.svg} color={RAILWAY_LIVE_STYLE.color} token={RAILWAY_LIVE_STYLE.token} />
+            <b>Live trains, and the stations they call at, cover Finland only.</b> Fintraffic/Digitraffic
+            publishes both for Finnish rail traffic and nothing else; that is a fact about their feed, not
+            a gap in this map&apos;s coverage of the network drawn above. Finland sits outside every one
+            of this map&apos;s eleven conflict theatres, so OpenStreetMap&apos;s own station sweep can
+            never reach it &mdash; this gazetteer is the only source that ever could, which is why it
+            rides the same toggle as the trains rather than the network above. Off by default and
+            switched on separately from the network itself.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="shippingLanes">
+          <LayerCheck
+            layerKey="shippingLanes"
+            on={layerVisibility.shippingLanes}
+            wish={layerWish?.shippingLanes}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={SHIPPING_LANE_STYLE.svg} color={SHIPPING_LANE_STYLE.color} token={SHIPPING_LANE_STYLE.token} />
+          {" "}Shipping Corridors (schematic)
+          <span className="count">{counts.shippingLanes} ({counts.shippingLanesTotal})</span>
+        </label>
+        <LayerDetails id="det-shippingLanes" open={isOpen("det-shippingLanes")} onToggle={setOpen}>
+          <div className="sublegend">
+            <b>Hand-drawn, not surveyed.</b> The ten corridors people actually name &mdash; Suez, Hormuz,
+            Malacca, the Bosphorus and the rest &mdash; as a short curated list of schematic waypoints
+            (backend/infrastructure.py). This is a different claim from the AIS density wash below: it is
+            not derived from anything this map has observed, and every popup says so.
+          </div>
+          <div className="sublegend">
+            Where a transit figure is shown, it always carries its publisher, unit and year. A corridor
+            with no citable figure on hand simply shows none, rather than a number nobody can stand behind.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="water">
+          <LayerCheck
+            layerKey="water"
+            on={layerVisibility.water}
+            wish={layerWish?.water}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={WATER_STYLE.svg} color={WATER_STYLE.color} token={WATER_STYLE.token} />
+          {" "}Water Bodies (Natural Earth)
+          <span className="count">{counts.water} ({counts.waterTotal})</span>
+        </label>
+        <label className="layer-row sub-row" data-layer="waterLakes">
+          <LayerCheck
+            layerKey="waterLakes"
+            on={layerVisibility.waterLakes}
+            wish={layerWish?.waterLakes}
+            onToggle={onToggleLayer}
+          />
+          Show lakes
+        </label>
+        <label className="layer-row sub-row" data-layer="waterRivers">
+          <LayerCheck
+            layerKey="waterRivers"
+            on={layerVisibility.waterRivers}
+            wish={layerWish?.waterRivers}
+            onToggle={onToggleLayer}
+          />
+          Show rivers
+        </label>
+        <LayerDetails id="det-water" open={isOpen("det-water")} onToggle={setOpen}>
+          <div className="sublegend">
+            Named oceans, seas, gulfs, bays, straits, sounds and channels, from Natural Earth&apos;s
+            1:10m marine polygons. The first shape on this map that is not an administrative
+            boundary &mdash; click one the same way you would a country. A sea is invisible until
+            you hover or select it; filling every named body of water on Earth at world zoom would
+            be exactly the clutter every other polygon layer here avoids.
+          </div>
+          <div className="sublegend">
+            <b>Coarse, schematic geometry, 1:10,000,000.</b> Public domain (CC0), generalised well
+            past any real coastline &mdash; treat a boundary as which sea you clicked, not where its
+            shore actually runs.
+          </div>
+          <div className="sublegend">
+            <b>Show lakes</b> and <b>Show rivers</b> ride this same checkbox rather than getting one
+            each: both are off by default and fetched only once you switch them on. Rivers are drawn
+            as lines and cannot be clicked or hovered the way a sea or a lake can &mdash; and rivers
+            are fetched for an area around wherever you are looking, then fetched again as you pan
+            far enough to leave that area. Panning never blanks what already loaded; it just takes a
+            moment after a long pan for the new area&apos;s rivers to catch up.
           </div>
         </LayerDetails>
 
@@ -1113,6 +1511,37 @@ export default function LayersSection({
         <LayerDetails id="det-jamming" open={isOpen("det-jamming")} onToggle={setOpen}>
           <div className="sublegend">
             Data: gpsjam.org, derived from ADS-B aircraft GPS-quality reports. Updated once/day, not real-time.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="laneDensity">
+          <LayerCheck
+            layerKey="laneDensity"
+            on={layerVisibility.laneDensity}
+            wish={layerWish?.laneDensity}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={LANE_DENSITY_STYLE.svg} color={LANE_DENSITY_STYLE.color} token={LANE_DENSITY_STYLE.token} />
+          {" "}AIS Traffic Density (this map&apos;s own coverage)
+          <span className="count">{counts.laneDensity} ({counts.laneDensityTotal})</span>
+        </label>
+        <div id="laneDensityZoomNote" className={`sublegend${zoomNotes.laneDensity ? " visible" : ""}`}>
+          Zoom in to inspect individual cells
+        </div>
+        <LayerDetails id="det-laneDensity" open={isOpen("det-laneDensity")} onToggle={setOpen}>
+          <div className="sublegend">
+            <b>This is where we have seen ships, not where shipping lanes run.</b> Every cell is built from
+            this map&apos;s own recorded AIS positions over roughly the last thirty days (see backend/refine/
+            lane_density.py). An empty stretch of ocean means this map has not observed traffic there
+            &mdash; never that there is none. It is a different claim from the schematic corridors above,
+            and the two are drawn as separate layers on purpose.
+          </div>
+          <div className="sublegend">
+            <b>Sightings, not distinct ships.</b> The number behind the colour counts how many times a hull
+            was recorded in a cell, not how many different vessels passed through it. A single ship sitting
+            still for weeks keeps adding to the same number a busy strait would produce by real traffic
+            &mdash; the wash cannot tell those two apart, and neither can you from the colour alone. Every
+            popup repeats this in words.
           </div>
         </LayerDetails>
       </PanelGroup>
@@ -1302,6 +1731,39 @@ export default function LayersSection({
             </span>
           </div>
         </LayerDetails>
+
+        {/* Task 24: client-propagated groups -- stored CelesTrak element sets,
+            SGP4'd in the browser (map/satPropagate.js) rather than here, one
+            row per control-panel toggle (backend/sources/satellites.py's
+            ELEMENT_LAYER_GROUPS). navigation/weather/imaging are on by
+            default; science/geo/starlink/oneweb are off, and the last two
+            carry a hard-gate warning about their object count -- see the
+            task brief and SAT_ELEMENT_LAYERS in map/decorators.js. */}
+        {SAT_ELEMENT_ROWS.map(({ key, label, hardGate, gated }) => (
+          <label className="layer-row sub-row" data-layer={key} key={key}>
+            <LayerCheck
+              layerKey={key}
+              on={layerVisibility[key]}
+              wish={layerWish?.[key]}
+              onToggle={onToggleLayer}
+            />
+            <LayerIcon svg={SAT_ELEMENT_LAYERS[key].svg} color={SAT_ELEMENT_LAYERS[key].color} token={SAT_ELEMENT_LAYERS[key].token} />
+            {" "}{label}
+            <span className="count">{counts[key]} ({counts[`${key}Total`]})</span>
+            {gated ? (
+              <div id={`${key}ZoomNote`} className={`sublegend${zoomNotes[key] ? " visible" : ""}`}>
+                Zoom in to show {label.toLowerCase()} satellites
+              </div>
+            ) : null}
+            {hardGate ? (
+              <div className="sublegend">
+                Runs to {hardGate} objects (see the total above once loaded). Propagating and
+                drawing that many in the browser is real work every frame -- switch this on
+                only if you want it.
+              </div>
+            ) : null}
+          </label>
+        ))}
 
         <label className="layer-row" data-layer="launches">
           <LayerCheck

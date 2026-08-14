@@ -285,6 +285,42 @@ export function useDraggablePanel(id, { onClick, enabled = true, resizable = fal
   };
 }
 
+/**
+ * Give a panel id the first stored position/size found among a list of
+ * predecessor ids, if the new id does not already have one of its own.
+ *
+ * For Task 12's IntelPanel, replacing NotableEventsPanel and NewsBroadcastPanel
+ * with one merged panel: a reader who had dragged either of the two old panels
+ * somewhere should not find the new one back at its shipped default. There is
+ * no honest way to merge *two* positions into one, so this takes the first
+ * predecessor (in the order the caller lists them) that actually has a saved
+ * position -- NotableEventsPanel's, since it was the one expanded by default
+ * and the more often-consulted of the pair. Call once, at module scope in
+ * IntelPanel.jsx (not inside the component), so it runs before that
+ * component's own `useDraggablePanel("intelPanel", ...)` call reads storage on
+ * its first render -- an effect would run one render too late to matter.
+ *
+ * A no-op once `newId` has its own entry, whether from a previous run of this
+ * migration or from the reader having since dragged the new panel themselves
+ * -- it must never overwrite a real choice with a stale one.
+ */
+export function migratePanelPosition(newId, oldIds) {
+  try {
+    const all = loadAll();
+    if (all[newId]) return;
+    for (const oldId of oldIds) {
+      if (all[oldId]) {
+        all[newId] = { ...all[oldId] };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+        return;
+      }
+    }
+  } catch {
+    // Storage full or disabled -- the panel opens at its shipped default,
+    // same fallback saveOne already takes.
+  }
+}
+
 /** Forget every stored panel position and snap every open panel back (the
  *  admin panel's "reset panel layout"). */
 export function clearAllPanelPositions() {

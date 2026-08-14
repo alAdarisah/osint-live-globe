@@ -136,6 +136,7 @@ export const FETCH_ALWAYS_BECAUSE = {
   escalation: "notable events, the choropleth",
   countries: "the hit-test index, choropleth, war flare, city scoping, border editing",
   outages: "the choropleth and the country card",
+  outagesRegions: "the state-target choropleth, the admin-1 badge layer, and the state/district cards",
   conflictStats: "the choropleth and the country card",
   conflictDistricts: "the choropleth and the country card",
   humanitarian: "the country card",
@@ -349,12 +350,162 @@ export const LAYER_MANIFEST = {
     disposition: CORROBORATING,
   },
   railways: {
-    // Coarse Natural Earth rail linework, theatre-clipped and drawn as whole
-    // polylines like cables -- so ungated once active. MANUAL and off by default:
-    // it is basemap context a reader opts into, not something the resolver should
-    // assert or a country focus should drag on. Fetched once at boot as a whole
-    // document (backend/sources/railways.py), same as cables, so FETCH_MANUAL
-    // keeps the poller out of it.
+    // Task 27 layered an attributed OpenStreetMap overlay on top of the
+    // Natural Earth linework (backend/sources/railways.py's own merge) --
+    // both clipped to the same eleven conflict theatres, neither worldwide,
+    // whatever "fallback" language a comment elsewhere uses for the coarser
+    // of the two. The gate is unchanged: both halves are whole polylines,
+    // drawn ungated once active, MANUAL and off by default for the same
+    // reason as before --
+    // this is basemap context a reader opts into, not something the resolver
+    // should assert or a country focus should drag on. Fetched once at boot
+    // as a whole document, same as cables, so FETCH_MANUAL keeps the poller
+    // out of it.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  // Task 27: the station/halt/yard/border points osm_infra.py already swept,
+  // pulled out of the generic OSM infrastructure layer and given a home next
+  // to the rail linework they sit on -- one toggle for the whole rail
+  // network instead of two unrelated checkboxes for one subject. No
+  // disposition/checkbox of its own: it mirrors "railways"' visibility
+  // exactly the way cableLandings mirrors "cables" (see
+  // createMapController.js's setLayerVisible), it just needs its own draw
+  // gate and collapse here because it is a dense point layer where its
+  // parent is a small set of whole lines. Gate and cap are copied from
+  // osmInfra's own entry unchanged -- this task did not ask to redraw when
+  // OSM points are worth showing, only which toggle governs them.
+  railwayPoints: {
+    draw: { band: "LOCAL", z: 9 },
+    fetch: "LOCAL",
+    cap: { LOCAL: 800 },
+    collapse: { mode: "proximity", maxZoom: 11 },
+    disposition: MANUAL,
+  },
+  // Task 28: power plants, pulled out of the generic OSM infrastructure layer
+  // (see osmInfra below) and given their own checkbox -- unlike railwayPoints
+  // above, which mirrors "railways"' visibility, this has no natural parent
+  // toggle to ride: nothing else on the map already carries a "the whole
+  // power picture" checkbox for it to join. Gate and cap copied from
+  // osmInfra's own entry unchanged (same reasoning railwayPoints' own note
+  // gives): this task did not ask to redraw when a crowd-sourced power plant
+  // point is worth showing, only to give it a home of its own to be shown in.
+  powerPlants: {
+    draw: { band: "LOCAL", z: 9 },
+    fetch: "LOCAL",
+    cap: { LOCAL: 800 },
+    collapse: { mode: "proximity", maxZoom: 11 },
+    disposition: CORROBORATING,
+  },
+  // Task 29: radar_station/military_bunker/military_checkpoint, pulled out
+  // of the generic OSM infrastructure layer the same way powerPlants was
+  // above -- gate and cap copied from osmInfra's own entry unchanged, same
+  // reasoning powerPlants' own note gives. MANUAL rather than CORROBORATING:
+  // the brief is explicit that this layer defaults off and states its own
+  // completeness caveat (OSM's coverage of air-defence sites is patchy and
+  // politically uneven in exactly the theatres this map watches), which is a
+  // stronger claim than "shown once a reader engages with the place it's
+  // about" -- a reader has to actively choose to see this layer at all.
+  airDefense: {
+    draw: { band: "LOCAL", z: 9 },
+    fetch: "LOCAL",
+    cap: { LOCAL: 800 },
+    collapse: { mode: "proximity", maxZoom: 11 },
+    disposition: MANUAL,
+  },
+  // Task 28: transmission-line geometry (backend/sources/power_lines.py,
+  // itself a re-serve of osm_infra.py's own Overpass sweep) -- "render
+  // through the same polyline path as railways" per the brief, and that is
+  // exactly the treatment this gets: a whole document, fetched once at boot
+  // (see useOsintData.js) rather than polled, drawn ungated once the layer is
+  // switched on since a line is only legible whole, MANUAL and off by
+  // default for the same reason railways is -- this is basemap-adjacent
+  // context a reader opts into, not something the resolver should assert.
+  // Swept only inside this map's eleven conflict theatres, same as every
+  // other osm_infra.py product; nothing here claims otherwise.
+  powerLines: {
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  // Task 27: Digitraffic's live Finnish train positions
+  // (backend/sources/digitraffic_rail.py, GET /api/rail-live) -- a genuine
+  // sub-layer of the same rail group rather than a sub-ticker, because a
+  // reader may want the (static) network without the (moving, Finland-only)
+  // trains or the reverse. MANUAL and off by default, deliberately not tied
+  // to "railways"' own checkbox: switching on the eleven-theatre rail
+  // linework must never be read as "and also Finland's live trains are now
+  // on" -- Finland sits outside every one of those eleven boxes (the
+  // nearest, russia_ukraine, tops out at 56N; Finland runs 60-70N), so the
+  // two checkboxes cover disjoint ground and conflating them would be
+  // exactly the false impression of coverage this layer's own note in
+  // LayersSection.jsx exists to head off. Ungated once switched on -- ~111
+  // trains at most is legible at any zoom, the same argument aisNavy makes.
+  railLive: {
+    draw: null,
+    fetch: FETCH_ALWAYS,
+    disposition: MANUAL,
+  },
+  // Task 27 fix (post-review): the station gazetteer railLive needs to mean
+  // anything -- Finland is outside every conflict theatre (see railLive's
+  // own note just above), so railwayPoints above, which only ever sweeps
+  // inside those theatres, can never place a station there. Mirrors
+  // "railLive"'s own visibility exactly the way railwayPoints mirrors
+  // "railways" -- one toggle for the whole Finnish picture, moving trains
+  // and the network they move on.
+  railStations: {
+    draw: null,
+    fetch: FETCH_ALWAYS,
+    disposition: MANUAL,
+  },
+  shippingLanes: {
+    // Task 20b: the ten named corridors (backend/infrastructure.py's
+    // SHIPPING_LANES), drawn the same way as the pipeline/cable/railway
+    // routes above -- a small curated set of whole polylines, fetched once
+    // at boot (see useOsintData.js's /api/infrastructure fetch) rather than
+    // polled. MANUAL and off by default for the same reason railways is: this
+    // is a hand-drawn schematic a reader opts into, not a claim the resolver
+    // or a country focus should push at them -- see the layer's own popup,
+    // which says "schematic corridor, not a surveyed route" on every line.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  laneDensity: {
+    // Task 20a: the AIS traffic grid (backend/refine/lane_density.py via
+    // GET /api/lanes) -- where this map's own AIS coverage has actually seen
+    // a hull, drawn as a heat wash exactly like FIRMS/jamming above. THEATRE
+    // and z5, the same gate jamming ships with and for the same reason: a
+    // world-zoom heat blur reads as an assertion about global shipping
+    // lanes, which is precisely the claim the layer's own note (and its
+    // legend) exists to disclaim. AUTO rather than CORROBORATING -- this is
+    // a straight rendering of what this map recorded, not an inference drawn
+    // from an absence, so it earns the same footing jamming has.
+    draw: { band: "THEATRE", z: 5 },
+    fetch: "THEATRE",
+    disposition: AUTO,
+    // /api/lanes takes a bbox (see backend/app.py's lanes_endpoint) and the
+    // grid is unbounded in principle -- global AIS coverage, resolved to
+    // 0.05deg/0.02deg cells -- so this earns the same viewport clip FIRMS and
+    // jamming's own scoped siblings (ports, airports, gfwGaps...) do.
+    scoped: true,
+  },
+  water: {
+    // Natural Earth 1:10m marine polygons -- named oceans, seas, gulfs, bays,
+    // straits, sounds, channels (backend/sources/water_bodies.py). The first
+    // polygon layer on this map that is not an administrative boundary, and it
+    // is given the same treatment as railways just above: coarse basemap
+    // reference geometry, boot-fetched once rather than polled (see
+    // useOsintData.js), MANUAL and off by default so drawing it is a reader's
+    // choice, not the resolver's or a country focus's to make.
+    //
+    // Lakes and rivers ride this same key behind their own sub-toggles
+    // (waterLakes/waterRivers, wired in createMapController.js) rather than
+    // getting manifest entries of their own: neither is fetched at all until
+    // its checkbox is ticked, so there is nothing here for the resolver to gate
+    // -- and kind=rivers requires a bbox the resolver has no reason to compute
+    // for a layer nobody has asked for yet (see backend/app.py's water_endpoint).
     draw: null,
     fetch: FETCH_MANUAL,
     disposition: MANUAL,
@@ -526,6 +677,18 @@ export const LAYER_MANIFEST = {
     fetch: FETCH_ALWAYS,
     disposition: AUTO,
   },
+  outageRegionPoints: {
+    // Gated the same as cities' own COUNTRY floor, and for the same reason: at
+    // WORLD or THEATRE a reader has not zoomed in far enough to place a small
+    // per-state badge meaningfully, and a bad week could otherwise paper the
+    // map in them before that. Unlike outagePoints above, this is never drawn
+    // ungated -- the country-level pin exists precisely because a national
+    // reading is worth seeing from anywhere; a state-level one is the detail
+    // a reader reaches by looking closer, not the headline.
+    draw: { band: "COUNTRY" },
+    fetch: FETCH_ALWAYS,
+    disposition: AUTO,
+  },
 
   // ---- hazards ------------------------------------------------------------
   hazards: {
@@ -566,6 +729,91 @@ export const LAYER_MANIFEST = {
     draw: { band: "THEATRE" },
     fetch: "THEATRE",
     disposition: AUTO,
+  },
+
+  // Task 24: client-propagated satellite layers. Stored CelesTrak element
+  // sets, propagated in the browser (see map/satPropagate.js).
+  //
+  // The three on-by-default groups below (navigation/weather/imaging) are
+  // zoom-gated at THEATRE, unlike `satellites` above. That is a deliberate
+  // departure from `satellites`' own "ungated, because ~46 curated objects
+  // is legible at any zoom" argument: navigation+weather+imaging land ~875
+  // objects on the map together (~225 DOM markers, ~650 WebGL sprites) with
+  // no cap and no collapse, on by default, at world zoom -- roughly the
+  // count aisCivilian's own "raised from WORLD to THEATRE... a texture, not
+  // a layer" argument was written about, not the ~46 stations/military is.
+  // Reusing `satellites`' ungated treatment here would have been the map's
+  // own stated philosophy (thin the presentation, never delete the data)
+  // asking for an argument this task never made. `fetch: FETCH_ALWAYS`
+  // still applies regardless of the draw gate -- elements have to already
+  // be in hand, propagating, when a reader crosses into THEATRE, or the
+  // gate would feel like a load spinner instead of an instant reveal (see
+  // `floods`' identical fetch-always/draw-gated split just above for the
+  // same reasoning already established in this file).
+  //
+  // The four off-by-default groups (science/geo/starlink/oneweb) are left
+  // ungated: a reader who has already opted into one of them (starlink/
+  // oneweb additionally past the control panel's own hard-gate warning
+  // about their object count) has already made the "I want to see this"
+  // decision a zoom gate exists to make on a reader's behalf for a layer
+  // that is on without being asked. Gating a layer nobody sees until they
+  // choose to enable it would not thin anything a reader has not already
+  // chosen to look at.
+  satNavigation: {
+    // GPS/Galileo/GLONASS/Beidou, ~150 objects, DOM markers. On by default.
+    draw: { band: "THEATRE" },
+    fetch: FETCH_ALWAYS,
+    disposition: AUTO,
+  },
+  satWeather: {
+    // ~75 objects (weather + goes -- see satellites.py's note on why "noaa"
+    // is not a real CelesTrak group), DOM markers. On by default.
+    draw: { band: "THEATRE" },
+    fetch: FETCH_ALWAYS,
+    disposition: AUTO,
+  },
+  satImaging: {
+    // resource/sarsat/spire/planet, ~650 objects. On by default per the task
+    // brief, which is exactly why this one draws on the WebGL entity path
+    // rather than as DOM markers (see createMapController.js) -- "on by
+    // default" and "hundreds of markers" cannot coexist on the DOM path
+    // without becoming the clutter this map's declutter philosophy exists
+    // to prevent, and it is the single largest contributor to the ~875
+    // ungated-at-world-zoom count the THEATRE gate above answers.
+    draw: { band: "THEATRE" },
+    fetch: FETCH_ALWAYS,
+    disposition: AUTO,
+  },
+  satScience: {
+    // Off by default (task brief): a curated-interest set (Hubble, Terra,
+    // ...) a reader opts into rather than one the resolver asserts. Ungated
+    // once on -- see this block's own note above on why the four
+    // off-by-default groups stay that way.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  satGeo: {
+    // Off by default (task brief). ~500+ geostationary objects -- WebGL.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  satStarlink: {
+    // Off by default and hard-gated in the control panel (task brief):
+    // several thousand objects. WebGL is not optional here -- it is the only
+    // reason this toggle can exist at all. `active` (11,000 objects) is
+    // deliberately not offered anywhere in this map, including here.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
+  satOneweb: {
+    // Off by default and hard-gated (task brief), same reasoning as
+    // satStarlink -- a few hundred to a thousand-odd objects, WebGL.
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
   },
 
   // ---- weather ------------------------------------------------------------
@@ -631,9 +879,14 @@ export const LAYER_MANIFEST = {
  *   cableLandings  has no toggle of its own; setLayerVisible("cables") mirrors
  *                  onto it, because a cable and the place it comes ashore are
  *                  one fact and being able to hide half of it helps nobody
+ *   railwayPoints  same arrangement, one layer over: setLayerVisible("railways")
+ *                  mirrors onto it -- see its own note in LAYER_MANIFEST above
+ *   railStations   same arrangement again, one layer over from railLive
+ *                  instead of railways -- see its own note in LAYER_MANIFEST
  */
+const MIRRORED_LAYER_KEYS = new Set(["cableLandings", "railwayPoints", "railStations"]);
 export const SCENE_APPLY_KEYS = Object.keys(LAYER_MANIFEST).filter(
-  (key) => !LAYER_MANIFEST[key].virtual && key !== "cableLandings"
+  (key) => !LAYER_MANIFEST[key].virtual && !MIRRORED_LAYER_KEYS.has(key)
 );
 
 // Sub-toggles that have no independent existence: a trail is drawn wherever its
@@ -664,8 +917,56 @@ export const TRAIL_PARENT = {
 export const UNGATED_FEEDS = new Set([
   "escalation", "conflictStats", "conflictDistricts", "humanitarian",
   "energyFlows", "foodTrade", "foodPriceIndex", "outages",
+  // Watched-water-box-keyed and sea-keyed respectively, read on demand by the
+  // water card, ChokepointPanel.jsx and buildWaterTraffic -- no pin, no gate,
+  // same footing as the country-keyed feeds above. navalPresence was missing
+  // here from Task 29 until it was fixed alongside the matching gap in
+  // createMapController.js's applyData; see REFERENCE_ONLY_FEEDS there.
+  "chokepoints", "navalPresence",
+  // Task 39: gpsjam-cell-keyed, read on demand by renderJamming's own popup
+  // build for whichever cells are on screen -- same footing as chokepoints/
+  // navalPresence just above, not a layer the jamming toggle needs a pin for
+  // (the jamming layer itself already has one).
+  "jamCrosscheck",
   // One payload each, split across three toggles by their own renderers.
   "ais", "adsb",
+]);
+
+/**
+ * Feeds that arrive as a whole reference document rather than an array of
+ * points: a country->series dict, a ranked region list, a box-keyed traffic
+ * table. Popups read them straight out of `raw` when a card is built. None has
+ * a marker layer, so createMapController.js's applyData dispatch has to stop
+ * at them rather than reaching its `renderMarkerLayer(key)` catch-all, which
+ * iterates its argument and throws "items is not iterable" on an object.
+ *
+ * This lives here, next to UNGATED_FEEDS, rather than beside the dispatch that
+ * reads it: the two lists make the same claim about the same feeds -- this one
+ * has nothing to draw -- and every feed in this set belongs in that one too.
+ * Keeping them in one dependency-free module is what lets a test check the
+ * pairing at all.
+ *
+ * It was an if-chain of `key === "..."` comparisons until it needed to be a
+ * list something could check. Task 29 added navalPresence to POLL_CONFIG and
+ * to neither list, so from the day it shipped every navalPresence poll threw
+ * inside applyData; useOsintData.js's per-poll try/catch swallowed it into a
+ * console warning, which is why it went unnoticed. Task 36 added chokepoints
+ * and hit the identical wall, which is what surfaced the older one.
+ *
+ * What that cost is narrower than it first looks, and worth recording so the
+ * next person weighs it right: `raw[key] = data` runs at the top of applyData,
+ * before the dispatch, so the document did land and a card opened afterwards
+ * read live data. What never ran was the tail of applyData below the throw --
+ * refreshChoropleth and the four refreshFocused*Card calls -- so a card left
+ * open across a poll silently kept the numbers it was built with. Stale on an
+ * open card, not absent.
+ *
+ * See frontend/tests/referenceOnlyFeeds.test.js.
+ */
+export const REFERENCE_ONLY_FEEDS = new Set([
+  "conflictStats", "escalation", "conflictDistricts", "humanitarian",
+  "energyFlows", "foodTrade", "foodPriceIndex", "fetchCoverage",
+  "navalPresence", "chokepoints", "jamCrosscheck",
 ]);
 
 /** Every layer key the manifest knows about. */

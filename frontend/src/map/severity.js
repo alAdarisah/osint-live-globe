@@ -3,9 +3,9 @@ import { paletteColor } from "./iconTheme";
 
 // The one severity scale.
 //
-// This lived in four places -- decorators.js (hex), NotableEventsPanel.jsx (CSS
-// class names), LayersSection.jsx (legend swatches), and style.css (chip
-// backgrounds) -- and they had already started to drift. CSS cannot import JS,
+// This lived in four places -- decorators.js (hex), the old NotableEventsPanel.jsx
+// (CSS class names, now IntelPanel.jsx), LayersSection.jsx (legend swatches), and
+// style.css (chip backgrounds) -- and they had already started to drift. CSS cannot import JS,
 // so the chip and legend colours are now applied inline from these objects,
 // which is the only way to make one definition genuinely authoritative.
 //

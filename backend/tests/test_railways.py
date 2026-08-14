@@ -72,9 +72,74 @@ def test_an_empty_collection_is_not_an_error():
     assert railways.clip_railroads({"features": []}, BOXES) == []
 
 
-def test_the_stored_document_states_its_coarse_static_provenance():
-    """The popup reads this string; it must say what the data is and is not."""
-    doc = railways.serialize([[[31.0, 35.0], [32.0, 35.5]]])
-    assert doc["attribution"] == "Natural Earth"
-    assert doc["provenance"] == "Natural Earth 1:10m, 2021, coarse basemap linework, unnamed"
-    assert doc["lines"] == [[[31.0, 35.0], [32.0, 35.5]]]
+def test_the_stored_document_states_both_sources_provenance():
+    """The popup reads this string; it must say what each half is and is not."""
+    doc = railways.serialize([{"source": "ne", "path": [[31.0, 35.0], [32.0, 35.5]]}])
+    assert doc["attribution"] == "Natural Earth + OpenStreetMap contributors"
+    assert "Natural Earth" in doc["provenance"]
+    assert "OpenStreetMap" in doc["provenance"]
+    assert doc["lines"] == [{"source": "ne", "path": [[31.0, 35.0], [32.0, 35.5]]}]
+
+
+def test_the_provenance_string_does_not_claim_worldwide_coverage():
+    """Regression: an earlier draft asserted Natural Earth was served
+    worldwide. It never has been -- start() clips it to the same eleven
+    theatre boxes as the OSM overlay, via the same _theatre_boxes() call
+    clip_railroads always used. The string has to disclaim that, not assert
+    it -- "worldwide" may appear (the honest string says "not worldwide"),
+    but never as a bare, unnegated coverage claim."""
+    doc = railways.serialize([])
+    assert "not worldwide" in doc["provenance"]
+    assert "theatres" in doc["provenance"]
+
+
+def test_truncated_regions_default_to_empty_and_pass_through_when_given():
+    """osm_infra.py is the only place that knows a theatre hit the Overpass
+    cap; this module just has to carry that flag rather than drop it."""
+    assert railways.serialize([])["truncated_regions"] == []
+    doc = railways.serialize([], truncated_regions=["russia_ukraine"])
+    assert doc["truncated_regions"] == ["russia_ukraine"]
+
+
+# --- Task 27: the NE/OSM merge, per-feature provenance ----------------------
+
+
+def test_natural_earth_paths_are_wrapped_with_their_source():
+    (rec,) = railways.ne_line_records([[[31.0, 35.0], [32.0, 35.5]]])
+    assert rec["source"] == "ne"
+    assert rec["path"] == [[31.0, 35.0], [32.0, 35.5]]
+
+
+def test_the_merge_keeps_both_provenances_on_every_line():
+    ne_paths = [[[31.0, 35.0], [32.0, 35.5]]]
+    osm_lines = [{"id": "osm:way/1", "source": "osm", "path": [[31.1, 35.1], [31.2, 35.2]], "name": "Test Line"}]
+    merged = railways.merge(ne_paths, osm_lines)
+    assert len(merged) == 2
+    sources = {line["source"] for line in merged}
+    assert sources == {"ne", "osm"}
+    # The OSM record's own attributes ride through untouched -- the merge adds
+    # nothing and drops nothing, it only wraps the Natural Earth half.
+    osm_record = next(line for line in merged if line["source"] == "osm")
+    assert osm_record["name"] == "Test Line"
+
+
+def test_the_merge_does_not_deduplicate_between_the_two_sources():
+    """These are two different claims about (mostly) the same tracks, not two
+    copies of one claim -- a theatre with both keeps both."""
+    ne_paths = [[[31.0, 35.0], [32.0, 35.5]]]
+    osm_lines = [{"id": "osm:way/1", "source": "osm", "path": [[31.0, 35.0], [32.0, 35.5]]}]
+    assert len(railways.merge(ne_paths, osm_lines)) == 2
+
+
+def test_an_empty_osm_overlay_still_serves_the_natural_earth_fallback():
+    """An unswept theatre, or a sweep that has not landed yet, must not blank
+    the global layer -- Natural Earth alone is still a complete answer."""
+    merged = railways.merge([[[31.0, 35.0], [32.0, 35.5]]], [])
+    assert len(merged) == 1
+    assert merged[0]["source"] == "ne"
+
+
+def test_merging_with_no_natural_earth_data_still_serves_the_osm_overlay():
+    osm_lines = [{"id": "osm:way/1", "source": "osm", "path": [[31.0, 35.0], [32.0, 35.5]]}]
+    merged = railways.merge([], osm_lines)
+    assert merged == osm_lines

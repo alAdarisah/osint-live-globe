@@ -172,6 +172,15 @@ export const SVG = {
   jointBase: '<path fill="currentColor" d="M12 2 L14.2 9.2 L21.5 9.2 L15.6 13.6 L17.8 20.8 L12 16.4 L6.2 20.8 L8.4 13.6 L2.5 9.2 L9.8 9.2 Z" fill-opacity="0.85"/>',
   logisticsBase: '<rect x="3" y="8" width="18" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" d="M3 8 L12 3 L21 8"/><line x1="12" y1="8" x2="12" y2="20" stroke="currentColor" stroke-width="1.6"/>',
   radarBase: '<path fill="none" stroke="currentColor" stroke-width="2" d="M4 18 A8 8 0 0 1 20 18"/><path fill="none" stroke="currentColor" stroke-width="2" d="M8 18 A4 4 0 0 1 16 18"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/><line x1="12" y1="18" x2="18" y2="7" stroke="currentColor" stroke-width="2"/>',
+  // Task 29: a bunker -- a low dome mostly below its own ground line, the one
+  // shape distinct enough from armyBase's tall shield/logisticsBase's shed
+  // that a reader scanning the air-defence layer's three glyphs together
+  // (this, radarBase, borderCrossing for a checkpoint) can tell them apart at
+  // a glance.
+  bunker: '<path fill="currentColor" fill-opacity="0.2" stroke="currentColor" stroke-width="1.8" ' +
+    'd="M3 19 C3 12 7 8 12 8 C17 8 21 12 21 19 Z"/>' +
+    '<rect x="10" y="14" width="4" height="5" fill="currentColor"/>' +
+    '<line x1="2" y1="19" x2="22" y2="19" stroke="currentColor" stroke-width="1.8"/>',
   // A single runway seen from above: threshold bars at both ends and a dashed
   // centreline, set on a diagonal so it never lines up with the map's own
   // graticule or with a pipeline. Two earlier attempts failed for opposite
@@ -259,6 +268,27 @@ export const SVG = {
     '<path fill="currentColor" d="M12.9 8.4 9 14.2h2.4L10.9 19l4.1-6.2h-2.6Z"/>',
   borderCrossing: '<path fill="none" stroke="currentColor" stroke-width="1.8" d="M6 3.4v17.2M18 3.4v17.2"/>' +
     '<path fill="currentColor" d="M6 8.2h12v3.2H6Z"/>',
+  // ---- power plant fuel glyphs (Task 28, backend/sources/osm_infra.py's
+  // own fuel normalisation) ----
+  //
+  // Nuclear reuses SVG.nuclear and hydro reuses SVG.dam below -- both are
+  // already exactly the right claim ("a reactor", "a barrier holding back
+  // water") for a plant of that fuel, and wind reuses SVG.wind, drawn
+  // originally for the weather-arrow legend but an unclaimed, already-correct
+  // silhouette for a turbine. Solar and the combustion family (coal/gas/
+  // biomass) get one new glyph each below -- three fuels sharing one flame
+  // glyph, distinguished by colour rather than by shape, the same economy the
+  // four railway node kinds already share one glyph under (see OSM_INFRA_STYLE
+  // in decorators.js).
+  solarPanel: '<circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<g stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
+    '<line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/>' +
+    '<line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/>' +
+    '<line x1="4.9" y1="4.9" x2="7" y2="7"/><line x1="17" y1="17" x2="19.1" y2="19.1"/>' +
+    '<line x1="4.9" y1="19.1" x2="7" y2="17"/><line x1="17" y1="7" x2="19.1" y2="4.9"/></g>',
+  flame: '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" ' +
+    'd="M12 2.6c-2.6 3.6-4.6 5.6-4.6 9a4.6 4.6 0 0 0 9.2 0c0-1.8-.9-2.8-1.8-3.7 ' +
+    'c0 1.8-.9 2.7-1.8 2.7c-.9 0-1.4-.9-1.4-1.8c0-1.8 1.4-3.2.4-6.2Z"/>',
   // ---- orbital launches (backend/sources/launches.py) ----
   //
   // A rocket on the pad rather than in flight: the pin marks a place on the
@@ -527,6 +557,43 @@ export const SVG = {
     '<rect x="8.2" y="6" width="7.6" height="4" rx="0.8" fill="currentColor"/>' +
     '<circle cx="9" cy="18" r="1.4" fill="currentColor"/><circle cx="15" cy="18" r="1.4" fill="currentColor"/>' +
     '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M6.2 20.8h11.6"/>',
+
+  // ---- water bodies (Natural Earth, via backend/sources/water_bodies.py) ----
+  //
+  // Three stacked wave lines -- a legend-row glyph only, for the same reason
+  // railway.line's `railway` glyph above is: the layer itself is a polygon
+  // fill and a line, drawn by water.js's own style function, not by a marker
+  // this SVG is turned into. Nothing chooses between shapes here (no
+  // GLYPH_CHOICES entry), the same treatment the choropleth ramp gets and for
+  // the same reason -- a fill has no shape to pick between.
+  wave: '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+    'd="M2.5 8.5c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+    'd="M2.5 14.5c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+    'd="M2.5 20c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>',
+
+  // ---- shipping lanes (Task 20) ----
+  //
+  // A dashed diagonal with an arrowhead -- a schematic route, deliberately
+  // distinct from `pipeline`'s wavy curve and `railway`'s station-box glyph
+  // so a reader scanning the legend does not mistake one drawn line for
+  // another. Legend-row only, like railway/wave above: the corridors
+  // themselves are polylines drawn by renderShippingLanes, not markers this
+  // SVG is turned into.
+  shippingLane: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3" ' +
+    'stroke-linecap="round" d="M2.5 19.5 L17.5 6"/>' +
+    '<path fill="currentColor" d="M14.6 3.6 L21 4.8 L18 9.2 Z"/>',
+  // A small hull with two wake lines rising behind it -- "traffic density",
+  // built from the same wedge-hulled silhouette as `ship` so the family
+  // reads as maritime, plus `wave`'s stroke idiom for the density half of
+  // the claim. Legend-row only: the wash itself is a canvas
+  // (createLaneDensityLayers in layers.js), not a marker.
+  laneDensity: '<path fill="currentColor" d="M3 15 L21 15 L18 20 L6 20 Z"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ' +
+    'd="M2 9.5c1.6-1.6 3.2-1.6 4.8 0s3.2 1.6 4.8 0 3.2-1.6 4.8 0 3.2 1.6 4.8 0"/>' +
+    '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ' +
+    'd="M2 5.5c1.6-1.6 3.2-1.6 4.8 0s3.2 1.6 4.8 0 3.2-1.6 4.8 0 3.2 1.6 4.8 0"/>',
 };
 
 // Which glyph an Officials & Diplomacy record gets, keyed on the `kind` the
@@ -702,6 +769,42 @@ export const GLYPH_CHOICES = Object.freeze({
   "infra.fab": ["fab", "powerPlant", "refinery", "nuclear"],
   "infra.pipeline": ["pipeline", "refinery", "lng", "powerPlant"],
   "osm.power": ["powerPlant", "nuclear", "refinery", "fab", "dam"],
+  // Task 28: the four new osm_infra.py point classes riding the generic OSM
+  // infrastructure layer -- same crowd-sourced family as osm.power above.
+  "osm.power_substation": ["powerPlant", "borderCrossing", "recordMark"],
+  "osm.refinery": ["refinery", "powerPlant", "fab"],
+  "osm.storage_tank": ["desalination", "lng", "powerPlant"],
+  "osm.oil_well": ["refinery", "powerPlant", "recordMark"],
+  // Task 29: the five OSM military=* base classes merge_military_bases pairs
+  // against MILITARY_BASES -- reusing the curated list's own subtype glyphs
+  // (armyBase/navalBase/airfieldMilitary) rather than inventing a second set,
+  // since the whole point of the merge is that these are the same kind of
+  // claim as a curated site, just a different provenance.
+  "osm.military_base": ["armyBase", "jointBase", "logisticsBase"],
+  "osm.military_naval_base": ["navalBase", "anchor", "armyBase"],
+  "osm.military_training_area": ["armyBase", "recordMark", "alertRing"],
+  "osm.military_barracks": ["logisticsBase", "armyBase", "recordMark"],
+  "osm.military_danger_area": ["armyBase", "alertRing", "recordMark"],
+  // Task 29: the three air-defence/radar classes, a separate default-off
+  // layer (see LAYER_MANIFEST's airDefense entry) with its own completeness
+  // caveat -- checkpoint reuses borderCrossing, the same glyph border_control
+  // already wears, since both are the same kind of controlled-access point.
+  "osm.radar_station": ["radarBase", "recordMark", "alertRing"],
+  "osm.military_bunker": ["bunker", "armyBase", "recordMark"],
+  "osm.military_checkpoint": ["borderCrossing", "alertRing", "recordMark"],
+  // Task 28: power plants, glyph-by-fuel (see osm_infra.py's own
+  // _fuel_category). nuclear/hydro/wind reuse an already-correct existing
+  // glyph (see SVG.nuclear/SVG.dam/SVG.wind's own notes); coal/gas/biomass
+  // share the new flame glyph, distinguished by colour, the same economy the
+  // railway node kinds already share one glyph under.
+  "powerPlant.nuclear": ["nuclear", "powerPlant", "radarBase"],
+  "powerPlant.coal": ["flame", "powerPlant", "refinery"],
+  "powerPlant.gas": ["flame", "powerPlant", "refinery"],
+  "powerPlant.hydro": ["dam", "powerPlant", "raindrop"],
+  "powerPlant.wind": ["wind", "powerPlant"],
+  "powerPlant.solar": ["solarPanel", "powerPlant"],
+  "powerPlant.biomass": ["flame", "powerPlant", "raindrop"],
+  "powerPlant.other": ["powerPlant", "recordMark"],
   // Had exactly one entry, so the picker was suppressed entirely (see
   // GlyphPicker, which needs two shapes before it draws anything) -- a pin type
   // with a shape control that never appeared.
@@ -719,6 +822,21 @@ export const GLYPH_CHOICES = Object.freeze({
   "osm.railway_yard": ["railway", "logisticsBase", "borderCrossing", "cityMedium"],
   "osm.railway_border": ["railway", "borderCrossing", "cityTown", "recordMark"],
   "railway.line": ["railway", "borderCrossing", "pipeline"],
+  // Task 27: the OSM overlay's three line tokens -- same "colour-only token,
+  // picker still offered" treatment as railway.line just above.
+  "railway.electrified": ["railway", "borderCrossing", "pipeline"],
+  "railway.nonElectrified": ["railway", "borderCrossing", "pipeline"],
+  "railway.narrowGauge": ["railway", "borderCrossing", "pipeline"],
+  // Task 27: a genuine marker (a live train position), so it gets the same
+  // settlement-glyph alternatives the station points above do rather than
+  // the line family's shapes.
+  "railway.live": ["railway", "borderCrossing", "cityTown", "cityMedium"],
+  // Same "colour-only token, picker still offered" treatment as railway.line
+  // just above -- neither corridors nor the density wash draws a marker, but
+  // the legend swatch next to their checkbox can still be any shape from the
+  // same schematic-route/maritime family.
+  "lanes.route": ["shippingLane", "pipeline", "railway"],
+  "lanes.density": ["laneDensity", "ship", "tanker", "wave"],
   "dam.barrier": ["dam", "powerPlant", "raindrop", "desalination"],
   "deflock.camera": ["alprCamera", "radarBase", "jammingSignal", "hiddenRing"],
   "osm.military_airfield": [
@@ -735,6 +853,18 @@ export const GLYPH_CHOICES = Object.freeze({
   // ---- space, news, diplomacy, places ----
   "satellite.stations": ["satellite", "satelliteMilitary", "globe", "launchPad"],
   "satellite.military": ["satelliteMilitary", "satellite", "radarBase", "globe"],
+  // Task 24: the seven client-propagated groups all ship with the plain
+  // `satellite` glyph (see SAT_ELEMENT_LAYERS in map/decorators.js) and offer
+  // the same picker list as satellite.stations -- nothing about which group a
+  // pin belongs to is a shape distinction, so there is no reason for one
+  // group's picker to differ from another's.
+  "satellite.navigation": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.weather": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.imaging": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.science": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.geo": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.starlink": ["satellite", "satelliteMilitary", "globe", "launchPad"],
+  "satellite.oneweb": ["satellite", "satelliteMilitary", "globe", "launchPad"],
   // An upcoming launch is a thing that has not happened; a flown one is a
   // record of one that has. The last entry on each says so.
   "launch.upcoming": ["launchPad", "missileBase", "satellite", "alertRing"],

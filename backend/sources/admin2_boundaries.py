@@ -94,11 +94,33 @@ def _thin_ring(ring: list, precision: int) -> list | None:
     return out
 
 
+def _thin_line(line: list, precision: int) -> list | None:
+    """One LineString's coordinates, rounded and de-duplicated like a ring.
+
+    A line is not a ring: it does not have to close, and two points are
+    already a line rather than a degenerate one, so this drops _thin_ring's
+    four-point minimum and closing-point rule and keeps only the rounding and
+    consecutive-duplicate collapse both shapes need.
+    """
+    out: list[list[float]] = []
+    for point in line:
+        if len(point) < 2:
+            continue
+        rounded = [round(float(point[0]), precision), round(float(point[1]), precision)]
+        if not out or rounded != out[-1]:
+            out.append(rounded)
+    return out if len(out) >= 2 else None
+
+
 def thin_geometry(geometry: dict, precision: int) -> dict | None:
-    """Public because admin1_boundaries.py thins the same way against a
-    different source -- rounding-plus-dedup is the one part of both modules
-    that has to behave identically, and a second copy is how they would
-    stop."""
+    """Public because admin1_boundaries.py and water_bodies.py thin the same
+    way against different sources -- rounding-plus-dedup is the one part of
+    all three modules that has to behave identically, and a second copy is
+    how they would stop.
+
+    LineString/MultiLineString exist for water_bodies.py's river centrelines,
+    which are the one geometry kind here with no ring to close.
+    """
     kind = (geometry or {}).get("type")
     if kind == "Polygon":
         rings = [r for r in (_thin_ring(r, precision) for r in geometry["coordinates"]) if r]
@@ -110,6 +132,12 @@ def thin_geometry(geometry: dict, precision: int) -> dict | None:
             if rings:
                 polys.append(rings)
         return {"type": "MultiPolygon", "coordinates": polys} if polys else None
+    if kind == "LineString":
+        line = _thin_line(geometry["coordinates"], precision)
+        return {"type": "LineString", "coordinates": line} if line else None
+    if kind == "MultiLineString":
+        lines = [l for l in (_thin_line(seg, precision) for seg in geometry["coordinates"]) if l]
+        return {"type": "MultiLineString", "coordinates": lines} if lines else None
     return None
 
 

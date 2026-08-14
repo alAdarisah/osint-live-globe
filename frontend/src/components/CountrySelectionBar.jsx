@@ -7,7 +7,18 @@
 //
 // Each chip is also the way back: clicking one reopens that country's card,
 // its × drops that country alone, and Clear drops the lot.
-export default function CountrySelectionBar({ selection, focusedKey, onFocus, onRemove, onClear }) {
+//
+// Task 40: `onCompare` is optional (undefined for any caller that predates
+// the comparison view, same "no-op when absent" rule this app's other
+// optional props follow) -- when supplied, a "Compare" button appears once a
+// second country joins the selection, since a comparison of one country is
+// not a comparison. It stays offered past three: the cap and the "which ones
+// got left out" note both live in countryCompareLogic.js's own
+// selectCompareCountries, not here, so the bar does not need to duplicate
+// that decision to know when to show its own entry point.
+const MIN_TO_COMPARE = 2;
+
+export default function CountrySelectionBar({ selection, focusedKey, onFocus, onRemove, onClear, onCompare }) {
   if (!selection.length) return null;
 
   return (
@@ -41,6 +52,11 @@ export default function CountrySelectionBar({ selection, focusedKey, onFocus, on
           </span>
         ))}
       </div>
+      {onCompare && selection.length >= MIN_TO_COMPARE && (
+        <button type="button" className="country-selection-compare" onClick={onCompare}>
+          Compare
+        </button>
+      )}
       <button type="button" className="country-selection-clear" onClick={onClear}>
         Clear
       </button>
