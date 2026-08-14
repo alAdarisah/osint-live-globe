@@ -319,7 +319,7 @@ Expected: all three time out or are refused. **A success on any of them means th
 
 If `nc` is missing: `ssh root@37.27.38.223 "apt-get install -y netcat-openbsd"`.
 
-- [ ] **Step 3: Confirm a new node is quarantined** — NOT RUN. Device approval is on, but no throwaway node was joined to watch it be held. Do it the next time a device is added.
+- [x] **Step 3: Confirm a new node is quarantined** — done 2026-08-14 with a second userspace tailscaled on the server rather than a spare device. Before/after measurements in docs/security.md.
 
 Install Tailscale on a phone or any spare machine and log in with the same account. At <https://login.tailscale.com/admin/machines> it appears marked **Needs approval**, and it can reach nothing.
 

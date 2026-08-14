@@ -148,9 +148,29 @@ Each claim above, and what was actually observed:
 | The public door still refuses writes | `POST /api/admin-config` on the tunnel URL → 403, `GET /` → 200 |
 | Container egress survived ufw | `ingest` logged 8305 aircraft from OpenSky after the firewall came up |
 
-Not tested: whether an unapproved node is genuinely quarantined. Device approval
-is on, but no throwaway node was joined to watch it be held. Worth doing the next
-time a device is added anyway.
+Device approval was tested the same day with a throwaway node — a second
+`tailscaled` on the server itself, in userspace networking mode with its own
+`--statedir` and `--socket`, so the real node's state was never touched. Joined
+with an untagged, ephemeral, not-pre-approved key, measured before approval and
+again after:
+
+| | Before approval | After approval |
+|---|---|---|
+| `BackendState` | `NeedsMachineAuth` | `Running` |
+| peers it can see | 0 | 2 |
+| server's filter `Srcs` | throwaway absent | `100.65.85.114/32` present |
+| TCP to `osint-server:22` | `Machine is not yet approved by tailnet admin.` | connects, exit 0 |
+| TCP to the PC, 22 and 3389 | same refusal | times out — the policy grants nothing toward the PC, approved or not |
+
+So an unapproved node is not merely blocked from connecting: it is not told the
+other machines exist, and no other machine is told about it. Quarantine is in
+the netmap, not in a firewall rule.
+
+The line to read carefully is the last one. Approval is the **only** gate in
+front of a new device of yours — once approved, it matches `autogroup:owner` and
+receives the `tcp:22` grant automatically. That is intended, and it is why
+approval matters: it is what stands between a compromised account session and an
+SSH-capable node.
 
 The firewall was enabled behind a five-minute `ufw --force disable` watchdog,
 cancelled once a *new* SSH session — not the established one — was confirmed to
