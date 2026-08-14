@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJson, urlForRegion } from "../api";
 import {
   REPLAY_WINDOW_MS, DEFAULT_FRAME_MS, DEFAULT_STEP_MINUTES,
-  PREFETCH_DEPTH, PREFETCH_MAX_INFLIGHT, isStutter, nextDegradeState, createFrameCache,
+  PREFETCH_DEPTH, PREFETCH_MAX_INFLIGHT, isStutter, nextPlaybackStep, createFrameCache,
 } from "../replay/playback";
 import { REPLAY_KINDS } from "../replay/availability";
 
@@ -86,15 +86,19 @@ export function useReplay({
   // `stepMinutes` -- the sync effect below keeps it there while paused/live
   // so a settings change is picked up by the next play, and the playback
   // effect is the only thing that moves it away from that while a sweep is
-  // actually running (see nextDegradeState in replay/playback.js).
+  // actually running (see nextPlaybackStep in replay/playback.js, which both
+  // degrades on a stutter streak and recovers on a later on-time streak).
   const [playbackStep, setPlaybackStep] = useState(stepMinutes);
-  // True only on the step where a degrade just happened, for a UI note
-  // ("Slowed to Xmin steps") -- not reset when playback stops, so pausing or
-  // reaching the live edge mid-degrade still explains why the sweep looked
-  // coarser than configured right up to that point. Reset by the sync
-  // effect the next time playback is *not* running and settings still match
-  // what shipped, i.e. once nothing is left to explain.
-  const [playbackDegraded, setPlaybackDegraded] = useState(false);
+
+  // Review fix (Task 44): `playbackDegraded` is *derived*, not its own piece
+  // of state that only ever got set to true. The first version tracked it
+  // separately and never cleared it except on pause/goLive, so a sweep that
+  // recovered mid-run kept showing "slowed" for the rest of it even after
+  // nextPlaybackStep had already brought the step back down. Comparing
+  // playbackStep against the configured value directly means the note
+  // disappears the instant recovery actually lands, with nothing to forget
+  // to reset.
+  const playbackDegraded = playbackStep !== stepMinutes;
 
   // Task 44: which of REPLAY_KINDS actually has history -- see
   // ../replay/availability.js for what each status means and why "events"
@@ -119,6 +123,11 @@ export function useReplay({
 
   const frameMsRef = useRef(frameMs);
   frameMsRef.current = frameMs;
+  // Live-tracked the same way frameMsRef is, so a settings change reaches an
+  // already-running sweep immediately -- specifically here, the floor
+  // nextPlaybackStep's recovery halves back down to.
+  const configuredStepMinutesRef = useRef(stepMinutes);
+  configuredStepMinutesRef.current = stepMinutes;
 
   // "now" only needs to be fresh enough to keep the slider's right edge
   // accurate -- once a minute is plenty and avoids re-rendering every second
@@ -275,11 +284,14 @@ export function useReplay({
     const inflight = inflightRef.current;
     // Local, not React state, for the same reason replayAtRef exists: this
     // loop must not tear down and rebuild (which would drop whatever fetch
-    // was in flight) every time a degrade nudges the step size. `playbackStep`
-    // seeds it; setPlaybackStep below keeps the *displayed* value in sync for
-    // TimelineBar without the loop itself depending on the state.
+    // was in flight) every time a degrade or a recovery nudges the step
+    // size. `playbackStep` seeds it; setPlaybackStep below keeps the
+    // *displayed* value in sync for TimelineBar without the loop itself
+    // depending on the state. Both streaks are mutually exclusive -- a
+    // stutter resets goodStreak and vice versa, see nextPlaybackStep.
     let stepMinutesLocal = playbackStep;
     let stutterStreak = 0;
+    let goodStreak = 0;
 
     // Fetches one frame ahead of time and parks it in the cache, bounded by
     // PREFETCH_MAX_INFLIGHT concurrent prefetches -- a full queue simply
@@ -343,16 +355,24 @@ export function useReplay({
       // Stuttering, defined concretely (replay/playback.js's
       // stutterThresholdMs): this frame's own fetch took longer than 1.5x the
       // configured frame hold to arrive. Two in a row -- not one, an ordinary
-      // network blip is not a trend -- degrades the step size, which is
-      // published to state (below) so the UI can say so rather than the
-      // sweep just quietly thinning out.
-      stutterStreak = isStutter(latencyMs, frameMsRef.current) ? stutterStreak + 1 : 0;
-      const degrade = nextDegradeState(stepMinutesLocal, stutterStreak);
-      stutterStreak = degrade.streak;
-      if (degrade.stepMinutes !== stepMinutesLocal) {
-        stepMinutesLocal = degrade.stepMinutes;
+      // network blip is not a trend -- degrades the step size; five in a row
+      // of the opposite (on-time) recovers it one notch, never below what
+      // settings actually configured. Either way the change is published to
+      // state (below) so the UI can say so rather than the sweep just
+      // quietly thinning out, or quietly staying thinned out after it no
+      // longer needs to be.
+      const result = nextPlaybackStep({
+        stepMinutes: stepMinutesLocal,
+        configuredMinutes: configuredStepMinutesRef.current,
+        stutterStreak,
+        goodStreak,
+        stuttered: isStutter(latencyMs, frameMsRef.current),
+      });
+      stutterStreak = result.stutterStreak;
+      goodStreak = result.goodStreak;
+      if (result.stepMinutes !== stepMinutesLocal) {
+        stepMinutesLocal = result.stepMinutes;
         setPlaybackStep(stepMinutesLocal);
-        setPlaybackDegraded(true);
       }
 
       timer = setTimeout(step, Math.max(0, frameMsRef.current - (Date.now() - startedAt)));
@@ -388,13 +408,13 @@ export function useReplay({
   }, [isPlaying, replayAt, now, seekTo]);
 
   // Keeps the *displayed* step size matched to settings whenever playback
-  // isn't actually running -- picks up a settings change for the next play,
-  // and clears a stale "degraded" note once there is nothing left running
-  // that it could be describing.
+  // isn't actually running -- picks up a settings change for the next play.
+  // playbackDegraded above is derived from the comparison this restores, so
+  // resetting playbackStep here is also what clears the "degraded" note once
+  // playback stops -- nothing else needs resetting alongside it.
   useEffect(() => {
     if (isPlaying) return;
     setPlaybackStep(stepMinutes);
-    setPlaybackDegraded(false);
   }, [stepMinutes, isPlaying]);
 
   // Task 44's per-kind availability check -- one batch of REPLAY_KINDS.length

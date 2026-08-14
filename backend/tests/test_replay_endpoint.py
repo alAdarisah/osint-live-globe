@@ -285,3 +285,22 @@ def test_a_kind_within_the_window_ceiling_is_not_refused(pool, kind_history):
     body = _kind_body(_run_kind("adsb"))
 
     assert body["status"] == "ok"
+
+
+def test_events_no_longer_hits_the_window_ceiling(pool, kind_history):
+    """Task 44 review: ENTITY_STALE_AFTER["events"] (7 days) is an eviction
+    figure, not a per-request scan width, and entity_history never holds more
+    than HISTORY_RETENTION_SECONDS of rows for *any* kind regardless -- so
+    the old fallback-chain default made `?kind=events` refuse a query that
+    costs the legacy no-kind bundle nothing (it calls storage.history_at
+    with no window_seconds at all and inherits the exact same default).
+    config.REPLAY_WINDOW_SECONDS now names "events" explicitly, at the
+    retention ceiling itself, so the two paths agree."""
+    assert config.REPLAY_WINDOW_SECONDS["events"] == config.HISTORY_RETENTION_SECONDS
+    known, windowed, calls = kind_history
+    known.add("events")
+
+    body = _kind_body(_run_kind("events"))
+
+    assert body["status"] == "ok"
+    assert calls["history_at"] == [("events", 1_700_000_000.0, config.HISTORY_RETENTION_SECONDS)]

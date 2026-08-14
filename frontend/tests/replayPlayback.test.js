@@ -11,9 +11,25 @@ import assert from "node:assert/strict";
 import {
   REPLAY_WINDOW_MS, DEFAULT_FRAME_MS, DEFAULT_STEP_MINUTES,
   FRAME_MS_BOUNDS, STEP_MINUTES_BOUNDS, MAX_STEP_MINUTES,
-  PREFETCH_DEPTH, PREFETCH_MAX_INFLIGHT, PLAYBACK_CACHE_MAX, STUTTER_STREAK_LIMIT,
-  stutterThresholdMs, isStutter, nextDegradeState, createFrameCache,
+  PREFETCH_DEPTH, PREFETCH_MAX_INFLIGHT, PLAYBACK_CACHE_MAX,
+  STUTTER_STREAK_LIMIT, RECOVERY_STREAK_LIMIT,
+  stutterThresholdMs, isStutter, nextPlaybackStep, createFrameCache,
 } from "../src/replay/playback.js";
+
+// A frame-outcome helper so each test below reads as "this happened, then
+// this" rather than repeating the same five-field object literal -- default
+// streaks/configuredMinutes match the common case (nothing degraded yet,
+// configured at 60) and each test overrides only what it's exercising.
+function outcome(overrides) {
+  return nextPlaybackStep({
+    stepMinutes: 60,
+    configuredMinutes: 60,
+    stutterStreak: 0,
+    goodStreak: 0,
+    stuttered: false,
+    ...overrides,
+  });
+}
 
 test("REPLAY_WINDOW_MS is exactly 24 hours, per task-44-brief.md's own wording", () => {
   assert.equal(REPLAY_WINDOW_MS, 24 * 60 * 60 * 1000);
@@ -48,33 +64,124 @@ test("isStutter is a strict > against the threshold, not >=", () => {
   assert.equal(isStutter(500, 800), false);
 });
 
-test("a single slow frame does not degrade -- STUTTER_STREAK_LIMIT frames in a row are required", () => {
+// --- nextPlaybackStep: degrading -----------------------------------------
+
+test("a single stuttering frame does not degrade -- STUTTER_STREAK_LIMIT in a row are required", () => {
   assert.ok(STUTTER_STREAK_LIMIT >= 2); // a lone blip must not trip this
-  const one = nextDegradeState(60, 1);
-  assert.equal(one.degraded, false);
-  assert.equal(one.stepMinutes, 60);
+  const result = outcome({ stuttered: true, stutterStreak: 0 });
+  assert.equal(result.changed, false);
+  assert.equal(result.stepMinutes, 60);
+  assert.equal(result.stutterStreak, 1);
 });
 
-test("STUTTER_STREAK_LIMIT consecutive stutters double the step and reset the streak", () => {
-  const result = nextDegradeState(60, STUTTER_STREAK_LIMIT);
-  assert.equal(result.degraded, true);
+test("STUTTER_STREAK_LIMIT consecutive stutters double the step and reset both streaks", () => {
+  const result = outcome({ stuttered: true, stutterStreak: STUTTER_STREAK_LIMIT - 1, goodStreak: 0 });
+  assert.equal(result.changed, true);
   assert.equal(result.stepMinutes, 120);
-  assert.equal(result.streak, 0);
+  assert.equal(result.stutterStreak, 0);
+  assert.equal(result.goodStreak, 0);
 });
 
 test("the degrade is capped at MAX_STEP_MINUTES, and reports no further change once capped", () => {
-  const atCap = nextDegradeState(MAX_STEP_MINUTES, STUTTER_STREAK_LIMIT);
+  const atCap = outcome({
+    stepMinutes: MAX_STEP_MINUTES, configuredMinutes: 60, stuttered: true, stutterStreak: STUTTER_STREAK_LIMIT - 1,
+  });
   assert.equal(atCap.stepMinutes, MAX_STEP_MINUTES);
-  assert.equal(atCap.degraded, false); // doubled === already-was, so nothing actually changed
-  const nearCap = nextDegradeState(MAX_STEP_MINUTES - 10, STUTTER_STREAK_LIMIT);
+  assert.equal(atCap.changed, false); // doubled === already-was, so nothing actually changed
+  const nearCap = outcome({
+    stepMinutes: MAX_STEP_MINUTES - 10, configuredMinutes: 60,
+    stuttered: true, stutterStreak: STUTTER_STREAK_LIMIT - 1,
+  });
   assert.equal(nearCap.stepMinutes, MAX_STEP_MINUTES); // clamps rather than overshoots
 });
 
-test("a below-threshold streak that never reaches the limit is passed straight through", () => {
-  const result = nextDegradeState(90, STUTTER_STREAK_LIMIT - 1);
-  assert.equal(result.stepMinutes, 90);
-  assert.equal(result.streak, STUTTER_STREAK_LIMIT - 1);
-  assert.equal(result.degraded, false);
+test("a stutter streak below the limit is passed straight through, and an on-time frame resets it", () => {
+  const stillBuilding = outcome({ stuttered: true, stutterStreak: STUTTER_STREAK_LIMIT - 2 });
+  assert.equal(stillBuilding.stepMinutes, 60);
+  assert.equal(stillBuilding.stutterStreak, STUTTER_STREAK_LIMIT - 1);
+  assert.equal(stillBuilding.changed, false);
+
+  // The very next frame arrives on time -- review fix (Task 44): stuttered
+  // and goodStreak are mutually exclusive, so an on-time frame must zero the
+  // stutter streak rather than let it carry over into a later bad patch.
+  const recovered = outcome({ stuttered: false, stutterStreak: STUTTER_STREAK_LIMIT - 1 });
+  assert.equal(recovered.stutterStreak, 0);
+});
+
+// --- nextPlaybackStep: recovering (review fix, Task 44) -------------------
+//
+// The first version of this only ever coarsened -- nothing let a degraded
+// sweep recover once conditions improved, so one bad patch early in a
+// 24-hour sweep left the rest of it coarser than configured long after the
+// network had recovered. These tests are the fix.
+
+test("an on-time frame with nothing degraded does not touch stepMinutes at all", () => {
+  const result = outcome({ stepMinutes: 60, configuredMinutes: 60, stuttered: false, goodStreak: 3 });
+  assert.equal(result.stepMinutes, 60);
+  assert.equal(result.changed, false);
+  // Nothing to recover from -- the good streak resets rather than climbing
+  // forever toward a threshold that would never fire anything.
+  assert.equal(result.goodStreak, 0);
+});
+
+test("a single on-time frame after a degrade does not recover -- RECOVERY_STREAK_LIMIT in a row are required", () => {
+  assert.ok(RECOVERY_STREAK_LIMIT > STUTTER_STREAK_LIMIT); // recovering is deliberately slower than degrading
+  const result = outcome({ stepMinutes: 120, configuredMinutes: 60, stuttered: false, goodStreak: 0 });
+  assert.equal(result.changed, false);
+  assert.equal(result.stepMinutes, 120);
+  assert.equal(result.goodStreak, 1);
+});
+
+test("RECOVERY_STREAK_LIMIT consecutive on-time frames halve the step and reset both streaks", () => {
+  const result = outcome({
+    stepMinutes: 120, configuredMinutes: 60, stuttered: false, goodStreak: RECOVERY_STREAK_LIMIT - 1,
+  });
+  assert.equal(result.changed, true);
+  assert.equal(result.stepMinutes, 60);
+  assert.equal(result.stutterStreak, 0);
+  assert.equal(result.goodStreak, 0);
+});
+
+test("recovery never undercuts configuredMinutes, even from an odd degraded value", () => {
+  // 90 is what a degrade could leave stepMinutes at if configuredMinutes
+  // itself was ever changed mid-sweep (configuredStepMinutesRef in
+  // useReplay.js tracks a live settings change) -- halving must clamp to
+  // the floor rather than dip under it.
+  const result = outcome({
+    stepMinutes: 90, configuredMinutes: 60, stuttered: false, goodStreak: RECOVERY_STREAK_LIMIT - 1,
+  });
+  assert.equal(result.stepMinutes, 60);
+});
+
+test("a full round trip: degrade to 120, then recover all the way back to 60", () => {
+  // nextPlaybackStep's return value deliberately doesn't echo back
+  // configuredMinutes (it's an input, not a piece of state the function
+  // owns) -- useReplay.js's own loop re-supplies it from
+  // configuredStepMinutesRef.current on every call, which is what this
+  // constant models here.
+  const configuredMinutes = 60;
+  let s = { stepMinutes: 60, stutterStreak: 0, goodStreak: 0 };
+  for (let i = 0; i < STUTTER_STREAK_LIMIT; i++) {
+    s = nextPlaybackStep({ ...s, configuredMinutes, stuttered: true });
+  }
+  assert.equal(s.stepMinutes, 120);
+
+  for (let i = 0; i < RECOVERY_STREAK_LIMIT; i++) {
+    s = nextPlaybackStep({ ...s, configuredMinutes, stuttered: false });
+  }
+  assert.equal(s.stepMinutes, 60);
+});
+
+test("a stutter mid-recovery resets the good streak back to zero, not just pauses it", () => {
+  const configuredMinutes = 60;
+  const degraded = outcome({ stuttered: true, stutterStreak: STUTTER_STREAK_LIMIT - 1 });
+  assert.equal(degraded.stepMinutes, 120);
+
+  let s = nextPlaybackStep({ ...degraded, configuredMinutes, stuttered: false }); // goodStreak: 1
+  assert.equal(s.goodStreak, 1);
+  s = nextPlaybackStep({ ...s, configuredMinutes, stuttered: true }); // a fresh stutter
+  assert.equal(s.goodStreak, 0);
+  assert.equal(s.stepMinutes, 120); // one stutter alone doesn't degrade further
 });
 
 // --- createFrameCache -------------------------------------------------

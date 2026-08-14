@@ -39,9 +39,8 @@ export const DEFAULT_STEP_MINUTES = 60;
 export const FRAME_MS_BOUNDS = [200, 5000];
 export const STEP_MINUTES_BOUNDS = [5, 360];
 
-// The ceiling the degrade logic below may push stepMinutes to. Four times
-// REPLAY_WINDOW_MS's implied hourly default (24 steps at the shipped 60min
-// step) -- past this a "sweep" is down to six frames across a whole day,
+// The ceiling the degrade logic below may push stepMinutes to. Six times the
+// shipped 60min step -- past this a 24h sweep is down to four frames total,
 // which is coarse enough that a further degrade would stop looking like
 // playback at all; asking the reader to widen the step themselves, or accept
 // a slower sweep, is the more honest answer past this point.
@@ -79,6 +78,20 @@ export const PLAYBACK_CACHE_MAX = PREFETCH_DEPTH + 2;
 // than a blip.
 export const STUTTER_STREAK_LIMIT = 2;
 
+// How many consecutive on-time frames it takes before a degraded step
+// recovers one notch back down. Review fix (Task 44): the first version of
+// this only ever coarsened -- nothing let a sweep recover once conditions
+// improved, so one transient stutter early in a 24-hour sweep left the rest
+// of it coarser than configured long after the network had recovered.
+// Longer than STUTTER_STREAK_LIMIT on purpose and asymmetric by design:
+// degrading fast protects the tab from a request pile-up (the failure mode
+// PLAYBACK_MIN_STEP_MS's original comment in the pre-Task-44 useReplay.js
+// worried about), so it should trip quickly; recovering should not be as
+// quick, or one good frame right after a bad patch would flap the step size
+// back and forth across an intermittently slow connection instead of
+// settling.
+export const RECOVERY_STREAK_LIMIT = 5;
+
 /**
  * The frame-arrival threshold that defines "stuttering", stated as a
  * concrete number rather than a feeling: a frame whose fetch-plus-apply
@@ -100,26 +113,55 @@ export function isStutter(latencyMs, frameMs) {
 }
 
 /**
- * The step-degrade decision for one frame's outcome.
+ * The step-size decision for one frame's outcome -- both directions. Review
+ * fix (Task 44): the original version of this (nextDegradeState) only ever
+ * coarsened; this replaces it with a symmetric-but-asymmetric-timed version
+ * that also recovers, so a sweep does not stay coarser than configured for
+ * the rest of its run over one bad patch early on.
  *
- * @param {number} stepMinutes the step size playback is currently running at
- *   (already possibly degraded from whatever settings configured).
- * @param {number} consecutiveStutters how many frames in a row (including
- *   this one, if it stuttered) have missed the threshold.
- * @returns {{stepMinutes: number, streak: number, degraded: boolean}}
- *   `stepMinutes` is unchanged unless the streak just reached the limit, in
- *   which case it doubles (capped at MAX_STEP_MINUTES) and `streak` resets
- *   to 0 so three-in-a-row doesn't double twice for one bad patch. `degraded`
- *   is true exactly on the step where a change happened -- the caller uses
- *   it to know when to tell the reader, not to mean "currently coarser than
- *   shipped" (the caller's own state already tracks that across calls).
+ * @param {object} state
+ * @param {number} state.stepMinutes the step size playback is currently
+ *   running at (already possibly degraded from whatever settings
+ *   configured).
+ * @param {number} state.configuredMinutes settings' own stepMinutes -- the
+ *   floor recovery may return to, but never undercut. Recovery only ever
+ *   unwinds a degrade this same sweep applied; it never volunteers a step
+ *   finer than the reader actually configured.
+ * @param {number} state.stutterStreak consecutive stuttering frames so far
+ *   (including this one, if it stuttered).
+ * @param {number} state.goodStreak consecutive on-time frames so far
+ *   (including this one, if it didn't stutter).
+ * @param {boolean} state.stuttered whether *this* frame stuttered.
+ * @returns {{stepMinutes: number, stutterStreak: number, goodStreak: number,
+ *   changed: boolean}} `changed` is true exactly on the step where
+ *   stepMinutes actually moved (either direction) -- the caller uses it to
+ *   know when to tell the reader a degrade just happened, not to mean
+ *   "currently coarser than configured" (comparing stepMinutes against
+ *   configuredMinutes directly answers that, and does not need this flag).
  */
-export function nextDegradeState(stepMinutes, consecutiveStutters) {
-  if (consecutiveStutters < STUTTER_STREAK_LIMIT) {
-    return { stepMinutes, streak: consecutiveStutters, degraded: false };
+export function nextPlaybackStep({ stepMinutes, configuredMinutes, stutterStreak, goodStreak, stuttered }) {
+  if (stuttered) {
+    const streak = stutterStreak + 1;
+    if (streak < STUTTER_STREAK_LIMIT) {
+      return { stepMinutes, stutterStreak: streak, goodStreak: 0, changed: false };
+    }
+    const doubled = Math.min(stepMinutes * 2, MAX_STEP_MINUTES);
+    return { stepMinutes: doubled, stutterStreak: 0, goodStreak: 0, changed: doubled !== stepMinutes };
   }
-  const doubled = Math.min(stepMinutes * 2, MAX_STEP_MINUTES);
-  return { stepMinutes: doubled, streak: 0, degraded: doubled !== stepMinutes };
+
+  // An on-time frame with nothing degraded to recover from is the ordinary
+  // case (shipped/configured cadence, everything fine) -- reset both streaks
+  // and move on without touching stepMinutes.
+  if (stepMinutes <= configuredMinutes) {
+    return { stepMinutes, stutterStreak: 0, goodStreak: 0, changed: false };
+  }
+
+  const streak = goodStreak + 1;
+  if (streak < RECOVERY_STREAK_LIMIT) {
+    return { stepMinutes, stutterStreak: 0, goodStreak: streak, changed: false };
+  }
+  const halved = Math.max(Math.round(stepMinutes / 2), configuredMinutes);
+  return { stepMinutes: halved, stutterStreak: 0, goodStreak: 0, changed: halved !== stepMinutes };
 }
 
 /**

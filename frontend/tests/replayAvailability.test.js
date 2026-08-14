@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 
 import {
   REPLAY_KINDS, kindLabel, kindStatusBadge, describeKindAvailability,
-  describeAvailabilityLoading, describePlaybackDegraded,
+  describeAvailabilityLoading, describePlaybackDegraded, playbackDegradedBadge,
 } from "../src/replay/availability.js";
 
 test("REPLAY_KINDS matches exactly the five kinds the legacy bundle replays", () => {
@@ -103,4 +103,20 @@ test("describePlaybackDegraded names both the configured and the actual step onc
   const msg = describePlaybackDegraded(60, 120);
   assert.match(msg, /120min/);
   assert.match(msg, /60min/);
+});
+
+// --- playbackDegradedBadge ----------------------------------------------
+//
+// Review fix (Task 44): this is the on-screen badge text, previously
+// composed inline in TimelineBar.jsx (`⚠ slowed to {playbackStepMinutes}min
+// steps`) where node --test could never reach it -- the exact thing this
+// module exists to prevent, in the same commit that introduced the module.
+
+test("playbackDegradedBadge names the current step", () => {
+  assert.match(playbackDegradedBadge(120), /120min/);
+});
+
+test("playbackDegradedBadge is null for a non-finite step, same guard style as the rest of this module", () => {
+  assert.equal(playbackDegradedBadge(undefined), null);
+  assert.equal(playbackDegradedBadge(NaN), null);
 });

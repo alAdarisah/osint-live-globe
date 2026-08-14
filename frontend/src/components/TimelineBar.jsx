@@ -6,7 +6,10 @@
 // just renders, and replay/availability.js for every string below the date
 // label -- kept out of this file on purpose, since it is JSX and node --test
 // cannot import it to check the wording directly.
-import { REPLAY_KINDS, kindLabel, kindStatusBadge, describeKindAvailability, describePlaybackDegraded } from "../replay/availability";
+import {
+  REPLAY_KINDS, kindLabel, kindStatusBadge, describeKindAvailability,
+  describePlaybackDegraded, playbackDegradedBadge,
+} from "../replay/availability";
 
 function fmtReplayTime(ts) {
   return new Date(ts).toLocaleString(undefined, {
@@ -36,6 +39,7 @@ export default function TimelineBar({
   const degradeNote = playbackDegraded
     ? describePlaybackDegraded(configuredStepMinutes, playbackStepMinutes)
     : null;
+  const degradeBadge = playbackDegraded ? playbackDegradedBadge(playbackStepMinutes) : null;
 
   return (
     <>
@@ -57,9 +61,9 @@ export default function TimelineBar({
               </span>
             );
           })}
-          {degradeNote && (
+          {degradeBadge && (
             <span className="timeline-kind timeline-degraded-note" title={degradeNote}>
-              ⚠ slowed to {playbackStepMinutes}min steps
+              {degradeBadge}
             </span>
           )}
         </div>

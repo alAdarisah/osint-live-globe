@@ -123,9 +123,12 @@ export function describeAvailabilityLoading(pendingCount, totalCount) {
  * step than settings configured -- the "observable, not a silent lie" half
  * of task-44-brief.md's prefetch requirement. `configuredMinutes` is what
  * settings.replay.stepMinutes actually asked for; `currentMinutes` is what
- * playback is actually running at right now, which nextDegradeState
- * (replay/playback.js) may have doubled one or more times since. Returns
- * null when they match, i.e. nothing to say.
+ * playback is actually running at right now, which nextPlaybackStep
+ * (replay/playback.js) may have doubled one or more times since (and may
+ * since have halved back down, on its own recovery streak -- this is called
+ * with whatever the current numbers are, so a mid-recovery state renders
+ * exactly as honestly as a freshly-degraded one). Returns null when they
+ * match, i.e. nothing to say.
  */
 export function describePlaybackDegraded(configuredMinutes, currentMinutes) {
   if (!(currentMinutes > configuredMinutes)) return null;
@@ -134,4 +137,21 @@ export function describePlaybackDegraded(configuredMinutes, currentMinutes) {
     "responses are arriving slower than the frame rate can wait for it, so the sweep is showing " +
     "fewer, wider-spaced moments instead of stalling."
   );
+}
+
+/**
+ * The short badge text TimelineBar prints on screen next to the degrade
+ * warning -- review fix (Task 44, seventh time this file's own rule was
+ * missed): describePlaybackDegraded above only ever covered the *tooltip*.
+ * The badge a reader sees without hovering anything was still composed
+ * inline in TimelineBar.jsx (`⚠ slowed to {playbackStepMinutes}min steps`),
+ * which is JSX and unreachable by node --test -- exactly the shape this
+ * module exists to prevent, in the same commit that added the module.
+ * Returns null on the same condition describePlaybackDegraded does (nothing
+ * to show once currentMinutes is back at or under configured), so a caller
+ * can render both from one flag without repeating the comparison.
+ */
+export function playbackDegradedBadge(currentMinutes) {
+  if (!Number.isFinite(currentMinutes)) return null;
+  return `⚠ slowed to ${currentMinutes}min steps`;
 }
