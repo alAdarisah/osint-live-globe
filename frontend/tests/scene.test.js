@@ -194,6 +194,74 @@ test("shipped draw gates match the band table", async (t) => {
   });
 });
 
+test("the FIRMS fetch gate", async (t) => {
+  // Measured against the running backend before this gate existed: the unclipped
+  // feed is 184,770 records and 28.2 MB of JSON, and a WORLD viewport is the
+  // whole world, so the layer's `scoped` bbox clipped nothing at the one band
+  // where the layer also draws nothing. Every reader parsed all of it, every
+  // three minutes, from the moment the map opened.
+  //
+  // These four assertions are the whole trade, and each one is load-bearing: the
+  // saving is the first, the reason it is safe is the second and third, and the
+  // fourth is the promise the second must not quietly grow into.
+  await t.test("a world view does not fetch the global thermal feed", () => {
+    const world = resolveScene({ zoom: 3 });
+    assert.equal(world.fetchZoom.get("firms"), floorOf("THEATRE"));
+    assert.ok(!world.active.has("firms"), "firms drew at a band it does not fetch at");
+  });
+
+  await t.test("a focused country fetches its fires however far out the camera is", () => {
+    // What keeps the "active fires" rows in buildLivePicture and buildAdminLive:
+    // the fetch carries that country's bounds (see bboxCell in useOsintData.js),
+    // so the rows count the country rather than the planet -- 435 kB over
+    // Ukraine against 28.2 MB.
+    const focused = resolveScene({ zoom: 3, focus: { kind: "country", key: "UA" } });
+    assert.equal(focused.fetchZoom.get("firms"), null);
+  });
+
+  await t.test("a focus does not put the heat canvas on a world view", () => {
+    // FOCUS_FETCH_ONLY rather than FOCUS_PROMOTE. A promotion would lift the
+    // draw band too, which is the thing the layer's own entry argues against: a
+    // global thermal feed at world zoom is mostly agricultural burning.
+    const focused = resolveScene({ zoom: 3, focus: { kind: "country", key: "UA" } });
+    assert.equal(focused.drawZoom.get("firms"), floorOf("THEATRE"));
+    assert.ok(!focused.active.has("firms"), "a country focus painted fires over the world board");
+  });
+
+  await t.test("the gate opens exactly where the layer starts drawing", () => {
+    const theatre = resolveScene({ zoom: floorOf("THEATRE") });
+    assert.equal(theatre.fetchZoom.get("firms"), floorOf("THEATRE"));
+    assert.ok(theatre.active.has("firms"), "firms fetches at a band it does not draw at");
+  });
+});
+
+test("the two on-demand line documents", async (t) => {
+  // railways and powerLines are 20.4 MB and 20.7 MB of JSON respectively, and
+  // both were fetched at boot for every reader. These assertions are what makes
+  // the lazy fetch in useOsintData.js's ONE_SHOT correct rather than merely
+  // cheaper: nothing but an explicit act can put either layer on the map, so
+  // nothing but an explicit act needs to pay for its geometry.
+  for (const key of ["railways", "powerLines"]) {
+    await t.test(`${key} is reachable only by an explicit act`, () => {
+      assert.equal(LAYER_MANIFEST[key].disposition, MANUAL, `${key} is no longer admin-only`);
+      assert.equal(LAYER_MANIFEST[key].fetch, FETCH_MANUAL, `${key} is no longer fetch-manual`);
+
+      // Neither a deep camera, nor a war under it, nor a country focus may
+      // activate it -- the three things that move every other layer.
+      const deep = resolveScene({ zoom: 12 });
+      const hot = resolveScene({
+        zoom: 12,
+        profile: { isMaritime: false, hotCountries: ["UA"], landFraction: 0.9, dominantCountries: ["UA"] },
+      });
+      const focused = resolveScene({ zoom: 12, focus: { kind: "country", key: "UA" } });
+      for (const [label, scene] of [["a deep camera", deep], ["a war view", hot], ["a country focus", focused]]) {
+        assert.ok(!scene.active.has(key), `${label} switched ${key} on by itself`);
+        assert.equal(scene.fetchZoom.get(key), Infinity, `${label} lifted ${key}'s fetch gate`);
+      }
+    });
+  }
+});
+
 test("disposition", async (t) => {
   await t.test("the camera alone never switches on a corroborating layer", () => {
     // The principle this exists to protect: a pin that is an inference drawn

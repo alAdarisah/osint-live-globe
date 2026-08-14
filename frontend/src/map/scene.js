@@ -143,7 +143,6 @@ export const FETCH_ALWAYS_BECAUSE = {
   energyFlows: "the country card",
   foodTrade: "the country card",
   foodPriceIndex: "the country card",
-  firms: "the country card's live picture counts fires in the country bbox",
   jamming: "the country card's live picture counts jamming cells in the country bbox",
   ais: "the country card counts navy hulls and tankers; Navy is ungated anyway",
   adsb: "the country card counts military aircraft; flagged and military are ungated anyway",
@@ -881,11 +880,30 @@ export const LAYER_MANIFEST = {
     // THEATRE rather than WORLD: at world zoom a global thermal feed is mostly
     // agricultural burning, which is a smear rather than a signal. Over one
     // theatre it is the layer that shows something burning that should not be.
-    // The fetch cannot be gated at all -- the country card counts fires inside
-    // the country bbox -- which is precisely why this feed earns a viewport
-    // bbox instead of a band gate.
+    //
+    // The fetch used to be FETCH_ALWAYS, on the argument that the country card
+    // counts fires inside the country bbox and a band gate would take that row
+    // away -- with `scoped` standing in for the gate. Measured against the
+    // running backend, the bbox was not standing in for anything at the one band
+    // where it mattered: a WORLD viewport *is* the whole world, so `bboxCell`
+    // resolves to null there (see useOsintData.js) and the poll ships the
+    // unclipped feed. That is 184,770 records and 28.2 MB of JSON parsed every
+    // three minutes, from the moment the map opens, at the one band where this
+    // layer draws nothing at all. A theatre-sized box over Europe and the Middle
+    // East is 1.8 MB; a country box over Ukraine is 435 kB.
+    //
+    // So the gate is the same THEATRE the layer draws at, and the two cards that
+    // count fires keep their rows through FOCUS_FETCH_ONLY below rather than
+    // through a permanent global poll: focusing a country fetches the fires
+    // inside that country's bounds however far out the camera is.
+    //
+    // Below the gate with nothing focused, the fires row does not silently read
+    // zero. firms has no coverage record until it has fetched, so
+    // coverageStateFor returns "not_loaded" and both buildLivePicture and
+    // buildAdminLive say so in the words they already had for it: an empty
+    // section here is "not checked", not "checked and empty".
     draw: { band: "THEATRE" },
-    fetch: FETCH_ALWAYS,
+    fetch: "THEATRE",
     disposition: AUTO,
     scoped: true,
   },
@@ -1079,6 +1097,16 @@ const HOT_PROMOTE = [
 // which no camera position may do.
 const FOCUS_PROMOTE = ["cities", "conflictHistory", "infra", "osmInfra"];
 
+// A focus lifts these layers' *fetch* gate and nothing else -- no band
+// promotion, so what draws at a given zoom is unchanged by clicking a country.
+//
+// Separate from FOCUS_PROMOTE because the two answer different questions, and
+// firms is the case that separates them. The cards need the fire counts for the
+// country the reader just clicked, which is a fetch. They do not need the global
+// thermal heat canvas painted over a world view, which is what a band promotion
+// would also do -- and what the layer's own entry argues against.
+const FOCUS_FETCH_ONLY = ["firms"];
+
 /**
  * @param {object} ctx
  * @param {number} ctx.zoom            current Leaflet zoom
@@ -1180,6 +1208,7 @@ function fetchZoomOf(key, entry, { focus, bypass }) {
   // A focused country is a request for that country's whole picture, so its
   // feeds are fetched regardless of how far out the camera happens to be.
   if (focus?.kind === "country" && FOCUS_PROMOTE.includes(key)) return null;
+  if (focus?.kind === "country" && FOCUS_FETCH_ONLY.includes(key)) return null;
   return floorOf(entry.fetch);
 }
 

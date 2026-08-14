@@ -483,6 +483,13 @@ export function useOsintData({
   const reapplyTransformRef = useRef(() => {});
   const reapplyTransform = useCallback((keys) => reapplyTransformRef.current(keys), []);
 
+  // Which on-demand documents have already been asked for (see ONE_SHOT in the
+  // effect below). Reached from outside through a ref for the same reason the
+  // pollers are: that effect mounts once.
+  const oneShotStartedRef = useRef(new Set());
+  const fetchOneShotRef = useRef(() => {});
+  const ensureOneShot = useCallback((key) => fetchOneShotRef.current(key), []);
+
   /**
    * Per-feed fetch coverage, threaded into `raw.fetchCoverage` (via
    * onData("fetchCoverage", ...)) so the country card's honesty section
@@ -760,27 +767,63 @@ export function useOsintData({
       })
       .catch((err) => console.warn("Failed to load submarine cables:", err));
 
-    // Coarse railway linework -- a whole document ({lines, attribution,
-    // provenance}, see backend/sources/railways.py), hard-cached for a day and
-    // fetched once at boot rather than polled, exactly like the cables routes
-    // above. The whole document is handed on so the popup can state its own
-    // provenance rather than having it restated in the renderer.
-    fetchJson("/api/railways")
-      .then((data) => {
-        if (cancelled) return;
-        onDataRef.current("railways", data || { lines: [] });
-      })
-      .catch((err) => console.warn("Failed to load railway linework:", err));
+    // Whole documents fetched the first time something switches their layer on,
+    // once each, never polled. The document is handed on entire so a popup can
+    // state its own provenance rather than having it restated in the renderer.
+    //
+    // The same shape the lakes fetch in createMapController.js's setLayerVisible
+    // already uses, and for the same reason -- it lives here rather than there
+    // only because these two have real layers of their own, so their documents
+    // belong beside the cables/water/infrastructure fetches below.
+    //
+    // Both entries are here because their own manifest entries already say they
+    // should be: `fetch: FETCH_MANUAL` and `disposition: MANUAL` together mean
+    // the resolver never switches them on and a country focus never drags them
+    // in -- only a checkbox, a stored configuration or a followed link does.
+    // They were nevertheless fetched at boot, which measured against the running
+    // backend is 20.4 MB and 20.7 MB of JSON (4.7 MB and 6.3 MB on the wire)
+    // parsed and held by every reader, for two layers that are off by default
+    // and that most sessions never draw a metre of.
+    //
+    // Cables and marine water deliberately stay at boot below. Cables is a
+    // twentieth of the size and CORROBORATING, so clicking a port or a landing
+    // point is enough to put it on the map -- there is no single toggle to hang
+    // a lazy fetch off. Marine water is 1.0 MB and is the basemap's own
+    // coastline context, on from the start.
+    const ONE_SHOT = {
+      railways: {
+        url: "/api/railways",
+        deliver: (data) => onDataRef.current("railways", data || { lines: [] }),
+        label: "railway linework",
+      },
+      powerLines: {
+        url: "/api/power-lines",
+        deliver: (data) => onDataRef.current("powerLines", data || { lines: [] }),
+        label: "transmission lines",
+      },
+    };
 
-    // Transmission-line geometry (Task 28, backend/sources/power_lines.py) --
-    // same treatment as railways just above: a whole document, hard-cached
-    // for a day, fetched once at boot rather than polled.
-    fetchJson("/api/power-lines")
-      .then((data) => {
-        if (cancelled) return;
-        onDataRef.current("powerLines", data || { lines: [] });
-      })
-      .catch((err) => console.warn("Failed to load transmission lines:", err));
+    fetchOneShotRef.current = (key) => {
+      const entry = ONE_SHOT[key];
+      if (!entry || oneShotStartedRef.current.has(key)) return;
+      // Marked before the request, not after -- the same in-flight guard the
+      // lakes fetch keeps, so a reader flipping the checkbox off and on again
+      // while the first one is still arriving does not start a second copy of a
+      // multi-megabyte download.
+      oneShotStartedRef.current.add(key);
+      fetchJson(entry.url)
+        .then((data) => {
+          if (cancelled) return;
+          entry.deliver(data);
+        })
+        .catch((err) => {
+          // Cleared on failure so the next toggle retries, exactly as the lakes
+          // fetch resets waterLakesFeatures to null. A layer that failed once and
+          // then silently refuses to ever try again is worse than a slow one.
+          oneShotStartedRef.current.delete(key);
+          console.warn(`Failed to load ${entry.label}:`, err);
+        });
+    };
 
     // Seas, gulfs, bays and straits -- marine only (see backend/sources/
     // water_bodies.py and backend/app.py's water_endpoint for why lakes and
@@ -956,5 +999,9 @@ export function useOsintData({
     // Exposed for Admin Mode: re-runs the override transform over the payloads
     // already in hand, so an edit lands on the map as it is typed.
     reapplyTransform,
+    // Fetches an on-demand document the first time something asks for it. Wired
+    // to the layer toggle in App.jsx -- see ONE_SHOT above for what is in it and
+    // why railways and power lines in particular are not fetched at boot.
+    ensureOneShot,
   };
 }
