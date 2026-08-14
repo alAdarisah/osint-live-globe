@@ -396,6 +396,38 @@ def test_run_once_is_a_no_op_when_there_is_nothing_new(monkeypatch):
     assert fake.docs == {}
 
 
+def test_run_once_recovers_from_the_pre_wrap_state_shape(monkeypatch, caplog):
+    """Every vessel_profile_state document on disk before Task 52 is a bare
+    {mmsi: entry} accumulator -- no "entities" key, no "schema_version" key,
+    same as port_calls.py/flight_legs.py's own equivalent test. Drives the
+    whole stack through run_once() itself -- _load_state, apply_history,
+    build_profile, both writes -- not just the version check in isolation."""
+    old_shaped_state = {MMSI: {"samples": {"11.0": -100.0}, "last_seen": -100.0, "current_draught": 11.0}}
+    rows = [row(1, 0.0, draught=17.0, ship_type=80)]
+    fake = _FakeStorage(rows)
+    fake.docs[vp.STATE_NAME] = old_shaped_state
+    monkeypatch.setattr(vp, "storage", fake)
+
+    with caplog.at_level("WARNING", logger="osint-globe.refine"):
+        result = _run(vp.run_once())
+    assert result["ok"] is True  # did not raise
+    assert any("schema_version" in r.message for r in caplog.records)  # logged, not silent
+
+    # The old (11.0m) sample is gone -- state was discarded wholesale, not
+    # selectively repaired -- so this pass's own new draught reading is the
+    # accumulator's only sample, exactly as it would be against a genuinely
+    # empty state.
+    assert fake.docs[vp.STATE_NAME]["schema_version"] == vp.STATE_SCHEMA_VERSION
+    entities = fake.docs[vp.STATE_NAME]["entities"]
+    assert len(entities[MMSI]["samples"]) == 1
+    profile = fake.docs["vessel_profiles"][MMSI]
+    assert profile["cargo_class"] == "tanker"
+    assert profile["draught_current"] == 17.0
+    # The cursor still advanced past this pass's own rows -- a state reset
+    # must never rewind or stall the cursor.
+    assert fake.docs[vp.CURSOR_NAME] == {"last_id": 1}
+
+
 def test_a_hull_that_goes_dark_decays_instead_of_freezing_at_its_last_verdict(monkeypatch):
     """The Task 16 review's Important finding: a hull that stops reporting
     must not keep serving its last confident laden_state/draught_current

@@ -496,7 +496,40 @@ def test_a_failed_state_write_holds_the_cursor_back_and_does_not_double_the_open
     # the first attempt's batch, not a second departure opened alongside it.
     assert len(fake.leg_batches) == 2
     assert fake.leg_batches[0] == fake.leg_batches[1]
-    assert fake.docs[fl.STATE_NAME][ICAO]["leg"]["arrived_at"] is None
+    assert fake.docs[fl.STATE_NAME]["entities"][ICAO]["leg"]["arrived_at"] is None
+
+
+# --- Task 52: recovering from an old-shaped state document -----------------
+
+
+def test_run_once_recovers_from_the_pre_wrap_state_shape(monkeypatch, caplog):
+    """Every flight_legs_state document on disk before Task 52 is a bare
+    {icao24: entry} map -- no "entities" key, no "schema_version" key -- the
+    aviation twin of test_port_calls.py's own equivalent test. Drives the
+    whole stack through run_once() itself -- _load_state, apply_positions,
+    both writes -- not just the version check in isolation."""
+    old_shaped_state = {ICAO: {"last": {"on_ground": True, "altitude_state": None, "ts": -600.0}}}
+    rows = [pos(1, 0.0, on_ground=True, airfield_km=1.0), pos(2, 60.0, on_ground=False, airfield_km=1.0)]
+    fake = _FakeStorage(rows)
+    fake.docs[fl.STATE_NAME] = old_shaped_state
+    monkeypatch.setattr(fl, "storage", fake)
+
+    with caplog.at_level("WARNING", logger="osint-globe.refine"):
+        result = _run(fl.run_once())
+    assert result["ok"] is True  # did not raise
+    assert any("schema_version" in r.message for r in caplog.records)  # logged, not silent
+
+    # The old "last" pointer is gone -- state was discarded wholesale, not
+    # selectively repaired -- so this pass's own on_ground transition opens a
+    # fresh leg exactly as it would against a genuinely empty state (not, for
+    # instance, comparing against the discarded on_ground=True and treating
+    # this as a continuation of a leg that was never durably recorded).
+    assert result["legs"] == 1
+    assert fake.docs[fl.STATE_NAME]["schema_version"] == fl.STATE_SCHEMA_VERSION
+    assert fake.docs[fl.STATE_NAME]["entities"][ICAO]["leg"]["departure_observed"] is True
+    # The cursor still advanced past this pass's own rows -- a state reset
+    # must never rewind or stall the cursor.
+    assert fake.docs[fl.CURSOR_NAME] == {"last_id": 2}
 
 
 def test_apply_positions_does_not_mutate_the_state_it_was_given():

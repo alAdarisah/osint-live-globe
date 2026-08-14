@@ -371,3 +371,97 @@ def test_a_pass_with_nothing_new_writes_nothing(monkeypatch):
     result = _run(lane_density.run_once())
     assert result == {"read": 0, "cells": 0, "ok": True}
     assert fake.docs == {}
+
+
+# --- Task 52: recovering from an old-shaped chokepoint_state document ------
+
+
+def test_run_once_recovers_from_an_old_shaped_chokepoint_state(monkeypatch, caplog):
+    """A day-entry shape change is the concrete hazard Task 52's own brief
+    names for this module: _finalize_and_prune's `mmsis.values()` (called
+    once a day-entry is old enough to close, see that function) raises
+    AttributeError against a day whose own "mmsis" is a list rather than a
+    dict -- a plausible earlier shape (membership as a bare list of MMSIs,
+    before by_class tallying needed a dict) that would otherwise freeze this
+    job's cursor forever while decay keeps running (see the module
+    docstring's "worst case" note). This drives the whole stack through
+    run_once() itself -- _cursor.load_state, compute_chokepoints,
+    _finalize_and_prune, both writes -- not just the version check in
+    isolation, matching jam_crosscheck.py's own equivalent test.
+    """
+    old_shaped_state = {
+        "schema_version": 0,  # an explicitly incompatible, superseded shape
+        "days_seen": ["2026-07-01"],
+        "latest_day": "2026-07-01",
+        "boxes": {
+            HORMUZ_LABEL: {
+                "days": {
+                    # Old-shaped: a bare list of MMSIs rather than {mmsi: cls}.
+                    # Handed straight to _finalize_and_prune once this pass's
+                    # own new rows push latest_day far enough past
+                    # 2026-07-01 to close it, `mmsis.values()` would raise.
+                    "2026-07-01": {"status": "open", "mmsis": ["999"]},
+                },
+            },
+        },
+    }
+    lat, lon = HORMUZ_POINT
+    rows = [row(1, "2026-08-05", lat, lon, "111")]  # far past 2026-07-01 -- would force the close path
+    fake = _FakeStorage(rows)
+    fake.docs[lane_density.CHOKEPOINT_STATE_NAME] = old_shaped_state
+    monkeypatch.setattr(lane_density, "storage", fake)
+
+    with caplog.at_level("WARNING", logger="osint-globe.refine"):
+        result = _run(lane_density.run_once())
+    assert result["ok"] is True  # did not raise
+    assert any("schema_version" in r.message for r in caplog.records)  # logged, not silent
+
+    new_state = fake.docs[lane_density.CHOKEPOINT_STATE_NAME]
+    assert new_state["schema_version"] == lane_density.CHOKEPOINT_STATE_SCHEMA_VERSION
+    # The old, incompatible 2026-07-01 entry is gone -- state was discarded
+    # wholesale, not selectively repaired -- so this pass's own new row is
+    # the only thing in the rebuilt state.
+    assert "2026-07-01" not in new_state.get("days_seen", [])
+    assert new_state["days_seen"] == ["2026-08-05"]
+    doc = fake.docs[lane_density.CHOKEPOINT_DOC_NAME]
+    today = doc["boxes"][HORMUZ_LABEL]["today"]
+    assert today["date"] == "2026-08-05"
+    assert today["total"] == 1
+    # The cursor still advanced past this pass's own rows -- a state reset
+    # must never rewind or stall the cursor (see the module docstring).
+    assert fake.docs[lane_density.CURSOR_NAME] == {"last_id": 1}
+
+
+def test_a_pre_task_52_state_document_with_no_schema_version_is_not_reset(monkeypatch, caplog):
+    """CHOKEPOINT_STATE_SCHEMA_VERSION's own comment claims adopting this
+    guard does not, by itself, discard a real chokepoint_state document that
+    predates it -- every one of those has no "schema_version" key at all,
+    which _cursor.load_state treats as version 1 by default (see that
+    function's docstring), matching CHOKEPOINT_STATE_SCHEMA_VERSION==1
+    exactly. Unlike port_calls.py/flight_legs.py/vessel_profile.py, this
+    document's shape is not changing in Task 52 -- so, unlike those three
+    modules' own equivalent tests, real pre-existing state must survive
+    unchanged into this pass's own output, not be discarded."""
+    assert lane_density.CHOKEPOINT_STATE_SCHEMA_VERSION == 1
+    pre_task_52_state = {
+        "days_seen": ["2026-08-01"],
+        "latest_day": "2026-08-01",
+        "boxes": {HORMUZ_LABEL: {"days": {"2026-08-01": {"status": "open", "mmsis": {"111": None}}}}},
+    }
+    assert "schema_version" not in pre_task_52_state
+
+    lat, lon = HORMUZ_POINT
+    rows = [row(1, "2026-08-01", lat, lon, "222")]  # same day -- extends the still-open entry
+    fake = _FakeStorage(rows)
+    fake.docs[lane_density.CHOKEPOINT_STATE_NAME] = pre_task_52_state
+    monkeypatch.setattr(lane_density, "storage", fake)
+
+    with caplog.at_level("WARNING", logger="osint-globe.refine"):
+        result = _run(lane_density.run_once())
+    assert result["ok"] is True
+    assert not any("schema_version" in r.message for r in caplog.records)  # no reset -- nothing to log
+
+    day = fake.docs[lane_density.CHOKEPOINT_STATE_NAME]["boxes"][HORMUZ_LABEL]["days"]["2026-08-01"]
+    # Both the pre-existing "111" and this pass's own "222" are present --
+    # the old entry was carried forward and extended, not wiped and rebuilt.
+    assert set(day["mmsis"]) == {"111", "222"}

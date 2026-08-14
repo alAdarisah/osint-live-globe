@@ -41,6 +41,7 @@ import copy
 import logging
 
 from backend import config, storage
+from backend.refine import _cursor
 from backend.refine.port_call_thresholds import (
     PORT_EXACT_RADIUS_KM, PORT_PROXIMITY_RADIUS_KM, PORT_SEARCH_RADIUS_KM,
 )
@@ -52,6 +53,24 @@ log = logging.getLogger("osint-globe.port_calls")
 CURSOR_NAME = "port_calls_cursor"
 STATE_NAME = "port_calls_state"
 HEALTH_NAME = "port_calls"
+
+# Bump this whenever port_calls_state's own on-disk shape changes -- see
+# backend/refine/_cursor.py's load_state and jam_crosscheck.py's own "State-
+# shape tolerance" section for the incident this guards against (Task 52).
+# 1 -> 2 is not a future-hypothetical bump: every port_calls_state document
+# already on disk before this change is a bare {mmsi: entry} map with no
+# "schema_version" key at all, which _cursor.load_state treats as version 1
+# by default (see _UNVERSIONED there). This change itself moves that map
+# under its own "entities" key, alongside the version stamp -- a bare
+# top-level "schema_version" key would otherwise collide with a real mmsi,
+# since every other top-level key in this document is read as one (see
+# _prune_state), which is not a risk jam_crosscheck.py's own richer,
+# named-field document runs. So version 2 is deliberately the *first*
+# version this deploy expects, making that wrapping change itself the one
+# this guard visibly (logged, not silent) recovers from on rollout, not only
+# a hypothetical future one. Bump again, past 2, whenever a *later* shape
+# change happens to the per-vessel entry shape inside "entities".
+STATE_SCHEMA_VERSION = 2
 
 # Rows read from entity_history per pass. Bounded so that a job which has
 # fallen behind -- a container restart after a day down, or the very first run
@@ -239,10 +258,14 @@ def apply_positions(rows: list[dict], ports: ProximityIndex, state: dict) -> tup
     returns them) -> (calls to upsert, the state to persist for next time,
     how many completed dwells could not be attributed to any port at all).
 
-    Pure and DB-free: `state` is a plain dict shaped like the "port_calls_state"
-    reference document, not a live connection, which is what makes this
-    testable without a database (see backend/tests/test_port_calls.py). The
-    input `state` is never mutated -- _advance is handed a deep copy of each
+    Pure and DB-free: `state` is a plain {mmsi: entry} dict, not a live
+    connection, which is what makes this testable without a database (see
+    backend/tests/test_port_calls.py). This is the unwrapped shape
+    "port_calls_state" actually persists under its own "entities" key --
+    see _load_state and STATE_SCHEMA_VERSION's own comment on why the stored
+    document also carries a "schema_version" alongside it -- so apply_positions
+    itself, and every existing test of it, never has to know that wrapper
+    exists. The input `state` is never mutated -- _advance is handed a deep copy of each
     vessel's entry, not a reference into the caller's dict, so a caller that
     retries a batch on `state` it already holds (see run_once) gets back a
     second, independent result rather than one built on an entry the first
@@ -288,14 +311,17 @@ def _prune_state(state: dict, now_ts: float) -> dict:
     return kept
 
 
-async def _load_cursor() -> int:
-    doc = await storage.reference(CURSOR_NAME)
-    return int(doc["last_id"]) if isinstance(doc, dict) and isinstance(doc.get("last_id"), (int, float)) else 0
-
-
 async def _load_state() -> dict:
-    doc = await storage.reference(STATE_NAME)
-    return doc if isinstance(doc, dict) else {}
+    """port_calls_state's own {mmsi: entry} map, or {} if there is none yet
+    or the stored shape does not match STATE_SCHEMA_VERSION -- see
+    _cursor.load_state and this module's own STATE_SCHEMA_VERSION comment.
+    The document on disk wraps that flat map under its own "entities" key,
+    alongside the version stamp; unwrapped back here so apply_positions/
+    _prune_state (and every existing test of them) keep operating on the
+    same plain {mmsi: entry} dict they always have."""
+    doc = await _cursor.load_state(storage, STATE_NAME, STATE_SCHEMA_VERSION, job_name="port_calls")
+    entities = doc.get("entities")
+    return entities if isinstance(entities, dict) else {}
 
 
 async def _load_ports() -> ProximityIndex:
@@ -356,7 +382,7 @@ async def run_once() -> dict:
     doubles up. See test_a_failed_state_write_holds_the_cursor_back_and_does_
     not_double_the_open_call in backend/tests/test_port_calls.py.
     """
-    cursor = await _load_cursor()
+    cursor = await _cursor.load_cursor(storage, CURSOR_NAME)
     rows = await storage.entity_history_since("ais", cursor, BATCH_LIMIT)
     if not rows:
         return {"read": 0, "calls": 0, "rejected": 0, "ok": True}
@@ -369,11 +395,14 @@ async def run_once() -> dict:
     if not wrote:
         return {"read": len(rows), "calls": 0, "rejected": rejected, "ok": False}
 
-    state_ok = await storage.record_reference(STATE_NAME, _prune_state(new_state, rows[-1]["ts"]))
+    pruned_state = _prune_state(new_state, rows[-1]["ts"])
+    state_ok = await storage.record_reference(
+        STATE_NAME, {"schema_version": STATE_SCHEMA_VERSION, "entities": pruned_state},
+    )
     if not state_ok:
         return {"read": len(rows), "calls": 0, "rejected": rejected, "ok": False}
 
-    cursor_ok = await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    cursor_ok = await _cursor.advance_cursor(storage, CURSOR_NAME, rows[-1]["id"])
     if not cursor_ok:
         return {"read": len(rows), "calls": 0, "rejected": rejected, "ok": False}
 

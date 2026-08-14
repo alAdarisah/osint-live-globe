@@ -96,6 +96,7 @@ import logging
 import re
 
 from backend import config, storage
+from backend.refine import _cursor
 from backend.sources.proximity import haversine_km
 
 log = logging.getLogger("osint-globe.flight_legs")
@@ -103,6 +104,21 @@ log = logging.getLogger("osint-globe.flight_legs")
 CURSOR_NAME = "flight_legs_cursor"
 STATE_NAME = "flight_legs_state"
 HEALTH_NAME = "flight_legs"
+
+# Bump this whenever flight_legs_state's own on-disk shape changes -- see
+# backend/refine/_cursor.py's load_state and port_calls.py's own identical
+# comment (Task 52), which this mirrors exactly: every flight_legs_state
+# document on disk before this change is a bare {icao24: entry} map with no
+# "schema_version" key, which _cursor.load_state treats as version 1 by
+# default. This change wraps that map under its own "entities" key alongside
+# the version stamp -- a bare top-level "schema_version" key would otherwise
+# collide with a real icao24, since every other top-level key in this
+# document is read as one (see _prune_state). Version 2 is deliberately the
+# *first* version this deploy expects, so that wrapping change is itself what
+# this guard visibly (logged, not silent) recovers from on rollout. Bump
+# again, past 2, whenever a *later* shape change happens to the per-airframe
+# entry shape inside "entities".
+STATE_SCHEMA_VERSION = 2
 
 # Rows read from entity_history per pass -- see port_calls.BATCH_LIMIT for the
 # full reasoning. Kept at the same figure: the cost is an index-scan against
@@ -364,9 +380,13 @@ def apply_positions(rows: list[dict], state: dict) -> tuple[list[dict], dict]:
     """One batch of entity_history rows (oldest first, as entity_history_since
     returns them) -> (legs to upsert, the state to persist for next time).
 
-    Pure and DB-free: `state` is a plain dict shaped like the
-    "flight_legs_state" reference document, not a live connection -- see
-    backend/tests/test_flight_legs.py. The input `state` is never mutated:
+    Pure and DB-free: `state` is a plain {icao24: entry} dict, not a live
+    connection -- see backend/tests/test_flight_legs.py. This is the
+    unwrapped shape "flight_legs_state" actually persists under its own
+    "entities" key alongside a "schema_version" stamp -- see _load_state and
+    STATE_SCHEMA_VERSION's own comment -- so apply_positions itself, and
+    every existing test of it, never has to know that wrapper exists. The
+    input `state` is never mutated:
     _advance is handed a deep copy of each airframe's entry, matching
     port_calls.apply_positions' own reasoning (a caller that retries a batch
     on `state` it already holds must get a second, independent result rather
@@ -403,14 +423,17 @@ def _prune_state(state: dict, now_ts: float) -> dict:
     return kept
 
 
-async def _load_cursor() -> int:
-    doc = await storage.reference(CURSOR_NAME)
-    return int(doc["last_id"]) if isinstance(doc, dict) and isinstance(doc.get("last_id"), (int, float)) else 0
-
-
 async def _load_state() -> dict:
-    doc = await storage.reference(STATE_NAME)
-    return doc if isinstance(doc, dict) else {}
+    """flight_legs_state's own {icao24: entry} map, or {} if there is none
+    yet or the stored shape does not match STATE_SCHEMA_VERSION -- see
+    _cursor.load_state and this module's own STATE_SCHEMA_VERSION comment.
+    The document on disk wraps that flat map under its own "entities" key,
+    alongside the version stamp; unwrapped back here so apply_positions/
+    _prune_state (and every existing test of them) keep operating on the
+    same plain {icao24: entry} dict they always have."""
+    doc = await _cursor.load_state(storage, STATE_NAME, STATE_SCHEMA_VERSION, job_name="flight_legs")
+    entities = doc.get("entities")
+    return entities if isinstance(entities, dict) else {}
 
 
 async def run_once() -> dict:
@@ -443,7 +466,7 @@ async def run_once() -> dict:
     holds_the_cursor_back_and_does_not_double_the_open_leg in
     backend/tests/test_flight_legs.py.
     """
-    cursor = await _load_cursor()
+    cursor = await _cursor.load_cursor(storage, CURSOR_NAME)
     rows = await storage.entity_history_since("adsb", cursor, BATCH_LIMIT)
     if not rows:
         return {"read": 0, "legs": 0, "ok": True}
@@ -455,11 +478,14 @@ async def run_once() -> dict:
     if not wrote:
         return {"read": len(rows), "legs": 0, "ok": False}
 
-    state_ok = await storage.record_reference(STATE_NAME, _prune_state(new_state, rows[-1]["ts"]))
+    pruned_state = _prune_state(new_state, rows[-1]["ts"])
+    state_ok = await storage.record_reference(
+        STATE_NAME, {"schema_version": STATE_SCHEMA_VERSION, "entities": pruned_state},
+    )
     if not state_ok:
         return {"read": len(rows), "legs": 0, "ok": False}
 
-    cursor_ok = await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    cursor_ok = await _cursor.advance_cursor(storage, CURSOR_NAME, rows[-1]["id"])
     if not cursor_ok:
         return {"read": len(rows), "legs": 0, "ok": False}
 
