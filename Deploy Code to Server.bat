@@ -19,7 +19,10 @@ REM it most of the time, and a deploy that only shipped committed changes would
 REM be a deploy that silently omitted whatever you were actually testing.
 setlocal EnableDelayedExpansion
 
-set SERVER=root@37.27.38.223
+REM The tailnet name, not the public address: port 22 is firewalled to the
+REM tailscale0 interface, so this resolves and connects only while Tailscale
+REM is up on this PC. See docs/superpowers/specs/2026-08-14-tailscale-access-design.md
+set SERVER=root@osint-server.tailee11c0.ts.net
 set REMOTE=/opt/osint
 set TARBALL=%TEMP%\osint-deploy.tgz
 

@@ -18,7 +18,10 @@ REM Daily -> Start a program -> this file. It needs no arguments and no
 REM credentials beyond the SSH key already in %USERPROFILE%\.ssh.
 setlocal
 
-set SERVER=root@37.27.38.223
+REM The tailnet name, not the public address: port 22 is firewalled to the
+REM tailscale0 interface, so this resolves and connects only while Tailscale
+REM is up on this PC. See docs/superpowers/specs/2026-08-14-tailscale-access-design.md
+set SERVER=root@osint-server.tailee11c0.ts.net
 set REMOTE=/var/backups/osint
 set DEST=%~dp0data\backups
 set KEEP_DAYS=30

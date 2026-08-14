@@ -15,10 +15,13 @@ REM What the link serves is the read-only listener (nginx :8081): the map, all
 REM read endpoints, and a 403 on any attempt to write the admin configuration.
 REM Full access with the admin panel is the SSH tunnel instead:
 REM
-REM   ssh -L 8080:localhost:8080 root@37.27.38.223     then http://localhost:8080
+REM   ssh -L 8080:localhost:8080 root@osint-server.tailee11c0.ts.net     then http://localhost:8080
 setlocal
 
-set SERVER=root@37.27.38.223
+REM The tailnet name, not the public address: port 22 is firewalled to the
+REM tailscale0 interface, so this resolves and connects only while Tailscale
+REM is up on this PC. See docs/superpowers/specs/2026-08-14-tailscale-access-design.md
+set SERVER=root@osint-server.tailee11c0.ts.net
 
 ssh %SERVER% "osint-link"
 if errorlevel 1 (

@@ -33,10 +33,11 @@ get a working map.
 11. [Configuration reference](#configuration-reference)
 12. [Persistence](#persistence)
 13. [Monitoring](#monitoring)
-14. [Tests](#tests)
-15. [Troubleshooting](#troubleshooting)
-16. [Limits, and what this is not](#limits-and-what-this-is-not)
-17. [Attribution](#attribution)
+14. [Security](#security)
+15. [Tests](#tests)
+16. [Troubleshooting](#troubleshooting)
+17. [Limits, and what this is not](#limits-and-what-this-is-not)
+18. [Attribution](#attribution)
 
 ---
 
@@ -1166,6 +1167,39 @@ write grants, and put a real password on Grafana before publishing port 3000.
 so it is reachable on the compose network and from nothing published to the
 host. That boundary is deliberate: the exposition carries route names, source
 names and error counts, which is operational detail rather than map data.
+
+---
+
+## Security
+
+Full detail, including the credential rotations that are yours to run, is in
+[docs/security.md](docs/security.md). The short version:
+
+The access model is two nginx listeners, and it is the whole of it. `:80` is
+reached only through an SSH tunnel and gets the app including Admin Mode; `:8081`
+is what the Cloudflare tunnel points at, and writes to `/api/admin-config` are
+refused there. Everything else the stack publishes — Postgres, the replica, the
+backend, Prometheus, Grafana — binds `127.0.0.1` on the server, so reaching any
+of it already needs the SSH key that also opens the admin door.
+
+What guards the public door: a Content-Security-Policy with `script-src 'self'`
+(which is why Leaflet and its plugins are vendored into
+`frontend/public/vendor/` rather than fetched from unpkg), `nosniff`,
+`frame-ancestors 'none'`, a referrer and permissions policy, and per-visitor
+rate and connection limits keyed off `CF-Connecting-IP`. Links built from feed
+data go through `safeUrl`, which allows only `http`/`https` — escaping alone does
+nothing to a `javascript:` URL, and every URL on the map came from a publisher
+we do not control.
+
+Three passwords still fall back to a built-in default: `POSTGRES_PASSWORD`,
+`REPLICATION_PASSWORD` and `GRAFANA_ADMIN_PASSWORD`. All three are behind
+localhost-only ports. `ops/rotate-credentials.sh` replaces all three in the
+order that avoids locking a service out — the Postgres password lives in the
+database, not in the compose file, so it has to change there first:
+
+```bash
+ssh root@osint-server.tailee11c0.ts.net 'bash /opt/osint/ops/rotate-credentials.sh'
+```
 
 ---
 

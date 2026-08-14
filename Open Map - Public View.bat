@@ -18,7 +18,10 @@ REM No tunnel and no SSH forwarding: this is the real public URL over the
 REM internet, so it also tells you the link is genuinely reachable from outside.
 setlocal EnableDelayedExpansion
 
-set SERVER=root@37.27.38.223
+REM The tailnet name, not the public address: port 22 is firewalled to the
+REM tailscale0 interface, so this resolves and connects only while Tailscale
+REM is up on this PC. See docs/superpowers/specs/2026-08-14-tailscale-access-design.md
+set SERVER=root@osint-server.tailee11c0.ts.net
 
 echo Asking the server for the current public link...
 REM The URL is not stored anywhere: it is a Cloudflare quick tunnel, so the
