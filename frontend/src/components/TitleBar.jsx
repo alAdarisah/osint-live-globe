@@ -3,7 +3,7 @@ import PlaceSearch from "./PlaceSearch";
 import CopyLinkButton from "./CopyLinkButton";
 
 export default function TitleBar({
-  theme, onToggleTheme, adminMode, onToggleAdminMode, readOnly, onLocatePlace, getShareUrl,
+  theme, onToggleTheme, adminMode, onToggleAdminMode, readOnly, onLocatePlace, getShareUrl, onOpenExport,
 }) {
   const clock = useClock();
 
@@ -20,6 +20,20 @@ export default function TitleBar({
             the brief -- the one copy-link affordance that is always on
             screen, whatever card (if any) is open. */}
         <CopyLinkButton getShareUrl={getShareUrl} label="Copy link" />
+        {/* Task 43: everything currently on screen, as GeoJSON or CSV, with a
+            provenance header naming every source, its licence and its
+            collection time -- see ExportDialog.jsx / map/exportBuilder.js.
+            A plain button next to Copy link rather than tucked into the
+            control drawer: exporting is a reader action about the world on
+            screen right now, the same footing Copy link already has, not an
+            adjustment to how the map behaves. */}
+        <button
+          id="exportToggle"
+          title="Export what is currently on screen as GeoJSON or CSV"
+          onClick={onOpenExport}
+        >
+          Export
+        </button>
         {/* The one way in and out of Admin Mode. Deliberately a plain labelled
             button rather than a hidden key chord: a mode that changes what the
             map is allowed to show should be visibly on, and its state should be

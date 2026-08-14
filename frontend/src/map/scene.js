@@ -824,6 +824,52 @@ export const LAYER_MANIFEST = {
   precip: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   clouds: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   windArrows: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  // Task 45: OWM's other four tile layers (see map/weatherLayers.js), same
+  // treatment as clouds right above -- never switched on by the resolver,
+  // reachable only by ticking the checkbox in WeatherSection.jsx.
+  wind: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  precipitation: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  temp: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  pressure: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  // Task 46: the day/night line. AUTO rather than MANUAL, unlike every other
+  // reference layer in this file (water, cables, railways...) -- the brief is
+  // explicit that this is "essential context for reading thermal detections
+  // and imagery, which is why it is here and not decoration", the same
+  // reasoning that keeps outagePoints/countries/czib ungated-AUTO rather than
+  // opt-in. Ungated (draw: null) like those three, so it is simply on unless
+  // a reader unticks it. `fetch: FETCH_MANUAL` is still the honest word for
+  // its network behaviour, just not for the reason it usually is here: this
+  // layer has no endpoint at all, ever -- it is computed from the clock alone
+  // (see map/solarMath.js) and refreshed on a timer in createMapController.js,
+  // so "never polled" is trivially true rather than "not yet ticked".
+  // draw:null/AUTO puts it in SCENE_APPLY_KEYS (see below), which is what
+  // lets the reader's checkbox override the resolver the same way every
+  // other layer's does.
+  terminator: {
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: AUTO,
+  },
+  // Task 50: the coverage overlay -- where this map has actually looked,
+  // read from raw.fetchCoverage rather than fetched from anywhere.
+  // Deliberately MANUAL, and off by default, same as `water`/`railways`
+  // just above: it draws rectangles and a legend over the reader's whole
+  // view, and the brief this task was written from is explicit -- "Default
+  // off. This is an instrument for interrogating the map, not part of the
+  // default reading." draw: null (ungated -- once switched on it draws at
+  // every zoom; there is no zoom at which "where has this map looked" stops
+  // being a fair question). fetch: FETCH_MANUAL is the honest word for its
+  // network behaviour for the same reason terminator's own note gives just
+  // below: this layer has no endpoint at all, ever. It is computed entirely
+  // from raw.fetchCoverage, which every other polled and one-shot fetch
+  // already publishes for its own reasons (see COVERAGE_FEEDS in
+  // map/popups.js) -- this layer adds no fetch of its own, so it needs
+  // neither a POLL_CONFIG row nor a boot fetch of its own.
+  coverage: {
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
   firms: {
     // One toggle covers two things -- the heat canvas and the interactive
     // per-point circles -- and only the second of them was ever gated. So this

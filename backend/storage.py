@@ -1602,6 +1602,30 @@ async def history_at(kind: str, at: float, window_seconds: int | None = None) ->
     return [json.loads(r["payload"]) for r in rows]
 
 
+# Answers a narrower question than history_at above: not "where was this kind
+# at a moment", just "has this kind ever written a row here at all". /api/replay
+# needs this to tell apart the two different reasons history_at can come back
+# empty -- a kind like "satellites" that this backend has never recorded (see
+# that source's own docstring on why it deliberately skips record_snapshot,
+# which reads as "no data" to a reader) from a kind that does have a movement
+# log somewhere but genuinely had nothing recorded in the window just asked
+# about (which reads as "nothing happened").
+#
+# EXISTS + no ts bound is what keeps this cheap regardless of how wide the
+# window a caller was about to ask history_at for was going to be: idx_history_
+# lookup's leading column is `kind`, so this seeks straight to the first row
+# for it and stops -- one index probe, never a scan, whether the kind has one
+# row or eleven million.
+_KIND_HAS_HISTORY = "SELECT EXISTS(SELECT 1 FROM entity_history WHERE kind = $1)"
+
+
+async def kind_has_history(kind: str) -> bool:
+    if _pool is None:
+        return False
+    async with _pool.acquire() as conn:
+        return bool(await conn.fetchval(_KIND_HAS_HISTORY, kind))
+
+
 # Consecutive recorded positions for one kind, keeping only the pairs far apart
 # in time. Written as a window function rather than pulled into Python because
 # the input is every position ever recorded for the window -- millions of rows
@@ -2079,6 +2103,28 @@ async def entity_latest(kind: str, order_by_recency: bool = False) -> list[dict]
             f"SELECT payload FROM entity_latest WHERE kind = $1 ORDER BY {order}", kind
         )
     return [json.loads(r["payload"]) for r in rows]
+
+
+async def entity_latest_with_ids(kind: str) -> list[tuple[str, dict]]:
+    """entity_latest rows as (entity_id, payload) pairs.
+
+    entity_id is entity_latest's own primary-key half (see the CREATE TABLE at
+    the top of this module) and is not reliably duplicated inside payload
+    itself -- a caller that needs a stable identity for a row cannot assume
+    which of a kind's own fields ("mmsi" for ais, "icao24" for adsb, ...)
+    happens to carry it. Task 42's alert rules are exactly this caller: firing
+    one alert per matching entity needs a key that is always right rather than
+    guessed per kind, so this reads it from the column instead. Same shape as
+    entity_latest_with_times just above -- one extra column alongside the
+    payload, not a different query path.
+    """
+    if _pool is None:
+        return []
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT entity_id, payload FROM entity_latest WHERE kind = $1 ORDER BY entity_id", kind
+        )
+    return [(r["entity_id"], json.loads(r["payload"])) for r in rows]
 
 
 async def entity_latest_one(kind: str, entity_id: str) -> dict | None:

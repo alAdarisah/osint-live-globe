@@ -414,6 +414,75 @@ export function selectOfficialsItems(officialsRaw, { scope, windowHours }) {
   return filtered.slice(0, OFFICIALS_MAX_ITEMS);
 }
 
+// ---------- opening a row's own record detail card ----------
+//
+// A row in Events, News or Officials is a fused/scraped record with a real
+// counterpart in one of the map's own kinds -- the same card a map pin (or a
+// country-card row, via App.jsx's openRecordDetail -> mapApi.recordDetail in
+// createMapController.js) already opens. This is the one place that maps a
+// tab to the `kind` recordDetail's own DECORATORS/ID_FIELD tables know, and a
+// row's own id field, so IntelPanel.jsx does not have to restate either.
+//
+// Escalation is the one tab with nothing to open: a zone is a region
+// aggregate over a 24h/7-day window (backend/escalation.py), not a fused
+// record with an id of its own -- there is no "escalation" entry in
+// recordDetail's tables and there should not be one. `null` here is what lets
+// IntelPanel.jsx tell "this tab has no card" apart from "this row's record is
+// gone", the same (b)-vs-(c) distinction eventDetail.js's own
+// buildNearbyBlock draws between "searched and found nothing" and "never
+// searched at all".
+export const INTEL_RECORD_KIND = {
+  escalation: null,
+  events: "events",
+  news: "gdelt",
+  officials: "officials",
+};
+
+// The field each tab's own item carries its id under -- matching
+// createMapController.js's own ID_FIELD table for the same kind (events:
+// "id", gdelt: "event_id", officials: "id"). Not read for "escalation",
+// which never reaches this table (intelRecordRef returns before touching it).
+const INTEL_RECORD_ID_FIELD = {
+  events: "id",
+  news: "event_id",
+  officials: "id",
+};
+
+/**
+ * A panel row's own `{kind, id}` for opening the same card a map pin opens,
+ * or `null` when there is nothing this row could ever open: either its tab
+ * has no card at all (Escalation), or the row itself carries no id in the
+ * field its tab is keyed on (News in particular can lack `event_id` -- see
+ * IntelPanel.jsx's own News rowKey, which already falls back to `source_url`
+ * for exactly this case). A row this returns `null` for must not be rendered
+ * as clickable at all (see IntelPanel.jsx's Row components).
+ *
+ * Deliberately does *not* check whether that id is still present in any raw
+ * feed. A row rendered a moment ago can point at a record that has since
+ * aged out of the window or been dropped by a reload -- a real state this
+ * project's honesty rule says must be said, not swallowed -- but that check
+ * already exists, once, at recordDetail's own live lookup (App.jsx's
+ * openRecordDetail already turns a miss there into an explicit "no longer
+ * listed" card rather than an empty one or a silent no-op). Re-running the
+ * same check here, against IntelPanel's own `eventsRaw`/`gdeltRaw`/
+ * `officialsRaw` props, would be a *second*, independently-timed opinion
+ * about whether the same id is still live -- those props are plain React
+ * state, updated on a different tick than the map controller's own internal
+ * `raw` object recordDetail reads, so the two could disagree about exactly
+ * the record a reader just clicked. Task 12's review (Important 3, see this
+ * module's own note on `windowMaxAgeDays`) is the standing lesson for why
+ * this project keeps a single check for one fact rather than two that could
+ * drift: recordDetail's is that one check, and this function resolves *which*
+ * id to hand it, nothing more.
+ */
+export function intelRecordRef(item, tabKind) {
+  const kind = INTEL_RECORD_KIND[tabKind];
+  if (!kind || !item) return null;
+  const id = item[INTEL_RECORD_ID_FIELD[tabKind]];
+  if (id === undefined || id === null || id === "") return null;
+  return { kind, id: String(id) };
+}
+
 // ---------- user-visible strings ----------
 //
 // This project's frontend suite cannot import JSX at all, so any sentence

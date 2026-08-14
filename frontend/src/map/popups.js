@@ -16,6 +16,7 @@ import { countryContainsPoint } from "./countryHitTest";
 import { CLASS_LABEL as WATER_CLASS_LABEL, WATER_SCALE_CAVEAT } from "./water";
 import { SUBDIVISION_SCALE_CAVEAT } from "./subdivisions";
 import { DISTRICT_METRICS, DISTRICT_NO_RECORD_CAVEAT } from "./districts";
+import { sunElevation, sunriseSunset } from "./solarMath";
 
 // ACLED/GDELT country names don't always match Natural Earth's ADMIN name
 // (e.g. "Russian Federation" vs "Russia") -- this covers the common cases.
@@ -1968,6 +1969,93 @@ function buildSatellitePasses(raw, key) {
   return satellitePassesSectionHtml(raw.satellitePasses?.[key] || { status: "loading" });
 }
 
+/** The centroid of a {south, west, north, east} bounds object, or null when
+ *  `bounds` is missing or carries a non-finite edge -- the same "no
+ *  coordinate, no section" gate buildSatellitePasses' own callers apply
+ *  before this ever runs. Antimeridian-aware the same way
+ *  createMapController.js's own boundsCentroid is (Russia/Fiji-shaped
+ *  countries straddle 180, and averaging west/east directly would land the
+ *  centroid on the far side of the planet from the sliver the bbox names). */
+function sunSectionCentroid(bounds) {
+  if (!bounds) return null;
+  const { south, west, north, east } = bounds;
+  if (![south, west, north, east].every((v) => typeof v === "number" && Number.isFinite(v))) return null;
+  const lat = (south + north) / 2;
+  const unwrappedEast = east < west ? east + 360 : east;
+  let lon = (west + unwrappedEast) / 2;
+  if (lon > 180) lon -= 360;
+  return { lat, lon };
+}
+
+function fmtUtcClock(date) {
+  return `${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")} UTC`;
+}
+
+/**
+ * Task 46's per-point illumination fold: sunrise, sunset and current sun
+ * elevation for this place's centre point, computed client-side from the
+ * current clock (see map/solarMath.js) -- essential context for reading a
+ * thermal detection or a satellite image, not decoration (see that task's
+ * own brief), which is why it sits in the Situation group next to the
+ * satellite-overpass fold rather than with the structural, rarely-changing
+ * country facts.
+ *
+ * The polar ruling this task's brief calls out by name: at high latitudes
+ * some dates have no sunrise and no sunset at all, and that has to read as a
+ * distinct, positive fact ("the sun does not set today here") rather than as
+ * an empty rise/set pair that looks like a computation that failed -- see
+ * solarMath.js's elevationCrossings, whose alwaysAbove/alwaysBelow flags this
+ * reads rather than inferring the polar case from a null.
+ *
+ * `null` centroid (no bounds yet) drops the whole fold rather than rendering
+ * it empty -- the same convention every other bounds-gated fold in this file
+ * follows (see e.g. buildConflictSummary's callers).
+ *
+ * The actual wording lives in the exported buildSunSectionForPoint below,
+ * which takes lat/lon/date directly rather than reading `bounds`/`new Date()`
+ * itself -- the review fix this split exists for: nothing reached the three
+ * branches (normal/polar day/polar night) this fold renders until a real
+ * point and instant could be pinned in a test, the same "no user-visible
+ * sentence node --test cannot reach" rule the rest of this codebase's
+ * sentence-building already follows.
+ */
+function buildSunSection(bounds) {
+  const point = sunSectionCentroid(bounds);
+  if (!point) return "";
+  return buildSunSectionForPoint(point.lat, point.lon, new Date());
+}
+
+/**
+ * The rendered wording for the sun-position fold at a specific point and
+ * instant -- exported so frontend/tests/terminator.test.js (or a card test)
+ * can pin a polar-latitude point and a fixed date and assert on the actual
+ * three branches a reader sees, not just on the solarMath.js maths behind
+ * them. See buildSunSection's own docstring for why this split exists.
+ */
+export function buildSunSectionForPoint(lat, lon, date) {
+  const elevationDeg = sunElevation(lat, lon, date);
+  const { rise, set, alwaysAbove, alwaysBelow } = sunriseSunset(date, lat, lon);
+
+  let riseSetLine;
+  if (alwaysAbove) {
+    riseSetLine = "The sun does not set today at this latitude &mdash; polar day.";
+  } else if (alwaysBelow) {
+    riseSetLine = "The sun does not rise today at this latitude &mdash; polar night.";
+  } else {
+    riseSetLine = `Sunrise ${fmtUtcClock(rise)}, sunset ${fmtUtcClock(set)} (today, this place's centre point).`;
+  }
+
+  return `
+    <div class="meta">Sun elevation right now: <b>${elevationDeg.toFixed(1)}&deg;</b>
+      ${esc(elevationDeg >= 0 ? "above the horizon" : "below the horizon")}.</div>
+    <div class="meta">${riseSetLine}</div>
+    <p class="meta">Derived: arithmetic over the current time and this place's centre point using standard
+      low-precision solar-position formulas, not an observation of the sky. Sunrise/sunset use the
+      standard -0.833&deg; elevation threshold (atmospheric refraction plus the sun's own angular radius).
+      A large country's true sunrise varies noticeably across its own width; this is one point's answer,
+      not the whole country's.</p>`;
+}
+
 // Task 10: fifteen sections is too many to scan at once, so PlaceInfoCard's
 // optional `groups` prop folds them into three questions a reader actually
 // asks -- what is happening right now (Situation), what does this country
@@ -1980,7 +2068,7 @@ function buildSatellitePasses(raw, key) {
 export const COUNTRY_CARD_GROUPS = [
   {
     id: "situation", title: "Situation",
-    sectionIds: ["conflict", "live", "satellitePasses", "connectivity", "events", "verified", "trend"],
+    sectionIds: ["conflict", "live", "satellitePasses", "sun", "connectivity", "events", "verified", "trend"],
   },
   {
     id: "country", title: "Country",
@@ -2049,6 +2137,12 @@ export function countryCardSections(props, raw, bounds) {
     // loadSatellitePasses), so it has something to say even before this
     // country's boundary layer has resolved a Leaflet bbox of its own.
     { id: "satellitePasses", title: "Satellite overpasses", html: buildSatellitePasses(raw, satelliteKey) },
+    // Task 46: same "not gated on bounds" reasoning does not apply here --
+    // unlike satellite passes, this reads bounds directly (see
+    // buildSunSection) rather than a centroid the controller already
+    // computed for a different purpose, so it drops out gracefully until a
+    // bbox exists rather than needing one plumbed to it separately.
+    { id: "sun", title: "Sun position", html: buildSunSection(bounds) },
     // Joined on ISO2 rather than on the country name: IODA and Natural Earth
     // disagree about several names ("Cote D Ivoire" vs "Côte d'Ivoire") and a
     // name join silently drops exactly those.
@@ -2570,6 +2664,10 @@ export function waterCardSections(feature, raw, bounds) {
     // ("water:<id>") -- see waterCardFor's own use of feature.id elsewhere
     // for the same identity.
     { id: "satellitePasses", title: "Satellite overpasses", html: buildSatellitePasses(raw, `water:${feature.id}`) },
+    // Task 46: see buildSunSection's own docstring -- drops out when
+    // `bounds` is not available yet, the same as every other bounds-gated
+    // fold in this card.
+    { id: "sun", title: "Sun position", html: buildSunSection(bounds) },
     { id: "traffic", title: "Traffic now", html: buildWaterTraffic(feature, raw, bounds) },
     { id: "dark", title: "Dark activity", html: buildWaterDark(feature, raw, bounds) },
     { id: "chokepoint", title: "Chokepoint watch", html: buildWaterChokepoint(feature) },

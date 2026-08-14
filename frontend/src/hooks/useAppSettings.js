@@ -660,6 +660,41 @@ export function useAppSettings() {
     [update]
   );
 
+  // --- Task 42's alert rules ------------------------------------------
+
+  /** Save a rule -- a new one if its id is not already in the list, an edit
+   *  in place otherwise. One action for both, the same "one writer, no
+   *  caller has to remember which path it is on" reasoning setLayerStyle
+   *  and every other patch-style setter above already follows. */
+  const saveAlertRule = useCallback(
+    (rule) =>
+      update((prev) => {
+        const rules = prev.alertRules;
+        const index = rules.findIndex((r) => r.id === rule.id);
+        const next = index === -1 ? [...rules, rule] : rules.map((r, i) => (i === index ? rule : r));
+        return { ...prev, alertRules: next };
+      }),
+    [update]
+  );
+
+  const deleteAlertRule = useCallback(
+    (id) => update((prev) => ({ ...prev, alertRules: prev.alertRules.filter((r) => r.id !== id) })),
+    [update]
+  );
+
+  /** The list row's own on/off switch -- a paused rule stays configured
+   *  (geofence, condition, everything) but the cache worker's own
+   *  parse_rules skips it, same as `enabled: false` anywhere else in this
+   *  file. */
+  const setAlertRuleEnabled = useCallback(
+    (id, enabled) =>
+      update((prev) => ({
+        ...prev,
+        alertRules: prev.alertRules.map((r) => (r.id === id ? { ...r, enabled } : r)),
+      })),
+    [update]
+  );
+
   // --- Task 31's Inference section ----------------------------------------
 
   /**
@@ -752,6 +787,13 @@ export function useAppSettings() {
 
   const setPerformance = useCallback(
     (patch) => update((prev) => ({ ...prev, performance: { ...prev.performance, ...patch } })),
+    [update]
+  );
+
+  // --- Task 44's replay cadence/step ----------------------------------------
+
+  const setReplay = useCallback(
+    (patch) => update((prev) => ({ ...prev, replay: { ...prev.replay, ...patch } })),
     [update]
   );
 
@@ -936,9 +978,10 @@ export function useAppSettings() {
       saveFilterPreset, deleteFilterPreset,
       setInferenceProductMode,
       setCardSectionHidden, moveCardSection, setCardSectionDefaultOpen, resetCardSettings,
-      setPerformance,
+      setPerformance, setReplay,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
+      saveAlertRule, deleteAlertRule, setAlertRuleEnabled,
       resetAll, exportSettings, importSettings,
     }),
     [
@@ -949,9 +992,10 @@ export function useAppSettings() {
       saveFilterPreset, deleteFilterPreset,
       setInferenceProductMode,
       setCardSectionHidden, moveCardSection, setCardSectionDefaultOpen, resetCardSettings,
-      setPerformance,
+      setPerformance, setReplay,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
+      saveAlertRule, deleteAlertRule, setAlertRuleEnabled,
       resetAll, exportSettings, importSettings,
     ]
   );

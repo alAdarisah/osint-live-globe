@@ -360,7 +360,45 @@ def test_a_failed_state_write_holds_the_cursor_back_and_does_not_double_the_open
     # the first attempt's batch, not a second dwell opened alongside it.
     assert len(fake.port_call_batches) == 2
     assert fake.port_call_batches[0] == fake.port_call_batches[1]
-    assert fake.docs[pc.STATE_NAME][MMSI]["run"]["phase"] == "open"
+    assert fake.docs[pc.STATE_NAME]["entities"][MMSI]["run"]["phase"] == "open"
+
+
+# --- Task 52: recovering from an old-shaped state document -----------------
+
+
+def test_run_once_recovers_from_the_pre_wrap_state_shape(monkeypatch, caplog):
+    """Every port_calls_state document on disk before Task 52 is a bare
+    {mmsi: entry} map -- no "entities" key, no "schema_version" key. Handed
+    straight to apply_positions via a naive _load_state, this would work fine
+    today, but it is exactly the shape a future entry-level change (like
+    jam_crosscheck.py's own real incident, see that module's docstring) could
+    break in a way _advance's own dict access would raise on, permanently
+    freezing the cursor with source_health merely red. This drives the whole
+    stack through run_once() itself -- _load_state, apply_positions, both
+    writes -- not just the version check in isolation, matching Task 39
+    review's own instruction for jam_crosscheck's identical test.
+    """
+    old_shaped_state = {MMSI: {"run": {"phase": "candidate", "since": 0.0, "lat": PORT_LAT, "lon": PORT_LON}}}
+    rows = [pos(1, 0.0), pos(2, HOUR)]  # would otherwise complete the dwell begun in `old_shaped_state`
+    fake = _FakeStorage(rows)
+    fake.docs[pc.STATE_NAME] = old_shaped_state
+    monkeypatch.setattr(pc, "storage", fake)
+    _stub_ports(monkeypatch)
+
+    with caplog.at_level("WARNING", logger="osint-globe.refine"):
+        result = _run(pc.run_once())
+    assert result["ok"] is True  # did not raise
+    assert any("schema_version" in r.message for r in caplog.records)  # logged, not silent
+
+    # The old candidate run is gone -- state was discarded wholesale, not
+    # selectively repaired -- so this pass's own hour-long dwell opens fresh
+    # from row 1, exactly as it would against a genuinely empty state.
+    assert result["calls"] == 1
+    assert fake.docs[pc.STATE_NAME]["schema_version"] == pc.STATE_SCHEMA_VERSION
+    assert fake.docs[pc.STATE_NAME]["entities"][MMSI]["run"]["phase"] == "open"
+    # The cursor still advanced past this pass's own rows -- a state reset
+    # must never rewind or stall the cursor (see the module docstring).
+    assert fake.docs[pc.CURSOR_NAME] == {"last_id": 2}
 
 
 def test_apply_positions_does_not_mutate_the_state_it_was_given():
