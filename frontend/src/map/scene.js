@@ -808,6 +808,13 @@ export const LAYER_MANIFEST = {
   precip: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   clouds: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   windArrows: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  // Task 45: OWM's other four tile layers (see map/weatherLayers.js), same
+  // treatment as clouds right above -- never switched on by the resolver,
+  // reachable only by ticking the checkbox in WeatherSection.jsx.
+  wind: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  precipitation: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  temp: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  pressure: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   firms: {
     // One toggle covers two things -- the heat canvas and the interactive
     // per-point circles -- and only the second of them was ever gated. So this

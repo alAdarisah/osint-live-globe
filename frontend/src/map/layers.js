@@ -4,6 +4,7 @@
 // Called once by useLeafletMap when the map is created.
 
 import { L } from "./leafletGlobal";
+import { OWM_WEATHER_LAYERS, owmTileUrl } from "./weatherLayers";
 
 // The single world every tile layer is clipped to.
 //
@@ -162,24 +163,33 @@ export function createWeatherLayers(map) {
     attribution: 'Weather data by <a href="https://www.rainviewer.com" target="_blank" rel="noopener noreferrer">RainViewer</a>',
   }).addTo(map);
 
-  const cloudsLayer = L.tileLayer("/api/weather/tile/clouds_new/{z}/{x}/{y}.png", {
-    opacity: 0.45,
-    pane: "weatherPane",
-    noWrap: true, // see createBaseLayer above
-    bounds: WORLD_TILE_BOUNDS,
-    // OWM's clouds_new tiles are only meaningfully distinct up to about z9 --
-    // past that it's the same low-res data upscaled. Without this cap, every
-    // zoom-in past z9 requested a brand new set of unique {z}/{x}/{y} tiles
-    // the backend cache had never seen, which (a) hammered OWM with fetches
-    // for pixels that carried no new information and (b) blew past the
-    // backend's 8000-entry cache cap fast enough to trigger repeated
-    // full-cache clears -- the combination is what showed up as "laggy" pan
-    // and zoom.
-    maxNativeZoom: 9,
-    attribution: "Weather: OpenWeatherMap",
-  });
+  // Task 45: clouds_new used to be the only one of OWM's five allowed tile
+  // layers (see _WEATHER_LAYERS in backend/app.py) this ever asked for. The
+  // other four -- wind, precipitation, temperature, pressure -- come through
+  // the exact same backend route and the exact same OWM tile set, so they
+  // get exactly the arrangement clouds_new already proved out below: their
+  // own tile layer in this same pane, the same noWrap/bounds guard, and the
+  // same z9 native-zoom cap. That cap was measured against clouds_new
+  // specifically -- OWM's tiles for it are only meaningfully distinct up to
+  // about z9, and asking past that just requested more {z}/{x}/{y} variants
+  // of the same low-res data, which both hammered OWM for pixels carrying no
+  // new information and blew past the backend's 8000-entry cache cap fast
+  // enough to trigger repeated full clears. OWM serves all five layers from
+  // the same tile pyramid, so the same cap applies to all five here rather
+  // than re-measuring it four more times.
+  const owmLayers = {};
+  for (const { key, owmId } of OWM_WEATHER_LAYERS) {
+    owmLayers[key] = L.tileLayer(owmTileUrl(owmId), {
+      opacity: 0.45,
+      pane: "weatherPane",
+      noWrap: true, // see createBaseLayer above
+      bounds: WORLD_TILE_BOUNDS,
+      maxNativeZoom: 9,
+      attribution: "Weather: OpenWeatherMap",
+    });
+  }
 
-  return { precip: precipLayer, clouds: cloudsLayer };
+  return { precip: precipLayer, ...owmLayers };
 }
 
 // leaflet.heat paints by reading back its own canvas (getImageData), which
