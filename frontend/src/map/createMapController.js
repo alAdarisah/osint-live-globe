@@ -2611,7 +2611,17 @@ export function createMapController(container, initial, callbacks) {
     if (key === "water") return waterLayer;
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
+    // Task 45: the five OWM tile layers, keyed exactly as
+    // map/weatherLayers.js's OWM_WEATHER_LAYERS names them. Note two pairs
+    // that read alike and are not: "precip" above is RainViewer's radar (its
+    // URL is filled in on a timer, see refreshPrecipRadar), while
+    // "precipitation" here is OWM's own; and "windArrows" above is the
+    // computed flow field, not OWM's "wind" tile.
     if (key === "clouds") return weatherLayers.clouds;
+    if (key === "wind") return weatherLayers.wind;
+    if (key === "precipitation") return weatherLayers.precipitation;
+    if (key === "temp") return weatherLayers.temp;
+    if (key === "pressure") return weatherLayers.pressure;
     if (key === "jamming") return jammingLayerWithPing;
     if (key === "laneDensity") return laneDensityLayer;
     if (key === "satellites") return satelliteGroup;
