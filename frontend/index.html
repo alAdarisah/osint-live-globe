@@ -8,10 +8,20 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>OSINT Live Globe</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet-velocity@2.1.4/dist/leaflet-velocity.min.css" />
+  <!--
+    Leaflet and its plugins are served from this origin, out of public/vendor/
+    (see the README there). They used to come from unpkg.com, which meant four
+    scripts fetched at page load from a host we do not control, running with the
+    same authority as our own bundle and with nothing checking that what came
+    back was what we asked for. A CDN does not have to be malicious for that to
+    end badly -- a compromised publish, a hijacked package name or a DNS answer
+    that is not unpkg's is enough, and on a map shared by public link the blast
+    radius is every reader.
+  -->
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="/vendor/leaflet.markercluster/MarkerCluster.css" />
+  <link rel="stylesheet" href="/vendor/leaflet.markercluster/MarkerCluster.Default.css" />
+  <link rel="stylesheet" href="/vendor/leaflet-velocity/leaflet-velocity.min.css" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='46' fill='%23001018' stroke='%236fe3ff' stroke-width='4'/%3E%3C/svg%3E" />
 </head>
 <body>
@@ -25,10 +35,10 @@
     that don't know about each other). They must load before the bundled
     React app, which expects `window.L` to already be fully extended.
   -->
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-  <script src="https://unpkg.com/leaflet-velocity@2.1.4/dist/leaflet-velocity.min.js"></script>
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/vendor/leaflet.markercluster/leaflet.markercluster.js"></script>
+  <script src="/vendor/leaflet.heat/leaflet-heat.js"></script>
+  <script src="/vendor/leaflet-velocity/leaflet-velocity.min.js"></script>
   <script type="module" src="/src/main.jsx"></script>
 </body>
 </html>
