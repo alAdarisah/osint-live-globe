@@ -144,6 +144,25 @@ CODE_WRITE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
 UIR=$(curl -s -I --max-time 10 http://localhost:8080/ \
       | grep -ci 'upgrade-insecure-requests' || true)
 
+# Can the backend still write data/? It is the only state outside Postgres --
+# Admin Mode's configuration, which every client reads back at startup -- and
+# admin_config.py writes it through a temp file in the same directory, so the
+# directory itself has to be writable, not just the file.
+#
+# This is not paranoia about disk space. The backend runs with cap_drop: ALL
+# (see docker-compose.yml), and dropping CAP_DAC_OVERRIDE is what stops root in
+# a container from ignoring permission bits -- so a data/ directory owned by
+# anyone else stops being writable, silently and only for writes. Reads keep
+# answering 200, the map keeps working, and the only symptom is that saving in
+# Admin Mode reports an error a deploy would never see.
+#
+# A touch rather than a real save, so probing does not rewrite the
+# configuration and move its saved_at.
+DATA_WRITE=$(docker compose exec -T backend sh -c \
+              'touch /app/data/.deploy-write-probe 2>/dev/null \
+               && rm -f /app/data/.deploy-write-probe && echo ok' 2>/dev/null \
+             | tr -d '\r')
+
 # Read the bundle name out of the running container rather than off the page: it
 # is the one thing that proves the *new* build is what is being served.
 #
@@ -169,6 +188,7 @@ SOURCES=$(curl -s --max-time 15 http://localhost:8080/api/health \
 echo "Bundle:   $BUNDLE"
 echo "Private:  /  = $CODE_PRIVATE    /api/health = $CODE_API"
 echo "Public:   /  = $CODE_PUBLIC    admin write = $CODE_WRITE (403 expected)"
+echo "Config:   data/ $([ "$DATA_WRITE" = ok ] && echo writable || echo 'NOT WRITABLE')"
 echo "Sources:  $SOURCES collecting"
 
 [ "$CODE_PRIVATE" = 200 ] || echo "  WARNING: the private listener is not answering 200."
@@ -178,3 +198,6 @@ echo "Sources:  $SOURCES collecting"
 [ "$UIR" = 0 ]            || echo "  WARNING: the private listener sends upgrade-insecure-requests. It is served over
            plain HTTP, so every subresource will be upgraded to https and fail --
            the page renders grey. Drop the directive from frontend/security-headers.conf."
+[ "$DATA_WRITE" = ok ]    || echo "  WARNING: the backend cannot write data/. Admin Mode will report every save as
+           failed while reads keep working. The service runs with cap_drop: ALL, so
+           root inside it obeys permission bits: chown -R 0:0 /opt/osint/data"
