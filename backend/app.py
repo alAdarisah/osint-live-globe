@@ -2090,6 +2090,72 @@ async def jam_crosscheck_endpoint():
     return JSONResponse(await _jam_crosscheck_doc(), headers={"Cache-Control": "no-store"})
 
 
+# Ceiling on how wide a single generalised replay request may ask
+# entity_history to search, regardless of which kind it names. The five
+# hard-coded kinds below each had their window picked and reviewed by hand
+# (ais/adsb via config.REPLAY_WINDOW_SECONDS; events/firms/gdelt via their own
+# defaults) -- opening the endpoint to *any* kind with history means a caller
+# can now name a kind whose configured window (config.ENTITY_STALE_AFTER's
+# fallback chain) was only ever sized to bound eviction, never a per-request
+# Postgres scan. cities/dams/ports/airports and the rest of the slow-moving
+# reference kinds default to 30 days for exactly that reason -- fine for
+# "when do we forget this row", wrong for "how wide a range should one HTTP
+# request search".
+#
+# entity_history keeps only config.HISTORY_RETENTION_SECONDS of rows for any
+# kind (see the DELETE in storage.py's prune loop, which is not kind-scoped),
+# so no replay window can ever need to be wider than that -- nothing older
+# survives to be found regardless. That is the bound used here. A kind whose
+# configured default exceeds it is refused outright rather than silently
+# queried with a narrower window: a silently narrowed window is a request
+# that looks like it succeeded while quietly answering a different question
+# than its own configuration asked for, and the whole point of this ceiling
+# is to fail loudly instead of eventually showing up as a slow scrub.
+_REPLAY_MAX_WINDOW_SECONDS = config.HISTORY_RETENTION_SECONDS
+
+
+def _replay_default_window(kind: str) -> int:
+    """Same fallback chain as storage._replay_window (REPLAY_WINDOW_SECONDS,
+    then ENTITY_STALE_AFTER, then the global default), duplicated here rather
+    than imported so this module can check the result against
+    _REPLAY_MAX_WINDOW_SECONDS *before* ever issuing a query -- by the time
+    storage.history_at applied the same default internally it would be too
+    late to refuse rather than run it."""
+    return config.REPLAY_WINDOW_SECONDS.get(
+        kind, config.ENTITY_STALE_AFTER.get(kind, config.ENTITY_STALE_AFTER_DEFAULT)
+    )
+
+
+async def _replay_kind(kind: str, at: float, bounds) -> dict:
+    """Generalised replay for any kind with a movement/event log in
+    entity_history, not just the five wired in by hand below. Returns a
+    `status` alongside `items` because a caller stepping through the
+    scrubber's kind list needs to tell apart three different facts that all
+    look like "nothing" from the outside:
+
+    - "unavailable": the database itself could not be reached, so this
+      request answers nothing at all -- not the same as an empty window, and
+      conflating the two is exactly the bug storage.kind_has_history exists
+      to prevent (see its own docstring). Checked via storage.get_pool()
+      rather than trusting kind_has_history's own False return, because that
+      helper *also* returns False when there is no pool at all (see its
+      `if _pool is None: return False`) -- so on its own it cannot tell "the
+      database says no" from "there is no database to ask".
+    - "no_history": the database is reachable and has genuinely never
+      recorded a row for this kind -- e.g. a kind whose source deliberately
+      skips record_snapshot. Reads as "no data" on the scrubber.
+    - "ok": the kind has history somewhere; `items` may still be empty if
+      nothing fell inside the window, which reads as "nothing happened" --
+      a real answer, not a missing one.
+    """
+    if storage.get_pool() is None:
+        return {"status": "unavailable", "items": []}
+    if not await storage.kind_has_history(kind):
+        return {"status": "no_history", "items": []}
+    items = await storage.history_at(kind, at, window_seconds=_replay_default_window(kind))
+    return {"status": "ok", "items": regions.filter_points(items, bounds)}
+
+
 async def _replay_source(kind, registry_key, ts_fn, at, bounds, window_seconds=None):
     """One replayed layer: the live payload time-filtered to `at`, falling back
     to what the database recorded by then once `at` predates the live window.
@@ -2130,13 +2196,46 @@ async def _replay_positions(kind, buffer, at, bounds):
 
 
 @app.get("/api/replay")
-async def replay_at(at: float, region: str | None = None):
-    """Point-in-time snapshot for the timeline scrubber: conflict/fires/news
-    filtered to whatever was already true at or before `at` (a unix
-    timestamp), plus the nearest captured ship/aircraft position snapshot.
-    Not cached -- every drag of the scrubber is a distinct `at`, so an ETag
-    would just be dead weight on every request.
+async def replay_at(at: float, region: str | None = None, kind: str | None = None):
+    """Point-in-time snapshot for the timeline scrubber.
+
+    With no `kind`: the original five-layer bundle, unchanged -- conflict/
+    fires/news filtered to whatever was already true at or before `at` (a
+    unix timestamp), plus the nearest captured ship/aircraft position
+    snapshot. Not cached -- every drag of the scrubber is a distinct `at`, so
+    an ETag would just be dead weight on every request.
+
+    With `kind`: Task 44's generalisation to any kind with history, not just
+    the five wired in below by hand. `kind` must name one of
+    config.ENTITY_STALE_AFTER's keys -- the same registry every point source
+    writes into via storage.record_snapshot -- rather than being trusted as
+    an arbitrary string; a name that isn't a real kind at all (a typo, a
+    layer that was never a point source) is a 400, not a quietly empty
+    "no_history" answer, which is reserved for a *real* kind that genuinely
+    has never recorded anything (see _replay_kind's own docstring for why
+    that distinction needs a database round trip and can't be read off the
+    name alone). A kind whose configured replay window exceeds
+    _REPLAY_MAX_WINDOW_SECONDS is refused the same way, before any query
+    runs -- see that constant's own comment for why.
+
+    Returns `{"at", "kind", "status", "items"}` in this mode; `status` is one
+    of "ok" / "no_history" / "unavailable" (again, see _replay_kind).
     """
+    if kind is not None:
+        if kind not in config.ENTITY_STALE_AFTER:
+            raise HTTPException(400, f"Unknown replay kind {kind!r}")
+        window = _replay_default_window(kind)
+        if window > _REPLAY_MAX_WINDOW_SECONDS:
+            raise HTTPException(
+                400,
+                f"Replay kind {kind!r} has a {window}s window, which exceeds the "
+                f"{_REPLAY_MAX_WINDOW_SECONDS}s ceiling entity_history's retention allows "
+                "for a single request",
+            )
+        result = await _replay_kind(kind, at, regions.bounds_for(region))
+        payload = {"at": at, "kind": kind, **result}
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
     bounds = regions.bounds_for(region)
 
     # The conflict layer replays out of Postgres when there's history there,

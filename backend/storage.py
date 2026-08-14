@@ -1602,6 +1602,30 @@ async def history_at(kind: str, at: float, window_seconds: int | None = None) ->
     return [json.loads(r["payload"]) for r in rows]
 
 
+# Answers a narrower question than history_at above: not "where was this kind
+# at a moment", just "has this kind ever written a row here at all". /api/replay
+# needs this to tell apart the two different reasons history_at can come back
+# empty -- a kind like "satellites" that this backend has never recorded (see
+# that source's own docstring on why it deliberately skips record_snapshot,
+# which reads as "no data" to a reader) from a kind that does have a movement
+# log somewhere but genuinely had nothing recorded in the window just asked
+# about (which reads as "nothing happened").
+#
+# EXISTS + no ts bound is what keeps this cheap regardless of how wide the
+# window a caller was about to ask history_at for was going to be: idx_history_
+# lookup's leading column is `kind`, so this seeks straight to the first row
+# for it and stops -- one index probe, never a scan, whether the kind has one
+# row or eleven million.
+_KIND_HAS_HISTORY = "SELECT EXISTS(SELECT 1 FROM entity_history WHERE kind = $1)"
+
+
+async def kind_has_history(kind: str) -> bool:
+    if _pool is None:
+        return False
+    async with _pool.acquire() as conn:
+        return bool(await conn.fetchval(_KIND_HAS_HISTORY, kind))
+
+
 # Consecutive recorded positions for one kind, keeping only the pairs far apart
 # in time. Written as a window function rather than pulled into Python because
 # the input is every position ever recorded for the window -- millions of rows
