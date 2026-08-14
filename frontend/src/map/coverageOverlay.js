@@ -58,6 +58,16 @@ export const COVERAGE_OVERLAY_SOURCES = [
   { key: "countries", label: "Country boundaries" },
   { key: "cities", label: "City index" },
   { key: "ais", label: "AIS vessel tracking" },
+  // The second AIS network, added on OSINT-Main while this branch was in
+  // flight. It is a separate feed and a separate layer, never merged into
+  // "ais" -- and its receivers are coastal, so its coverage is genuinely a
+  // different shape from the global stream's. Listing it separately is the
+  // whole point: a reader seeing no vessels in the Baltic should be able to
+  // tell which of the two networks was looking there.
+  //
+  // Found by frontend/tests/coverageOverlay.test.js's own pairing check on the
+  // first merge after that test was written, which is exactly what it is for.
+  { key: "aisDigitraffic", label: "AIS vessel tracking, Finnish/Baltic coastal (Fintraffic Digitraffic)" },
   { key: "adsb", label: "ADS-B aircraft tracking" },
   { key: "jamming", label: "GPS jamming cells (GPSJam)" },
   { key: "laneDensity", label: "AIS traffic density (this map's own coverage)" },
