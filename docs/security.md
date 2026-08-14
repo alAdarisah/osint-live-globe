@@ -132,6 +132,31 @@ since every published port binds `127.0.0.1` already. And the Cloudflare tunnel
 is an outbound connection from `cloudflared`, so `default deny incoming` never
 touches it and the public map is unaffected.
 
+### Verified 2026-08-14
+
+Each claim above, and what was actually observed:
+
+| Claim | Observed |
+|-------|----------|
+| The policy is enforcing, not just saved | the server's netmap carries exactly one inbound rule: `Srcs 100.77.142.79/32`, `Dsts 100.74.206.20/32:22`, `IPProto 6` |
+| Shields-up is on | `tailscale debug prefs` → `"ShieldsUp": true`, `"RouteAll": false` |
+| The server's key cannot lapse | `tailscale status --json` → `Self.KeyExpiry` absent; tags `['tag:server']` |
+| The server cannot reach back | from the server, TCP 22, 445, 3389 and 5985 to the PC all blocked |
+| …but the transport still works | `tailscale ping` → `pong from aladarisah via DERP(par)`, which is the expected limit of the claim |
+| Public SSH is closed | from the PC over the public path, `37.27.38.223:22` unreachable; `100.74.206.20:22` reachable |
+| The admin door still writes | over the forward, `GET /` 200 and `POST /api/admin-config` 400 — a bad request, not a refusal |
+| The public door still refuses writes | `POST /api/admin-config` on the tunnel URL → 403, `GET /` → 200 |
+| Container egress survived ufw | `ingest` logged 8305 aircraft from OpenSky after the firewall came up |
+
+Not tested: whether an unapproved node is genuinely quarantined. Device approval
+is on, but no throwaway node was joined to watch it be held. Worth doing the next
+time a device is added anyway.
+
+The firewall was enabled behind a five-minute `ufw --force disable` watchdog,
+cancelled once a *new* SSH session — not the established one — was confirmed to
+come through. Worth repeating that trick on any future rule change: an
+established session survives a bad rule and tells you nothing.
+
 ## Rotating the credentials
 
 Three passwords still fall back to a built-in default when the variable is unset:

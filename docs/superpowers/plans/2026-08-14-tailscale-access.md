@@ -31,11 +31,11 @@ Nothing is installed and nothing is changed in this task. Its only job is to pro
 
 **Files:** none.
 
-- [ ] **Step 1 [YOU]: Open the Hetzner Cloud console**
+- [x] **Step 1 [YOU]: Open the Hetzner Cloud console**
 
 Log in at <https://console.hetzner.cloud/>, select the server, and open the **Console** tab (the noVNC window).
 
-- [ ] **Step 2 [YOU]: Log in through it**
+- [x] **Step 2 [YOU]: Log in through it**
 
 Type the root password at the VNC login prompt. If you do not have the root password, set one now while normal SSH still works:
 
@@ -45,7 +45,7 @@ ssh root@37.27.38.223 "passwd"
 
 Expected: a root shell inside the browser console. This path does not depend on the network configuration, so it survives every step that follows.
 
-- [ ] **Step 3: Record that it worked**
+- [x] **Step 3: Record that it worked**
 
 No command. If the console did not give you a shell, **stop here** — Task 7 is unsafe without it.
 
@@ -61,7 +61,7 @@ The admin console is the authority, but the reviewable copy lives in git. This t
 **Interfaces:**
 - Produces: the exact policy text pasted into the admin console in Task 5.
 
-- [ ] **Step 1: Create the file**
+- [x] **Step 1: Create the file**
 
 ```hujson
 // Tailscale access policy for the OSINT stack.
@@ -106,7 +106,7 @@ The admin console is the authority, but the reviewable copy lives in git. This t
 }
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add ops/tailscale/policy.hujson
@@ -122,7 +122,7 @@ git commit -m "Write down the one flow the tailnet is allowed to carry"
 **Interfaces:**
 - Produces: the server's tailnet IP and MagicDNS name, used by Tasks 4, 6, 7 and 8.
 
-- [ ] **Step 1 [YOU]: Create the tailnet and mint a tagged auth key**
+- [x] **Step 1 [YOU]: Create the tailnet and mint a tagged auth key**
 
 Sign in at <https://login.tailscale.com/>. Then, at <https://login.tailscale.com/admin/settings/keys>, **Generate auth key** with:
 
@@ -148,7 +148,7 @@ it early is expected), then come back.
 
 Copy the key. It starts `tskey-auth-`. Keep it out of this conversation.
 
-- [ ] **Step 2: Install Tailscale from the official apt repository**
+- [x] **Step 2: Install Tailscale from the official apt repository**
 
 Run on the server. These two URLs were verified to return HTTP 200:
 
@@ -158,7 +158,7 @@ ssh root@37.27.38.223 "curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble
 
 Expected: `tailscale` and `tailscaled` install, and the unit starts.
 
-- [ ] **Step 3: Verify the daemon is running**
+- [x] **Step 3: Verify the daemon is running**
 
 ```bash
 ssh root@37.27.38.223 "systemctl is-active tailscaled && tailscale version"
@@ -166,7 +166,7 @@ ssh root@37.27.38.223 "systemctl is-active tailscaled && tailscale version"
 
 Expected: `active`, then a version at or above `1.46.1`.
 
-- [ ] **Step 4 [YOU]: Join, with the auth key**
+- [x] **Step 4 [YOU]: Join, with the auth key**
 
 Open your own SSH session so the key is not typed into an agent transcript:
 
@@ -182,7 +182,7 @@ tailscale up --auth-key=tskey-auth-XXXX --hostname=osint-server --accept-routes=
 
 Expected: the command returns silently. `--accept-routes=false` keeps the server from picking up routes any future node advertises; the two `--advertise-*` flags state explicitly that it offers none.
 
-- [ ] **Step 5: Read back the node's identity**
+- [x] **Step 5: Read back the node's identity**
 
 ```bash
 ssh root@37.27.38.223 "tailscale status --self --peers=false; tailscale ip -4"
@@ -190,7 +190,7 @@ ssh root@37.27.38.223 "tailscale status --self --peers=false; tailscale ip -4"
 
 Expected: one line showing `osint-server` tagged `tag:server`, and a `100.x.y.z` address. **Write that address down** — later tasks need it.
 
-- [ ] **Step 6 [YOU]: Disable key expiry on this node**
+- [x] **Step 6 [YOU]: Disable key expiry on this node**
 
 At <https://login.tailscale.com/admin/machines>, open `osint-server` → the `...` menu → **Disable key expiry**.
 
@@ -206,7 +206,7 @@ This is not cosmetic. A tagged node's key does not expire by default, but confir
 - Consumes: the tailnet from Task 3.
 - Produces: the PC's tailnet IP, used by Task 6 to prove the reverse direction is dead.
 
-- [ ] **Step 1: Install Tailscale**
+- [x] **Step 1: Install Tailscale**
 
 ```powershell
 winget install --id Tailscale.Tailscale --accept-package-agreements --accept-source-agreements
@@ -214,11 +214,11 @@ winget install --id Tailscale.Tailscale --accept-package-agreements --accept-sou
 
 Expected: install succeeds and a Tailscale tray icon appears.
 
-- [ ] **Step 2 [YOU]: Log in**
+- [x] **Step 2 [YOU]: Log in**
 
 Open the tray icon → **Log in**, and complete the browser sign-in as the same account that owns the tailnet. Do not use an auth key here; this node should carry your user identity, which is what `autogroup:owner` in the policy matches.
 
-- [ ] **Step 3: Turn on shields-up**
+- [x] **Step 3: Turn on shields-up**
 
 ```powershell
 & "$env:ProgramFiles\Tailscale\tailscale.exe" up --shields-up --accept-routes=false
@@ -226,7 +226,7 @@ Open the tray icon → **Log in**, and complete the browser sign-in as the same 
 
 Expected: returns silently. This makes the PC's own daemon refuse all inbound connections regardless of what the policy file says — the layer that survives a careless console edit later.
 
-- [ ] **Step 4: Verify both nodes see each other**
+- [x] **Step 4: Verify both nodes see each other**
 
 ```powershell
 & "$env:ProgramFiles\Tailscale\tailscale.exe" status
@@ -241,7 +241,7 @@ Expected: two lines, `osint-server` and this PC. Note the PC's `100.x.y.z` addre
 **Files:**
 - Reference: `ops/tailscale/policy.hujson` (created in Task 2)
 
-- [ ] **Step 1 [YOU]: Paste the policy file**
+- [x] **Step 1 [YOU]: Paste the policy file**
 
 Copy the file to the clipboard rather than retyping it — HuJSON is unforgiving:
 
@@ -272,7 +272,7 @@ describes access being removed, and accept.
 If the editor refuses to save it will name the line — the usual cause is a
 partial paste, so select all and repaste rather than hand-patching.
 
-- [ ] **Step 2: Confirm the PC can still reach the server**
+- [x] **Step 2: Confirm the PC can still reach the server**
 
 ```powershell
 ssh root@<server-tailnet-ip>
@@ -280,13 +280,13 @@ ssh root@<server-tailnet-ip>
 
 Expected: a root shell. If this fails immediately after saving the policy, the grant is wrong — fix it before continuing, because Task 7 depends on this path.
 
-- [ ] **Step 3 [YOU]: Enable device approval**
+- [x] **Step 3 [YOU]: Enable device approval**
 
 At <https://login.tailscale.com/admin/settings/device-management>, turn on **Device approval**.
 
 Existing nodes stay approved. From now on a new machine can authenticate but is quarantined with access to nothing until you approve it by hand.
 
-- [ ] **Step 4 [YOU]: Confirm tailnet lock is off**
+- [x] **Step 4 [YOU]: Confirm tailnet lock is off**
 
 At <https://login.tailscale.com/admin/settings/tailnet-lock>, confirm it reads **Disabled**. The two features are mutually exclusive, and lock is deliberately not the choice here — it wants two or more signing nodes, and this tailnet has one client.
 
@@ -298,7 +298,7 @@ This is the task that verifies the actual requirement, and it is the one easiest
 
 **Files:** none.
 
-- [ ] **Step 1: Confirm the forward direction carries the admin panel**
+- [x] **Step 1: Confirm the forward direction carries the admin panel**
 
 ```powershell
 ssh -L 8090:localhost:8080 root@<server-tailnet-ip>
@@ -307,7 +307,7 @@ ssh -L 8090:localhost:8080 root@<server-tailnet-ip>
 Leave it open and load <http://localhost:8090> in a browser.
 Expected: the map with Admin Mode present. Port 8090 rather than 8080 matches what `Open Map - Admin.bat` already uses, so this does not collide with the legacy local stack.
 
-- [ ] **Step 2: Confirm the reverse direction is dead**
+- [x] **Step 2: Confirm the reverse direction is dead**
 
 On the server, substituting the PC's tailnet address:
 
@@ -319,7 +319,7 @@ Expected: all three time out or are refused. **A success on any of them means th
 
 If `nc` is missing: `ssh root@37.27.38.223 "apt-get install -y netcat-openbsd"`.
 
-- [ ] **Step 3: Confirm a new node is quarantined**
+- [ ] **Step 3: Confirm a new node is quarantined** — NOT RUN. Device approval is on, but no throwaway node was joined to watch it be held. Do it the next time a device is added.
 
 Install Tailscale on a phone or any spare machine and log in with the same account. At <https://login.tailscale.com/admin/machines> it appears marked **Needs approval**, and it can reach nothing.
 
@@ -335,7 +335,7 @@ Run every command in this task **through the tailnet address**, not `37.27.38.22
 
 **Files:** none in the repo.
 
-- [ ] **Step 1: Open a tailnet session and stay in it**
+- [x] **Step 1: Open a tailnet session and stay in it**
 
 ```powershell
 ssh root@<server-tailnet-ip>
@@ -343,7 +343,7 @@ ssh root@<server-tailnet-ip>
 
 Every remaining step in this task is typed into this session.
 
-- [ ] **Step 2: Set the rules without activating them**
+- [x] **Step 2: Set the rules without activating them**
 
 ```bash
 ufw default deny incoming
@@ -356,7 +356,7 @@ ufw allow in 41641/udp
 
 Note what is deliberately absent: no global `ufw allow 22`. That single line would undo the entire task.
 
-- [ ] **Step 3: Read the rules back before arming them**
+- [x] **Step 3: Read the rules back before arming them**
 
 ```bash
 ufw show added
@@ -364,7 +364,7 @@ ufw show added
 
 Expected: exactly the four rules above. If a global port 22 allow appears, delete it now: `ufw delete allow 22`.
 
-- [ ] **Step 4: Enable**
+- [x] **Step 4: Enable**
 
 ```bash
 ufw --force enable
@@ -374,7 +374,7 @@ ufw --force enable
 
 Expected: `Firewall is active and enabled on system startup`, and **your tailnet session stays alive**. If it drops, the tailscale0 rule is wrong — recover through the Hetzner console and run `ufw disable`.
 
-- [ ] **Step 5: Confirm the containers still reach out**
+- [x] **Step 5: Confirm the containers still reach out**
 
 ```bash
 cd /opt/osint && docker compose logs --tail=20 ingest
@@ -401,7 +401,7 @@ Six batch files hardcode `root@37.27.38.223`. After Task 7 every one of them is 
 - Modify: `docs/security.md` — the door table near line 10, and the rotation command at line 86
 - Modify: `ops/rotate-credentials.sh:6`
 
-- [ ] **Step 1: Read the server's MagicDNS name**
+- [x] **Step 1: Read the server's MagicDNS name**
 
 ```powershell
 & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json | ConvertFrom-Json | ForEach-Object { $_.Peer.PSObject.Properties.Value.DNSName }
@@ -409,7 +409,7 @@ Six batch files hardcode `root@37.27.38.223`. After Task 7 every one of them is 
 
 Expected: something like `osint-server.tailXXXX.ts.net.`. Use the name without the trailing dot. Use this rather than the raw `100.x.y.z` — MagicDNS survives a node re-registering with a different address.
 
-- [ ] **Step 2: Replace the address in every `set SERVER=` line**
+- [x] **Step 2: Replace the address in every `set SERVER=` line**
 
 In `Deploy Code to Server.bat`, `Download Backups.bat`, `Open Map - Admin.bat`, `Open Map - Public View.bat` and `Show Public Link.bat`, change:
 
@@ -426,21 +426,21 @@ REM Tailscale is up on this PC. See docs/superpowers/specs/2026-08-14-tailscale-
 set SERVER=root@osint-server.tailXXXX.ts.net
 ```
 
-- [ ] **Step 3: Fix the comment lines that quote an ssh command**
+- [x] **Step 3: Fix the comment lines that quote an ssh command**
 
 `Show Public Link.bat:18` and `Watch the Stack - This PC.bat:9` name the old address inside REM comments. Replace `root@37.27.38.223` with the tailnet name in both, so nobody copies a command that cannot connect.
 
-- [ ] **Step 4: Fix the same address in the docs and the rotation script**
+- [x] **Step 4: Fix the same address in the docs and the rotation script**
 
 `README.md:1201`, `docs/security.md:86` and `ops/rotate-credentials.sh:6` each carry `ssh root@37.27.38.223 'bash /opt/osint/ops/rotate-credentials.sh'`. Replace the host in all three.
 
-- [ ] **Step 5: Correct the door table in `docs/security.md`**
+- [x] **Step 5: Correct the door table in `docs/security.md`**
 
 The table near line 10 says the admin door is reached by `ssh -L 8080:localhost:8080` and describes a two-door model. Rewrite that row and add a short section describing the third door: SSH now arrives over the tailnet, port 22 is dropped from the internet, one policy grant carries `tcp:22` from your identity to `tag:server` and nothing carries anything back, new nodes need manual approval, and the recovery path is the Hetzner console. Point at `ops/tailscale/policy.hujson` for the policy itself.
 
 Also amend the sentence "SSH access to the server is total access" — still true, and now qualified by the fact that reaching SSH at all requires a node you approved.
 
-- [ ] **Step 6: Verify a script actually works end to end**
+- [x] **Step 6: Verify a script actually works end to end**
 
 ```powershell
 & ".\Show Public Link.bat"
@@ -448,7 +448,7 @@ Also amend the sentence "SSH access to the server is total access" — still tru
 
 Expected: it prints the current Cloudflare link. That proves the tailnet name resolves, SSH connects over it, and the public tunnel is unaffected.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add "Deploy Code to Server.bat" "Download Backups.bat" "Open Map - Admin.bat" "Open Map - Public View.bat" "Show Public Link.bat" "Watch the Stack - This PC.bat" README.md docs/security.md ops/rotate-credentials.sh
@@ -461,7 +461,7 @@ git commit -m "Send every script through the tailnet, since the public door is s
 
 **Files:** none.
 
-- [ ] **Step 1: Confirm port 22 is gone from the internet**
+- [x] **Step 1: Confirm port 22 is gone from the internet**
 
 From a network that is not on the tailnet — a phone on cellular with Tailscale off is the easiest:
 
@@ -471,12 +471,12 @@ nc -vz -w 5 37.27.38.223 22
 
 Expected: timeout. A refusal or a banner means the firewall did not take.
 
-- [ ] **Step 2: Confirm the public map is unharmed**
+- [x] **Step 2: Confirm the public map is unharmed**
 
 Run `Show Public Link.bat`, open the link on that same off-tailnet device.
 Expected: the map loads and renders. The Cloudflare tunnel is outbound, so `default deny incoming` never touched it.
 
-- [ ] **Step 3: Confirm the write refusal still holds**
+- [x] **Step 3: Confirm the write refusal still holds**
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<public-link>/api/admin-config
@@ -484,7 +484,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<public-link>/api/admin
 
 Expected: `403`. Nothing in this work should have changed it, which is exactly why it is worth confirming.
 
-- [ ] **Step 4: Record the outcome**
+- [x] **Step 4: Record the outcome**
 
 Append a short "verified on 2026-08-14" note to the Tailscale section of `docs/security.md` listing what was checked, then commit.
 
