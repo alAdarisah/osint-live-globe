@@ -15,11 +15,11 @@
 // frontend/tests/weatherLayers.test.js), the same reasoning
 // map/countryHitTest.js gives for its own no-imports rule.
 export const OWM_WEATHER_LAYERS = [
-  { key: "clouds", owmId: "clouds_new", label: "Cloud Cover", color: "#c9d6dd" },
-  { key: "wind", owmId: "wind_new", label: "Wind Speed", color: "#b39ddb" },
-  { key: "precipitation", owmId: "precipitation_new", label: "Precipitation Intensity", color: "#6a89ff" },
-  { key: "temp", owmId: "temp_new", label: "Temperature", color: "#ff8a65" },
-  { key: "pressure", owmId: "pressure_new", label: "Pressure", color: "#ffd54f" },
+  { key: "clouds", owmId: "clouds_new" },
+  { key: "wind", owmId: "wind_new" },
+  { key: "precipitation", owmId: "precipitation_new" },
+  { key: "temp", owmId: "temp_new" },
+  { key: "pressure", owmId: "pressure_new" },
 ];
 
 // The one route every OWM tile layer is served through, keyed by OWM layer

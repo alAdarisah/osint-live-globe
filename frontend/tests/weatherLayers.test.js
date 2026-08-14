@@ -24,14 +24,12 @@ test("the registry has exactly the five layer ids the backend allows", () => {
   for (const id of BACKEND_ALLOW_LIST) assert.ok(owmIds.includes(id), `${id} from the backend allow-list is missing here`);
 });
 
-test("every registry entry has a distinct key, a label and a color", () => {
+test("every registry entry has a distinct, non-empty key", () => {
   const keys = OWM_WEATHER_LAYERS.map((entry) => entry.key);
   assert.equal(new Set(keys).size, keys.length, "no duplicate layer keys");
-  for (const entry of OWM_WEATHER_LAYERS) {
-    assert.equal(typeof entry.label, "string");
-    assert.ok(entry.label.length > 0);
-    assert.equal(typeof entry.color, "string");
-    assert.ok(entry.color.startsWith("#"));
+  for (const key of keys) {
+    assert.equal(typeof key, "string");
+    assert.ok(key.length > 0);
   }
 });
 
