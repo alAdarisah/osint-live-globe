@@ -154,6 +154,35 @@ ALTITUDE_AIRFIELD_RADIUS_KM = 10.0
 # row, the same as any airframe this job has never seen before.
 STATE_PRUNE_SECONDS = 6 * 3600
 
+# How many per-airframe entries with no currently open leg this state
+# document keeps before the oldest of them are evicted on append -- a bound
+# STATE_PRUNE_SECONDS alone does not provide, because it only ages an entry
+# out once it personally goes quiet for six hours; it does nothing to limit
+# how many *distinct* airframes can pile up inside that same six-hour window
+# in the first place. Postgres is unreachable from this environment, so this
+# is not a fresh live measurement of flight_legs_state itself -- it is a
+# judgment call, sized from the closest citable analogue this codebase has:
+# jam_crosscheck_state's own per-airframe "last" bridge, the same shape
+# (on_ground/altitude bookkeeping, keyed by icao24, read off the same "adsb"
+# entity_history rows, pruned by this module's own STATE_PRUNE_SECONDS
+# figure), measured live in review at 9,928 entries (889 KB of a 910 KB
+# document) against ~26,873 distinct airframes seen in that six-hour window
+# -- a real ceiling near 2.4 MB for a document this job, like that one, deep-
+# copies and re-serialises on every pass. FLIGHT_LEGS_STATE_CAP is set with
+# headroom above that measured population (roughly 1.5x) rather than at it,
+# so an ordinary busy day is never the thing doing the evicting -- only a
+# population genuinely larger than any day this map has actually measured
+# (a flood of spoofed or transient ICAO24 addresses, for instance) is.
+# Worst case: at most FLIGHT_LEGS_STATE_CAP entries with no open leg
+# (on_ground, altitude_state, ts -- on the order of 100 bytes each, smaller
+# than jam_crosscheck's own per-entry figure above) plus every entry that
+# does have one, which this cap never evicts -- see _evict_state below for
+# why, and backend/app.py's own /api/aircraft docstring ("~17,000 aircraft
+# ... at once") for why that second population does not need a cap of its
+# own: this map cannot simultaneously track more open legs than it is
+# simultaneously tracking airframes in the air.
+FLIGHT_LEGS_STATE_CAP = 40_000
+
 # How much wall-clock time may separate two consecutive entity_history rows
 # before this job stops trusting the earlier one as "this airframe's own
 # immediately preceding state" -- see the module docstring's "A coverage gap
@@ -423,6 +452,46 @@ def _prune_state(state: dict, now_ts: float) -> dict:
     return kept
 
 
+def _evict_state(state: dict, cap: int) -> dict:
+    """Bounds `state`'s population at `cap`, on top of (not instead of)
+    _prune_state's own time-based pruning -- see FLIGHT_LEGS_STATE_CAP's own
+    comment on why a time bound alone is not a population bound.
+
+    An entry with a currently open leg (`entry.get("leg") is not None`) is
+    never evicted here, no matter how far over `cap` the state has grown.
+    That asymmetry is deliberate, and mirrors vessel_profile.HULL_CAP's own
+    "evicted by staleness" ruling exactly for the entries this *does* evict:
+    an entry with no open leg exists only to bridge to the next
+    on_ground/altitude transition, so dropping the oldest of those first
+    keeps this job watching the present, the same trade-off HULL_CAP makes
+    for a hull profile nobody has heard from in weeks. But an *open* leg is
+    not a bridge to a future observation waiting to happen -- it is itself
+    unwritten data, a departure this job already watched, still waiting on
+    an arrival. Evicting it would not merely lose a stale bridge worth
+    rebuilding; the leg itself would cease to exist, unclosed, forever --
+    the exact failure this module's own "A coverage gap is not evidence of
+    anything" docstring section already names as a Task 23 review Critical,
+    reached here by a different door (a population cap instead of a stale
+    comparison). So open legs are excluded from both the count against
+    `cap` and the eviction candidates entirely: this only ever trims entries
+    that exist purely to watch for a transition that has not happened yet.
+
+    If open legs alone already meet or exceed `cap` -- which would mean this
+    map is simultaneously tracking as many in-flight departures as
+    FLIGHT_LEGS_STATE_CAP itself, well past the ~17,000-aircraft figure
+    FLIGHT_LEGS_STATE_CAP's own comment cites -- every closable entry is
+    evicted and the state is still left over `cap`. That is not a promise
+    this function breaks; it never promised to bound entries it will not
+    touch, only the ones it is safe to."""
+    open_legs = {icao24: entry for icao24, entry in state.items() if entry.get("leg") is not None}
+    closable = {icao24: entry for icao24, entry in state.items() if entry.get("leg") is None}
+    if len(open_legs) + len(closable) <= cap:
+        return state
+    keep_count = max(cap - len(open_legs), 0)
+    ranked = sorted(closable.items(), key=lambda kv: (kv[1].get("last") or {}).get("ts", 0.0), reverse=True)
+    return {**open_legs, **dict(ranked[:keep_count])}
+
+
 async def _load_state() -> dict:
     """flight_legs_state's own {icao24: entry} map, or {} if there is none
     yet or the stored shape does not match STATE_SCHEMA_VERSION -- see
@@ -479,6 +548,7 @@ async def run_once() -> dict:
         return {"read": len(rows), "legs": 0, "ok": False}
 
     pruned_state = _prune_state(new_state, rows[-1]["ts"])
+    pruned_state = _evict_state(pruned_state, FLIGHT_LEGS_STATE_CAP)
     state_ok = await storage.record_reference(
         STATE_NAME, {"schema_version": STATE_SCHEMA_VERSION, "entities": pruned_state},
     )
