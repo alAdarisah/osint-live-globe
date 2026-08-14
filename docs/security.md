@@ -146,6 +146,14 @@ still publishes on `127.0.0.1`, and none of these ports answers on
 `ssh -L` still works if you want it — nothing was taken away — but nothing in
 the repository relies on it any more.
 
+Survives reboot, tested rather than assumed: the server was rebooted on
+2026-08-14 and came back on the tailnet in about eight seconds with all three
+proxies restored, ufw active, and every container up. `tailscaled`, `ufw` and
+`docker` are all enabled at boot and the serve config lives in
+`/var/lib/tailscale/tailscaled.state`, so there is nothing to re-run by hand.
+Worth knowing before the first unplanned reboot, since port 22 answers only on
+`tailscale0` now — if `tailscaled` did not come back, neither would SSH.
+
 **What this cost.** `:8080` writes and has no authentication of its own — see
 "Writes are refused on the public listener" above, which protects the *public*
 door only. Reaching it used to require the server's SSH private key. It now
