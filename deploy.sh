@@ -132,6 +132,18 @@ CODE_WRITE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
               -X PUT -H 'Content-Type: application/json' --data-binary 'not json' \
               http://localhost:8081/api/admin-config || echo 000)
 
+# The private listener is plain HTTP, so its CSP must not carry
+# upgrade-insecure-requests: the browser would rewrite every same-origin
+# subresource to https on a port with no TLS, and the page would render nothing.
+#
+# Worth a probe of its own because every status check above stays green while it
+# happens. The document is served, so / is 200 and /api/health is 200; it is the
+# bundle, the stylesheet and the vendor scripts that never get requested, and
+# curl does not honour the directive so it cannot notice either. The symptom is a
+# grey screen and a server log that looks like a healthy deploy.
+UIR=$(curl -s -I --max-time 10 http://localhost:8080/ \
+      | grep -ci 'upgrade-insecure-requests' || true)
+
 # Read the bundle name out of the running container rather than off the page: it
 # is the one thing that proves the *new* build is what is being served.
 #
@@ -163,3 +175,6 @@ echo "Sources:  $SOURCES collecting"
 [ "$CODE_API" = 200 ]     || echo "  WARNING: the API is not answering 200 -- docker compose logs backend"
 [ "$CODE_PUBLIC" = 200 ]  || echo "  WARNING: the public listener is not answering 200."
 [ "$CODE_WRITE" = 403 ]   || echo "  WARNING: the public listener accepted an admin write. Check frontend/nginx.conf."
+[ "$UIR" = 0 ]            || echo "  WARNING: the private listener sends upgrade-insecure-requests. It is served over
+           plain HTTP, so every subresource will be upgraded to https and fail --
+           the page renders grey. Drop the directive from frontend/security-headers.conf."
