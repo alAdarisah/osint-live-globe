@@ -222,3 +222,71 @@ export function unwrapPath(points, refLon) {
     return [lat, shifted];
   });
 }
+
+/**
+ * The bounding box of a path, or null if it holds no finite point.
+ *
+ * Null rather than a degenerate box, because the two mean different things to a
+ * caller deciding whether to draw something: an empty box would compare as
+ * "outside the view" by arithmetic accident, and a record with no usable
+ * geometry deserves to be rejected on purpose.
+ *
+ * Longitude is unwrapped as it goes, exactly as unwrapPath does and for the same
+ * reason -- each point taken on the copy of the world nearest the one before it.
+ * A route running 170 -> 175 -> -175 -> -170 is one continuous line across the
+ * antimeridian, and a plain min/max would describe it as the box from -175 to
+ * 175: the entire rest of the world, everywhere except where the route actually
+ * is. So `west` and `east` here may fall outside +/-180, which is what makes them
+ * a continuous span that extentInView can translate as one piece.
+ *
+ * @param {Array<[number, number]>} path [lat, lon] pairs
+ */
+export function pathExtent(path) {
+  if (!Array.isArray(path)) return null;
+  let south = Infinity;
+  let north = -Infinity;
+  let west = Infinity;
+  let east = -Infinity;
+  let previous = null;
+  for (const point of path) {
+    const lat = point?.[0];
+    const lon = point?.[1];
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    // The first usable point anchors the frame; every later one is placed
+    // relative to its predecessor rather than to the anchor, so a path long
+    // enough to wrap more than once still stays continuous.
+    const unwrapped = previous == null ? lon : nearestLon(lon, previous);
+    previous = unwrapped;
+    if (lat < south) south = lat;
+    if (lat > north) north = lat;
+    if (unwrapped < west) west = unwrapped;
+    if (unwrapped > east) east = unwrapped;
+  }
+  return south === Infinity ? null : { south, west, north, east };
+}
+
+/**
+ * Does a path's extent overlap a viewport box, allowing for the repeating world?
+ *
+ * The line counterpart to boundsContainsPoint, and the difference between them is
+ * the reason this exists rather than the caller testing each vertex: a segment
+ * can cross the whole screen with both of its endpoints off it, and a per-vertex
+ * test drops exactly that line. An overlap test keeps it.
+ *
+ * The extent is translated onto the copy of the world nearest `refLon` before the
+ * longitude comparison -- as one piece, keyed off its midpoint, so a route never
+ * gets torn in half across the antimeridian the way a per-vertex nearestLon would
+ * tear it. That is also why this takes an extent rather than a path: the shift has
+ * to be decided once for the whole line.
+ *
+ * @param {{south:number,west:number,north:number,east:number}|null} extent
+ * @param {{south:number,west:number,north:number,east:number}} view
+ * @param {number} refLon the camera's own longitude
+ */
+export function extentInView(extent, view, refLon) {
+  if (!extent) return false;
+  if (extent.north < view.south || extent.south > view.north) return false;
+  const mid = (extent.west + extent.east) / 2;
+  const shift = nearestLon(mid, refLon) - mid;
+  return extent.west + shift <= view.east && extent.east + shift >= view.west;
+}

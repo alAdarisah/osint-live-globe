@@ -612,6 +612,47 @@ export const LAYER_MANIFEST = {
     fetch: FETCH_ALWAYS,
     disposition: AUTO,
   },
+  pipelines: {
+    // Not a layer anyone can toggle: the pipeline lines ride the infrastructure
+    // layer's own group (infraLayer wraps infraGroup + pipelinesGroup), so this
+    // entry is a cap holder, the same shape firmsPoints and airfieldActivity
+    // have. No `draw`, because `infra` above is what decides whether any of this
+    // is on the map at all.
+    //
+    // It needs a cap because Task 28 changed what this layer is without changing
+    // how it draws. It used to be backend/infrastructure.py's ten hand-written
+    // schematic routes; it is now those ten plus 16,739 real OSM ways, and
+    // renderPipelines built one Leaflet polyline per route per world copy, each
+    // with a bound tooltip and a bound popup. At THEATRE band with three copies
+    // of the world in view that is ~50,000 SVG paths in the document, for a
+    // layer that is on by default.
+    //
+    // Ranked by vertex count, which is the closest thing to "how much pipeline
+    // is this" that the record actually carries -- a trunk line runs to hundreds
+    // of points (the longest is 1,857) where a yard stub is two or three. Not
+    // length in kilometres, and the popup does not claim it is.
+    //
+    // The numbers rise with the band because the question narrows: a theatre
+    // view wants the trunk network legible, a town view wants what is actually
+    // under it. Measured against the served document, that is also where they
+    // stop mattering -- routes whose extent falls in the padded viewport:
+    //
+    //   zoom 4, Europe and the Middle East   12,131   capped to 600
+    //   zoom 6, Ukraine                       4,152   capped to 1,500
+    //   zoom 9, one town                        226   uncapped, all drawn
+    //
+    // which is the shape to keep if these are ever retuned: the bounds filter
+    // does all the work where the detail is wanted, and the cap only bites at
+    // the zooms where no individual line could be read anyway.
+    //
+    // Only the OSM half is ever capped or bounds-filtered -- see renderPipelines
+    // for why the ten curated routes are exempt from both.
+    cap: { THEATRE: 600, COUNTRY: 1500, LOCAL: 3000 },
+    rank: (d) => (Array.isArray(d.path) ? d.path.length : 0),
+    fetch: FETCH_ALWAYS,
+    disposition: AUTO,
+    virtual: true,
+  },
   osmInfra: {
     // Unchanged at 9, and this entry is the precedent the whole file
     // generalises rather than an exception to it: crowd-sourced geometry

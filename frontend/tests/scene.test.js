@@ -262,6 +262,41 @@ test("the two on-demand line documents", async (t) => {
   }
 });
 
+test("the pipeline cap", async (t) => {
+  // Task 28 changed what this layer is without changing how it drew. It was ten
+  // hand-written schematic routes; it became those ten plus 16,739 real OSM
+  // ways, still drawn one Leaflet polyline per route per world copy with a
+  // tooltip and a popup bound to each -- ~50,000 SVG paths at THEATRE band with
+  // three copies in view, for a layer that is on by default.
+  await t.test("is a cap holder, not a layer anyone can toggle", () => {
+    // The lines ride infraLayer's own group, so this entry must never become a
+    // checkbox -- the same arrangement firmsPoints and airfieldActivity have.
+    assert.equal(LAYER_MANIFEST.pipelines.virtual, true);
+    assert.ok(!SCENE_APPLY_KEYS.includes("pipelines"));
+    assert.equal(LAYER_MANIFEST.pipelines.draw, undefined, "infra decides whether pipelines draw");
+  });
+
+  await t.test("tightens as the camera pulls back", () => {
+    // The question narrows as the reader goes in, so the allowance widens. The
+    // ordering is the assertion: a cap that did not rise with the band would
+    // thin a town view as hard as a theatre one.
+    assert.equal(resolveScene({ zoom: 4 }).caps.get("pipelines"), 600);
+    assert.equal(resolveScene({ zoom: 6 }).caps.get("pipelines"), 1500);
+    assert.equal(resolveScene({ zoom: 9 }).caps.get("pipelines"), 3000);
+    assert.equal(resolveScene({ zoom: 14 }).caps.get("pipelines"), 3000);
+  });
+
+  await t.test("ranks by how much pipeline a record carries", () => {
+    // Vertex count is the closest thing the record holds to "how much of this
+    // is there" -- a trunk line runs to hundreds of points, a yard stub to two
+    // or three. Not kilometres, and nothing claims it is.
+    const { rank } = LAYER_MANIFEST.pipelines;
+    assert.ok(rank({ path: new Array(400) }) > rank({ path: new Array(3) }));
+    assert.equal(rank({}), 0, "a record with no path must not outrank a real one");
+    assert.equal(rank({ path: "not an array" }), 0);
+  });
+});
+
 test("disposition", async (t) => {
   await t.test("the camera alone never switches on a corroborating layer", () => {
     // The principle this exists to protect: a pin that is an inference drawn
