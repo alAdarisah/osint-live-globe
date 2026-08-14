@@ -142,8 +142,9 @@ still publishes on `127.0.0.1`, and none of these ports answers on
 `37.27.38.223`. Verified by asking the public address for each of 3000, 8080,
 9090 and 22, and getting nothing.
 
-The `ssh -L` forwards still work and `Open Map - Admin.bat` still uses one.
-Nothing was taken away; a shorter path was added.
+`Open Map - Admin.bat` opens the URL directly and no longer forwards anything.
+`ssh -L` still works if you want it — nothing was taken away — but nothing in
+the repository relies on it any more.
 
 **What this cost.** `:8080` writes and has no authentication of its own — see
 "Writes are refused on the public listener" above, which protects the *public*

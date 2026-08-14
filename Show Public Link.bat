@@ -13,9 +13,10 @@ REM tunnel; nothing else about the setup would change.
 REM
 REM What the link serves is the read-only listener (nginx :8081): the map, all
 REM read endpoints, and a 403 on any attempt to write the admin configuration.
-REM Full access with the admin panel is the SSH tunnel instead:
+REM Full access with the admin panel is the tailnet instead -- no tunnel, the
+REM private listener is proxied onto the server's tailnet address:
 REM
-REM   ssh -L 8080:localhost:8080 root@osint-server.tailee11c0.ts.net     then http://localhost:8080
+REM   http://osint-server.tailee11c0.ts.net:8080     or run "Open Map - Admin.bat"
 setlocal
 
 REM The tailnet name, not the public address: port 22 is firewalled to the

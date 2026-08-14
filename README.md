@@ -220,7 +220,7 @@ documentation anyone reads at the moment they need it:
 
 | Script | Does |
 |---|---|
-| `Open Map - Admin.bat` | The map **with** Admin Mode, over an SSH tunnel, on `localhost:8090`. `--close` tears the tunnel down |
+| `Open Map - Admin.bat` | The map **with** Admin Mode, over the tailnet, at `osint-server.tailee11c0.ts.net:8080`. No tunnel — it opens a URL |
 | `Open Map - Public View.bat` | The map as a stranger sees it — the real Cloudflare link, over the internet, no admin controls. Run it before sharing |
 | `Show Public Link.bat` | Prints the current public link and checks it answers, without opening a browser |
 | `Deploy Code to Server.bat` | Packs this working tree, uploads it, rebuilds whatever image is behind its source, then verifies both listeners and the read-only boundary. `--ingest` to also rebuild the metered collector, `--force` to rebuild regardless |
@@ -228,9 +228,10 @@ documentation anyone reads at the moment they need it:
 
 The two `Open Map` scripts are the pair worth understanding, because they are the
 security boundary made visible: the admin one reaches the server's private
-listener through SSH, the public one goes over the internet to a listener that
-does not render Admin Mode and answers 403 to any attempt to write the
-configuration. Same app, same container, two doors.
+listener over the tailnet, which only a device you approved can join; the public
+one goes over the internet to a listener that does not render Admin Mode and
+answers 403 to any attempt to write the configuration. Same app, same container,
+two doors.
 
 `deploy.sh` is the server half of `Deploy Code to Server.bat` — the staleness check and rebuild,
 in bash rather than batch. It replaces the old `update-link.bat`, which assumed

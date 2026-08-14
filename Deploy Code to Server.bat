@@ -67,7 +67,7 @@ echo.
 echo Public link:
 ssh %SERVER% "osint-link"
 echo.
-echo Admin view: run "Open Map - Admin.bat"   (http://localhost:8090)
+echo Admin view: run "Open Map - Admin.bat"   (http://osint-server.tailee11c0.ts.net:8080)
 echo.
 echo Anyone holding the public link has the old bundle cached; tell them Ctrl+Shift+R.
 endlocal
