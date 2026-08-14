@@ -49,7 +49,12 @@ import {
   createTrailLayers,
   createWindFlowLayer,
   createTerminatorLayer,
+  createCoverageLayer,
+  createCoverageLegend,
 } from "./layers";
+import {
+  summarizeCoverage, coverageLegendHtml, COVERAGE_RECTANGLE_STYLE, COVERAGE_OVERLAY_SOURCES,
+} from "./coverageOverlay";
 import {
   nightPolygonRings, CIVIL_TWILIGHT_DEG, NAUTICAL_TWILIGHT_DEG, ASTRONOMICAL_TWILIGHT_DEG,
 } from "./solarMath";
@@ -775,6 +780,13 @@ export function createMapController(container, initial, callbacks) {
   // Seas, lakes and rivers. Also NOT added to the map here, for the same
   // reason -- MANUAL and off by default, see map/scene.js's `water` entry.
   const waterLayer = createWaterLayer(map);
+  // Task 50: the coverage overlay -- rectangles for scoped sources' last-
+  // fetched bbox, plus a legend control naming every one of the five states
+  // (see map/coverageOverlay.js). Same MANUAL, off-by-default, deferred-add
+  // treatment as waterLayer just above; renderCoverage/coverageVisible are
+  // defined near renderWater further down this file.
+  const coverageLayer = createCoverageLayer(map);
+  const coverageLegend = createCoverageLegend();
   // NASA GIBS imagery. Not added to the map until a reader picks a layer.
   const imageryLayer = createImageryLayer(map);
   let imageryKey = null;   // null == off; otherwise a key of GIBS_LAYERS
@@ -1213,6 +1225,11 @@ export function createMapController(container, initial, callbacks) {
   // the click/hover chain below so a hidden water layer never answers for a
   // click that landed on a sea nobody asked to see.
   let waterVisible = false;
+  // Same mirror again for "coverage" -- MANUAL and off by default (see its
+  // LAYER_MANIFEST entry in scene.js). Read by renderCoverage so a poll or a
+  // camera move while the layer is off does nothing rather than rebuilding
+  // rectangles nobody can see.
+  let coverageVisible = false;
   // These three mirror their own dedicated "*Trails" sub-ticker toggle (see
   // LayersSection.jsx's "Show ... trails" rows and the matching keys in
   // setLayerVisible below) -- entityWebglLayer/renderSatellites keep
@@ -1538,6 +1555,12 @@ export function createMapController(container, initial, callbacks) {
     }
 
     reportLayerState();
+    // Task 50: re-derive the coverage overlay against the scene that was
+    // just recomputed -- its "gated" sentences name the zoom that would lift
+    // each source's gate, which is a fact about *this* scene, not the one
+    // the last poll happened to land under. No-op while the layer is off
+    // (see renderCoverage's own guard).
+    renderCoverage();
   }
 
   // The panel's checkboxes read this rather than a React copy of their own,
@@ -2633,6 +2656,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "powerLines") return powerLinesGroup;
     if (key === "shippingLanes") return shippingLanesGroup;
     if (key === "water") return waterLayer;
+    if (key === "coverage") return coverageLayer;
     if (key === "terminator") return terminatorLayer;
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
@@ -2868,6 +2892,23 @@ export function createMapController(container, initial, callbacks) {
       // so a water body already selected before the layer was switched off
       // needs its highlight repainted rather than left to the next click.
       else updateWaterHighlights();
+    }
+
+    // Task 50: the coverage overlay -- coverageLayer's own add/remove already
+    // ran through the generic layerForKey block above; this owns what that
+    // block does not know about: the legend control (a plain Leaflet
+    // control, not a Leaflet *layer*, so it needs its own addTo/remove) and
+    // the catch-up render that draws the rectangles the moment the layer
+    // comes on, rather than leaving it empty until the next poll or pan.
+    if (key === "coverage") {
+      coverageVisible = visible;
+      if (visible) {
+        coverageLegend.addTo(map);
+        renderCoverage();
+      } else {
+        coverageLegend.remove();
+        coverageLayer.clearLayers();
+      }
     }
 
     if (key === "terminator") {
@@ -6884,6 +6925,38 @@ export function createMapController(container, initial, callbacks) {
     scheduleReports({ counts: true });
   }
 
+  /**
+   * Rebuild the coverage overlay from raw.fetchCoverage and the current
+   * scene -- one rectangle per "scoped" source's last-fetched bbox, plus a
+   * legend control naming every one of the five states a tracked source can
+   * be in (see map/coverageOverlay.js for the logic; this only owns the
+   * Leaflet objects). Called on toggle-on (setLayerVisible), on every
+   * "fetchCoverage" poll (applyData), and at the tail of applyScene so the
+   * "gated -- needs zoom N" sentences track the live camera position rather
+   * than whatever zoom happened to be current the last time a poll landed.
+   * All three call sites are cheap to call unconditionally -- the guard
+   * below is what actually skips the work while the layer is off.
+   */
+  function renderCoverage() {
+    if (!coverageVisible) return;
+    coverageLayer.clearLayers();
+    const { rectangles } = summarizeCoverage(raw, scene);
+    for (const rect of rectangles) {
+      L.rectangle(
+        [[rect.bbox.south, rect.bbox.west], [rect.bbox.north, rect.bbox.east]],
+        { pane: "coveragePane", interactive: true, ...COVERAGE_RECTANGLE_STYLE }
+      ).bindTooltip(rect.sentence, { sticky: true }).addTo(coverageLayer);
+    }
+    coverageLegend.setContent(coverageLegendHtml(raw, scene));
+    // Rectangles actually drawn vs. every source this layer tracks -- the
+    // same "drawn count vs. known-about total" shape LayersSection.jsx's own
+    // "N (Total)" convention already uses for every other layer, reused
+    // rather than inventing a second one just for this row.
+    counts.coverage = rectangles.length;
+    totals.coverage = COVERAGE_OVERLAY_SOURCES.length;
+    scheduleReports({ counts: true });
+  }
+
   // Same technique updateCountryHighlights/updateSubdivisionHighlights use:
   // Leaflet applies a path's `className` once, at creation, so hover and
   // selection are toggled on the already-rendered element rather than by
@@ -8001,6 +8074,14 @@ export function createMapController(container, initial, callbacks) {
       // the same shape and was missing here from the day it shipped; see
       // REFERENCE_ONLY_FEEDS above for what that cost and for the test that now
       // stops the next one going the same way.
+      // Task 50: the one REFERENCE_ONLY_FEEDS key with a real side effect --
+      // every recordCoverage call (useOsintData.js) republishes this whole
+      // dict on every poll, gated tick and boot-time one-shot fetch, and the
+      // coverage overlay has to catch up with each one while it is on.
+      // Explicit branch, ahead of the generic REFERENCE_ONLY_FEEDS check
+      // below, the same way "outages"/"outagesRegions" earn their own
+      // branches above rather than falling through to it.
+      else if (key === "fetchCoverage") renderCoverage();
       else if (REFERENCE_ONLY_FEEDS.has(key)) {
         /* reference data read on demand by popups.js -- no marker layer */
       }

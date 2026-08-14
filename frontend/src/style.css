@@ -325,6 +325,55 @@ html, body {
   border-color: var(--panel-border) !important;
 }
 
+/* Task 50: the coverage overlay's own legend -- a plain Leaflet control
+   (map/layers.js's createCoverageLegend) rather than a React panel, so it
+   gets its own small stylesheet here instead of riding an existing card's
+   classes. bottom-left, out of the way of the zoom control (top-left) and
+   Leaflet's own attribution (bottom-right, unmoved). */
+.coverage-legend {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-width: 280px;
+  max-height: 45vh;
+  overflow-y: auto;
+  font-size: 11px;
+  color: var(--text-secondary);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+.coverage-legend-head {
+  color: var(--text-primary);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.coverage-legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  margin: 5px 0;
+}
+.coverage-legend-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+.coverage-legend-names {
+  flex-basis: 100%;
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+.coverage-legend-foot {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
 /* Push Leaflet's built-in top-left controls (zoom buttons) below the fixed
    title bar + region bar so they don't visually collide with the new bar. */
 .leaflet-top { top: 80px; }

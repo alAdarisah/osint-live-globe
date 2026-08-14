@@ -139,6 +139,10 @@ export const SETTINGS_LAYERS = [
   // Task 46: computed from the clock, not fetched -- see its own note in
   // map/scene.js's LAYER_MANIFEST for why it still has a MANUAL entry there.
   { key: "terminator", label: "Day/night terminator" },
+  // Task 50: derived from raw.fetchCoverage, not fetched either -- same
+  // "no endpoint of its own" reasoning as terminator just above, see its
+  // own note in map/scene.js's LAYER_MANIFEST.
+  { key: "coverage", label: "Coverage -- where this map has looked (diagnostic)" },
 ].map((layer) => ({ ...layer, zoomGate: shippedDrawZoom(layer.key) }));
 
 /**

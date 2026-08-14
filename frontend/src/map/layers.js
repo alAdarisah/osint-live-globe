@@ -608,6 +608,52 @@ export function createPowerLinesGroup() {
   return L.layerGroup();
 }
 
+// Task 50: the coverage overlay -- rectangles for the last bbox a scoped
+// source actually fetched, on their own pane above the water fill and below
+// every marker pane, so a reader can see a checked area without it hiding
+// what's drawn on top of it. See map/coverageOverlay.js for the logic that
+// decides what gets drawn here; this factory only owns the Leaflet objects.
+// Not added to the map here -- MANUAL and off by default (see its
+// LAYER_MANIFEST entry in map/scene.js), same deferred-add every other
+// MANUAL layer in this file uses.
+export function createCoverageLayer(map) {
+  if (!map.getPane("coveragePane")) {
+    // 346: above waterPane (345, water.js), below every marker overlay pane
+    // (400+) -- a coverage rectangle should never swallow a click meant for
+    // a pin drawn on top of it, and this layer's own rectangles carry their
+    // own tooltip instead of needing to win a stacking fight.
+    map.createPane("coveragePane").style.zIndex = 346;
+  }
+  return L.layerGroup();
+}
+
+// A plain Leaflet control rather than a React component. The legend's
+// content is rebuilt from raw.fetchCoverage on every poll and every camera
+// move while the layer is on (see createMapController.js's renderCoverage),
+// and threading that live data through App.jsx into a new panel component
+// would touch a file this task was told to leave alone -- Leaflet already
+// owns a live, imperative surface this controller can write straight into.
+// `setContent` is the only method this control adds beyond the stock
+// L.Control API; the HTML itself is built once, in map/coverageOverlay.js's
+// coverageLegendHtml, and never composed here.
+export function createCoverageLegend() {
+  const control = L.control({ position: "bottomleft" });
+  control.onAdd = function onAdd() {
+    const div = L.DomUtil.create("div", "coverage-legend leaflet-control");
+    // A click or scroll inside the legend must not reach the map underneath
+    // it -- the same guard Leaflet's stock controls get for free, needed
+    // here because this div is hand-built rather than one of them.
+    L.DomEvent.disableClickPropagation(div);
+    L.DomEvent.disableScrollPropagation(div);
+    control._div = div;
+    return div;
+  };
+  control.setContent = function setContent(html) {
+    if (control._div) control._div.innerHTML = html;
+  };
+  return control;
+}
+
 // Task 46: the day/night terminator, in its own pane below the country
 // outlines (350) -- 340 keeps it above every raster pane (imagery 205,
 // weather 210) so the night shading reads over them, and still well under
