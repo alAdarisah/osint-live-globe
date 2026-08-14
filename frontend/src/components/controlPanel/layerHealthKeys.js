@@ -21,6 +21,10 @@ export const LAYER_HEALTH_KEY = {
   aisNavy: "ais",
   aisTanker: "ais",
   aisCivilian: "ais",
+  // Its own entry, not "ais": a different network with a different poller, and
+  // the whole point of drawing it separately is that its health is a separate
+  // question. During the aisstream outage the two answer opposite ways.
+  aisDigitraffic: "ais_digitraffic",
   darkVessels: "dark_vessels",
   gfwGaps: "gfw_gaps",
   gfwDetections: "gfw_detections",

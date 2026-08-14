@@ -550,7 +550,7 @@ const EntityWebglLayer = L.Layer.extend({
   },
 
   /**
-   * @param {string} bucketKey - "aisCivilian" | "aisTanker" | "aisNavy" | "adsbCivilian" | "adsbMilitary"
+   * @param {string} bucketKey - "aisCivilian" | "aisTanker" | "aisNavy" | "aisDigitraffic" | "adsbCivilian" | "adsbMilitary"
    * @param {object[]} items - visible entities for this bucket (already bounds/zoom filtered)
    * @param {object} opts
    *   idField: (item) => string|number
