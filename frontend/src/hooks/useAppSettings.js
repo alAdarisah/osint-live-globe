@@ -790,6 +790,13 @@ export function useAppSettings() {
     [update]
   );
 
+  // --- Task 44's replay cadence/step ----------------------------------------
+
+  const setReplay = useCallback(
+    (patch) => update((prev) => ({ ...prev, replay: { ...prev.replay, ...patch } })),
+    [update]
+  );
+
   /** Merge a field patch into one record's overrides. Passing {} is a no-op edit. */
   const editRecord = useCallback(
     (sourceKey, id, patch) =>
@@ -971,7 +978,7 @@ export function useAppSettings() {
       saveFilterPreset, deleteFilterPreset,
       setInferenceProductMode,
       setCardSectionHidden, moveCardSection, setCardSectionDefaultOpen, resetCardSettings,
-      setPerformance,
+      setPerformance, setReplay,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       saveAlertRule, deleteAlertRule, setAlertRuleEnabled,
@@ -985,7 +992,7 @@ export function useAppSettings() {
       saveFilterPreset, deleteFilterPreset,
       setInferenceProductMode,
       setCardSectionHidden, moveCardSection, setCardSectionDefaultOpen, resetCardSettings,
-      setPerformance,
+      setPerformance, setReplay,
       editRecord, revertRecord, addRecord, removeAddedRecord, clearDataEdits,
       setBorderRings, revertBorderCountry, clearBorderEdits, clearBorderNotice,
       saveAlertRule, deleteAlertRule, setAlertRuleEnabled,

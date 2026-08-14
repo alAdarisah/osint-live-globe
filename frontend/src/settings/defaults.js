@@ -21,6 +21,7 @@ import { DEFAULT_EVENT_FILTER } from "../map/severity";
 import { mergeInferenceMode } from "./inferenceProducts";
 import { CARD_TYPES, CARD_SECTIONS } from "./cardSections";
 import { sanitizeAlertRules } from "./alertRules";
+import { DEFAULT_FRAME_MS, DEFAULT_STEP_MINUTES, FRAME_MS_BOUNDS, STEP_MINUTES_BOUNDS } from "../replay/playback";
 
 // Bumped only when a saved config could no longer be merged onto the defaults
 // safely. Every load runs through mergeSettings below, which takes the shipped
@@ -55,7 +56,16 @@ import { sanitizeAlertRules } from "./alertRules";
 // has no `stored.alertRules` at all, and mergeSettings' own
 // Array.isArray(stored.alertRules) guard below leaves the shipped empty
 // list in place for it, same as every bump above.
-export const SETTINGS_VERSION = 5;
+//
+// 6 (Task 44): added `replay` -- the timeline scrubber's play-button cadence
+// (how long a frame is held on screen) and step size (how far each frame
+// advances), see hooks/useReplay.js and replay/playback.js. Additive for the
+// same reason as every bump above: a config saved before this task has no
+// `stored.replay` at all, and mergeSettings' own isPlainObject(stored.replay)
+// guard below leaves defaultSettings()' shipped `{ frameMs: 800,
+// stepMinutes: 60 }` in place for it -- the exact cadence useReplay.js
+// already ran at before this became a dial.
+export const SETTINGS_VERSION = 6;
 
 /**
  * The layers whose appearance can be configured, in the order the admin panel
@@ -622,6 +632,18 @@ export function defaultSettings() {
     // reader-authored list in this file (filters.presets, data.*.added)
     // ships with.
     alertRules: [],
+    // Task 44: the timeline scrubber's play button. `frameMs` is the floor
+    // on how long one frame is held on screen (hooks/useReplay.js awaits
+    // each frame's fetch and then waits out whatever's left of this before
+    // stepping again, so a fast response doesn't flash by); `stepMinutes` is
+    // how far each step advances the replayed moment. Both ship at exactly
+    // what useReplay.js ran at as bare constants before this task turned
+    // them into dials -- see replay/playback.js for the shared defaults and
+    // the bounds mergeSettings clamps a stored value to below.
+    replay: {
+      frameMs: DEFAULT_FRAME_MS,
+      stepMinutes: DEFAULT_STEP_MINUTES,
+    },
   };
 }
 
@@ -959,6 +981,17 @@ export function mergeSettings(stored) {
     // all yet, but the same rule holds for a hand-edited file that simply
     // omits it) must not switch it off.
     base.performance.pausePollingWhenHidden = p.pausePollingWhenHidden !== false;
+  }
+
+  // Task 44's replay cadence/step. Additive (see SETTINGS_VERSION's own
+  // note above) -- a config saved before this task has no `stored.replay`
+  // at all, and the isPlainObject guard leaves defaultSettings()' shipped
+  // { frameMs: 800, stepMinutes: 60 } in place for it.
+  if (isPlainObject(stored.replay)) {
+    base.replay.frameMs = Math.round(pickNumber(stored.replay.frameMs, DEFAULT_FRAME_MS, ...FRAME_MS_BOUNDS));
+    base.replay.stepMinutes = Math.round(
+      pickNumber(stored.replay.stepMinutes, DEFAULT_STEP_MINUTES, ...STEP_MINUTES_BOUNDS)
+    );
   }
 
   // Repaired rather than validated: an order that has lost a layer is worse than

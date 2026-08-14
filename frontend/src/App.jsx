@@ -251,6 +251,10 @@ export default function App() {
     onExitReplay: dataApi.refetchAllNow,
     // Task 35: a restored deep link opens already scrubbed back, not live.
     initialReplayAt: urlState.state.replayAt,
+    // Task 44: the play button's frame cadence and step size, as settings
+    // rather than bare constants -- see settings/defaults.js's `replay` block.
+    frameMs: settings.replay.frameMs,
+    stepMinutes: settings.replay.stepMinutes,
   });
   replayActiveRef.current = replayApi.isReplaying;
 
@@ -1057,6 +1061,10 @@ export default function App() {
           onScrub={replayApi.scrubTo}
           onTogglePlay={replayApi.togglePlay}
           onGoLive={replayApi.goLive}
+          configuredStepMinutes={replayApi.configuredStepMinutes}
+          playbackStepMinutes={replayApi.playbackStepMinutes}
+          playbackDegraded={replayApi.playbackDegraded}
+          kindAvailability={replayApi.kindAvailability}
         />
       )}
 

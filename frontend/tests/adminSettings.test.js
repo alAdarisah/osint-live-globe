@@ -52,9 +52,9 @@ function preTask31Config() {
 
 test("the settings version was bumped for this task's shape change", () => {
   // 3 for Task 31's own five keys, 4 for Task 32's `units` addition, 5 for
-  // Task 42's `alertRules` -- this test just asserts "a real bump happened
-  // since 2", not which task.
-  assert.equal(SETTINGS_VERSION, 5);
+  // Task 42's `alertRules`, 6 for Task 44's `replay` -- this test just
+  // asserts "a real bump happened since 2", not which task.
+  assert.equal(SETTINGS_VERSION, 6);
 });
 
 test("an old config missing all five new keys merges to the shipped defaults", () => {
@@ -366,5 +366,46 @@ test("performance", async (t) => {
     const merged = mergeSettings(stored).performance;
     assert.equal(merged.shipTrailPoints, 300);
     assert.equal(merged.satLargeCadenceMs, 60_000);
+  });
+});
+
+// --- replay (Task 44) --------------------------------------------------
+
+test("replay", async (t) => {
+  await t.test("ships exactly what useReplay.js ran at as bare constants before this task", () => {
+    const replay = defaultSettings().replay;
+    assert.equal(replay.frameMs, 800);
+    assert.equal(replay.stepMinutes, 60);
+  });
+
+  await t.test("a real value round-trips", () => {
+    const stored = defaultSettings();
+    stored.replay = { frameMs: 1500, stepMinutes: 30 };
+    const merged = mergeSettings(stored).replay;
+    assert.equal(merged.frameMs, 1500);
+    assert.equal(merged.stepMinutes, 30);
+  });
+
+  await t.test("clamps to its own bounds rather than accepting anything", () => {
+    const stored = defaultSettings();
+    stored.replay = { frameMs: 50_000, stepMinutes: -10 };
+    const merged = mergeSettings(stored).replay;
+    assert.equal(merged.frameMs, 5000); // FRAME_MS_BOUNDS' own ceiling
+    assert.equal(merged.stepMinutes, 5); // STEP_MINUTES_BOUNDS' own floor
+  });
+
+  await t.test("a malformed value falls back to the shipped default rather than NaN", () => {
+    const stored = defaultSettings();
+    stored.replay = { frameMs: "fast", stepMinutes: null };
+    const merged = mergeSettings(stored).replay;
+    assert.equal(merged.frameMs, 800);
+    assert.equal(merged.stepMinutes, 60);
+  });
+
+  await t.test("a config saved before this task has no stored.replay at all and merges to the shipped default", () => {
+    const stored = defaultSettings();
+    delete stored.replay;
+    const merged = mergeSettings(stored).replay;
+    assert.deepEqual(merged, defaultSettings().replay);
   });
 });

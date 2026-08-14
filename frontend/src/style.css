@@ -1839,6 +1839,52 @@ details[open] > .layer-details-body {
 .timeline-live-btn:disabled .live-dot { animation: none; }
 .timeline-live-btn:not(:disabled) .live-dot { background: var(--text-dim); animation: none; }
 
+/* Task 44: the per-kind availability strip and the playback-degraded note,
+   both sitting in their own thin row just above the main bar rather than
+   crowding it -- see TimelineBar.jsx's own comment on why. */
+.timeline-kinds-row {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 46px;
+  z-index: 959;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 4px 14px;
+  background: var(--panel-bg);
+  border-top: 1px solid var(--panel-border);
+  font-size: 10.5px;
+}
+
+.timeline-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.timeline-kind-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+/* "no rows" and "nothing happened" must never look the same -- see
+   map-declutter-philosophy: thin the presentation, never blur what a pin
+   (or here, a dot) is actually saying. */
+.timeline-kind-ok .timeline-kind-dot { background: var(--accent); }
+.timeline-kind-no-history .timeline-kind-dot { background: var(--text-dim); }
+.timeline-kind-unavailable .timeline-kind-dot { background: var(--danger, #d9534f); }
+.timeline-kind-refused .timeline-kind-dot { background: var(--warn, #e0a52c); }
+.timeline-kind-error .timeline-kind-dot { background: var(--warn, #e0a52c); }
+.timeline-kind-checking .timeline-kind-dot { background: var(--text-dim); opacity: 0.5; }
+
+.timeline-degraded-note { color: var(--warn, #e0a52c); }
+
 .news-sentence {
   color: var(--text-bright);
   font-size: 12.5px;
@@ -3330,6 +3376,7 @@ details[open] > .layer-details-body {
   #timelineBar { gap: 6px; padding: 0 8px; height: 50px; }
   .timeline-label { min-width: 0; font-size: 10px; }
   .timeline-live-btn { padding: 5px 8px; }
+  .timeline-kinds-row { bottom: 50px; }
   #attribution { bottom: 50px; }
 
   /* Full width and clear of the taller mobile timeline. Starts collapsed
