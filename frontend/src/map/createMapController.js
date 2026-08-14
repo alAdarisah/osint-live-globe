@@ -48,7 +48,11 @@ import {
   createSatelliteGroup,
   createTrailLayers,
   createWindFlowLayer,
+  createTerminatorLayer,
 } from "./layers";
+import {
+  nightPolygonRings, CIVIL_TWILIGHT_DEG, NAUTICAL_TWILIGHT_DEG, ASTRONOMICAL_TWILIGHT_DEG,
+} from "./solarMath";
 import { attachTileTintMotionGate } from "./tileTintMotion";
 import {
   decorateEvent,
@@ -717,6 +721,17 @@ export function createMapController(container, initial, callbacks) {
     createLaneDensityLayers(map);
   laneDensityLayer.addTo(map);
   const { groups } = createEntityClusterGroups(map);
+  // Task 46: the day/night line. AUTO disposition (see map/scene.js), so like
+  // firms/jamming/laneDensity above it starts on the map here and
+  // applyLayerWishes below corrects it to whatever the resolver's initial
+  // answer is before the first paint. twilightLayer is NOT added here -- its
+  // own sub-toggle defaults off (see terminatorTwilightVisible below) and it
+  // is added/removed by setLayerVisible("terminatorTwilight") instead.
+  const {
+    nightLayer: terminatorLayer, twilightLayer: terminatorTwilightLayer,
+    astronomicalRing: terminatorAstronomicalRing, nauticalRing: terminatorNauticalRing,
+    civilRing: terminatorCivilRing, nightStyle: terminatorNightStyle,
+  } = createTerminatorLayer(map);
   // The area a conflict event could actually be in, drawn under its pin. Tied
   // to the events layer rather than toggled separately -- it is the same claim
   // as the pin, drawn honestly, not a layer a reader should have to find.
@@ -1148,6 +1163,9 @@ export function createMapController(container, initial, callbacks) {
   // Debounced re-check of the rivers sub-toggle's loaded extent -- see
   // maybeRefetchRivers below, wired to moveend next to moveEndWindTimer above.
   let moveEndRiversTimer = null;
+  // Task 46: redraws the terminator/twilight geometry -- see refreshTerminator
+  // below for the cadence and why it is what it is.
+  let terminatorRefreshTimer = null;
 
   // ---------- cities gate + country selection/highlight ----------
   // Cities only render once the user has opted into a scope (clicking a
@@ -1211,6 +1229,11 @@ export function createMapController(container, initial, callbacks) {
   // the whole thing off. Filters the pool renderSatellites works from, so
   // both the markers and their orbital trails follow it.
   let satellitesMilitaryVisible = true;
+  // Sub-toggle under "Day/night terminator" (Task 46): civil/nautical/
+  // astronomical twilight bands, off by default per the brief -- see
+  // syncTerminatorTwilight below for how this combines with "terminator"'s
+  // own on/off state, the same shape syncNewsLayer gives gdelt/events.
+  let terminatorTwilightVisible = false;
 
   // News is a sub-ticker of Conflict & Violence, not a layer of its own (see
   // LayersSection.jsx): it draws only when both its own checkbox and its
@@ -1532,6 +1555,7 @@ export function createMapController(container, initial, callbacks) {
     on.satellitesMilitary = satellitesMilitaryVisible;
     on.waterLakes = waterLakesVisible;
     on.waterRivers = waterRiversVisible;
+    on.terminatorTwilight = terminatorTwilightVisible;
     const signature = `${JSON.stringify(on)}|${JSON.stringify(userLayerWish)}|${sceneBypass}`;
     if (signature === lastLayerStateSignature) return;
     lastLayerStateSignature = signature;
@@ -2609,6 +2633,7 @@ export function createMapController(container, initial, callbacks) {
     if (key === "powerLines") return powerLinesGroup;
     if (key === "shippingLanes") return shippingLanesGroup;
     if (key === "water") return waterLayer;
+    if (key === "terminator") return terminatorLayer;
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
     // Task 45: the five OWM tile layers, keyed exactly as
@@ -2760,6 +2785,17 @@ export function createMapController(container, initial, callbacks) {
       renderWater();
       return;
     }
+    // Task 46: no Leaflet layer of its own to add/remove -- like
+    // satellitesMilitary/waterLakes/waterRivers above, it rides a layer
+    // that already exists (terminatorTwilightLayer, built once in
+    // createTerminatorLayer) rather than layerForKey having anything to
+    // hand back for this key.
+    if (key === "terminatorTwilight") {
+      terminatorTwilightVisible = visible;
+      syncTerminatorTwilight();
+      if (visible) refreshTerminator(); // draw the bands now rather than waiting out the rest of the minute
+      return;
+    }
 
     const trailToggle = TRAIL_TOGGLES[key];
     if (trailToggle) {
@@ -2832,6 +2868,16 @@ export function createMapController(container, initial, callbacks) {
       // so a water body already selected before the layer was switched off
       // needs its highlight repainted rather than left to the next click.
       else updateWaterHighlights();
+    }
+
+    if (key === "terminator") {
+      // The twilight sub-toggle's real visibility is an AND of its own
+      // checkbox and this one (see syncTerminatorTwilight) -- switching the
+      // parent off has to take the bands with it even though the reader
+      // never touched their checkbox, the same "parent off overrides the
+      // sub-ticker" rule the satellites branch below applies to trails.
+      syncTerminatorTwilight();
+      if (visible) refreshTerminator(); // draw now rather than waiting out the rest of the minute
     }
 
     if (key === "satellites") {
@@ -7300,6 +7346,78 @@ export function createMapController(container, initial, callbacks) {
     }
   }
 
+  // ---------- terminator: day/night line, computed from the clock ----------
+  //
+  // Cadence: the subsolar point moves ~15deg of longitude an hour (Earth's
+  // rotation, ~0.25deg/min, ~28km/min at the equator). A minute-old
+  // terminator is therefore off by at most ~28km at the equator and less at
+  // higher latitudes -- imperceptible at any zoom this map opens at (WORLD
+  // is a whole hemisphere on screen), and still well under one pixel of
+  // drift even at COUNTRY zoom by the time the next tick corrects it. A
+  // faster timer would buy accuracy nobody could see for a polygon rebuild
+  // this map does not otherwise need; a much slower one (RainViewer's own
+  // 10min radar-pass cadence, say) would let the line visibly lag a
+  // fast-moving news event's local time-of-day. One minute matches neither
+  // constant exactly because this is not fetched or rate-limited data --
+  // it is the shortest round number that keeps the drift below what a
+  // reader could ever notice.
+  const TERMINATOR_REFRESH_MS = 60 * 1000;
+
+  function refreshTerminator() {
+    // Same torn-down-map guard refreshWindArrows carries and for the
+    // identical reason (see that function's own note): destroy() clears
+    // this timer and then calls map.stop(), whose synchronous 'moveend' can
+    // re-arm timers a beat before map.remove() deletes _mapPane. This one
+    // touches Leaflet layer geometry directly (no network round trip to
+    // race), so the guard has to come before that geometry write, not just
+    // before a fetch.
+    if (!map._mapPane) return;
+    // Same "off means don't bother" guard refreshWindArrows carries -- a
+    // reader who has switched the layer off should not pay for a polygon
+    // rebuild every minute for a layer nothing is displaying. setLayerVisible
+    // catches up with an immediate call when the layer (or the twilight
+    // sub-toggle) is switched back on.
+    if (layerOnMap.terminator === false) return;
+    const now = new Date();
+
+    // The main terminator: always exactly one ring (see nightPolygonRings'
+    // own docstring), rebuilt in place rather than diffed -- it is one
+    // polygon, not hundreds of markers, so there is nothing updateMarker's
+    // diff-and-skip discipline would be saving here.
+    terminatorLayer.clearLayers();
+    for (const ring of nightPolygonRings(now, 0)) {
+      L.polygon(ring, terminatorNightStyle).addTo(terminatorLayer);
+    }
+
+    // Twilight bands only cost anything to rebuild while a reader has
+    // actually asked to see them -- see setLayerVisible's "terminatorTwilight"
+    // branch, which calls this once immediately on the first toggle rather
+    // than waiting out the rest of the minute.
+    if (!terminatorTwilightVisible) return;
+    const bandStyle = (fillOpacity) => ({ ...terminatorNightStyle, fillOpacity });
+    const rebuildRing = (group, thresholdDeg, fillOpacity) => {
+      group.clearLayers();
+      for (const ring of nightPolygonRings(now, thresholdDeg)) {
+        L.polygon(ring, bandStyle(fillOpacity)).addTo(group);
+      }
+    };
+    // Faintest (astronomical) drawn first, so each band's own opacity adds up
+    // toward the terminator rather than one band's fill hiding the ring
+    // inside it -- see createTerminatorLayer's own note on the ordering.
+    rebuildRing(terminatorAstronomicalRing, ASTRONOMICAL_TWILIGHT_DEG, 0.12);
+    rebuildRing(terminatorNauticalRing, NAUTICAL_TWILIGHT_DEG, 0.12);
+    rebuildRing(terminatorCivilRing, CIVIL_TWILIGHT_DEG, 0.12);
+  }
+
+  // Combines "terminator"'s own on/off state with the twilight sub-toggle's,
+  // the same AND-of-two-toggles shape syncNewsLayer gives gdelt/events.
+  function syncTerminatorTwilight() {
+    const show = layerOnMap.terminator === true && terminatorTwilightVisible;
+    layerOnMap.terminatorTwilight = show;
+    if (show) map.addLayer(terminatorTwilightLayer);
+    else map.removeLayer(terminatorTwilightLayer);
+  }
+
   // ---------- region flyTo ----------
 
   function flyToRegion(key, entry) {
@@ -7666,6 +7784,8 @@ export function createMapController(container, initial, callbacks) {
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
   refreshPrecipRadar();
   precipRefreshTimer = setInterval(refreshPrecipRadar, 10 * 60 * 1000); // matches RainViewer's own pass cadence
+  refreshTerminator();
+  terminatorRefreshTimer = setInterval(refreshTerminator, TERMINATOR_REFRESH_MS);
   // Task 24: navigation/weather/imaging (on by default -- see map/scene.js)
   // are fetched by useOsintData.js's own POLL_CONFIG, which lands here
   // through applyData's "key in SAT_ELEMENT_CELESTRAK_GROUP" branch below,
@@ -7687,6 +7807,26 @@ export function createMapController(container, initial, callbacks) {
   // stop a later flight from undoing it. whenReady is the first moment the clamp can
   // actually stick.
   map.whenReady(() => applyWorldFence());
+  // Same reasoning as applyWorldFence's own whenReady call just above, for a
+  // vector layer instead of a zoom clamp: a polygon spanning most of the
+  // globe, added (via the refreshTerminator() call above) before the map's
+  // pixel origin is established, projects to degenerate coordinates that
+  // Leaflet's SVG renderer draws as an empty path -- invisible until
+  // whichever comes first, a pan/zoom, the next minute's timer tick, or a
+  // reader toggling the layer. Re-drawing once more here, the first moment
+  // the map is truly loaded, means a reader who never touches the map still
+  // sees a correct terminator on the very first paint.
+  map.whenReady(() => refreshTerminator());
+  // Belt and suspenders on the call just above: whenReady fires once
+  // Leaflet considers the map loaded, which was not always enough on its
+  // own to leave every ring correctly projected (observed manually against
+  // the running dev server -- some, not all, of a multi-ring twilight
+  // layer's paths still drew empty even after whenReady, self-healing only
+  // on the next real pan/zoom). 'moveend' is a stronger signal specifically
+  // for vector geometry: every SVG path on the map gets reprojected when it
+  // fires, so redrawing once more right after costs nothing extra and
+  // removes whatever gap whenReady alone left.
+  map.once("moveend", () => refreshTerminator());
   callbacks.onBoundsChange?.(boundsToPlainObject(map.getBounds()));
   reportZoom();
 
@@ -8322,6 +8462,7 @@ export function createMapController(container, initial, callbacks) {
       clearInterval(windRefreshTimer);
       clearInterval(precipRefreshTimer);
       clearInterval(satElementTickTimer);
+      clearInterval(terminatorRefreshTimer);
       clearTimeout(moveEndWindTimer);
       clearTimeout(moveEndRiversTimer);
       clearTimeout(regionFlightTimer);

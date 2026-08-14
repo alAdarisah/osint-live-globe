@@ -815,6 +815,25 @@ export const LAYER_MANIFEST = {
   precipitation: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   temp: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   pressure: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  // Task 46: the day/night line. AUTO rather than MANUAL, unlike every other
+  // reference layer in this file (water, cables, railways...) -- the brief is
+  // explicit that this is "essential context for reading thermal detections
+  // and imagery, which is why it is here and not decoration", the same
+  // reasoning that keeps outagePoints/countries/czib ungated-AUTO rather than
+  // opt-in. Ungated (draw: null) like those three, so it is simply on unless
+  // a reader unticks it. `fetch: FETCH_MANUAL` is still the honest word for
+  // its network behaviour, just not for the reason it usually is here: this
+  // layer has no endpoint at all, ever -- it is computed from the clock alone
+  // (see map/solarMath.js) and refreshed on a timer in createMapController.js,
+  // so "never polled" is trivially true rather than "not yet ticked".
+  // draw:null/AUTO puts it in SCENE_APPLY_KEYS (see below), which is what
+  // lets the reader's checkbox override the resolver the same way every
+  // other layer's does.
+  terminator: {
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: AUTO,
+  },
   firms: {
     // One toggle covers two things -- the heat canvas and the interactive
     // per-point circles -- and only the second of them was ever gated. So this

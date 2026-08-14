@@ -580,6 +580,16 @@ export const SVG = {
     '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
     'd="M2.5 20c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>',
 
+  // ---- day/night terminator (Task 46) ----
+  //
+  // A circle outline with its right half filled -- the conventional
+  // day/night glyph. Legend-row only, same treatment as `wave` just above:
+  // the layer itself is a polygon fill drawn straight from the ring points
+  // map/solarMath.js computes, not a marker this SVG is turned into (no
+  // GLYPH_CHOICES entry, for the same reason).
+  dayNight: '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/>' +
+    '<path fill="currentColor" d="M12 4a8 8 0 0 1 0 16z"/>',
+
   // ---- shipping lanes (Task 20) ----
   //
   // A dashed diagonal with an arrowhead -- a schematic route, deliberately

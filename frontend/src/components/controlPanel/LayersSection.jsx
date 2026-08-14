@@ -9,7 +9,7 @@ import {
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
   RAILWAY_OSM_STYLE, RAILWAY_LIVE_STYLE,
   WATER_STYLE, SHIPPING_LANE_STYLE, LANE_DENSITY_STYLE, SAT_ELEMENT_LAYERS,
-  POWER_PLANT_FUEL_STYLE,
+  POWER_PLANT_FUEL_STYLE, TERMINATOR_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
@@ -130,7 +130,7 @@ const GROUP_LAYERS = {
   ground: [
     "infra", "osmInfra", "powerPlants", "airDefense", "airports", "ports", "dams", "deflock",
     "railways", "railLive", "powerLines", "shippingLanes",
-    "water", "cables", "firms", "jamming", "laneDensity",
+    "water", "cables", "firms", "jamming", "laneDensity", "terminator",
   ],
   // Its own group rather than a ninth row under traffic: a regulator's ruling
   // about a volume of airspace is neither traffic nor infrastructure, and
@@ -1515,6 +1515,43 @@ export default function LayersSection({
             still for weeks keeps adding to the same number a busy strait would produce by real traffic
             &mdash; the wash cannot tell those two apart, and neither can you from the colour alone. Every
             popup repeats this in words.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="terminator">
+          <LayerCheck
+            layerKey="terminator"
+            on={layerVisibility.terminator}
+            wish={layerWish?.terminator}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={TERMINATOR_STYLE.svg} color={TERMINATOR_STYLE.color} />
+          {" "}Day/Night Terminator
+        </label>
+        <label className="layer-row sub-row" data-layer="terminatorTwilight">
+          <LayerCheck
+            layerKey="terminatorTwilight"
+            on={layerVisibility.terminatorTwilight}
+            wish={layerWish?.terminatorTwilight}
+            onToggle={onToggleLayer}
+          />
+          Show twilight bands (civil / nautical / astronomical)
+        </label>
+        <LayerDetails id="det-terminator" open={isOpen("det-terminator")} onToggle={setOpen}>
+          <div className="sublegend">
+            Where it is currently day and night, computed from the clock alone (no fetch, refreshed once a
+            minute) &mdash; context for reading a thermal detection or a satellite pass: a FIRMS hotspot at
+            local midnight means something different from one at local noon.
+          </div>
+          <div className="sublegend">
+            <b>Twilight bands</b> shade the civil (-6&deg;), nautical (-12&deg;) and astronomical (-18&deg;)
+            sun-elevation thresholds around the terminator line. Off by default &mdash; the plain day/night
+            split is usually all a reader needs, and near a pole in that hemisphere&apos;s dark season a band
+            can wrap most of the way around it rather than staying a thin ring.
+          </div>
+          <div className="sublegend">
+            Click any country or sea to see its own sunrise, sunset and current sun elevation in that
+            place&apos;s card.
           </div>
         </LayerDetails>
       </PanelGroup>

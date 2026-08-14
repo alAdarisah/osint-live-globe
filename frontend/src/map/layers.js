@@ -608,6 +608,44 @@ export function createPowerLinesGroup() {
   return L.layerGroup();
 }
 
+// Task 46: the day/night terminator, in its own pane below the country
+// outlines (350) -- 340 keeps it above every raster pane (imagery 205,
+// weather 210) so the night shading reads over them, and still well under
+// the vector overlays so a country's hover/selection highlight, and every
+// point layer, keeps painting on top of it rather than under it.
+// pointerEvents is off for the same reason the uncertainty pane's is: a
+// polygon covering roughly half the globe would swallow clicks meant for
+// whatever is drawn on top of it otherwise.
+export function createTerminatorLayer(map) {
+  if (!map.getPane("terminatorPane")) {
+    const pane = map.createPane("terminatorPane");
+    pane.style.zIndex = 340;
+    pane.style.pointerEvents = "none";
+  }
+  const nightStyle = {
+    pane: "terminatorPane",
+    stroke: false,
+    fill: true,
+    fillColor: "#0a1120",
+    fillOpacity: 0.38,
+    interactive: false,
+  };
+  // Three concentric bands, faintest first (astronomical, drawn under civil)
+  // so each band's own fillOpacity adds up toward the terminator rather than
+  // one band's paint hiding the ring inside it -- civil (closest to the
+  // terminator line) ends up the least additionally-dark of the three, which
+  // matches how a reader's eye actually reads a dusk gradient. Off the map by
+  // default (see createMapController.js's terminatorTwilightVisible); built
+  // here regardless so the first toggle has geometry to show immediately
+  // rather than waiting on a render that only happens post-toggle.
+  const astronomicalRing = L.layerGroup();
+  const nauticalRing = L.layerGroup();
+  const civilRing = L.layerGroup();
+  const twilightLayer = L.layerGroup([astronomicalRing, nauticalRing, civilRing]);
+  const nightLayer = L.layerGroup().addTo(map);
+  return { nightLayer, twilightLayer, astronomicalRing, nauticalRing, civilRing, nightStyle };
+}
+
 export function createWindFlowLayer(map) {
   // leaflet-velocity draws a canvas of small particles that drift along the
   // interpolated wind field -- the same technique Windy.com uses -- which is

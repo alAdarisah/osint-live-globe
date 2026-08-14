@@ -2843,6 +2843,18 @@ export const WATER_STYLE = {
   svg: SVG.wave, color: WATER_FILL_COLOR, label: "Water bodies (Natural Earth)", token: "water.fill",
 };
 
+// ---- day/night terminator (Task 46, computed client-side -- map/solarMath.js) ----
+//
+// No palette token, deliberately: the fill colour is a fixed constant in
+// createTerminatorLayer (map/layers.js), the same "the palette system has
+// never driven this" treatment the heat-layer gradients get (see that
+// file's own note by createFirmsLayers) -- a single translucent night-shade
+// fill has no per-kind variation for a colour picker to choose between, and
+// this layer draws no marker for icons.colors to reach either.
+export const TERMINATOR_STYLE = {
+  svg: SVG.dayNight, color: "#3a4a6b", label: "Day/night terminator",
+};
+
 export function cableLandingStyle(d) {
   return themedStyle(d?.planned ? CABLE_PLANNED_STYLE : CABLE_LANDING_STYLE, "cables");
 }

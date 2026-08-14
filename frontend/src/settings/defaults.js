@@ -126,6 +126,9 @@ export const SETTINGS_LAYERS = [
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
   { key: "shippingLanes", label: "Shipping corridors (schematic)" },
   { key: "laneDensity", label: "AIS traffic density (this map's own coverage)" },
+  // Task 46: computed from the clock, not fetched -- see its own note in
+  // map/scene.js's LAYER_MANIFEST for why it still has a MANUAL entry there.
+  { key: "terminator", label: "Day/night terminator" },
 ].map((layer) => ({ ...layer, zoomGate: shippedDrawZoom(layer.key) }));
 
 /**
@@ -203,12 +206,17 @@ const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null
  * both ride the single `water` layer key, filtering what is currently synced
  * into it rather than adding or removing a Leaflet layer of their own (see
  * setLayerVisible in createMapController.js).
+ *
+ * terminatorTwilight joins them for the identical reason (Task 46): it rides
+ * "terminator"'s own on/off state -- see syncTerminatorTwilight in
+ * createMapController.js -- rather than having a manifest entry of its own.
  */
 export const TOGGLEABLE_LAYER_KEYS = new Set([
   ...SCENE_APPLY_KEYS,
   ...Object.keys(TRAIL_PARENT),
   "satellitesMilitary",
   "waterLakes", "waterRivers",
+  "terminatorTwilight",
 ]);
 
 /**
