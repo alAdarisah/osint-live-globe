@@ -85,11 +85,35 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 
 import {
   subsolarPoint, sunElevation, sunriseSunset, elevationCrossings, nightPolygonRings,
   SUNRISE_SUNSET_THRESHOLD_DEG, CIVIL_TWILIGHT_DEG, ASTRONOMICAL_TWILIGHT_DEG,
 } from "../src/map/solarMath.js";
+
+// map/popups.js's own imports are extensionless ("./decorators", not
+// "./decorators.js"), which Node's ESM loader refuses outright -- Vite
+// resolves it at build/dev time, plain `node --test` does not. Same loader
+// shim tests/countryCardSections.test.js and tests/countryCard.test.js
+// already use for the identical reason: rewrite a bare relative specifier
+// to add ".js" before Node tries to resolve it.
+registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier.startsWith(".") && !specifier.endsWith(".js")) {
+      return next(`${specifier}.js`, context);
+    }
+    return next(specifier, context);
+  },
+});
+
+// popups.js pulls in map/decorators.js at module scope, which reads
+// window.L (Leaflet) -- stubbed just enough to satisfy that import, same as
+// the two test files above. Nothing in the sun-section tests below touches
+// the DOM or a real map.
+globalThis.window = { L: { geoJSON: () => ({}) } };
+
+const { buildSunSectionForPoint } = await import("../src/map/popups.js");
 
 // This module's algorithm is the standard "low precision" solar position
 // formula, good to roughly 0.01 degree near the current epoch -- not full
@@ -338,4 +362,49 @@ test("every point nightPolygonRings ever returns is a real, self-consistent lati
   // above stopped exercising anything and the test would pass for the wrong
   // reason (nothing to check, not "everything checked was valid").
   assert.ok(checked > 10_000, `expected a substantial sweep, only checked ${checked} points`);
+});
+
+// --- the country/water card's "Sun position" fold: rendered wording, -----
+// --- not just the maths behind it -----------------------------------
+//
+// Review fix: popups.js's buildSunSection branches between polar day, polar
+// night and the ordinary sunrise/sunset case, and nothing reached those
+// branches as *rendered text* -- solarMath.js's own alwaysAbove/alwaysBelow
+// flags were tested above, but a future edit could transpose which flag
+// produces which sentence (or swap "does not set" for "does not rise") and
+// every test in this file would stay green, because none of them look at
+// the string a reader actually sees. These three do, using the same
+// Longyearbyen point and instants (mid-June polar day, mid-December polar
+// night, both confirmed against Skyfield earlier in this file) plus an
+// ordinary mid-latitude case for the normal branch.
+
+test("sun section wording: polar day says the sun does not set, not the polar-night sentence", () => {
+  const html = buildSunSectionForPoint(78.2232, 15.6267, new Date("2025-06-21T12:00:00Z"));
+  assert.match(html, /does not set today.*polar day/s);
+  assert.doesNotMatch(html, /does not rise/);
+  assert.doesNotMatch(html, /polar night/);
+  assert.doesNotMatch(html, /Sunrise \d/);
+});
+
+test("sun section wording: polar night says the sun does not rise, not the polar-day sentence", () => {
+  const html = buildSunSectionForPoint(78.2232, 15.6267, new Date("2025-12-21T12:00:00Z"));
+  assert.match(html, /does not rise today.*polar night/s);
+  assert.doesNotMatch(html, /does not set/);
+  assert.doesNotMatch(html, /polar day/);
+  assert.doesNotMatch(html, /Sunrise \d/);
+});
+
+test("sun section wording: an ordinary mid-latitude day states a real sunrise and sunset, not a polar sentence", () => {
+  // London, the same place/date already checked against Skyfield above --
+  // sunrise ~03:43 UTC, sunset ~20:21 UTC.
+  const html = buildSunSectionForPoint(51.5074, -0.1278, new Date("2025-06-21T12:00:00Z"));
+  assert.match(html, /Sunrise \d\d:\d\d UTC, sunset \d\d:\d\d UTC/);
+  assert.doesNotMatch(html, /polar day/);
+  assert.doesNotMatch(html, /polar night/);
+  assert.doesNotMatch(html, /does not set/);
+  assert.doesNotMatch(html, /does not rise/);
+  // The elevation line and the provenance line are both present too --
+  // this fold is three lines, not just the rise/set sentence.
+  assert.match(html, /Sun elevation right now/);
+  assert.match(html, /Derived: arithmetic/);
 });

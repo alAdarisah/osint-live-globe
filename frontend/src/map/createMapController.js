@@ -7807,26 +7807,42 @@ export function createMapController(container, initial, callbacks) {
   // stop a later flight from undoing it. whenReady is the first moment the clamp can
   // actually stick.
   map.whenReady(() => applyWorldFence());
-  // Same reasoning as applyWorldFence's own whenReady call just above, for a
-  // vector layer instead of a zoom clamp: a polygon spanning most of the
-  // globe, added (via the refreshTerminator() call above) before the map's
-  // pixel origin is established, projects to degenerate coordinates that
-  // Leaflet's SVG renderer draws as an empty path -- invisible until
-  // whichever comes first, a pan/zoom, the next minute's timer tick, or a
-  // reader toggling the layer. Re-drawing once more here, the first moment
-  // the map is truly loaded, means a reader who never touches the map still
-  // sees a correct terminator on the very first paint.
-  map.whenReady(() => refreshTerminator());
-  // Belt and suspenders on the call just above: whenReady fires once
-  // Leaflet considers the map loaded, which was not always enough on its
-  // own to leave every ring correctly projected (observed manually against
-  // the running dev server -- some, not all, of a multi-ring twilight
-  // layer's paths still drew empty even after whenReady, self-healing only
-  // on the next real pan/zoom). 'moveend' is a stronger signal specifically
-  // for vector geometry: every SVG path on the map gets reprojected when it
-  // fires, so redrawing once more right after costs nothing extra and
-  // removes whatever gap whenReady alone left.
-  map.once("moveend", () => refreshTerminator());
+  // A polygon spanning most of the globe, built (via the refreshTerminator()
+  // call above) before the map's real pixel origin is established, projects
+  // to degenerate coordinates -- Leaflet's SVG renderer then draws that ring
+  // as an empty or collapsed-to-a-point path, not an error, so it is
+  // invisible with nothing to say why. This is the reference layer.js's own
+  // makeHeatResilient and webglLayer.js's createEntityWebglLayer both guard
+  // against the same class of "added before the map/container was truly
+  // ready" problem, each for its own layer type.
+  //
+  // Neither whenReady() nor a one-time 'moveend' listener turned out to be
+  // reliable here (verified manually, repeatedly, against the running dev
+  // server): both fire once Leaflet considers itself loaded, which is not
+  // the same guarantee as the container having settled into its real,
+  // laid-out size and the map having recomputed its pixel origin from it --
+  // on some loads the ring still drew empty, or drew as a single collapsed
+  // point at the coordinate origin, for over three full refresh-timer
+  // cycles with nothing but a manual zoom fixing it. What a zoom reliably
+  // fixes is exactly what invalidateSize() does on demand: force Leaflet to
+  // re-read the container's current size and recompute from it, which is
+  // the one thing whenReady/moveend do not guarantee has happened yet.
+  //
+  // So this forces that recompute itself, a few times across consecutive
+  // animation frames rather than once: invalidateSize()+refreshTerminator()
+  // is cheap (one polygon rebuild, no network), and repeating it after the
+  // browser has had a few more paint cycles to finish settling the layout
+  // costs nothing extra while removing the guesswork about which single
+  // trigger will have caught up by then.
+  let terminatorReadyAttempts = 0;
+  function settleTerminatorOnceReady() {
+    if (!map._mapPane) return; // torn down before this ever got to run
+    map.invalidateSize({ pan: false, debounceMoveend: true });
+    refreshTerminator();
+    terminatorReadyAttempts += 1;
+    if (terminatorReadyAttempts < 5) requestAnimationFrame(settleTerminatorOnceReady);
+  }
+  requestAnimationFrame(settleTerminatorOnceReady);
   callbacks.onBoundsChange?.(boundsToPlainObject(map.getBounds()));
   reportZoom();
 

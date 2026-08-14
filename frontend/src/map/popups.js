@@ -2010,13 +2010,31 @@ function fmtUtcClock(date) {
  * `null` centroid (no bounds yet) drops the whole fold rather than rendering
  * it empty -- the same convention every other bounds-gated fold in this file
  * follows (see e.g. buildConflictSummary's callers).
+ *
+ * The actual wording lives in the exported buildSunSectionForPoint below,
+ * which takes lat/lon/date directly rather than reading `bounds`/`new Date()`
+ * itself -- the review fix this split exists for: nothing reached the three
+ * branches (normal/polar day/polar night) this fold renders until a real
+ * point and instant could be pinned in a test, the same "no user-visible
+ * sentence node --test cannot reach" rule the rest of this codebase's
+ * sentence-building already follows.
  */
 function buildSunSection(bounds) {
   const point = sunSectionCentroid(bounds);
   if (!point) return "";
-  const now = new Date();
-  const elevationDeg = sunElevation(point.lat, point.lon, now);
-  const { rise, set, alwaysAbove, alwaysBelow } = sunriseSunset(now, point.lat, point.lon);
+  return buildSunSectionForPoint(point.lat, point.lon, new Date());
+}
+
+/**
+ * The rendered wording for the sun-position fold at a specific point and
+ * instant -- exported so frontend/tests/terminator.test.js (or a card test)
+ * can pin a polar-latitude point and a fixed date and assert on the actual
+ * three branches a reader sees, not just on the solarMath.js maths behind
+ * them. See buildSunSection's own docstring for why this split exists.
+ */
+export function buildSunSectionForPoint(lat, lon, date) {
+  const elevationDeg = sunElevation(lat, lon, date);
+  const { rise, set, alwaysAbove, alwaysBelow } = sunriseSunset(date, lat, lon);
 
   let riseSetLine;
   if (alwaysAbove) {
