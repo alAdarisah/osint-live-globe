@@ -126,12 +126,25 @@ git commit -m "Write down the one flow the tailnet is allowed to carry"
 
 Sign in at <https://login.tailscale.com/>. Then, at <https://login.tailscale.com/admin/settings/keys>, **Generate auth key** with:
 
-- **Reusable:** off
-- **Ephemeral:** off
-- **Pre-approved:** on — otherwise the server lands in the approval queue you are about to enable, and Task 5 quarantines it
-- **Tags:** `tag:server`
+- **Description:** `osint-server`, matching the `--hostname` passed in Step 4
+- **Reusable:** off — one key, one machine
+- **Expiration:** 1 day. This is the key's own life, and it is consumed minutes
+  later; the default 90 leaves a live credential lying around for a quarter
+- **Ephemeral:** off — an ephemeral node is removed when it goes offline
+- **Tags:** on, `tag:server`
 
-If `tag:server` is not offered, the tag does not exist yet: paste `ops/tailscale/policy.hujson` into <https://login.tailscale.com/admin/acls> first (that is Task 5, Step 1 — doing it early is fine), then come back.
+The dialog notes that tagging "will also disable node key expiry for the
+device". That is Step 6 of this task handled at creation time — but verify it in
+Step 6 anyway rather than trusting the label.
+
+There is **no "pre-approved" toggle** at this point, and there should not be: it
+appears only once device approval is enabled on the tailnet, which Task 5 does
+deliberately *after* the server has joined. The server joins already approved.
+
+If the Tags toggle offers nothing, or does not list `tag:server`, the tag does
+not exist yet: apply `ops/tailscale/policy.hujson` at
+<https://login.tailscale.com/admin/acls> first (that is Task 5, Step 1 — doing
+it early is expected), then come back.
 
 Copy the key. It starts `tskey-auth-`. Keep it out of this conversation.
 
