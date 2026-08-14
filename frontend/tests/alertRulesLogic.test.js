@@ -7,12 +7,32 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 
-import {
+// alertRules.js now imports utils/tempo.js the extensionless way every
+// source file in this project does -- fine for Vite, not for plain Node ESM
+// -- so this needs the same resolver shim squawkAlerts.test.js's own note
+// explains, the first time this file's own module graph has reached one.
+// registerHooks has to run before alertRules.js is imported, and a static
+// `import` at the top of the file is hoisted above any code that would --
+// so, matching squawkAlerts.test.js's own pattern, that import is a dynamic
+// `await import()` below instead, which executes in place.
+registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier.startsWith(".") && !specifier.endsWith(".js")) {
+      return next(`${specifier}.js`, context);
+    }
+    return next(specifier, context);
+  },
+});
+
+const {
   RULE_LAYERS, sanitizeAlertRules, sanitizeGeofence, sanitizeCondition,
   blankAlertRule, validateAlertRule, describeGeofence, describeCondition,
-  describeEngineStatus, describeAreaCaptureLabel,
-} from "../src/settings/alertRules.js";
+  describeEngineStatus, describeAreaCaptureLabel, describeAreaCaptureConfirmation,
+  describeRuleStatus, layerIsHealthy,
+} = await import("../src/settings/alertRules.js");
+const { STALE_AFTER_SECONDS } = await import("../src/utils/tempo.js");
 
 const REGION_KEYS = new Set(["persian_gulf_hormuz", "red_sea_yemen"]);
 
@@ -218,4 +238,122 @@ test("describeAreaCaptureLabel prompts to click the map when nothing is selected
 test("describeAreaCaptureLabel names the selection once one exists", () => {
   assert.equal(describeAreaCaptureLabel("country", "Iran"), "Use Iran");
   assert.equal(describeAreaCaptureLabel("water", "Strait of Hormuz"), "Use Strait of Hormuz");
+});
+
+// --- describeAreaCaptureConfirmation ---------------------------------------
+//
+// Review fix: AlertRulesSection.jsx was still composing "Set to {name}."
+// inline for the country and water pickers (the sweep for this defect had
+// found and fixed three inline strings, but missed these two -- see this
+// task's report for the corrected count). Moved here, tested, and reused
+// for the third (rect) case too so all three capture confirmations come
+// from one place.
+
+test("describeAreaCaptureConfirmation is empty before anything is captured", () => {
+  assert.equal(describeAreaCaptureConfirmation(null), "");
+});
+
+test("describeAreaCaptureConfirmation names a captured country", () => {
+  assert.equal(
+    describeAreaCaptureConfirmation({ type: "country", iso2: "IR", name: "Iran" }),
+    "Set to Iran."
+  );
+});
+
+test("describeAreaCaptureConfirmation falls back to the code when a country has no name", () => {
+  assert.equal(describeAreaCaptureConfirmation({ type: "country", iso2: "IR", name: null }), "Set to IR.");
+});
+
+test("describeAreaCaptureConfirmation names a captured water body", () => {
+  assert.equal(
+    describeAreaCaptureConfirmation({ type: "water", id: "marine:5:hormuz", name: "Strait of Hormuz", bbox: [1, 2, 3, 4] }),
+    "Set to Strait of Hormuz."
+  );
+});
+
+test("describeAreaCaptureConfirmation reports a captured rect distinctly", () => {
+  assert.equal(
+    describeAreaCaptureConfirmation({ type: "rect", bounds: [1, 2, 3, 4] }),
+    "Area captured from the current view."
+  );
+});
+
+// --- layerIsHealthy / describeRuleStatus -----------------------------------
+//
+// Review fix (critical): the rule list's status dot used to be computed from
+// firing + rule.enabled alone, so a rule whose layer's feed had broken --
+// entity_latest_with_ids returning nothing because the data is gone, not
+// because the geofence is genuinely empty -- rendered identically to a
+// healthy rule that is correctly quiet: both were a plain green "Watching"
+// dot. describeRuleStatus is the fix; these tests pin all four states, using
+// the same fresh/stale rule SourceStatusSection.jsx's own dot colouring
+// already uses (STALE_AFTER_SECONDS), not a second threshold invented here.
+
+const HEALTHY_AIS = { last_success: 100, seconds_since_success: 5 };
+const STALE_AIS = { last_success: 100, seconds_since_success: STALE_AFTER_SECONDS + 1 };
+const NEVER_SUCCEEDED_AIS = { last_success: null, seconds_since_success: null, last_error: "no database connection" };
+
+function rule(overrides) {
+  return { id: "r1", name: "Test rule", layer: "ais", enabled: true, geofence: null, condition: { type: "enter" }, ...overrides };
+}
+
+test("layerIsHealthy is true only for a fresh success", () => {
+  assert.equal(layerIsHealthy(HEALTHY_AIS), true);
+  assert.equal(layerIsHealthy(STALE_AIS), false);
+  assert.equal(layerIsHealthy(NEVER_SUCCEEDED_AIS), false);
+  assert.equal(layerIsHealthy(undefined), false);
+  assert.equal(layerIsHealthy(null), false);
+});
+
+test("describeRuleStatus reports firing above every other state", () => {
+  const health = { ais: HEALTHY_AIS, alerts: [{ subject: "rule:r1", condition: "entity:1" }] };
+  const status = describeRuleStatus(rule(), health);
+  assert.equal(status.severity, "err");
+  assert.equal(status.text, "Currently firing");
+});
+
+test("describeRuleStatus reports paused when the reader turned the rule off", () => {
+  const health = { ais: HEALTHY_AIS, alerts: [] };
+  const status = describeRuleStatus(rule({ enabled: false }), health);
+  assert.equal(status.severity, "warn");
+  assert.equal(status.text, "Paused");
+});
+
+test("describeRuleStatus reports watching-and-quiet when the layer is healthy and nothing is firing", () => {
+  const health = { ais: HEALTHY_AIS, alerts: [] };
+  const status = describeRuleStatus(rule(), health);
+  assert.equal(status.severity, "ok");
+  assert.equal(status.text, "Watching");
+});
+
+test("describeRuleStatus tells a broken layer apart from a healthy-and-quiet one -- the review's own critical finding", () => {
+  const healthyHealth = { ais: HEALTHY_AIS, alerts: [] };
+  const brokenHealth = { ais: NEVER_SUCCEEDED_AIS, alerts: [] };
+  const watching = describeRuleStatus(rule(), healthyHealth);
+  const cannotEvaluate = describeRuleStatus(rule(), brokenHealth);
+  // The whole point: these must not be the same severity or the same text.
+  assert.notEqual(watching.severity, cannotEvaluate.severity);
+  assert.notEqual(watching.text, cannotEvaluate.text);
+  assert.equal(cannotEvaluate.severity, "warn");
+  assert.match(cannotEvaluate.text, /cannot be evaluated/i);
+  assert.match(cannotEvaluate.text, /ships/i); // RULE_LAYERS' own label for "ais"
+});
+
+test("describeRuleStatus also catches a stale (not just a never-succeeded) layer", () => {
+  const status = describeRuleStatus(rule(), { ais: STALE_AIS, alerts: [] });
+  assert.match(status.text, /cannot be evaluated/i);
+});
+
+test("describeRuleStatus with the sandbox's own observed shape (every source erroring) reports unhealthy, not quiet", () => {
+  // The exact /api/health shape this task's own live verification saw with
+  // Postgres unreachable: last_success null, a "no database connection"
+  // last_error. This is the scenario the review specifically asked to be
+  // told apart from "nothing is happening".
+  const health = {
+    ais: { name: "ais", last_success: null, seconds_since_success: null, last_error: "no database connection -- showing the last Ships data read" },
+    alerts: [],
+  };
+  const status = describeRuleStatus(rule(), health);
+  assert.equal(status.severity, "warn");
+  assert.notEqual(status.text, "Watching");
 });

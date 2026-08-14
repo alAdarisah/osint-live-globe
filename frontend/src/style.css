@@ -1569,7 +1569,17 @@ details[open] > .layer-details-body {
   color: var(--text-secondary);
 }
 
-#healthList .dot {
+/* A small status circle: healthList's own row (source health), alertList's
+   severity dot (both in SourceStatusSection.jsx), and Task 42's rule-status
+   dots (AlertRulesSection.jsx, AlertToast.jsx) all draw the identical thing
+   -- one colour standing for ok/warn/err -- so this is one shared rule
+   rather than a `#healthList`-scoped original with unstyled lookalikes
+   growing beside it. Widened from `#healthList .dot` (its original, narrower
+   selector) rather than left as a second copy: a `.dot` outside #healthList
+   used to render with no size and no colour at all, which is exactly the
+   kind of "two states look pixel-identical" bug Task 42's own review caught
+   for its rule-status dots specifically. */
+.dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -1577,9 +1587,9 @@ details[open] > .layer-details-body {
   background: #555;
 }
 
-#healthList .dot.ok { background: #34c759; }
-#healthList .dot.warn { background: #ff9500; }
-#healthList .dot.err { background: #ff3b30; }
+.dot.ok { background: #34c759; }
+.dot.warn { background: #ff9500; }
+.dot.err { background: #ff3b30; }
 
 /* A source dot's pulse period is that source's own cadence (see
    utils/tempo.js), so the row reports how alive it is without anyone reading

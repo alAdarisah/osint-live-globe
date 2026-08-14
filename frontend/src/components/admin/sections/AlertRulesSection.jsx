@@ -2,25 +2,48 @@
 // for building a rule (backend/alert_rules.py evaluates it; AlertToast.jsx
 // shows it firing).
 //
-// A rule needs a geofence, and the brief says "draw it on the map, or pick a
-// country / region / water body". This section does not build a fourth,
-// standalone drawing tool for that first option. Three interactions this map
-// already has cover exactly the same ground:
-//   - clicking a country (the same click Task 40's compare view already
-//     reads as mapApi.countrySelection)
-//   - clicking a water body (mapApi.selectedWater, Task 7's own card
-//     selection)
-//   - panning/zooming the map itself (mapApi.mapBounds, kept live by
-//     createMapController's own onBoundsChange)
-// borderEdit.js's own drag-a-vertex editor was read first and is not this --
-// it edits an existing country's boundary vertex by vertex, and adapting it
-// into a freehand shape tool would be a second, larger piece of map-drawing
-// machinery for a plan whose brief already asks not to build more than the
-// task needs. "Use current map view" is this task's honest stand-in for a
-// drawn rectangle: an operator points the real map at the real place they
-// mean, the same motion drawing one would take, and clicks one button
-// instead of dragging a shape. See this task's own report for the full
-// reasoning.
+// A rule needs a geofence, and the brief's first-listed option is "draw it
+// on the map". This section does not do that -- it is a real reduction from
+// the brief, not a disguised equivalent, and the reasoning is on record
+// (this task's own report) rather than asserted here. Two of the three area
+// choices reuse interactions this map already has (clicking a country --
+// mapApi.countrySelection, the same state Task 40's compare view reads;
+// clicking a water body -- mapApi.selectedWater, Task 7's own card
+// selection); the third, "current map view", is a plain rectangle read off
+// mapApi.mapBounds, and is presented as exactly that below -- a rectangle
+// matching whatever the map happens to be showing, not a hand-drawn shape.
+//
+// createMapController.js's own boundary editor (borderEdit.js's
+// createBorderEditor, driven by the module-level `borderSession` in
+// createMapController.js) was read and rejected as a base for real
+// freehand drawing, on three specific points, not a general "too much
+// work" judgement:
+//   1. Its only entry point, adopt(), requires a feature already present in
+//      the FeatureCollection it is handed -- there is no "start a new blank
+//      shape" path, only "start editing this existing one".
+//   2. It is wired to exactly one FeatureCollection, permanently:
+//      createMapController.js constructs it once with
+//      `getFeatureCollection: () => raw.countries` and
+//      `replaceFeatureCollection: (fc) => { raw.countries = fc; }`. Adopting
+//      it for a rule's geofence would mean either inserting a synthetic
+//      "country" into the real countries data the map's own hit-testing,
+//      choropleth and outage-pin placement all read, or standing up a
+//      second, independent instance against a parallel collection -- which
+//      is not reuse, it is building the drawing tool a second time with
+//      extra steps.
+//   3. `borderSession` is one global slot, gating map click-through and a
+//      `country-editing` CSS toggle at roughly ten call sites in
+//      createMapController.js, and a commit from it is persisted into
+//      `settings.borders`, which applyBorderOverrides/countryHitTest.js
+//      downstream interpret specifically as "this country's real boundary
+//      was redrawn" -- reusing that key for an unrelated rule-fence polygon
+//      would corrupt a real country's shape.
+// A genuine freehand tool -- its own pane, a place-vertex/close-the-loop
+// interaction, a session independent of border editing, storage that is not
+// `settings.borders` -- is a bigger build than the rest of this task, which
+// is the trade the original brief's own escape hatch anticipated ("if the
+// UI for drawing a geofence turns out to be much larger than the rest of
+// the task, say so"). It was not built.
 //
 // Everything a rule needs to be saved lives in a local `draft` -- there is
 // no live-as-you-type save the way a colour picker gets, because a
@@ -32,7 +55,8 @@ import { CheckField } from "../fields";
 import {
   RULE_LAYERS, CONDITION_TYPES, GEOFENCE_TYPES,
   blankAlertRule, validateAlertRule, describeGeofence, describeCondition,
-  describeEngineStatus, describeAreaCaptureLabel,
+  describeEngineStatus, describeAreaCaptureLabel, describeAreaCaptureConfirmation,
+  describeRuleStatus,
 } from "../../../settings/alertRules";
 import { EMERGENCY_SQUAWK_CODES } from "../../../map/decorators";
 
@@ -100,7 +124,7 @@ function AreaPicker({ draft, setDraft, regions, mapBounds, countrySelection, sel
             {describeAreaCaptureLabel("country", selectedCountry?.name)}
           </button>
           {draft.geofence?.type === "country" && (
-            <span className="admin-note">Set to {draft.geofence.name || draft.geofence.iso2}.</span>
+            <span className="admin-note">{describeAreaCaptureConfirmation(draft.geofence)}</span>
           )}
         </div>
       )}
@@ -142,13 +166,22 @@ function AreaPicker({ draft, setDraft, regions, mapBounds, countrySelection, sel
             {describeAreaCaptureLabel("water", water ? water.name || "this water body" : null)}
           </button>
           {draft.geofence?.type === "water" && (
-            <span className="admin-note">Set to {draft.geofence.name || draft.geofence.id}.</span>
+            <span className="admin-note">{describeAreaCaptureConfirmation(draft.geofence)}</span>
           )}
         </div>
       )}
 
       {type === "rect" && (
         <div className="admin-row">
+          {/* Plain-language, static, and not composed from data -- this is
+              deliberately a caveat, not a claim of equivalence to a drawn
+              shape. Pan and zoom the map, then capture whatever rectangle
+              is currently visible; see this file's own module note for why
+              a real freehand tool was not built for this task. */}
+          <div className="admin-note">
+            This is a rectangle matching whatever the map currently shows -- pan and zoom first, then capture
+            it. Not a hand-drawn shape; pick a country or region above for a precise, non-rectangular area.
+          </div>
           <button
             type="button"
             className="admin-wide-btn"
@@ -165,7 +198,9 @@ function AreaPicker({ draft, setDraft, regions, mapBounds, countrySelection, sel
           >
             Use the current map view
           </button>
-          {draft.geofence?.type === "rect" && <span className="admin-note">Area captured from the current view.</span>}
+          {draft.geofence?.type === "rect" && (
+            <span className="admin-note">{describeAreaCaptureConfirmation(draft.geofence)}</span>
+          )}
         </div>
       )}
     </>
@@ -256,14 +291,20 @@ function ConditionPicker({ draft, setDraft }) {
 }
 
 function RuleRow({ rule, health, onEdit, onToggle, onDelete }) {
-  const firing = (health?.alerts || []).some((a) => a.subject === `rule:${rule.id}`);
+  const status = describeRuleStatus(rule, health);
   return (
     <li className="admin-filter-preset-row">
-      <span className={`dot ${firing ? "err breathing" : rule.enabled ? "ok" : "warn"}`} title={firing ? "Currently firing" : rule.enabled ? "Watching" : "Paused"} />
+      {/* status.text is printed here, not only carried as a hover title --
+          a dot's colour alone is exactly the "two states look the same"
+          failure mode this row was reviewed for once already (the layer-
+          unhealthy state used to be indistinguishable from "watching,
+          quiet" with nothing but a tooltip to tell them apart). */}
+      <span className={`dot ${status.severity}${status.pulse ? " breathing" : ""}`} title={status.text} />
       <span className="admin-filter-preset-name">
         {rule.name}
         <span className="admin-field-note">
-          {" "}{RULE_LAYERS.find((l) => l.key === rule.layer)?.label || rule.layer} &middot; {describeCondition(rule.condition)} &middot; {describeGeofence(rule.geofence)}
+          {" "}{status.text} &middot; {RULE_LAYERS.find((l) => l.key === rule.layer)?.label || rule.layer} &middot;{" "}
+          {describeCondition(rule.condition)} &middot; {describeGeofence(rule.geofence)}
         </span>
       </span>
       <button type="button" className="admin-reset-btn" title={rule.enabled ? "Pause this rule" : "Resume this rule"} onClick={() => onToggle(rule.id, !rule.enabled)}>
