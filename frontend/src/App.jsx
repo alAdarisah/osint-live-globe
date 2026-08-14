@@ -928,6 +928,7 @@ export default function App() {
         countryScope={countryScope}
         water={mapApi.selectedWater}
         onLocate={onLocateNewsItem}
+        onOpenRecord={openRecordDetail}
         isMobile={isMobileViewport}
       />
 

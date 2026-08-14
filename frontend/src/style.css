@@ -2481,6 +2481,27 @@ details[open] > .layer-details-body {
   white-space: nowrap;
 }
 
+/* The "open this record's detail card" variant of .notable-line -- a real
+   <button> (see IntelPanel.jsx's RecordLine), so it needs its own reset on
+   top of the shared layout rules above. Only ever rendered when
+   intelRecordRef actually resolved a row to a real record; a row it did not
+   (Escalation, or a News item with no event_id) stays a plain, unstyled
+   .notable-line span -- see IntelPanel.jsx's own note on why a row that
+   cannot open a card must not look like it can. */
+button.notable-line {
+  display: block;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+button.notable-line:hover, button.notable-line:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .notable-item-meta {
   padding-left: 2px;
   font-size: 10px;

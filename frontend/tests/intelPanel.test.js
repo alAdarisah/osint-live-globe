@@ -34,7 +34,7 @@ const {
   intelPanelIsEmpty,
   eventsSeverityFloor, windowMaxAgeDays, withinWindowHours, WINDOW_OPTIONS,
   selectEventItems, selectEscalationZones, selectNewsItems, selectOfficialsItems,
-  escalationMiniBarTitle, eventReliabilityTooltip,
+  escalationMiniBarTitle, eventReliabilityTooltip, intelRecordRef,
   escalationEmptyMessage, eventsEmptyMessage, newsEmptyMessage, officialsEmptyMessage,
 } = await import("../src/components/intelPanelLogic.js");
 
@@ -560,6 +560,89 @@ test("selectOfficialsItems sorts most recent first", async (t) => {
   ];
   const out = selectOfficialsItems(items, { scope, windowHours: null });
   assert.deepEqual(out.map((i) => i.published_at), [300, 200, 100]);
+});
+
+// ---------- opening a row's own record detail card ----------
+//
+// intelRecordRef is what a panel row's onClick calls to find out which kind
+// and id App.jsx's openRecordDetail(kind, id) should open -- the same card a
+// map pin or a country-card row already opens. Three shapes, matching the
+// task brief's own three cases: a row that resolves to a real record, a row
+// whose tab has no card at all, and a row whose own record has aged out of
+// the feed by the time it might be clicked.
+
+test("intelRecordRef: a normal row resolves to the map's own kind and id", async (t) => {
+  await t.test("events reads id, and maps to recordDetail's own 'events' kind", () => {
+    assert.deepEqual(intelRecordRef({ id: 42, severity: 80 }, "events"), { kind: "events", id: "42" });
+  });
+
+  await t.test("news reads event_id, not id, and maps to recordDetail's 'gdelt' kind", () => {
+    assert.deepEqual(
+      intelRecordRef({ event_id: "gd-1", real_title: "x" }, "news"),
+      { kind: "gdelt", id: "gd-1" }
+    );
+  });
+
+  await t.test("officials reads id, and maps to recordDetail's own 'officials' kind", () => {
+    assert.deepEqual(intelRecordRef({ id: "off-9", kind: "meeting" }, "officials"), { kind: "officials", id: "off-9" });
+  });
+});
+
+test("intelRecordRef: a row kind that has no card at all", async (t) => {
+  await t.test("Escalation never resolves, whatever fields a zone carries -- a zone is a region " +
+    "aggregate, not a fused record with an id recordDetail's own tables know", () => {
+    assert.equal(intelRecordRef({ id: "zone-1", region: "sahel" }, "escalation"), null);
+  });
+
+  await t.test("an unrecognised tab kind resolves to nothing either, rather than guessing", () => {
+    assert.equal(intelRecordRef({ id: "x" }, "not-a-real-tab"), null);
+  });
+});
+
+test("intelRecordRef: a row with no id of its own cannot be opened", async (t) => {
+  await t.test("a News row missing event_id -- the same gap its own rowKey already falls back to " +
+    "source_url for (see IntelPanel.jsx's TabList call for the News tab)", () => {
+    assert.equal(intelRecordRef({ real_title: "x", source_url: "u" }, "news"), null);
+  });
+
+  await t.test("an empty-string id counts as no id, not a real one", () => {
+    assert.equal(intelRecordRef({ id: "" }, "events"), null);
+  });
+
+  await t.test("no item at all", () => {
+    assert.equal(intelRecordRef(null, "events"), null);
+  });
+});
+
+// Task brief's third case: "a row whose event has aged out". The check that
+// actually answers that -- is this id still in the live feed right now -- is
+// recordDetail's own lookup inside createMapController.js, run fresh at
+// click time and already wired to say so honestly rather than open an empty
+// card or do nothing (see App.jsx's openRecordDetail). intelRecordRef takes
+// no raw feed and does not re-run that check: it only resolves *which* id to
+// hand recordDetail. This test pins that boundary -- a row for a record that
+// has since aged out of eventsRaw still resolves to a normal ref here, the
+// same as any other row for its tab, because whether the id is still live is
+// not this function's question to answer. Re-deciding it here too, against
+// IntelPanel's own eventsRaw/gdeltRaw/officialsRaw props (plain React state,
+// updated on a different tick than the map controller's own internal `raw`
+// that recordDetail reads), would be exactly the two-independent-opinions
+// bug Task 12's review caught for eventFilter.maxAgeDays -- see
+// windowMaxAgeDays' own note above.
+test("intelRecordRef: an aged-out record still resolves -- staleness is recordDetail's call, not resolution's", async (t) => {
+  await t.test("an events row whose id is absent from every currently-held feed still resolves normally", () => {
+    // A row shaped exactly like one selectEventItems could have returned a
+    // moment ago, for a record the (hypothetical) current eventsRaw no
+    // longer carries at all -- aged out of the window, or dropped by a
+    // reload between render and click.
+    const staleRow = { id: "aged-1", severity: 90, weaklyPlaced: false };
+    assert.deepEqual(intelRecordRef(staleRow, "events"), { kind: "events", id: "aged-1" });
+  });
+
+  await t.test("the same holds for News and Officials rows", () => {
+    assert.deepEqual(intelRecordRef({ event_id: "aged-2", real_title: "x" }, "news"), { kind: "gdelt", id: "aged-2" });
+    assert.deepEqual(intelRecordRef({ id: "aged-3", kind: "demand" }, "officials"), { kind: "officials", id: "aged-3" });
+  });
 });
 
 // ---------- user-visible strings ----------
