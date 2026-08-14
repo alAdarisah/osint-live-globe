@@ -1,6 +1,6 @@
 // The two Admin Mode settings that decide what a reader is shown: which of the
-// three reader panels the public page carries, and which pin layers wait for a
-// country to be selected.
+// intel panel's tabs (and the briefing card) the public page carries, and which
+// pin layers wait for a country to be selected.
 //
 // Both are storage-and-validation tests. The drawing half lives in the map
 // controller, which needs a real Leaflet map to exercise; what is asserted here
@@ -30,24 +30,34 @@ globalThis.window = {
   matchMedia: () => ({ matches: false }),
 };
 
-const { defaultSettings, mergeSettings, COUNTRY_ONLY_LAYERS } =
+const { defaultSettings, mergeSettings, COUNTRY_ONLY_LAYERS, INTEL_TAB_KEYS } =
   await import("../src/settings/defaults.js");
 
+const ALL_ON = {
+  escalation: true, events: true, news: true, officials: true, briefingCard: true,
+};
+
 test("the reader panels", async (t) => {
-  await t.test("all three ship on", () => {
-    assert.deepEqual(defaultSettings().publicPanels, {
-      newsTicker: true,
-      notableEvents: true,
-      briefingCard: true,
-    });
+  await t.test("every tab and the briefing card ship on", () => {
+    assert.deepEqual(defaultSettings().publicPanels, ALL_ON);
+  });
+
+  await t.test("the tab keys are the ones IntelPanel draws", () => {
+    // The three files agree on a key rather than translating between three
+    // vocabularies -- App.jsx filters INTEL_TAB_KEYS by this table and hands
+    // the result to IntelPanel, which filters its own TABS by it.
+    for (const key of INTEL_TAB_KEYS) {
+      assert.equal(key in defaultSettings().publicPanels, true, `${key} should be settable`);
+    }
   });
 
   await t.test("survives a round trip", () => {
     const stored = defaultSettings();
-    stored.publicPanels.newsTicker = false;
+    stored.publicPanels.news = false;
     const merged = mergeSettings(stored).publicPanels;
-    assert.equal(merged.newsTicker, false);
-    assert.equal(merged.notableEvents, true, "the others are untouched");
+    assert.equal(merged.news, false);
+    assert.equal(merged.events, true, "the others are untouched");
+    assert.equal(merged.briefingCard, true);
   });
 
   await t.test("a configuration written before this setting existed keeps every panel", () => {
@@ -55,21 +65,17 @@ test("the reader panels", async (t) => {
     // at all, and a missing key must not read as "the operator hid it".
     const stored = defaultSettings();
     delete stored.publicPanels;
-    assert.deepEqual(mergeSettings(stored).publicPanels, {
-      newsTicker: true,
-      notableEvents: true,
-      briefingCard: true,
-    });
+    assert.deepEqual(mergeSettings(stored).publicPanels, ALL_ON);
   });
 
   await t.test("only an explicit false hides a panel", () => {
     for (const value of [undefined, null, 0, "", "no"]) {
       const stored = defaultSettings();
-      stored.publicPanels.newsTicker = value;
+      stored.publicPanels.news = value;
       assert.equal(
-        mergeSettings(stored).publicPanels.newsTicker,
+        mergeSettings(stored).publicPanels.news,
         true,
-        `${JSON.stringify(value)} should leave the panel showing`
+        `${JSON.stringify(value)} should leave the tab showing`
       );
     }
   });
@@ -118,7 +124,10 @@ test("the country gate on a layer", async (t) => {
     // or drop, and cities is already country-scoped by its own renderer. None
     // of them is offered the checkbox, so a file naming one is asking for
     // something the renderers do not implement.
-    for (const key of ["cities", "firms", "jamming", "cables", "railways"]) {
+    for (const key of [
+      "cities", "firms", "jamming", "laneDensity",
+      "cables", "railways", "powerLines", "water", "shippingLanes",
+    ]) {
       assert.equal(COUNTRY_ONLY_LAYERS.has(key), false, `${key} should not be on offer`);
       const stored = defaultSettings();
       stored.layers[key] = { ...stored.layers[key], countryOnly: true };
@@ -131,7 +140,14 @@ test("the country gate on a layer", async (t) => {
   });
 
   await t.test("the layers that do draw pins are on offer", () => {
-    for (const key of ["events", "airports", "osmInfra", "adsbMilitary", "aisTanker", "satellites"]) {
+    for (const key of [
+      "events", "airports", "osmInfra", "adsbMilitary", "aisTanker",
+      // Every satellite layer, bulk WebGL ones included: a satellite is a pin
+      // with a real position, and renderSatElementWebgl clips it like any other.
+      "satellites", "satNavigation", "satStarlink",
+      // Layers that did not exist when this gate was first written.
+      "powerPlants", "airDefense", "railLive",
+    ]) {
       assert.equal(COUNTRY_ONLY_LAYERS.has(key), true, `${key} should be on offer`);
     }
   });
