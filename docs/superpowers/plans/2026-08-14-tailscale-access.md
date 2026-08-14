@@ -230,9 +230,34 @@ Expected: two lines, `osint-server` and this PC. Note the PC's `100.x.y.z` addre
 
 - [ ] **Step 1 [YOU]: Paste the policy file**
 
-Open <https://login.tailscale.com/admin/acls>, select the whole editor contents, replace with the contents of `ops/tailscale/policy.hujson`, and **Save**.
+Copy the file to the clipboard rather than retyping it — HuJSON is unforgiving:
 
-The default policy you are replacing is allow-all between every node. If the editor refuses to save, it will name the line — the usual cause is a stray trailing character, since HuJSON tolerates trailing commas and comments but not much else.
+```powershell
+Get-Content ops\tailscale\policy.hujson -Raw | Set-Clipboard
+```
+
+Open <https://login.tailscale.com/admin/acls>. The page opens on a **Visual editor**
+tab — Tailscale's no-code policy builder, which is now the default view. Switch
+to the **JSON editor** tab beside it, click **Edit file**, then `Ctrl+A` and
+`Ctrl+V` to replace the whole policy, and **Save**. The two editors sync
+bidirectionally, so it does not matter which one the policy is authored in.
+
+If only the visual editor is available, build the same thing by hand: a tag
+`server` owned by `autogroup:owner`, and exactly one grant — source
+`autogroup:owner`, destination `tag:server`, protocol TCP port 22.
+
+Either way, **delete every other rule, including the default allow-all**. The
+enforcement in this design lives entirely in what is absent: nothing may name
+`tag:server` as a source. A surviving default rule leaves the server able to
+open connections back toward the PC, which is the one thing this whole plan
+exists to prevent.
+
+On save the console previews the effect and may warn that the policy removes
+access for devices. That warning is the design working. Read it, confirm it only
+describes access being removed, and accept.
+
+If the editor refuses to save it will name the line — the usual cause is a
+partial paste, so select all and repaste rather than hand-patching.
 
 - [ ] **Step 2: Confirm the PC can still reach the server**
 
