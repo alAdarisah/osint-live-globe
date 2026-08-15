@@ -1,5 +1,26 @@
-fastapi==0.115.0
+# 0.115.14 rather than 0.115.0: fastapi 0.115.0 requires starlette <0.39.0, which
+# is below the security floor pinned below, and pip resolves the pair to nothing
+# at all -- the image simply stopped building. 0.115.3 is the release that raised
+# fastapi's own starlette floor past CVE-2024-47874; .14 is the end of the same
+# patch line, so this is the smallest bump that builds.
+fastapi==0.115.14
 uvicorn==0.32.0
+# Two transitive dependencies pinned by floor rather than left to whatever pip
+# resolves, because both have a version below which they are known-vulnerable
+# and neither is named anywhere else in this file -- so without these lines the
+# only thing deciding which one goes into the image is the day it was built.
+#
+#   starlette  < 0.40.0 can be held open by a multipart request that is never
+#              completed (CVE-2024-47874). This app parses no multipart body,
+#              so the floor is precaution rather than a fix for something
+#              reachable today. The ceiling keeps the jump to one minor version
+#              we can reason about, well inside what fastapi 0.115.14 accepts.
+#   h11        < 0.16.0 accepts a malformed chunked body in a way that lets a
+#              proxy and this server disagree about where one request ends
+#              (CVE-2025-43859) -- request smuggling, and there is a proxy in
+#              front of this one (frontend/nginx.conf).
+starlette>=0.40.0,<0.41.0
+h11>=0.16.0
 asyncpg==0.31.0
 apscheduler==3.11.0
 redis==5.2.1
