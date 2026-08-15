@@ -17,22 +17,13 @@
 services:
   postgres:
     image: postgres:16-alpine
-    # Streaming-replication settings for the Phase 1 read replica (see
-    # docs/plans/2026-08-09-read-replica.md and ops/postgres/README.md). All
-    # three are safe on the existing 13 GB volume: wal_level=replica and
-    # max_wal_senders=10 are already the PG16 defaults, and max_replication_slots
-    # only reserves a little shared memory. They change nothing until a standby
-    # actually connects. The replication ROLE and slot are NOT created by these
-    # flags -- on a fresh volume the init script below creates them; on the
-    # existing populated volume that is the one-time manual step in the README.
-    command:
-      - postgres
-      - -c
-      - wal_level=replica
-      - -c
-      - max_wal_senders=10
-      - -c
-      - max_replication_slots=10
+    # No `command:` overriding the replication settings, deliberately. An earlier
+    # version of this file passed wal_level=replica, max_wal_senders=10 and
+    # max_replication_slots=10 here. All three are already the PG16 defaults --
+    # which is why the standby streams happily from a primary running a bare
+    # `postgres`, verified against the running container -- so setting them is a
+    # no-op that changes the container's config and therefore forces compose to
+    # recreate a 13 GB primary to achieve nothing.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-osint}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-osint}
@@ -43,10 +34,12 @@ services:
       REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-replicator}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Runs ONLY on a fresh data dir: creates the `replicator` role, a physical
-      # slot, and the replication pg_hba line. A no-op on the populated volume,
-      # which is why the README documents the manual equivalent.
-      - ./ops/postgres/initdb:/docker-entrypoint-initdb.d:ro
+      # No ./ops/postgres/initdb bind mount here either. That script creates the
+      # `replicator` role, the physical slot and the replication pg_hba line on a
+      # *fresh* data directory only, and ops/ is not among the paths "Deploy Code
+      # to Server.bat" ships -- so on the server the mount would resolve to an
+      # empty directory. On a genuinely fresh stack, creating the role and the
+      # slot is the one manual step, documented in ops/postgres/README.md.
     ports:
       # Exposed so the migration script and psql/GUI clients can reach it
       # from the host. Drop this line if you don't need that.
@@ -59,75 +52,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # A process inside this container cannot gain privileges it did not start
-    # with -- setuid binaries and file capabilities stop working as an escalation
-    # step. Nothing here relies on either, so this costs nothing and removes the
-    # usual second half of a container escape.
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-
-  # Read replica -- a physical streaming standby of `postgres` (Phase 1 of
-  # docs/plans/2026-08-09-read-replica.md). It exists to (a) be a hot,
-  # always-current second copy for durability/failover and (b) take heavy
-  # lag-tolerant reads (backups, monitoring, analytics) off the write-heavy
-  # primary. Nothing in the app routes to it yet -- that is Phase 2/3. It is
-  # read-only by nature, so a write accidentally sent here fails loud.
-  #
-  # It must NEVER be given the live serve path: LISTEN/NOTIFY does not reach a
-  # replica, so the mirror's sub-second wakeups (backend/mirror.py) would go
-  # deaf on it, and a lagging replica split from the watermark read would serve
-  # stale data as fresh. See the plan's "two landmines" section.
-  postgres-replica:
-    image: postgres:16-alpine
-    user: postgres
-    environment:
-      # libpq honours PGPASSWORD for both the one-off pg_basebackup seed and the
-      # standby's ongoing walreceiver connection (which inherits the postmaster
-      # environment), so this one variable authenticates the whole stream.
-      PGPASSWORD: ${REPLICATION_PASSWORD:-replicator}
-    depends_on:
-      # Waits for the primary to be accepting connections. On a fresh stack the
-      # primary's init script has already created the role + slot by the time it
-      # reports healthy, so the base backup below can authenticate immediately.
-      postgres:
-        condition: service_healthy
-    volumes:
-      - pgdata-replica:/var/lib/postgresql/data
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        # First boot only: a fresh named volume is an empty, postgres-owned
-        # mountpoint, so seed it from the primary. -R writes standby.signal +
-        # primary_conninfo, -S binds the physical slot so the primary keeps WAL
-        # for us, -Xs streams WAL during the copy so the backup is consistent.
-        # On every later boot PG_VERSION exists and we just start streaming.
-        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
-          rm -rf "$$PGDATA"/* 2>/dev/null || true
-          pg_basebackup -h postgres -p 5432 -U replicator -D "$$PGDATA" -Fp -Xs -P -R -S standby_1
-        fi
-        # The volume's mountpoint is created 0755 and pg_basebackup only sets
-        # modes *inside* it, so without this the postmaster refuses to start:
-        # "data directory has invalid permissions ... should be u=rwx (0700)".
-        # The official entrypoint does this for the primary; this service
-        # replaces the entrypoint, so it has to do it itself. Unconditional and
-        # idempotent -- the same 0755 comes back on any later fresh volume.
-        chmod 0700 "$$PGDATA"
-        exec postgres -c hot_standby=on
-    ports:
-      # Host access for backups/psql, mirroring the primary's 5432. Bound to
-      # localhost only, like everything else in this stack.
-      - "127.0.0.1:5433:5432"
-    healthcheck:
-      # Passes once the standby is accepting read-only connections; fails during
-      # the initial base backup, which is correct -- it is not usable yet then.
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-osint} -d ${POSTGRES_DB:-osint}"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
     # A process inside this container cannot gain privileges it did not start
     # with -- setuid binaries and file capabilities stop working as an escalation
     # step. Nothing here relies on either, so this costs nothing and removes the
@@ -462,28 +386,6 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
-  # The same exporter pointed at the read replica, so the standby's own liveness
-  # and size are visible and a failed scrape means the replica is down. It runs
-  # built-ins only (no PG_EXPORTER_EXTEND_QUERY_PATH): the replica-specific WAL
-  # functions differ from the primary's, and the authoritative lag number
-  # already lives on the primary exporter's pg_replication query. Harmless when
-  # no replica is running -- the scrape simply reports the target down.
-  postgres-exporter-replica:
-    image: prometheuscommunity/postgres-exporter:v0.15.0
-    environment:
-      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres-replica:5432/${POSTGRES_DB:-osint}?sslmode=disable
-    depends_on:
-      postgres-replica:
-        condition: service_healthy
-    expose:
-      - "9187"
-    # A process inside this container cannot gain privileges it did not start
-    # with -- setuid binaries and file capabilities stop working as an escalation
-    # step. Nothing here relies on either, so this costs nothing and removes the
-    # usual second half of a container escape.
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
 
   # The same exporter pointed at the read replica, so the standby's own liveness
   # and size are visible and a failed scrape means the replica is down. It runs
