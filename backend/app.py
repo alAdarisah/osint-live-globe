@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend import (
     admin_config, cachestore, config, escalation, history, infrastructure, ingest, inference_config, metrics,
-    mirror, refine, regions, replay, storage,
+    mirror, refhash, refine, regions, replay, storage,
 )
 from backend.cache import registry
 from backend.ratelimit import LruTtlCache, TokenBucket
@@ -133,6 +133,12 @@ async def lifespan(app: FastAPI):
     # ~60s. Under compose the healthcheck means it connects on the first
     # attempt anyway; this only changes the degraded cases.
     _background_tasks.append(asyncio.create_task(storage.init_pool()))
+
+    # The optional read-replica pool, scheduled the same fire-and-forget way. It
+    # no-ops unless READ_REPLICA_URL is set, and storage.get_read_pool() falls
+    # back to the primary until (and unless) it opens, so this only ever adds a
+    # faster read path for the consumers that opt into it -- never a dependency.
+    _background_tasks.append(asyncio.create_task(storage.init_read_pool()))
 
     # Before the mirror starts, so its first read can already hit a warm cache
     # after a restart instead of pulling every kind out of Postgres in full.
@@ -465,6 +471,7 @@ def _cached_source_response(
     max_age: int | None = None,
     bbox: str | None = None,
     variant: str | None = None,
+    stable_etag: bool = False,
 ):
     """Serves a source's (region-filtered) data with a version-based ETag.
 
@@ -513,7 +520,18 @@ def _cached_source_response(
     # The box belongs in the ETag: two clients on the same source and version
     # but different cells hold genuinely different bodies, and without it the
     # second would be told its stale one is still good.
-    etag = f'"{_PROCESS_TOKEN}:{state.version}:{region or "world"}:{box_key}:{variant_key}"'
+    #
+    # A whole-document reference layer identifies itself by its own bytes
+    # rather than by the process serving them -- see backend/refhash.py. The
+    # process token stays for everything else, and stays here too whenever the
+    # hash comes back None, because an ETag that cannot distinguish two
+    # documents is worse than one that is merely pessimistic.
+    identity = f"{_PROCESS_TOKEN}:{state.version}"
+    if stable_etag:
+        digest = refhash.content_hash(source_name, state.version, state.data)
+        if digest is not None:
+            identity = digest
+    etag = f'"{identity}:{region or "world"}:{box_key}:{variant_key}"'
     cache_control = f"public, max-age={max_age}" if max_age else "no-cache"
     headers = {"Cache-Control": cache_control, "ETag": etag}
     if request.headers.get("if-none-match") == etag:
@@ -863,7 +881,9 @@ async def osm_infrastructure_endpoint(request: Request, region: str | None = Non
     # Crowd-sourced, and served on its own endpoint rather than merged into
     # /api/infrastructure for exactly that reason -- see the module docstring in
     # backend/sources/osm_infra.py.
-    return _cached_source_response(request, "osm_infra", region, regions.filter_points, max_age=3600, bbox=bbox)
+    return _cached_source_response(
+        request, "osm_infra", region, regions.filter_points, max_age=3600, bbox=bbox, stable_etag=True,
+    )
 
 
 @app.get("/api/humanitarian")
@@ -914,7 +934,9 @@ async def cables_endpoint(request: Request):
     # /api/infrastructure, since neither changes more than a few times a year.
     # No region filter: a cable is a single object thousands of kilometres long
     # and clipping it to a bounding box would cut it in half.
-    return _cached_source_response(request, "cables", None, lambda data, _bounds: data, max_age=86400)
+    return _cached_source_response(
+        request, "cables", None, lambda data, _bounds: data, max_age=86400, stable_etag=True,
+    )
 
 
 @app.get("/api/railways")
@@ -924,7 +946,9 @@ async def railways_endpoint(request: Request):
     # and no region filter for the same reason: a rail line is one object the
     # client splits, not a set of points to clip. The station/yard/border POINTS
     # are a different thing entirely and ride /api/osm-infrastructure.
-    return _cached_source_response(request, "railways", None, lambda data, _bounds: data, max_age=86400)
+    return _cached_source_response(
+        request, "railways", None, lambda data, _bounds: data, max_age=86400, stable_etag=True,
+    )
 
 
 @app.get("/api/power-lines")
@@ -933,7 +957,9 @@ async def power_lines_endpoint(request: Request):
     # backend/sources/power_lines.py) -- same shape and hard cache as
     # /api/railways, and for the same reason: a line is one object the client
     # splits into a polyline, not a set of points to clip to a region.
-    return _cached_source_response(request, "power_lines", None, lambda data, _bounds: data, max_age=86400)
+    return _cached_source_response(
+        request, "power_lines", None, lambda data, _bounds: data, max_age=86400, stable_etag=True,
+    )
 
 
 @app.get("/api/deflock")
@@ -1497,7 +1523,9 @@ async def rail_stations(request: Request):
     # per-row entity rows, and served whole for the client to place. No region
     # filter (a station gazetteer is reference data, not a scoped point layer),
     # and a longer cache since it refreshes only every few hours.
-    return _cached_source_response(request, "rail_stations", None, lambda data, _bounds: data, max_age=3600)
+    return _cached_source_response(
+        request, "rail_stations", None, lambda data, _bounds: data, max_age=3600, stable_etag=True,
+    )
 
 
 @app.get("/api/weathercams")
@@ -1655,12 +1683,16 @@ async def countries(request: Request, region: str | None = None):
     # Refreshed server-side once/day (see backend/sources/countries.py) --
     # capped well under that so a dev-server restart's fresh data doesn't
     # sit invisible to an already-open tab for a full day.
-    return _cached_source_response(request, "countries", region, regions.filter_geojson, max_age=3600)
+    return _cached_source_response(
+        request, "countries", region, regions.filter_geojson, max_age=3600, stable_etag=True,
+    )
 
 
 @app.get("/api/cities")
 async def cities(request: Request, region: str | None = None, bbox: str | None = None):
-    return _cached_source_response(request, "cities", region, regions.filter_points, max_age=3600, bbox=bbox)
+    return _cached_source_response(
+        request, "cities", region, regions.filter_points, max_age=3600, bbox=bbox, stable_etag=True,
+    )
 
 
 @app.get("/api/airports")
@@ -1669,7 +1701,9 @@ async def airports_endpoint(request: Request, region: str | None = None, bbox: s
     # a client may sit on a cached copy for an hour rather than revalidating on
     # every poll. Only the served slice is here -- the wider index ADS-B popups
     # query never leaves the backend (see backend/sources/airports.py).
-    return _cached_source_response(request, "airports", region, regions.filter_points, max_age=3600, bbox=bbox)
+    return _cached_source_response(
+        request, "airports", region, regions.filter_points, max_age=3600, bbox=bbox, stable_etag=True,
+    )
 
 
 # Task 34: place search. gazetteer_places/gazetteer_alternates (see
