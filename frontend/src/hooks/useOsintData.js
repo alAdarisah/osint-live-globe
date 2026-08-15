@@ -483,6 +483,13 @@ export function useOsintData({
   const reapplyTransformRef = useRef(() => {});
   const reapplyTransform = useCallback((keys) => reapplyTransformRef.current(keys), []);
 
+  // Which on-demand documents have already been asked for (see ONE_SHOT in the
+  // effect below). Reached from outside through a ref for the same reason the
+  // pollers are: that effect mounts once.
+  const oneShotStartedRef = useRef(new Set());
+  const fetchOneShotRef = useRef(() => {});
+  const ensureOneShot = useCallback((key) => fetchOneShotRef.current(key), []);
+
   /**
    * Per-feed fetch coverage, threaded into `raw.fetchCoverage` (via
    * onData("fetchCoverage", ...)) so the country card's honesty section
@@ -760,17 +767,51 @@ export function useOsintData({
       })
       .catch((err) => console.warn("Failed to load submarine cables:", err));
 
-    // Coarse railway linework -- a whole document ({lines, attribution,
-    // provenance}, see backend/sources/railways.py), hard-cached for a day and
-    // fetched once at boot rather than polled, exactly like the cables routes
-    // above. The whole document is handed on so the popup can state its own
+    // Documents fetched on demand rather than at boot, once each, and never
+    // polled. The whole document is handed on so a popup can state its own
     // provenance rather than having it restated in the renderer.
-    fetchJson("/api/railways")
-      .then((data) => {
-        if (cancelled) return;
-        onDataRef.current("railways", data || { lines: [] });
-      })
-      .catch((err) => console.warn("Failed to load railway linework:", err));
+    //
+    // Railways is here because its manifest entry already says it should be:
+    // `fetch: FETCH_MANUAL` and `disposition: MANUAL`, which together mean the
+    // resolver never switches it on and a country focus never drags it in --
+    // only an operator ticking its box in the control drawer does. It was
+    // nevertheless fetched at boot beside the cables document, which measured
+    // against the running backend is 20.4 MB of JSON (4.7 MB on the wire) parsed
+    // and held by every reader, for linework that is off by default and that
+    // most sessions never draw a metre of.
+    //
+    // Cables deliberately stays at boot above: it is a twentieth of the size,
+    // and unlike railways it is CORROBORATING, so clicking a port or a landing
+    // point is enough to put it on the map -- there is no single toggle to hang
+    // a lazy fetch off.
+    const ONE_SHOT = {
+      railways: {
+        url: "/api/railways",
+        deliver: (data) => onDataRef.current("railways", data || { lines: [] }),
+        label: "railway linework",
+      },
+    };
+
+    fetchOneShotRef.current = (key) => {
+      const entry = ONE_SHOT[key];
+      if (!entry || oneShotStartedRef.current.has(key)) return;
+      // Marked before the request, not after, so a reader toggling the layer off
+      // and on again while the first one is still in flight does not start a
+      // second copy of a multi-megabyte download.
+      oneShotStartedRef.current.add(key);
+      fetchJson(entry.url)
+        .then((data) => {
+          if (cancelled) return;
+          entry.deliver(data);
+        })
+        .catch((err) => {
+          // Cleared on failure so the next toggle retries. A layer that failed
+          // to load once and then silently refuses to ever try again is worse
+          // than one that is slow.
+          oneShotStartedRef.current.delete(key);
+          console.warn(`Failed to load ${entry.label}:`, err);
+        });
+    };
 
     // Transmission-line geometry (Task 28, backend/sources/power_lines.py) --
     // same treatment as railways just above: a whole document, hard-cached
@@ -956,5 +997,9 @@ export function useOsintData({
     // Exposed for Admin Mode: re-runs the override transform over the payloads
     // already in hand, so an edit lands on the map as it is typed.
     reapplyTransform,
+    // Fetches an on-demand document the first time something asks for it. Wired
+    // to the layer toggle in App.jsx -- see ONE_SHOT above for what is in it and
+    // why railways in particular is not fetched at boot.
+    ensureOneShot,
   };
 }
