@@ -346,6 +346,17 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "").strip()
 # app runs live-only until it connects.
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://osint:osint@localhost:5432/osint")
 
+# Optional physical read replica (Phase 2 of docs/plans/2026-08-09-read-replica.md).
+# Unset -> every read goes to the primary, i.e. today's behaviour exactly, so
+# leaving this empty is a fully supported configuration. Set it to the standby's
+# DSN (e.g. postgresql://osint:osint@postgres-replica:5432/osint in compose, or
+# ...@localhost:5433/... from the host) to offload lag-tolerant heavy reads --
+# backups, monitoring, analytics -- off the write-heavy primary. It must never
+# carry the live serve path: LISTEN/NOTIFY does not reach a replica and a lagging
+# replica split from the watermark read serves stale data as fresh, so only
+# storage.get_read_pool() consumers are ever pointed here.
+READ_REPLICA_URL = os.getenv("READ_REPLICA_URL", "").strip() or None
+
 # How long per-poll source outcomes are kept in storage.py's source_health
 # table -- purely an operational log (what succeeded/failed, when, how many
 # items), so it doesn't need the long window the event archive gets.

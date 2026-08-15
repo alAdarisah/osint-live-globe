@@ -59,6 +59,12 @@ _BATCH = 5000
 
 _pool: asyncpg.Pool | None = None
 
+# Optional read-only pool against the physical replica (Phase 2 of
+# docs/plans/2026-08-09-read-replica.md). Stays None unless READ_REPLICA_URL is
+# set AND the replica opened; get_read_pool() falls back to the primary in every
+# other case, so nothing downstream has to know whether a replica exists.
+_read_pool: asyncpg.Pool | None = None
+
 # The channel every writer announces on and the backend listens to (see
 # backend/mirror.py). One channel for all kinds, with the kind as the payload,
 # rather than a channel each: asyncpg registers listeners per channel name, and
@@ -429,8 +435,92 @@ def get_pool() -> asyncpg.Pool | None:
     return _pool
 
 
+def _redact_dsn(dsn: str) -> str:
+    """A DSN with the password stripped, for logs -- keeps user/host/db so a line
+    still says which replica, without ever printing the credential."""
+    if "://" not in dsn or "@" not in dsn:
+        return dsn
+    scheme, rest = dsn.split("://", 1)
+    auth, tail = rest.split("@", 1)
+    user = auth.split(":", 1)[0]
+    return f"{scheme}://{user}@{tail}"
+
+
+async def init_read_pool(retries: int = 60, delay: float = 10.0) -> None:
+    """Open the read-only pool against READ_REPLICA_URL, if one is configured.
+
+    Additive and non-fatal by design: no replica set, or a replica that will not
+    connect, leaves `_read_pool` None and get_read_pool() falls back to the
+    primary -- exactly today's behaviour. So this is scheduled the same way as
+    init_pool (a background task nobody awaits), and a failure here degrades to
+    "reads use the primary", never to a stalled or dead process.
+
+    It retries because a *single* attempt is the wrong shape for what the standby
+    actually does at startup. The replica is not merely slow to accept
+    connections: on a fresh volume it runs a full pg_basebackup first, so for
+    several minutes the name does not resolve at all. One attempt loses that race
+    every time, and because nothing retries afterwards the process stays pinned to
+    the primary until someone restarts it -- the replica streaming healthily beside
+    it, unused. Observed exactly that: refine logged "Temporary failure in name
+    resolution" once at boot and read from the primary for the rest of its life.
+
+    The budget is generous (ten minutes by default) and the loop is quiet after
+    the first failure, since the normal case for a cold stack is a few minutes of
+    seeding. Giving up is still safe: reads keep working on the primary, and the
+    next restart tries again.
+    """
+    global _read_pool
+    if _read_pool is not None or not config.READ_REPLICA_URL:
+        return
+    dsn = _redact_dsn(config.READ_REPLICA_URL)
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            _read_pool = await asyncpg.create_pool(config.READ_REPLICA_URL, min_size=1, max_size=5)
+            log.info("Read replica pool ready (%s)", dsn)
+            return
+        except Exception as exc:  # noqa: BLE001 - a missing replica must not break reads
+            _read_pool = None
+            last_error = exc
+            if attempt == 1:
+                log.warning(
+                    "Read replica not ready (%s); reads use the primary while we wait: %s",
+                    dsn, exc,
+                )
+            if attempt < retries:
+                await asyncio.sleep(delay)
+    log.warning(
+        "Gave up opening the read replica (%s) after %d attempts; reads stay on the primary: %s",
+        dsn, retries, last_error,
+    )
+
+
+def get_read_pool() -> asyncpg.Pool | None:
+    """Pool for lag-tolerant, read-ONLY queries; the primary when no replica.
+
+    Intended only for heavy background reads that tolerate replication lag --
+    backups, monitoring, analytics, and (Phase 3) refine's bulk reads. It must
+    never be handed a write, kind_watermark, or the mirror's serve read: those
+    stay on the primary, because LISTEN/NOTIFY does not reach a replica and a
+    lagging replica split from the watermark serves stale data as fresh (see the
+    plan's "two landmines"). Returns None only when the primary itself is down,
+    matching get_pool(), so callers keep the one "no database" check they have.
+    """
+    return _read_pool or _pool
+
+
+def _reader(prefer_replica: bool) -> "asyncpg.Pool | None":
+    """The pool a read should use: the replica when the caller opts in and one
+    is open, otherwise the primary. Only lag-tolerant reads that never read
+    their own recent writes may pass prefer_replica=True (see get_read_pool)."""
+    return get_read_pool() if prefer_replica else _pool
+
+
 async def close_pool() -> None:
-    global _pool
+    global _pool, _read_pool
+    if _read_pool is not None:
+        await _read_pool.close()
+        _read_pool = None
     if _pool is not None:
         await _pool.close()
         _pool = None
@@ -1633,7 +1723,9 @@ SELECT entity_id, prev_ts, prev_lat, prev_lon, prev_payload, ts, lat, lon,
 """
 
 
-async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: int = 500) -> list[dict]:
+async def position_gaps(
+    kind: str, since: float, min_gap_seconds: float, limit: int = 500, prefer_replica: bool = False
+) -> list[dict]:
     """Where an entity stopped reporting and later reappeared.
 
     Each row is the pair of positions either side of the silence, so a caller
@@ -1645,11 +1737,17 @@ async def position_gaps(kind: str, since: float, min_gap_seconds: float, limit: 
     last thing we knew before it went dark" rather than the hull's current
     state, which by the time this row exists already reflects whatever
     happened after it reappeared.
+
+    The heaviest read in the system -- a self-join over entity_history's 15M
+    rows -- and a lag-tolerant one (it reads AIS other producers wrote, never
+    its own output), so the dark-vessel detector passes prefer_replica=True to
+    take this scan off the write-heavy primary.
     """
-    if _pool is None:
+    pool = _reader(prefer_replica)
+    if pool is None:
         return []
     when = datetime.fromtimestamp(since, tz=timezone.utc)
-    async with _pool.acquire() as conn:
+    async with pool.acquire() as conn:
         rows = await conn.fetch(_POSITION_GAPS, kind, when, float(min_gap_seconds), int(limit))
     return [
         {
@@ -1941,7 +2039,9 @@ SELECT payload->'nearest_airfield'->>'code' AS code,
 TOP_TYPES_PER_FIELD = 3
 
 
-async def airfield_activity(since: float, hours: int = 24, top: int = 300) -> dict:
+async def airfield_activity(
+    since: float, hours: int = 24, top: int = 300, prefer_replica: bool = False
+) -> dict:
     """Traffic per airfield over the recent ADS-B log, as one document.
 
     Ranked on two axes and capped on both: the `top` busiest fields by total
@@ -1958,11 +2058,17 @@ async def airfield_activity(since: float, hours: int = 24, top: int = 300) -> di
 
     Returns {code: {...}} rather than a list because every consumer looks a
     field up by the code its pin already carries (see sources/airports.py).
+
+    prefer_replica routes both aggregates to the read replica for the refine job
+    that computes this: they scan roughly five million ADS-B history rows written
+    by other processes, and the answer is a 24-hour rolling count, so seconds of
+    replication lag change nothing about it.
     """
-    if _pool is None:
+    pool = _reader(prefer_replica)
+    if pool is None:
         return {}
     when = datetime.fromtimestamp(since, tz=timezone.utc)
-    async with _pool.acquire() as conn:
+    async with pool.acquire() as conn:
         totals = await conn.fetch(_AIRFIELD_TOTALS, when)
         by_traffic = sorted(totals, key=lambda r: r["aircraft"], reverse=True)
         by_military = sorted(totals, key=lambda r: r["military_aircraft"], reverse=True)
@@ -2027,16 +2133,21 @@ async def airfield_activity(since: float, hours: int = 24, top: int = 300) -> di
     return out
 
 
-async def entity_latest_with_times(kind: str) -> list[dict]:
+async def entity_latest_with_times(kind: str, prefer_replica: bool = False) -> list[dict]:
     """entity_latest rows with their timestamps alongside the payload.
 
     `last_moved_at` is the field this exists for: it is how long an entity has
     been sitting still, which entity_latest maintains for free (see
     _UPSERT_LATEST) and which no amount of reading the payload can recover.
+
+    prefer_replica routes to the read replica for the dark-vessel detector,
+    which reads AIS it did not write and tolerates seconds of lag against an
+    hours-long stillness window.
     """
-    if _pool is None:
+    pool = _reader(prefer_replica)
+    if pool is None:
         return []
-    async with _pool.acquire() as conn:
+    async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT payload, updated_at, last_moved_at
                  FROM entity_latest WHERE kind = $1""",
@@ -2051,17 +2162,21 @@ async def entity_latest_with_times(kind: str) -> list[dict]:
     return out
 
 
-async def source_health_series(source: str, since: float) -> list[tuple[float, int | None, bool]]:
+async def source_health_series(
+    source: str, since: float, prefer_replica: bool = False
+) -> list[tuple[float, int | None, bool]]:
     """(timestamp, item_count, ok) per poll since `since`, oldest first.
 
     Read by the dark-vessel detector to tell "this ship switched its
     transponder off" from "our AIS feed dropped out", which look identical from
-    a single ship's history.
+    a single ship's history. Routed to the replica alongside that detector's
+    other reads (prefer_replica) so its whole read side leaves the primary.
     """
-    if _pool is None:
+    pool = _reader(prefer_replica)
+    if pool is None:
         return []
     when = datetime.fromtimestamp(since, tz=timezone.utc)
-    async with _pool.acquire() as conn:
+    async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT ts, item_count, ok FROM source_health
                 WHERE source = $1 AND ts >= $2 ORDER BY ts ASC""",

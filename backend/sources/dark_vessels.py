@@ -1103,10 +1103,16 @@ def add_reachability(
 
 async def _compute() -> list[dict]:
     since = time.time() - LOOKBACK_SECONDS
+    # The first three read AIS that other processes wrote (never this detector's
+    # own output) and run against hours-long windows, so they tolerate a lagging
+    # replica and are routed there to keep the 15M-row position-gap scan off the
+    # write-heavy primary. prefer_replica falls back to the primary whenever no
+    # replica is configured or open, so this is a no-op without one (Phase 2/3 of
+    # docs/plans/2026-08-09-read-replica.md).
     gaps, ships, health, priors, wpi_ports, water_marine, water_lakes = await asyncio.gather(
-        storage.position_gaps("ais", since, GAP_MIN_HOURS * 3600),
-        storage.entity_latest_with_times("ais"),
-        storage.source_health_series("ais", since),
+        storage.position_gaps("ais", since, GAP_MIN_HOURS * 3600, prefer_replica=True),
+        storage.entity_latest_with_times("ais", prefer_replica=True),
+        storage.source_health_series("ais", since, prefer_replica=True),
         # Written by the ingest process (see backend/sources/gfw_gaps.py) and
         # read here rather than fetched, which is what keeps this module inside
         # the refine tier's rule that nothing in it makes an outbound call.

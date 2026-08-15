@@ -37,6 +37,15 @@ scrape_configs:
     static_configs:
       - targets: ["postgres-exporter:9187"]
 
+  # The read replica's exporter (Phase 3 of the read-replica plan). A separate
+  # job rather than a second target under `postgres`, so a down replica shows as
+  # this job failing rather than muddying the primary's health. Replication lag
+  # itself comes from the primary exporter's pg_replication metric, not here.
+  - job_name: postgres-replica
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["postgres-exporter-replica:9187"]
+
   # The FastAPI process, on backend:8000/metrics (see backend/metrics.py).
   # Reached directly rather than through the frontend's nginx, which forwards
   # /api/ only -- so /metrics is on the compose network and nowhere else.

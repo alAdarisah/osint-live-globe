@@ -17,12 +17,36 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # Streaming-replication settings for the Phase 1 read replica (see
+    # docs/plans/2026-08-09-read-replica.md and ops/postgres/README.md). All
+    # three are safe on the existing 13 GB volume: wal_level=replica and
+    # max_wal_senders=10 are already the PG16 defaults, and max_replication_slots
+    # only reserves a little shared memory. They change nothing until a standby
+    # actually connects. The replication ROLE and slot are NOT created by these
+    # flags -- on a fresh volume the init script below creates them; on the
+    # existing populated volume that is the one-time manual step in the README.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-osint}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-osint}
       POSTGRES_DB: ${POSTGRES_DB:-osint}
+      # Password for the streaming-replication role. Only consumed by the init
+      # script on a fresh volume; override in .env before the first `up` to use
+      # something other than the default.
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-replicator}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Runs ONLY on a fresh data dir: creates the `replicator` role, a physical
+      # slot, and the replication pg_hba line. A no-op on the populated volume,
+      # which is why the README documents the manual equivalent.
+      - ./ops/postgres/initdb:/docker-entrypoint-initdb.d:ro
     ports:
       # Exposed so the migration script and psql/GUI clients can reach it
       # from the host. Drop this line if you don't need that.
@@ -35,6 +59,81 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # Read replica -- a physical streaming standby of `postgres` (Phase 1 of
+  # docs/plans/2026-08-09-read-replica.md). It exists to (a) be a hot,
+  # always-current second copy for durability/failover and (b) take heavy
+  # lag-tolerant reads (backups, monitoring, analytics) off the write-heavy
+  # primary. Nothing in the app routes to it yet -- that is Phase 2/3. It is
+  # read-only by nature, so a write accidentally sent here fails loud.
+  #
+  # It must NEVER be given the live serve path: LISTEN/NOTIFY does not reach a
+  # replica, so the mirror's sub-second wakeups (backend/mirror.py) would go
+  # deaf on it, and a lagging replica split from the watermark read would serve
+  # stale data as fresh. See the plan's "two landmines" section.
+  postgres-replica:
+    image: postgres:16-alpine
+    user: postgres
+    environment:
+      # libpq honours PGPASSWORD for both the one-off pg_basebackup seed and the
+      # standby's ongoing walreceiver connection (which inherits the postmaster
+      # environment), so this one variable authenticates the whole stream.
+      PGPASSWORD: ${REPLICATION_PASSWORD:-replicator}
+    depends_on:
+      # Waits for the primary to be accepting connections. On a fresh stack the
+      # primary's init script has already created the role + slot by the time it
+      # reports healthy, so the base backup below can authenticate immediately.
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgdata-replica:/var/lib/postgresql/data
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        # First boot only: a fresh named volume is an empty, postgres-owned
+        # mountpoint, so seed it from the primary. -R writes standby.signal +
+        # primary_conninfo, -S binds the physical slot so the primary keeps WAL
+        # for us, -Xs streams WAL during the copy so the backup is consistent.
+        # On every later boot PG_VERSION exists and we just start streaming.
+        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          rm -rf "$$PGDATA"/* 2>/dev/null || true
+          pg_basebackup -h postgres -p 5432 -U replicator -D "$$PGDATA" -Fp -Xs -P -R -S standby_1
+        fi
+        # The volume's mountpoint is created 0755 and pg_basebackup only sets
+        # modes *inside* it, so without this the postmaster refuses to start:
+        # "data directory has invalid permissions ... should be u=rwx (0700)".
+        # The official entrypoint does this for the primary; this service
+        # replaces the entrypoint, so it has to do it itself. Unconditional and
+        # idempotent -- the same 0755 comes back on any later fresh volume.
+        chmod 0700 "$$PGDATA"
+        exec postgres -c hot_standby=on
+    ports:
+      # Host access for backups/psql, mirroring the primary's 5432. Bound to
+      # localhost only, like everything else in this stack.
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      # Passes once the standby is accepting read-only connections; fails during
+      # the initial base backup, which is correct -- it is not usable yet then.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-osint} -d ${POSTGRES_DB:-osint}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   backend:
@@ -81,6 +180,17 @@ services:
       timeout: 8s
       retries: 12
       start_period: 20s
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
+    # Pure Python talking to Postgres and Redis: it binds no privileged port,
+    # changes no file ownership and loads no kernel module, so it needs no Linux
+    # capability at all.
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # Read-through cache in front of Postgres for the payloads the backend serves
@@ -99,6 +209,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   # Owns ACLED, FIRMS, ADS-B, AIS and the Overpass sweep -- everything that
@@ -129,6 +245,17 @@ services:
     # No ports: it serves nothing. No volumes: everything it produces goes to
     # Postgres, and it reads no local state.
     command: ["python", "-m", "backend.ingest"]
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
+    # Pure Python talking to Postgres and Redis: it binds no privileged port,
+    # changes no file ownership and loads no kernel module, so it needs no Linux
+    # capability at all.
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # Derives new facts from stored ones: fuses ACLED/UCDP/GDELT into one record
@@ -145,12 +272,30 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres:5432/${POSTGRES_DB:-osint}
+      # Routes only dark_vessels' heavy AIS reads (the 15M-row position-gap scan)
+      # to the read replica -- writes and every read that must be current stay on
+      # the primary via DATABASE_URL. Safe by construction: storage.init_read_pool
+      # falls back to the primary if the replica is down or still seeding, so this
+      # is a no-op until a healthy standby exists. NOT a depends_on -- refine must
+      # never wait on the replica to start.
+      READ_REPLICA_URL: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres-replica:5432/${POSTGRES_DB:-osint}
     depends_on:
       postgres:
         condition: service_healthy
     # No env_file: nothing here reads an API key, and not passing them is the
     # cheapest way to keep that true.
     command: ["python", "-m", "backend.refine"]
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
+    # Pure Python talking to Postgres and Redis: it binds no privileged port,
+    # changes no file ownership and loads no kernel module, so it needs no Linux
+    # capability at all.
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # Watches the cache and the two producing processes, and reports what is wrong
@@ -178,6 +323,17 @@ services:
       redis:
         condition: service_healthy
     command: ["python", "-m", "backend.cacheworker"]
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
+    # Pure Python talking to Postgres and Redis: it binds no privileged port,
+    # changes no file ownership and loads no kernel module, so it needs no Linux
+    # capability at all.
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # --- Monitoring -----------------------------------------------------------
@@ -219,6 +375,35 @@ services:
     # to curl the raw metrics while debugging a missing panel.
     expose:
       - "9187"
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # The same exporter pointed at the read replica, so the standby's own liveness
+  # and size are visible and a failed scrape means the replica is down. It runs
+  # built-ins only (no PG_EXPORTER_EXTEND_QUERY_PATH): the replica-specific WAL
+  # functions differ from the primary's, and the authoritative lag number
+  # already lives on the primary exporter's pg_replication query. Harmless when
+  # no replica is running -- the scrape simply reports the target down.
+  postgres-exporter-replica:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-osint}:${POSTGRES_PASSWORD:-osint}@postgres-replica:5432/${POSTGRES_DB:-osint}?sslmode=disable
+    depends_on:
+      postgres-replica:
+        condition: service_healthy
+    expose:
+      - "9187"
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   prometheus:
@@ -239,6 +424,12 @@ services:
       - "127.0.0.1:9090:9090"
     depends_on:
       - postgres-exporter
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   grafana:
@@ -267,6 +458,12 @@ services:
       - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   frontend:
@@ -292,6 +489,12 @@ services:
       #                particular.
       - "127.0.0.1:8080:80"
       - "127.0.0.1:8081:8081"
+    # A process inside this container cannot gain privileges it did not start
+    # with -- setuid binaries and file capabilities stop working as an escalation
+    # step. Nothing here relies on either, so this costs nothing and removes the
+    # usual second half of a container escape.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   # One-off SQLite -> Postgres import. Not part of the default stack (it sits
@@ -316,6 +519,13 @@ services:
       postgres:
         condition: service_healthy
     command: ["python", "-m", "backend.migrate_sqlite_to_postgres"]
+    # The same two restrictions every other Python service here runs under. It
+    # matters no less for being a one-off: this is the container that reads a
+    # 1.5 GB file the app did not produce.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
   # Named, so it survives `docker compose down`, an image rebuild and a host
@@ -323,6 +533,12 @@ volumes:
   # source writes here and reads its own data back at startup -- so `down -v`
   # is the one command that throws the collected history away.
   pgdata:
+
+  # The read replica's own full copy of the data, seeded once by pg_basebackup
+  # and kept current by streaming. Budget the same size as pgdata (~13 GB now).
+  # Losing it costs only the standby: `docker compose up` re-seeds it from the
+  # primary. `down -v` drops it along with pgdata.
+  pgdata-replica:
 
   # Metric history and Grafana's own state (users, preferences, starred
   # dashboards). Both are safe to lose: the dashboard is provisioned from a file

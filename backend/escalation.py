@@ -100,7 +100,13 @@ SELECT count(*) FROM source_health
 async def compute() -> list[dict]:
     """Ranked escalating regions, most escalated first. Empty when the
     database lacks the history to say anything defensible."""
-    pool = storage.get_pool()
+    # The read replica when one is open, the primary otherwise (get_read_pool
+    # falls back, and returns None only when the primary is down too, so the
+    # check below keeps its original meaning). Safe to route: this scans
+    # conflict_events and source_health over a 24-hour window against a
+    # multi-day baseline, once per region, and writes nothing -- seconds of
+    # replication lag cannot move a ratio measured in days.
+    pool = storage.get_read_pool()
     if pool is None:
         return []
 
