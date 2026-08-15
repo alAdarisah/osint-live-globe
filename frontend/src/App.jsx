@@ -13,7 +13,7 @@ import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
 import { useAppSettings } from "./hooks/useAppSettings";
 import { applyOverrides } from "./settings/applyOverrides";
-import { EDITABLE_SOURCES } from "./settings/defaults";
+import { EDITABLE_SOURCES, INTEL_TAB_KEYS } from "./settings/defaults";
 import { applyBorderOverrides, staleBorderKeys } from "./settings/borderOverrides";
 import { DEFAULT_EVENT_FILTER } from "./map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "./utils/entityFilter";
@@ -210,6 +210,31 @@ export default function App() {
     return ceilings;
   }, [settings.layers]);
 
+  // The layers Admin Mode has told to draw only for a selected country, as
+  // { [key]: true }. Sparse, and the sparseness is what the controller checks to
+  // decide whether a selection change is worth a re-render at all -- a
+  // deployment using none of this pays nothing for it.
+  //
+  // Not threaded into the fetch layer, unlike the zoom floors above: this gate
+  // decides what is drawn out of a payload, not whether the payload is worth
+  // asking for. Clearing the selection has to put the full picture back
+  // immediately, and it cannot do that if the data was never fetched.
+  // Which of the intel panel's tabs this deployment carries, in the panel's own
+  // order. An array rather than the settings object itself, so IntelPanel takes
+  // a list of tab keys and never has to know what a settings table looks like.
+  const intelTabs = useMemo(
+    () => INTEL_TAB_KEYS.filter((key) => settings.publicPanels[key]),
+    [settings.publicPanels]
+  );
+
+  const layerCountryOnly = useMemo(() => {
+    const gated = {};
+    for (const [key, layer] of Object.entries(settings.layers)) {
+      if (layer.countryOnly === true) gated[key] = true;
+    }
+    return gated;
+  }, [settings.layers]);
+
   const dataApi = useOsintData({
     onData: (key, data) => {
       if (!replayActiveRef.current) mapApi.applyData(key, data);
@@ -335,6 +360,10 @@ export default function App() {
   useEffect(() => {
     mapApi.setLayerZoomMaxOverrides(layerZoomMaxOverrides);
   }, [layerZoomMaxOverrides, mapApi.setLayerZoomMaxOverrides]);
+
+  useEffect(() => {
+    mapApi.setLayerCountryOnly(layerCountryOnly);
+  }, [layerCountryOnly, mapApi.setLayerCountryOnly]);
 
   // The saved layer states, replayed whenever the configuration itself is
   // replaced rather than only at mount: the backend's copy landing on top of the
@@ -933,23 +962,34 @@ export default function App() {
           scope/window/severity/group-by controls, and one Minimum
           severity/verification floor that this panel and the map both read off
           `eventFilter` rather than two independent copies that could drift
-          apart. See IntelPanel.jsx for the rest. */}
-      <IntelPanel
-        eventsRaw={dataApi.eventsRaw}
-        gdeltRaw={dataApi.gdeltRaw}
-        officialsRaw={dataApi.officialsRaw}
-        escalation={dataApi.escalation}
-        eventFilter={eventFilter}
-        onEventFilterChange={onEventFilterChange}
-        mapBounds={mapApi.mapBounds}
-        regions={dataApi.regions}
-        currentRegionKey={dataApi.currentRegionKey}
-        countryScope={countryScope}
-        water={mapApi.selectedWater}
-        onLocate={onLocateNewsItem}
-        onOpenRecord={openRecordDetail}
-        isMobile={isMobileViewport}
-      />
+          apart. See IntelPanel.jsx for the rest.
+
+          Which of those four tabs a deployment carries is Admin Mode's to say
+          (see Reader panels there, and publicPanels in settings/defaults.js).
+          Per tab rather than per panel because the four are four readings of
+          four different feeds behind one header, and "carry the news wire but
+          not the officials one" is a real editorial decision a single on/off
+          could not express. With none of them left the panel is not rendered at
+          all -- an empty tab bar over an empty list is worse than no panel. */}
+      {intelTabs.length > 0 && (
+        <IntelPanel
+          tabs={intelTabs}
+          eventsRaw={dataApi.eventsRaw}
+          gdeltRaw={dataApi.gdeltRaw}
+          officialsRaw={dataApi.officialsRaw}
+          escalation={dataApi.escalation}
+          eventFilter={eventFilter}
+          onEventFilterChange={onEventFilterChange}
+          mapBounds={mapApi.mapBounds}
+          regions={dataApi.regions}
+          currentRegionKey={dataApi.currentRegionKey}
+          countryScope={countryScope}
+          water={mapApi.selectedWater}
+          onLocate={onLocateNewsItem}
+          onOpenRecord={openRecordDetail}
+          isMobile={isMobileViewport}
+        />
+      )}
 
       {/* Task 29: /api/airfield-activity has existed since before this plan
           and nothing in the frontend called it -- see AirfieldActivityPanel.jsx's
@@ -1003,7 +1043,7 @@ export default function App() {
           the gesture and get nothing back. It follows the two panels out for
           that reason rather than as a separate decision: it is the same
           "what is happening here" question, asked of one zone. */}
-      {briefingZone && (
+      {settings.publicPanels.briefingCard && briefingZone && (
         <ConflictBriefingCard
           zone={briefingZone}
           eventsRaw={dataApi.eventsRaw}

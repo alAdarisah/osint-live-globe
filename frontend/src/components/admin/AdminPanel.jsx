@@ -21,6 +21,8 @@
 //            plus saved filter presets (see FiltersSection.jsx)
 //   Inference  the three-state switch per inferred product, and the
 //            read-only thresholds behind each one (see InferenceSection.jsx)
+//   Reader   which of the intel panel's tabs, and the briefing card, this
+//   panels   deployment carries (see ReaderPanelsSection.jsx)
 //   Data     the records themselves (see DataEditor.jsx)
 //   Cards    which sections a country/water/state/district card shows, in
 //            what order, and whether each starts open (see CardsSection.jsx)
@@ -44,6 +46,7 @@ import StackSection, { SEARCH_TERMS as STACK_TERMS } from "./sections/StackSecti
 import LayerDialsSection, { SEARCH_TERMS as LAYERS_TERMS } from "./sections/LayerDialsSection";
 import WaterSection, { SEARCH_TERMS as WATER_TERMS } from "./sections/WaterSection";
 import CityZonesSection, { SEARCH_TERMS as ZONES_TERMS } from "./sections/CityZonesSection";
+import ReaderPanelsSection, { SEARCH_TERMS as READER_TERMS } from "./sections/ReaderPanelsSection";
 import BasemapSection, { SEARCH_TERMS as TILES_TERMS } from "./sections/BasemapSection";
 import FiltersSection, { SEARCH_TERMS as FILTERS_TERMS } from "./sections/FiltersSection";
 import InferenceSection, { SEARCH_TERMS as INFERENCE_TERMS } from "./sections/InferenceSection";
@@ -69,6 +72,7 @@ const SECTIONS = [
   { Component: LayerDialsSection, terms: LAYERS_TERMS },
   { Component: WaterSection, terms: WATER_TERMS },
   { Component: CityZonesSection, terms: ZONES_TERMS },
+  { Component: ReaderPanelsSection, terms: READER_TERMS },
   { Component: BasemapSection, terms: TILES_TERMS },
   { Component: FiltersSection, terms: FILTERS_TERMS },
   { Component: InferenceSection, terms: INFERENCE_TERMS },

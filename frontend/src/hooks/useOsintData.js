@@ -14,6 +14,7 @@ import { fetchJson, urlForRegion, urlWithBbox, urlWithQuery } from "../api";
 import {
   resolveScene, fetchZoomFor, isScoped, sourceQueryFor, bboxSnapDegrees, bandFor,
 } from "../map/scene";
+import { countOf, failureDetail } from "./bootSourceMeta.js";
 
 /**
  * The one order that keeps `raw.fetchCoverage` from ever describing a fetch
@@ -47,24 +48,40 @@ export function publishFetchOutcome(recordCoverage, onData, coverageKey, coverag
 }
 
 const BOOT_SOURCES = [
-  { key: "countries", label: "Country boundaries" },
-  { key: "cities", label: "City index" },
-  { key: "events", label: "Conflict & violence events (ACLED + UCDP + GDELT, fused)" },
-  { key: "firms", label: "Thermal anomaly feed (NASA FIRMS)" },
-  { key: "gdelt", label: "Global news stream (GDELT)" },
-  { key: "ais", label: "Maritime traffic (AIS)" },
-  { key: "adsb", label: "Aircraft tracking (ADS-B)" },
-  { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
-  { key: "satellites", label: "Satellite tracking (CelesTrak)" },
+  { key: "countries", label: "Country boundaries", short: "Country boundaries" },
+  { key: "cities", label: "City index", short: "City index" },
+  {
+    key: "events",
+    label: "Conflict & violence events (ACLED + UCDP + GDELT, fused)",
+    short: "Conflict events",
+  },
+  { key: "firms", label: "Thermal anomaly feed (NASA FIRMS)", short: "Thermal anomalies" },
+  { key: "gdelt", label: "Global news stream (GDELT)", short: "News stream" },
+  { key: "ais", label: "Maritime traffic (AIS)", short: "Maritime traffic" },
+  { key: "adsb", label: "Aircraft tracking (ADS-B)", short: "Aircraft tracking" },
+  { key: "jamming", label: "GPS/radio jamming (GPSJam)", short: "GPS jamming" },
+  { key: "satellites", label: "Satellite tracking (CelesTrak)", short: "Satellites" },
   // Task 24: the three client-propagated groups on by default (see
   // map/scene.js) -- same footing as "satellites" above, the server-
   // propagated pair. The other four groups are off by default and fetched
   // on demand instead (see createMapController.js's setLayerVisible), so
   // they never belong on this list -- nothing should make the boot screen
   // wait on a layer nobody has asked to see yet.
-  { key: "satNavigation", label: "Satellite tracking: navigation (CelesTrak, browser-propagated)" },
-  { key: "satWeather", label: "Satellite tracking: weather (CelesTrak, browser-propagated)" },
-  { key: "satImaging", label: "Satellite tracking: Earth imaging (CelesTrak, browser-propagated)" },
+  {
+    key: "satNavigation",
+    label: "Satellite tracking: navigation (CelesTrak, browser-propagated)",
+    short: "Satellites: navigation",
+  },
+  {
+    key: "satWeather",
+    label: "Satellite tracking: weather (CelesTrak, browser-propagated)",
+    short: "Satellites: weather",
+  },
+  {
+    key: "satImaging",
+    label: "Satellite tracking: Earth imaging (CelesTrak, browser-propagated)",
+    short: "Satellites: imaging",
+  },
 ];
 
 // ACLED/FIRMS refresh server-side every 30/15 minutes respectively (see
@@ -327,7 +344,12 @@ export function useOsintData({
   // records that only the map needs, but the date has to reach the control
   // panel so the layer can state its own staleness.
   const [conflictHistoryAsOf, setConflictHistoryAsOf] = useState(null);
-  const [bootSources, setBootSources] = useState(() => BOOT_SOURCES.map((s) => ({ ...s, status: "pending" })));
+  // ms/count/detail start null rather than absent so every row has the same
+  // shape from first paint, and the boot screen never has to distinguish "not
+  // measured yet" from "this key does not exist on this object".
+  const [bootSources, setBootSources] = useState(() =>
+    BOOT_SOURCES.map((s) => ({ ...s, status: "pending", ms: null, count: null, detail: null }))
+  );
 
   // Read by poller ticks so a region switch is picked up on the very next
   // tick without having to tear down and recreate every poller.
@@ -541,15 +563,34 @@ export function useOsintData({
     // which is why both statuses are accepted here as a starting point.
     const UNRESOLVED = new Set(["pending", "deferred"]);
 
-    function markSourceLoaded(key, ok) {
+    // `meta` carries what the boot log reports underneath the label: how long
+    // the round trip took, how many rows came back, and -- on failure -- why.
+    // The three fields are written unconditionally rather than spread, so a
+    // deferred source that later loads for real has its "below zoom gate"
+    // detail cleared instead of keeping a stale reason next to a green tick.
+    function markSourceLoaded(key, ok, meta = {}) {
       setBootSources((prev) =>
-        prev.map((s) => (s.key === key && UNRESOLVED.has(s.status) ? { ...s, status: ok ? "ok" : "warn" } : s))
+        prev.map((s) =>
+          s.key === key && UNRESOLVED.has(s.status)
+            ? {
+                ...s,
+                status: ok ? "ok" : "warn",
+                ms: meta.ms ?? null,
+                count: meta.count ?? null,
+                detail: meta.detail ?? null,
+              }
+            : s
+        )
       );
     }
 
     function markSourceDeferred(key) {
       setBootSources((prev) =>
-        prev.map((s) => (s.key === key && s.status === "pending" ? { ...s, status: "deferred" } : s))
+        prev.map((s) =>
+          s.key === key && s.status === "pending"
+            ? { ...s, status: "deferred", ms: null, count: null, detail: "below zoom gate" }
+            : s
+        )
       );
     }
 
@@ -640,6 +681,21 @@ export function useOsintData({
           timer = setTimeout(tick, intervalNow());
           return;
         }
+        // Above the try, not inside it, so the catch branch can measure a
+        // failure as well as a success -- how long a source took to fail is as
+        // much a fact about the boot as how long it took to load. Measured
+        // through to the map, not just the network: it is differenced after
+        // the transform and publishFetchOutcome below, both of which run
+        // synchronously before the "ms" it becomes. That is "time until it
+        // was on the map", not round-trip time, and deliberately so -- it is
+        // the number a reader waiting at the boot screen actually cares
+        // about, even though for a large source local work (parsing,
+        // rebuilding layers) can be a material share of it.
+        const startedAt = Date.now();
+        // Set true the instant the payload has landed, so the catch branch
+        // below can tell "the fetch itself failed" apart from "something
+        // downstream of a successful fetch threw" -- see its own comment.
+        let landed = false;
         try {
           // Captured before the await, so the signature recorded below is the
           // one this request was actually made under rather than whatever the
@@ -651,6 +707,7 @@ export function useOsintData({
             sourceQuery(key)
           );
           const fetched = await fetchJson(scopedUrl);
+          landed = true;
           if (cancelled) return;
           fetchedRef.current[key] = fetched;
           fetchedScopeRef.current[key] = signature;
@@ -674,7 +731,7 @@ export function useOsintData({
           // Unconditional: markSourceLoaded only touches rows still pending or
           // deferred, so this upgrades a deferred source once it really loads
           // and is a no-op on every poll after that.
-          markSourceLoaded(key, true);
+          markSourceLoaded(key, true, { ms: Date.now() - startedAt, count: countOf(data) });
         } catch (err) {
           // Pre-existing: unlike the success path above, this branch does not
           // check `cancelled` before writing. Harmless today -- every write
@@ -684,10 +741,25 @@ export function useOsintData({
           // not part of what this pass was asked to change.
           console.warn(`Failed to fetch ${key}:`, err);
           firstFetchDone = true;
-          if (!bootReported) {
-            bootReported = true;
-            markSourceLoaded(key, false);
-          }
+          bootReported = true;
+          // Unconditional, for the same reason the success path's own call is:
+          // markSourceLoaded only touches rows still pending or deferred, so
+          // this upgrades a deferred source that has now genuinely failed and
+          // is a no-op on every poll after the row has resolved. Without this,
+          // a source that was deferred and later fetched-and-failed could
+          // never reach `warn` -- its row would keep showing "below zoom gate"
+          // next to a coverage record that already says "error".
+          markSourceLoaded(key, false, {
+            ms: Date.now() - startedAt,
+            // `landed` tells apart two different failures. If the payload
+            // never arrived, failureDetail(err) is true: an HTTP status or
+            // "unreachable". If it did arrive (landed), whatever threw here is
+            // the app failing to draw the data, not the source failing to
+            // arrive -- failureDetail has nothing true to say about a
+            // transport error that didn't happen, so this reports null and
+            // lets the boot log fall back to showing the elapsed time instead.
+            detail: landed ? null : failureDetail(err),
+          });
           // fetchedAt/bbox untouched -- an error says nothing about the data
           // already sitting in raw[key] from a previous success, if any.
           // No publishFetchOutcome ordering concern here either: no fetch

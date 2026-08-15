@@ -28,6 +28,7 @@ const EMPTY_COUNTS = Object.fromEntries(
 const EMPTY_ZOOM_NOTES = {
   adsb: false, cities: false, citiesScoped: false, firms: false, events: false, gdelt: false,
   ais: false, jamming: false, officials: false, capped: {}, eventsCapped: 0,
+  aged: {}, eventsAged: 0,
   gfwGaps: false, gfwDetections: false, floods: false, ports: false, dams: false, deflock: false,
   laneDensity: false,
   // Task 24: navigation/weather/imaging are THEATRE-gated (see map/scene.js
@@ -320,6 +321,10 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     controllerRef.current?.setLayerZoomMaxOverrides(next);
   }, []);
 
+  const setLayerCountryOnly = useCallback((next) => {
+    controllerRef.current?.setLayerCountryOnly(next);
+  }, []);
+
   const setLayerWishes = useCallback((next) => {
     controllerRef.current?.setLayerWishes(next);
   }, []);
@@ -383,7 +388,8 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     setVesselFilter, setAircraftFilter, setAgeReference,
     emergencySquawks, selectAircraftByIcao,
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
-    setIconTheme, setLayerZoomOverrides, setLayerZoomMaxOverrides, setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
+    setIconTheme, setLayerZoomOverrides, setLayerZoomMaxOverrides, setLayerCountryOnly,
+    setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
     exportLayerRecords,
     choropleth, setChoroplethMetric,
     borderEdit, countryFingerprints,

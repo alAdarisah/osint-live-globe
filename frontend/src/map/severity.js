@@ -1,5 +1,6 @@
 import { parseGdeltDateAdded } from "../utils/format";
 import { paletteColor } from "./iconTheme";
+import { AGE_WINDOW_DATE_STEPS } from "./scene";
 
 // The one severity scale.
 //
@@ -296,13 +297,39 @@ export function ageHours(item, now = Date.now()) {
 // severity bands at the top of this file, for the same reason.
 //
 // maxAgeDays counts dates, not hours -- see ageDays. null means no window, and
-// it is the shipped default on purpose: the backend already decides what is
-// recent enough to serve (acled.py's 3-day cutoff, event_fusion's 3-day
-// violence accumulator), and a client-side default that hides some of what it
-// was just sent is how this layer came to draw a fraction of its own count.
-// GDELT rows in particular can carry an event date weeks before the report
-// that surfaced them -- MAX_REPORT_LAG_DAYS is 30 -- so any finite default
-// would silently drop real, deliberately-served events.
+// it used to be the shipped default, on the argument that the backend already
+// decides what is recent enough to serve (acled.py's 3-day cutoff,
+// event_fusion's 3-day violence accumulator) and that a client-side default
+// hiding some of what it was just sent is how this layer came to draw a
+// fraction of its own count.
+//
+// That argument was half right, and the wrong half is the expensive one. Both
+// backend windows measure *when we first saw a row*, not when the event
+// happened: event_fusion's accumulator prunes on `_seen_at`, and gdelt.py
+// admits an event date up to MAX_REPORT_LAG_DAYS -- thirty -- behind the report
+// that surfaced it. So a wire report filed this morning about a massacre three
+// weeks ago is inside every window the backend applies, and with no client
+// window it drew as a pin on a map whose whole claim is the last three days.
+// A reader cannot tell that pin from this morning's by looking at it, which
+// makes it the one kind of error the map cannot be checked for.
+//
+// So the default is AGE_WINDOW_DAYS, the same three days map/scene.js gates the
+// other layers on. The old objection still stands and is answered rather than
+// overruled: a layer showing a fraction of its own count with no explanation
+// reads as broken, so the drop is *reported*, the way capByRank reports a cap
+// (zoomNotes.aged, see createMapController). And it stays a default rather than
+// a rule -- the Window control in IntelPanel's header writes this field, and
+// widening it to "7d" is one click.
+//
+// Note what this constant does *not* decide. IntelPanel's mount effect writes
+// windowMaxAgeDays(windowHours) here unconditionally, so the value that governs
+// the running map is DEFAULT_WINDOW_HOURS in intelPanelLogic.js, and this one
+// holds only until that panel mounts. The two are kept in agreement by hand
+// (72h inverts to AGE_WINDOW_DATE_STEPS); change one and change the other.
+// Anything wider than "7d" -- including the null that means no window at all,
+// and with it the thirty-day GDELT tail -- is not reachable from the UI, because
+// WINDOW_OPTIONS has no "All available" entry. See windowMaxAgeDays' note for
+// why that entry has to be added deliberately rather than smuggled into "7d".
 //
 // minConfidence lives on this object even though passesEventFilter ignores it,
 // and that is the point: it is one more thing the reader has said about this
@@ -320,7 +347,9 @@ export function ageHours(item, now = Date.now()) {
 // rows, revisit this: a default that hides most of the layer reads as a broken
 // feed, which is exactly why the confidence control fades instead of filtering.
 export const DEFAULT_EVENT_FILTER = {
-  maxAgeDays: null, minSeverity: 0, showImprecise: false,
+  // AGE_WINDOW_DATE_STEPS, not AGE_WINDOW_DAYS: this field counts date
+  // boundaries, so three days of history is 2. See the note on the constant.
+  maxAgeDays: AGE_WINDOW_DATE_STEPS, minSeverity: 0, showImprecise: false,
   minConfidence: CONFIDENCE_THRESHOLD,
 };
 

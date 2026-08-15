@@ -8,6 +8,48 @@ export function esc(s) {
   ));
 }
 
+// Schemes a link in a popup is allowed to have. Everything the map links to is
+// a source article, a dataset page or an event report, so this is the whole
+// list -- mailto: and tel: are not in it because nothing here produces one.
+const LINK_SCHEMES = ["http://", "https://"];
+
+/**
+ * The URL if it is one a link may point at, or "" if it is not.
+ *
+ * Returns the URL unescaped, so it is correct in both places this app builds a
+ * link: a JSX `href={safeUrl(u)}`, where React escapes the attribute itself and
+ * pre-escaping would double it, and an HTML string, where the caller wraps it
+ * as `esc(safeUrl(u))`. The two concerns are separate -- this one decides
+ * whether the URL may be followed at all, esc() decides whether it can break
+ * out of the attribute -- and a link built from feed data needs both.
+ *
+ * esc() is not enough on its own here, and the reason is worth stating: it
+ * escapes the characters that would break *out* of the attribute, but
+ * `javascript:fetch(...)` contains none of them, so it survives escaping intact
+ * and runs on click with the full authority of the page. Every URL rendered by
+ * this app comes from a feed -- an ACLED note, a GDELT article link, an OSM tag
+ * -- which is to say from a publisher we do not control, and one bad record
+ * would otherwise be one click away from reading whatever the map holds.
+ *
+ * So the scheme is checked against a list rather than the dangerous ones being
+ * blocked: a blocklist has to anticipate `data:`, `vbscript:`, tab-and-newline
+ * obfuscation and whatever the next one is, and an allowlist does not.
+ * Protocol-relative "//host/path" is accepted and left to inherit https from
+ * the page. A rejected URL becomes "", which callers already treat as "no link"
+ * -- the text stays, the anchor does not.
+ */
+export function safeUrl(u) {
+  const raw = String(u ?? "").trim();
+  if (!raw) return "";
+  // Control characters and whitespace inside the scheme are the standard way of
+  // hiding one from a naive check ("java\tscript:"); browsers strip them before
+  // parsing, so they are stripped before checking too.
+  const probe = raw.replace(/[\u0000-\u0020]/g, "").toLowerCase();
+  if (probe.startsWith("//")) return raw;
+  if (!LINK_SCHEMES.some((scheme) => probe.startsWith(scheme))) return "";
+  return raw;
+}
+
 export function fmtNumber(n) {
   return typeof n === "number" ? n.toLocaleString() : "n/a";
 }

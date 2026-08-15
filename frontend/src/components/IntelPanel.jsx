@@ -52,7 +52,7 @@ import {
   DEFAULT_EVENT_FILTER, CONFIDENCE_THRESHOLD,
 } from "../map/severity";
 import { OFFICIALS_KIND_LABEL } from "../map/decorators";
-import { timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
+import { safeUrl, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
 import { useDraggablePanel, migratePanelPosition } from "../hooks/useDraggablePanel";
 import {
   SCOPE_OPTIONS, SCOPE_WORLD, SCOPE_VIEWPORT, SCOPE_COUNTRY, SCOPE_REGION, SCOPE_WATER,
@@ -257,6 +257,13 @@ function NewsRow({ item, onLocate, onOpenRecord }) {
   const headline = item.real_title.trim();
   const when = timeAgoFromDateAdded(item.date_added);
   const meta = [item.source_name, when, item.corroborated ? "corroborated" : null].filter(Boolean).join(" · ");
+  // safeUrl returns "" for anything that is not http(s), so the headline falls
+  // back to plain text rather than becoming a link to a scheme nobody vetted.
+  // The URL is the publisher's, not this app's: React will render whatever
+  // scheme a feed hands it, and `javascript:` in an href is the whole reason
+  // this is not simply `item.source_url`. Same treatment ConflictBriefingCard
+  // and map/popups.js give the same field.
+  const link = safeUrl(item.source_url);
   // Unlike Events/Officials, News' own headline is already the row's primary
   // click target -- a real link to the cited article, which has to keep
   // working as a link (including middle-click and open-in-new-tab). Making
@@ -270,8 +277,8 @@ function NewsRow({ item, onLocate, onOpenRecord }) {
   return (
     <div className="news-item">
       <div className="news-item-row">
-        {item.source_url ? (
-          <a href={item.source_url} target="_blank" rel="noopener noreferrer">
+        {link ? (
+          <a href={link} target="_blank" rel="noopener noreferrer">
             {headline}
           </a>
         ) : (
@@ -366,6 +373,7 @@ function TabList({ items, groupBy, tabKind, Row, rowKey, onLocate, onOpenRecord 
 }
 
 export default function IntelPanel({
+  tabs,
   eventsRaw, gdeltRaw, officialsRaw, escalation,
   eventFilter = DEFAULT_EVENT_FILTER, onEventFilterChange,
   mapBounds, regions, currentRegionKey,
@@ -382,7 +390,29 @@ export default function IntelPanel({
     enabled: !isMobile,
   });
 
+  // Which tabs this deployment carries, in this panel's own order. An absent
+  // prop means all of them, so nothing that renders this panel without an
+  // opinion has to supply one.
+  //
+  // Filtered from TABS rather than mapped from the prop, so the order on screen
+  // is always this file's -- a caller cannot rearrange the tab bar by listing
+  // the keys in a different sequence, which is not a decision the settings
+  // shape was meant to carry.
+  const shownTabs = useMemo(
+    () => (tabs ? TABS.filter((t) => tabs.includes(t.key)) : TABS),
+    [tabs]
+  );
+
   const [activeTab, setActiveTab] = useState("events");
+  // The selected tab can stop being carried while it is selected -- an operator
+  // unticks Events in Admin Mode and the panel is still showing it. Falling
+  // back to the first tab that is left keeps the body and the tab bar agreeing;
+  // without it the bar would highlight nothing and the body would go on
+  // rendering a tab nobody can reach.
+  useEffect(() => {
+    if (!shownTabs.length) return;
+    if (!shownTabs.some((t) => t.key === activeTab)) setActiveTab(shownTabs[0].key);
+  }, [shownTabs, activeTab]);
   const [scopeKind, setScopeKind] = useState(SCOPE_WORLD);
   const [windowHours, setWindowHours] = useState(DEFAULT_WINDOW_HOURS);
   const [groupBy, setGroupBy] = useState("none");
@@ -534,7 +564,7 @@ export default function IntelPanel({
       {!collapsed && (
         <>
           <div className="intel-tabs" role="tablist">
-            {TABS.map((t) => {
+            {shownTabs.map((t) => {
               const count = t.key === "escalation" ? escalationZones.length
                 : t.key === "events" ? eventItems.length
                   : t.key === "news" ? newsItems.length

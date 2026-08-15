@@ -21,8 +21,8 @@ const DURATION = /(?<![\w-])\d*\.?\d+m?s(?![\w-])/;
 
 // Mechanism, not status -- a spinner reporting that work is in progress cannot
 // be asked "how urgent is this condition", which is the only question the tempo
-// scale answers. Both carry the same explanation in the stylesheet.
-const EXEMPT = ["loading-radar-spin", "loading-ellipsis-pulse"];
+// scale answers. Carries the same explanation in the stylesheet.
+const EXEMPT = ["loading-ellipsis-pulse"];
 
 // Matches the shorthand (animation:, transition:) and the four longhands
 // (animation-duration:, animation-delay:, transition-duration:,
@@ -248,10 +248,10 @@ test("every looping animation can be switched off", () => {
 
   // Every rule that loops. A looping animation nobody can switch off is the one
   // accessibility failure this feature can actually cause, and it is invisible
-  // to whoever adds the loop. EXEMPT is excluded here too -- loading-radar-spin
-  // and loading-ellipsis-pulse are mechanism, not status, and the earlier test
-  // already guards that their exemption stays documented; this test is only
-  // about loops that are supposed to be reachable through reduce-motion.
+  // to whoever adds the loop. EXEMPT is excluded here too -- loading-ellipsis-pulse
+  // is mechanism, not status, and the earlier test already guards that its
+  // exemption stays documented; this test is only about loops that are
+  // supposed to be reachable through reduce-motion.
   //
   // Compared as whole normalised selectors, not leaf class names: a raw
   // substring/leaf check passes ".threat-halo .entity-icon-wrap" as covered

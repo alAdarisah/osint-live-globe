@@ -8,10 +8,10 @@
 // LayersSection.jsx) -- that one turns layers on and off; this one tunes how
 // an already-visible layer looks.
 import { PanelGroup } from "../../controlPanel/Collapsible";
-import { SliderField, IconField } from "../fields";
+import { SliderField, IconField, CheckField } from "../fields";
 import { DEFAULT_COLORS, TOKEN_LAYER, tokenHasSize, tokenHasZoom, glyphChoicesFor } from "../../../map/iconTheme";
 import { shippedDrawZoom } from "../../../map/scene";
-import { SETTINGS_LAYERS } from "../../../settings/defaults";
+import { SETTINGS_LAYERS, COUNTRY_ONLY_LAYERS } from "../../../settings/defaults";
 import {
   EXTRA_TOKENS_UNDER, TOKENS_BY_LAYER, perPinDials,
   SharedColours, PinTypesNote,
@@ -29,6 +29,7 @@ export const SEARCH_TERMS = [
   "Opacity",
   "Shows from zoom",
   "Hides past zoom",
+  "Only with a country selected",
   "Shared colours",
   ...SETTINGS_LAYERS.map((l) => l.label),
   ...ALL_TOKEN_LABELS,
@@ -203,6 +204,17 @@ function LayerBlock({ layer, settings, actions, open, onToggle }) {
             actions.setLayerStyle(layer.key, { maxZoom: value >= 19 ? null : value })
           }
         />
+        {/* Offered only on the layers that draw individual pins -- see
+            COUNTRY_ONLY_LAYERS for the kinds of layer left out and why there is
+            nothing here for them to clip. */}
+        {COUNTRY_ONLY_LAYERS.has(layer.key) && (
+          <CheckField
+            label="Only with a country selected"
+            note="Hidden until a country is clicked, then clipped to that country's borders. Its own zoom gate still applies — a selection makes the layer eligible, it does not bring it below the zoom above."
+            checked={style.countryOnly === true}
+            onChange={(value) => actions.setLayerStyle(layer.key, { countryOnly: value })}
+          />
+        )}
 
         {tokens.length > 0 && (
           <>

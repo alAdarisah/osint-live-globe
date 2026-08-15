@@ -96,3 +96,50 @@ pg_connection_budget:
     - limit_ordinary:
         usage: "GAUGE"
         description: "max_connections minus superuser_reserved_connections"
+
+# The read replica's lag, from the primary's side (Phase 3 of the read-replica
+# plan). pg_stat_replication is populated only while a standby is connected, so
+# streaming_standbys drops to 0 the moment the replica disconnects -- which is
+# itself the alert. replay_lag is how far behind the standby is in *applying*
+# WAL, the number that decides whether a read routed there is acceptably fresh.
+# These run only on the primary (pg_current_wal_lsn() has no meaning on a
+# standby), so they live in this file, which only the primary exporter loads.
+pg_replication:
+  query: |
+    SELECT
+      COUNT(*) FILTER (WHERE state = 'streaming') AS streaming_standbys,
+      COALESCE(MAX(EXTRACT(EPOCH FROM replay_lag)), 0) AS max_replay_lag_seconds,
+      COALESCE(MAX(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)), 0) AS max_replay_lag_bytes
+    FROM pg_stat_replication
+  metrics:
+    - streaming_standbys:
+        usage: "GAUGE"
+        description: "Standbys currently streaming from this primary"
+    - max_replay_lag_seconds:
+        usage: "GAUGE"
+        description: "Worst standby apply lag, in seconds"
+    - max_replay_lag_bytes:
+        usage: "GAUGE"
+        description: "Worst standby apply lag, in WAL bytes"
+
+# WAL a replication slot is forcing the primary to retain. This is the sharp
+# edge of using a slot: an inactive slot (active=0, its standby gone) makes
+# retained_wal_bytes climb until the disk fills. Alert on active=0 with
+# retained_wal_bytes rising, and drop the slot if the standby is really retired.
+pg_replication_slots:
+  query: |
+    SELECT
+      slot_name,
+      active::int AS active,
+      COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0) AS retained_wal_bytes
+    FROM pg_replication_slots
+  metrics:
+    - slot_name:
+        usage: "LABEL"
+        description: "Replication slot name"
+    - active:
+        usage: "GAUGE"
+        description: "1 while a standby holds the slot, 0 when it is abandoned"
+    - retained_wal_bytes:
+        usage: "GAUGE"
+        description: "WAL bytes the primary is retaining for this slot"

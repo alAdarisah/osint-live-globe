@@ -194,6 +194,69 @@ def test_the_stored_window_is_not_silently_truncated_by_the_cap():
     )
 
 
+# --- what is drawn is not what is kept --------------------------------------
+#
+# The sweep serves two consumers with one download and they want opposite
+# windows. dark_vessels wants a long one: "has this hull done this before" is a
+# statement about months, and it survives the publication lag precisely because
+# it never claims to be about tonight. The map wants a short one, because a pin
+# is read as a thing that happened and a month-old pin drawn beside a live
+# position is a claim about *when* that nothing on the tile contradicts.
+#
+# So the fetch stays wide and the pins are sliced out of it. What this cannot do
+# is reach three days: GFW publishes this batch five or more days behind wall
+# clock, so a three-day pin window would draw an empty layer every day of the
+# year, which reads as a broken feed rather than as calm water.
+
+
+def test_the_prior_keeps_the_long_window_the_map_does_not():
+    """The two windows answer different questions and must not be collapsed into
+    one number. Trimming the fetch to the pin window would quietly gut the prior
+    -- "flagged three times last month" is the whole reason dark_vessels reads
+    it -- and widening the pins to the fetch window is what put month-old pins
+    on the map in the first place."""
+    assert gfw_gaps.PIN_LOOKBACK_DAYS < gfw_gaps.LOOKBACK_DAYS
+    assert gfw_gaps.LOOKBACK_DAYS >= 30, "the prior needs a month to mean anything"
+
+
+def test_the_pin_window_clears_the_publication_lag():
+    """Measured on 2026-08-07: a four-day window returned zero events and the
+    newest gap in the feed began 2026-08-02, five days back. A pin window at or
+    below that lag draws nothing, ever -- so this is not a preference, it is the
+    floor the publisher sets."""
+    assert gfw_gaps.PIN_LOOKBACK_DAYS > 5
+
+
+def test_only_the_recent_end_of_the_sweep_becomes_pins():
+    day = 86400.0
+    recent = {**parsed(), "id": "gfw:gap:recent", "went_dark_at": NOW - 2 * day}
+    edge = {**parsed(), "id": "gfw:gap:edge", "went_dark_at": NOW - (gfw_gaps.PIN_LOOKBACK_DAYS - 0.5) * day}
+    stale = {**parsed(), "id": "gfw:gap:stale", "went_dark_at": NOW - 25 * day}
+
+    drawn = gfw_gaps.drawable([recent, edge, stale], NOW)
+
+    assert [r["id"] for r in drawn] == ["gfw:gap:recent", "gfw:gap:edge"]
+    # And the one that was dropped is still in the input the prior is built
+    # from, which is the entire point of doing this as a slice rather than as a
+    # narrower fetch.
+    assert gfw_gaps.vessel_priors([recent, edge, stale])["636014909"]["events"] == 3
+
+
+def test_a_gap_that_cannot_say_when_it_started_is_not_drawn():
+    """Every other layer on this map keeps an undated record rather than hiding
+    data over a missing field. This one does not, and the exception is argued
+    rather than inherited: `age_days` is on every record here *because* the
+    failure this layer risks is an old gap reading as a live one, and a record
+    with no start cannot make that statement at all. parse_gap already drops a
+    gap with no coordinates on the same reasoning -- a gap that cannot be drawn
+    honestly is not one."""
+    undated = {**parsed(), "id": "gfw:gap:undated", "went_dark_at": None}
+    assert gfw_gaps.drawable([undated], NOW) == []
+    # It still counts toward the hull's history, which needs an occurrence and
+    # not a timestamp.
+    assert gfw_gaps.vessel_priors([undated])["636014909"]["events"] == 1
+
+
 def test_a_record_with_no_mmsi_contributes_no_prior():
     """There is nothing to key it on, and a prior under a null MMSI would attach
     itself to every vessel that also lacks one."""

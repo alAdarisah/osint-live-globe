@@ -55,8 +55,15 @@ SNAPSHOT_NAME = "airfield_activity"
 
 
 async def _compute() -> dict:
+    # Routed to the read replica: this reads ADS-B history other processes wrote,
+    # never its own output, and a 24-hour rolling count does not notice seconds of
+    # lag. Falls back to the primary whenever no replica is open, so it is a no-op
+    # without one.
     return await storage.airfield_activity(
-        time.time() - WINDOW_HOURS * 3600, hours=WINDOW_HOURS, top=TOP_FIELDS
+        time.time() - WINDOW_HOURS * 3600,
+        hours=WINDOW_HOURS,
+        top=TOP_FIELDS,
+        prefer_replica=True,
     )
 
 

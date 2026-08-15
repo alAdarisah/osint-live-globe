@@ -132,11 +132,55 @@ CODE_WRITE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
               -X PUT -H 'Content-Type: application/json' --data-binary 'not json' \
               http://localhost:8081/api/admin-config || echo 000)
 
+# The private listener is plain HTTP, so its CSP must not carry
+# upgrade-insecure-requests: the browser would rewrite every same-origin
+# subresource to https on a port with no TLS, and the page would render nothing.
+#
+# Worth a probe of its own because every status check above stays green while it
+# happens. The document is served, so / is 200 and /api/health is 200; it is the
+# bundle, the stylesheet and the vendor scripts that never get requested, and
+# curl does not honour the directive so it cannot notice either. The symptom is a
+# grey screen and a server log that looks like a healthy deploy.
+UIR=$(curl -s -I --max-time 10 http://localhost:8080/ \
+      | grep -ci 'upgrade-insecure-requests' || true)
+
+# Can the backend still write data/? It is the only state outside Postgres --
+# Admin Mode's configuration, which every client reads back at startup -- and
+# admin_config.py writes it through a temp file in the same directory, so the
+# directory itself has to be writable, not just the file.
+#
+# This is not paranoia about disk space. The backend runs with cap_drop: ALL
+# (see docker-compose.yml), and dropping CAP_DAC_OVERRIDE is what stops root in
+# a container from ignoring permission bits -- so a data/ directory owned by
+# anyone else stops being writable, silently and only for writes. Reads keep
+# answering 200, the map keeps working, and the only symptom is that saving in
+# Admin Mode reports an error a deploy would never see.
+#
+# A touch rather than a real save, so probing does not rewrite the
+# configuration and move its saved_at.
+DATA_WRITE=$(docker compose exec -T backend sh -c \
+              'touch /app/data/.deploy-write-probe 2>/dev/null \
+               && rm -f /app/data/.deploy-write-probe && echo ok' 2>/dev/null \
+             | tr -d '\r')
+
 # Read the bundle name out of the running container rather than off the page: it
 # is the one thing that proves the *new* build is what is being served.
-BUNDLE=$(docker compose exec -T frontend sh -c \
-          'ls /usr/share/nginx/html/assets/index-*.js 2>/dev/null' | tr -d '\r' | tail -1)
-BUNDLE=$(basename "${BUNDLE:-none}")
+#
+# Taken from index.html's own <script src>, not from `ls assets/index-*.js`.
+# The build emits more than one index-*.js -- the entry point and a chunk it
+# imports later -- and `ls | tail -1` returned whichever sorted last, which is
+# not the one the browser loads. It printed a real file from a real build, so it
+# looked right every time and was wrong about half of them, which is the worst
+# way for a proof line to fail. index.html names exactly one entry, and that is
+# the file whose hash changing means the deploy reached the browser.
+#
+# Parsed here rather than inside `sh -c` so the quoting stays readable: the
+# container only has to hand back the file.
+BUNDLE=$(docker compose exec -T frontend cat /usr/share/nginx/html/index.html 2>/dev/null \
+          | tr -d '\r' \
+          | grep -o 'src="/assets/index-[A-Za-z0-9_-]*\.js"' \
+          | head -1 | sed 's|.*/||; s|"$||')
+BUNDLE=${BUNDLE:-none}
 
 SOURCES=$(curl -s --max-time 15 http://localhost:8080/api/health \
           | tr ',' '\n' | grep -c '"item_count":[1-9]' || echo '?')
@@ -144,9 +188,16 @@ SOURCES=$(curl -s --max-time 15 http://localhost:8080/api/health \
 echo "Bundle:   $BUNDLE"
 echo "Private:  /  = $CODE_PRIVATE    /api/health = $CODE_API"
 echo "Public:   /  = $CODE_PUBLIC    admin write = $CODE_WRITE (403 expected)"
+echo "Config:   data/ $([ "$DATA_WRITE" = ok ] && echo writable || echo 'NOT WRITABLE')"
 echo "Sources:  $SOURCES collecting"
 
 [ "$CODE_PRIVATE" = 200 ] || echo "  WARNING: the private listener is not answering 200."
 [ "$CODE_API" = 200 ]     || echo "  WARNING: the API is not answering 200 -- docker compose logs backend"
 [ "$CODE_PUBLIC" = 200 ]  || echo "  WARNING: the public listener is not answering 200."
 [ "$CODE_WRITE" = 403 ]   || echo "  WARNING: the public listener accepted an admin write. Check frontend/nginx.conf."
+[ "$UIR" = 0 ]            || echo "  WARNING: the private listener sends upgrade-insecure-requests. It is served over
+           plain HTTP, so every subresource will be upgraded to https and fail --
+           the page renders grey. Drop the directive from frontend/security-headers.conf."
+[ "$DATA_WRITE" = ok ]    || echo "  WARNING: the backend cannot write data/. Admin Mode will report every save as
+           failed while reads keep working. The service runs with cap_drop: ALL, so
+           root inside it obeys permission bits: chown -R 0:0 /opt/osint/data"

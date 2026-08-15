@@ -6,7 +6,7 @@
 // zone answers "what's actually happening here" without also opening the
 // separate news ticker.
 import { useMemo } from "react";
-import { timeAgoFromDateAdded } from "../utils/format";
+import { safeUrl, timeAgoFromDateAdded } from "../utils/format";
 import { boundsContainsPoint } from "../utils/geo";
 import { passesEventFilter, DEFAULT_EVENT_FILTER } from "../map/severity";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
@@ -132,12 +132,16 @@ function BriefingNewsItem({ item, onLocate }) {
   const headline = item.real_title.trim();
   const when = timeAgoFromDateAdded(item.date_added);
   const meta = [item.source_name, when, item.corroborated ? "corroborated" : null].filter(Boolean).join(" · ");
+  // Same feed and same reasoning as NewsBroadcastPanel's NewsItem: the URL is
+  // the publisher's, React will render whatever scheme it carries, and safeUrl
+  // turns anything that is not http(s) into "no link".
+  const link = safeUrl(item.source_url);
 
   return (
     <div className="news-item">
       <div className="news-item-row">
-        {item.source_url ? (
-          <a href={item.source_url} target="_blank" rel="noopener noreferrer">
+        {link ? (
+          <a href={link} target="_blank" rel="noopener noreferrer">
             {headline}
           </a>
         ) : (

@@ -65,7 +65,17 @@ import { DEFAULT_FRAME_MS, DEFAULT_STEP_MINUTES, FRAME_MS_BOUNDS, STEP_MINUTES_B
 // guard below leaves defaultSettings()' shipped `{ frameMs: 800,
 // stepMinutes: 60 }` in place for it -- the exact cadence useReplay.js
 // already ran at before this became a dial.
-export const SETTINGS_VERSION = 6;
+//
+// 7: added `publicPanels` -- which of the intel panel's four tabs, and the
+// conflict briefing card, a deployment carries -- and `countryOnly` on each
+// entry in `layers`. Numbered 7 rather than the 5 it was written as: this
+// landed on a branch alongside 5 and 6 above, and two configurations claiming
+// the same version number while describing different shapes is the one thing
+// this counter exists to prevent. Additive for the same reason as every bump
+// above it, and both are default-permissive besides: an absent publicPanels
+// leaves all five showing, and an absent countryOnly leaves the layer ungated,
+// so a config saved before this task describes exactly the behaviour it had.
+export const SETTINGS_VERSION = 7;
 
 /**
  * The layers whose appearance can be configured, in the order the admin panel
@@ -201,7 +211,64 @@ const SUPERSEDED_PIN_STACKS = [
   ],
 ];
 
-const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null };
+const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null, countryOnly: false };
+
+/**
+ * The layers that can be told to draw only for a selected country.
+ *
+ * Every layer that draws individual pins, minus four kinds of thing that have
+ * no pin to clip:
+ *
+ *   cities    already country-scoped by its own renderer, on country_code. A
+ *             second gate saying the same thing in a different vocabulary is
+ *             how the two end up disagreeing.
+ *   firms,    density canvases rather than pins, and a quarter of a million
+ *   jamming,  rows apiece. There is no individual mark to keep or drop.
+ *   laneDensity
+ *   water     a lake or a sea is a shape, not a mark on one.
+ *   cables,   lines that live in the ocean. The line layers below are gated by
+ *   shippingLanes  keeping whole lines that touch the selection, and a submarine
+ *             cable or a shipping corridor almost never has a vertex inside a
+ *             country -- the test would hide them permanently rather than scope
+ *             them, which is a checkbox that does not do what it says.
+ *
+ * Two kinds of layer are deliberately in.
+ *
+ * The satellite layers, bulk WebGL groups included: a satellite is a pin with a
+ * real position, and "only the passes over the country I am reading about" is
+ * exactly the question the gate exists for.
+ *
+ * The overland line layers -- railways and powerLines -- which were out while
+ * the gate could only clip geometry, because a line cut at a border draws a
+ * fragment claiming the line ends there. They are in now because the renderers
+ * do not clip them: a line is kept or dropped whole, by whether any part of it
+ * lies inside the selection (see lineInCountryScope in createMapController.js).
+ * That answers the objection rather than accepting it, and these are the two
+ * layers where it matters most -- an OSM sweep of eleven theatres is tens of
+ * thousands of ways, drawn as real geometry at every zoom.
+ *
+ * A layer outside this set gets no checkbox at all, rather than a checkbox that
+ * half works.
+ */
+const NO_COUNTRY_GATE = new Set([
+  "cities", "firms", "jamming", "laneDensity",
+  "water", "cables", "shippingLanes",
+]);
+
+export const COUNTRY_ONLY_LAYERS = new Set(
+  SETTINGS_LAYERS.map((l) => l.key).filter((key) => !NO_COUNTRY_GATE.has(key))
+);
+
+/**
+ * The intel panel's tabs, in the order it draws them, as `publicPanels` keys.
+ *
+ * Named here rather than imported from IntelPanel.jsx because this is the
+ * settings shape: the panel owns what a tab looks like and what it lists, and
+ * this file owns which of them a deployment carries. They have to agree on the
+ * key, and the panel takes the list it is given (see its `tabs` prop) rather
+ * than reading a settings object, so there is one direction to the dependency.
+ */
+export const INTEL_TAB_KEYS = ["escalation", "events", "news", "officials"];
 
 /**
  * Every key a checkbox in the control drawer can address.
@@ -501,6 +568,24 @@ export function defaultSettings() {
     // On by default: the pile-up it addresses is the ordinary case in every city
     // this map is used to look at, and the grouping is reversible per pin.
     cityZones: { group: true, show: true, radiusScale: 1 },
+    // What the reader's own panels carry. Written in full rather than sparsely,
+    // unlike layerWish: there is no resolver to hand a panel back to, so an
+    // absent key has no third state to mean.
+    //
+    // The first four are the intel panel's tabs (see IntelPanel.jsx). They are
+    // named per tab rather than per panel because the panel is four readings of
+    // four different feeds behind one header -- "carry the news ticker but not
+    // the officials wire" is a real editorial decision about a deployment, and
+    // a single on/off for the whole panel could not say it. Switch all four off
+    // and the panel does not render at all; there is nothing left in it.
+    //
+    // Switching one off hides it from everyone, an operator included: Admin
+    // Mode is the reader's map plus instruments, not a different app, and the
+    // checkbox that hid it is the way back.
+    publicPanels: {
+      escalation: true, events: true, news: true, officials: true,
+      briefingCard: true,
+    },
     ui: {
       textScale: 1,
       panelOpacity: 0.94,
@@ -821,7 +906,22 @@ export function mergeSettings(stored) {
         opacity: pickNumber(value.opacity, 1, 0.1, 1),
         minZoom: Number.isFinite(value.minZoom) ? pickNumber(value.minZoom, null, 0, 18) : null,
         maxZoom: Number.isFinite(value.maxZoom) ? pickNumber(value.maxZoom, null, 0, 18) : null,
+        // A strict boolean, and only for a layer that has the gate on offer.
+        // The same rule layerWish uses below, for the same reason: a truthy
+        // string in a hand-edited file would blank a layer until somebody found
+        // the checkbox, and that is too large a consequence for a guess.
+        countryOnly: value.countryOnly === true && COUNTRY_ONLY_LAYERS.has(key),
       };
+    }
+  }
+
+  if (isPlainObject(stored.publicPanels)) {
+    // Default-on, so anything but an explicit `false` leaves the panel showing
+    // -- the rule ui.showLeaderLines uses, and for the same reason: a
+    // configuration written before this setting existed must not switch a
+    // reader's panel off by not mentioning it.
+    for (const key of Object.keys(base.publicPanels)) {
+      base.publicPanels[key] = stored.publicPanels[key] !== false;
     }
   }
 

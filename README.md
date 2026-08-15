@@ -33,10 +33,11 @@ get a working map.
 11. [Configuration reference](#configuration-reference)
 12. [Persistence](#persistence)
 13. [Monitoring](#monitoring)
-14. [Tests](#tests)
-15. [Troubleshooting](#troubleshooting)
-16. [Limits, and what this is not](#limits-and-what-this-is-not)
-17. [Attribution](#attribution)
+14. [Security](#security)
+15. [Tests](#tests)
+16. [Troubleshooting](#troubleshooting)
+17. [Limits, and what this is not](#limits-and-what-this-is-not)
+18. [Attribution](#attribution)
 
 ---
 
@@ -219,7 +220,7 @@ documentation anyone reads at the moment they need it:
 
 | Script | Does |
 |---|---|
-| `Open Map - Admin.bat` | The map **with** Admin Mode, over an SSH tunnel, on `localhost:8090`. `--close` tears the tunnel down |
+| `Open Map - Admin.bat` | The map **with** Admin Mode, over the tailnet, at `osint-server.tailee11c0.ts.net:8080`. No tunnel — it opens a URL |
 | `Open Map - Public View.bat` | The map as a stranger sees it — the real Cloudflare link, over the internet, no admin controls. Run it before sharing |
 | `Show Public Link.bat` | Prints the current public link and checks it answers, without opening a browser |
 | `Deploy Code to Server.bat` | Packs this working tree, uploads it, rebuilds whatever image is behind its source, then verifies both listeners and the read-only boundary. `--ingest` to also rebuild the metered collector, `--force` to rebuild regardless |
@@ -227,9 +228,10 @@ documentation anyone reads at the moment they need it:
 
 The two `Open Map` scripts are the pair worth understanding, because they are the
 security boundary made visible: the admin one reaches the server's private
-listener through SSH, the public one goes over the internet to a listener that
-does not render Admin Mode and answers 403 to any attempt to write the
-configuration. Same app, same container, two doors.
+listener over the tailnet, which only a device you approved can join; the public
+one goes over the internet to a listener that does not render Admin Mode and
+answers 403 to any attempt to write the configuration. Same app, same container,
+two doors.
 
 `deploy.sh` is the server half of `Deploy Code to Server.bat` — the staleness check and rebuild,
 in bash rather than batch. It replaces the old `update-link.bat`, which assumed
@@ -1166,6 +1168,39 @@ write grants, and put a real password on Grafana before publishing port 3000.
 so it is reachable on the compose network and from nothing published to the
 host. That boundary is deliberate: the exposition carries route names, source
 names and error counts, which is operational detail rather than map data.
+
+---
+
+## Security
+
+Full detail, including the credential rotations that are yours to run, is in
+[docs/security.md](docs/security.md). The short version:
+
+The access model is two nginx listeners, and it is the whole of it. `:80` is
+reached only through an SSH tunnel and gets the app including Admin Mode; `:8081`
+is what the Cloudflare tunnel points at, and writes to `/api/admin-config` are
+refused there. Everything else the stack publishes — Postgres, the replica, the
+backend, Prometheus, Grafana — binds `127.0.0.1` on the server, so reaching any
+of it already needs the SSH key that also opens the admin door.
+
+What guards the public door: a Content-Security-Policy with `script-src 'self'`
+(which is why Leaflet and its plugins are vendored into
+`frontend/public/vendor/` rather than fetched from unpkg), `nosniff`,
+`frame-ancestors 'none'`, a referrer and permissions policy, and per-visitor
+rate and connection limits keyed off `CF-Connecting-IP`. Links built from feed
+data go through `safeUrl`, which allows only `http`/`https` — escaping alone does
+nothing to a `javascript:` URL, and every URL on the map came from a publisher
+we do not control.
+
+Three passwords still fall back to a built-in default: `POSTGRES_PASSWORD`,
+`REPLICATION_PASSWORD` and `GRAFANA_ADMIN_PASSWORD`. All three are behind
+localhost-only ports. `ops/rotate-credentials.sh` replaces all three in the
+order that avoids locking a service out — the Postgres password lives in the
+database, not in the compose file, so it has to change there first:
+
+```bash
+ssh root@osint-server.tailee11c0.ts.net 'bash /opt/osint/ops/rotate-credentials.sh'
+```
 
 ---
 

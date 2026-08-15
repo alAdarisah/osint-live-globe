@@ -258,6 +258,18 @@ test("events severity floor: 40 at world/passive scope, 0 once deliberately scop
   });
 });
 
+// DEFAULT_EVENT_FILTER with the age window taken back off.
+//
+// The tests below are about the severity floor and the verification floor, and
+// they date their fixtures to a fixed 2020-01-01 so that nothing varies between
+// runs. That was free while maxAgeDays defaulted to null; it is not any more --
+// the default is now AGE_WINDOW_DATE_STEPS (severity.js), so a 2020 fixture is
+// outside the window and every one of those rows is dropped before the floor
+// under test is ever consulted. A test that fails for a reason its name does
+// not mention is worse than no test, so the age gate is switched off explicitly
+// here and asserted on its own further down.
+const UNWINDOWED = { ...DEFAULT_EVENT_FILTER, maxAgeDays: null };
+
 test("selectEventItems applies the floor end to end", async (t) => {
   const events = [
     { id: "a", severity: 45, date: "2020-01-01", lat: 1, lon: 1 },
@@ -266,14 +278,14 @@ test("selectEventItems applies the floor end to end", async (t) => {
 
   await t.test("at world scope the sub-40 event is dropped", () => {
     const scope = makeIntelScope(SCOPE_WORLD, {});
-    const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
+    const out = selectEventItems(events, { scope, eventFilter: UNWINDOWED });
     assert.deepEqual(out.map((e) => e.id), ["a"]);
   });
 
   await t.test("a deliberately-scoped country keeps the sub-40 event too", () => {
     const countryScope = { active: true, label: "X", contains: () => true, intersectsBounds: () => true };
     const scope = makeIntelScope(SCOPE_COUNTRY, { countryScope });
-    const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
+    const out = selectEventItems(events, { scope, eventFilter: UNWINDOWED });
     assert.deepEqual(new Set(out.map((e) => e.id)), new Set(["a", "b"]));
   });
 });
@@ -289,7 +301,7 @@ test("selectEventItems marks weaklyPlaced rather than dropping the record", asyn
     { id: "b", severity: 90, date: "2020-01-01", lat: 1, lon: 1, geo_confidence: 90 }, // well-placed
     { id: "c", severity: 90, date: "2020-01-01", lat: 1, lon: 1 }, // never scored at all
   ];
-  const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
+  const out = selectEventItems(events, { scope, eventFilter: UNWINDOWED });
   const byId = Object.fromEntries(out.map((e) => [e.id, e]));
 
   await t.test("a weakly-placed event stays in the list, flagged rather than excluded", () => {
@@ -329,14 +341,23 @@ test("selectEventItems honours eventFilter.maxAgeDays as the one Window gate", a
     assert.deepEqual(out.map((e) => e.id), ["today"]);
   });
 
-  // maxAgeDays: null is passesEventFilter's own "no window" value -- it is
-  // not what any WINDOW_OPTIONS entry produces any more (see the
-  // "cross-tab consistency" test below and windowMaxAgeDays' own note), but
-  // it is still a real, reachable eventFilter state (DEFAULT_EVENT_FILTER's
-  // own shipped default, before IntelPanel's mount effect overwrites it) and
-  // this asserts what it does when it occurs.
-  await t.test("maxAgeDays: null keeps both -- DEFAULT_EVENT_FILTER's own 'no window' value", () => {
+  // The shipped default is a three-day window now (AGE_WINDOW_DATE_STEPS),
+  // not the null it used to be -- see the argument on DEFAULT_EVENT_FILTER in
+  // severity.js about report dates running up to thirty days behind the event
+  // dates they carry. The default is therefore a gate in its own right, and
+  // this asserts the gate rather than the absence it replaced.
+  await t.test("the shipped default is a three-day window, so a ten-day-old event goes", () => {
     const out = selectEventItems(events, { scope, eventFilter: DEFAULT_EVENT_FILTER });
+    assert.deepEqual(out.map((e) => e.id), ["today"]);
+  });
+
+  // null is still passesEventFilter's "no window" value, and still the state a
+  // caller can construct, but no WINDOW_OPTIONS entry produces it any more --
+  // windowMaxAgeDays only returns null for a non-finite hour count. Asserted
+  // because the branch is live in passesEventFilter and would otherwise go
+  // uncovered, not because anything ships in this state.
+  await t.test("maxAgeDays: null keeps both -- passesEventFilter's 'no window' branch", () => {
+    const out = selectEventItems(events, { scope, eventFilter: UNWINDOWED });
     assert.deepEqual(new Set(out.map((e) => e.id)), new Set(["today", "old"]));
   });
 });

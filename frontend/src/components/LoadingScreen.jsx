@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import BootGlobe from "./BootGlobe.jsx";
+import { formatBootMeta } from "../hooks/bootSourceMeta.js";
 
 // Covers the map from first paint until every source in `sources` has
 // reported in once (or a safety timeout elapses, so one slow external API
@@ -8,7 +10,12 @@ import { useEffect, useState } from "react";
 const MIN_VISIBLE_MS = 1400;
 const MAX_VISIBLE_MS = 9000;
 
-const STATUS_GLYPH = { pending: "⋯", ok: "✓", warn: "―", timeout: "⚠" };
+// "deferred" was missing here while useOsintData.js was already producing it
+// for a source sitting below its zoom gate -- cities is one, and the map opens
+// at zoom 3 -- so that row rendered a blank glyph in a class no rule matched.
+// A source correctly not fetched is not a failure and does not get a warning
+// mark; it gets a quiet dot and says why on the line beneath.
+const STATUS_GLYPH = { pending: "⋯", ok: "✓", warn: "―", timeout: "⚠", deferred: "·" };
 
 export default function LoadingScreen({ sources }) {
   const [mountedAt] = useState(() => Date.now());
@@ -27,7 +34,9 @@ export default function LoadingScreen({ sources }) {
   // relabeled "timed out" (not silently counted as loaded) so the log stays
   // honest about what actually happened; the app still boots either way.
   const displaySources = forceDone
-    ? sources.map((s) => (s.status === "pending" ? { ...s, status: "timeout" } : s))
+    ? sources.map((s) =>
+        s.status === "pending" ? { ...s, status: "timeout", detail: "still waiting" } : s
+      )
     : sources;
 
   const loadedCount = sources.filter((s) => s.status !== "pending").length;
@@ -54,20 +63,26 @@ export default function LoadingScreen({ sources }) {
   return (
     <div id="loadingScreen" className={hidden ? "hidden" : ""}>
       <div className="loading-inner">
-        <div className="loading-radar">
-          <div className="loading-radar-ring" />
-          <div className="loading-radar-ring loading-radar-ring-2" />
-          <div className="loading-radar-sweep" />
-        </div>
+        <BootGlobe hidden={hidden} />
         <div className="loading-title">OSINT LIVE GLOBE</div>
         <div className="loading-subtitle">Establishing live intelligence feeds&hellip;</div>
         <ul className="loading-log">
-          {displaySources.map((s) => (
-            <li key={s.key} className={`loading-log-line ${s.status}`}>
-              <span className="loading-log-status">{STATUS_GLYPH[s.status]}</span>
-              <span>{s.label}</span>
-            </li>
-          ))}
+          {displaySources.map((s) => {
+            const meta = formatBootMeta(s);
+            return (
+              // title carries the full upstream attribution -- the short name is
+              // what fits the column, but which feed a layer came from is the
+              // part a reader actually needs, so it stays one hover away rather
+              // than being dropped.
+              <li key={s.key} className={`loading-log-line ${s.status}`} title={s.label}>
+                <span className="loading-log-status">{STATUS_GLYPH[s.status]}</span>
+                <span className="loading-log-text">
+                  <span className="loading-log-label">{s.short || s.label}</span>
+                  {meta ? <span className="loading-log-meta">{meta}</span> : null}
+                </span>
+              </li>
+            );
+          })}
         </ul>
         <div className="loading-bar">
           <div className="loading-bar-fill" style={{ width: `${progressPct}%` }} />

@@ -3,7 +3,10 @@
 // events/gdelt arrays passed in by the caller (see useLeafletMap) rather than
 // holding its own copy, so it's always working off the latest poll.
 
-import { esc, fmtNumber, haversineKm, parseGdeltDateAdded, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
+import {
+  esc, fmtNumber, haversineKm, safeUrl,
+  parseGdeltDateAdded, timeAgoFromDateAdded, timeAgoFromUnix,
+} from "../utils/format";
 import { boundsContainsPoint } from "../utils/geo";
 import {
   classifyAircraft, classifyShip, classifyVesselTraffic, isSanctioned,
@@ -78,7 +81,7 @@ function formatEventRow(type, item) {
   const headline = (item.real_title || "").trim();
   if (!headline) return ""; // defensive: server should never serve a title-less item, but never render a blank row if it slips through
   const link = item.source_url
-    ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener noreferrer">${esc(headline)}</a>`
+    ? `<a href="${esc(safeUrl(item.source_url))}" target="_blank" rel="noopener noreferrer">${esc(headline)}</a>`
     : esc(headline);
   const sourceLabel = item.source_name || "GDELT";
   const when = timeAgoFromDateAdded(item.date_added);

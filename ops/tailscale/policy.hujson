@@ -1,0 +1,54 @@
+// Tailscale access policy for the OSINT stack.
+//
+// The authority is the admin console at
+// https://login.tailscale.com/admin/acls -- this file is the reviewable copy
+// of what is pasted there, and the record of why it says this.
+//
+// The whole point is in what is ABSENT: no grant names tag:server as a
+// source. The packet filter is stateful, so replies inside a session the PC
+// opened flow back normally, while a connection the server tries to open on
+// its own matches no rule and is dropped.
+{
+  // tag:server is owned by the tailnet owner, so a tagged auth key can be
+  // minted for the Hetzner box. A tagged node is owned by the tag rather than
+  // by a user, which means its key never expires -- and a node whose key
+  // lapses while port 22 is firewalled is a lockout.
+  "tagOwners": {
+    "tag:server": ["autogroup:owner"],
+  },
+
+  "grants": [
+    // The only permitted flow on the entire tailnet.
+    //
+    // src is autogroup:owner, not autogroup:member: a device approved later
+    // under some other identity inherits nothing from this rule.
+    //
+    // The ports:
+    //
+    //   22    ssh, and the `ssh -L` forwards that ride it
+    //   3000  Grafana      via `tailscale serve`
+    //   8080  admin panel  via `tailscale serve`
+    //   9090  Prometheus   via `tailscale serve`
+    //
+    // The three served ports are proxies run by tailscaled itself, listening
+    // on the tailnet address only. Docker still publishes every service on
+    // 127.0.0.1 and nothing new listens on a public interface.
+    //
+    // Read 8080 twice before keeping it. The admin panel has no authentication
+    // of its own -- see "Writes are refused on the public listener" in
+    // docs/security.md -- so reaching it used to require the server's SSH
+    // private key. Served here, an approved tailnet device gets admin write
+    // with no key and no password. Device approval and this grant are the only
+    // things in front of it. Grafana (3000) has its own login; Prometheus
+    // (9090) does not, but it is read-only.
+    {
+      "src": ["autogroup:owner"],
+      "dst": ["tag:server"],
+      "ip":  ["tcp:22", "tcp:3000", "tcp:8080", "tcp:9090"],
+    },
+  ],
+
+  // Tailscale SSH off. Authentication stays with the existing sshd and the
+  // existing key; the tailnet's job is confined to being the network path.
+  "ssh": [],
+}

@@ -56,6 +56,25 @@ lag. It is labelled as what it is -- history about a vessel, not evidence about
 tonight -- because a reader who mistook it for confirmation would be reading a
 five-day-old fact as a live one.
 
+Two windows, one download
+-------------------------
+That prior wants a month. The map wants nothing like it, and for a while it got
+one anyway: the full 30-day sweep was stored and served, so roughly 20,000 pins
+were on offer and the oldest of them marked a vessel that went quiet four weeks
+ago. A pin is read as a thing that happened, and drawn beside a live position it
+makes a claim about *when* that nothing on the tile contradicts.
+
+So the sweep still asks for the month -- it is ~20 requests against a quota it
+uses 0.5% of, and the prior is the reason it exists -- and only the recent end
+of it becomes pins (see PIN_LOOKBACK_DAYS). What this deliberately does not do
+is reach the three days the rest of the map is held to. It cannot: the batch is
+published five or more days behind wall clock, so a three-day window here would
+draw an empty layer every day of the year, and an empty layer reads as calm
+water rather than as a feed that has not caught up yet. That would be a worse
+error than the one it fixed. The honest arrangement is a window that clears the
+lag, a `disposition: CORROBORATING` gate so nobody is handed this layer unasked
+(see frontend/src/map/scene.js), and `age_days` stated on every record.
+
 What was measured and left out
 ------------------------------
 `public-global-encounters-events` looked like the natural corroborator for
@@ -113,6 +132,32 @@ DATASET = "public-global-gaps-events:latest"
 # 14-day window was 9,402 events, so a month is roughly 20 requests at the page
 # size below.
 LOOKBACK_DAYS = 30
+
+# How far back a gap may have started and still be drawn.
+#
+# One download, two consumers, opposite windows. dark_vessels wants the month
+# above: "this hull has been flagged three times recently" is a statement about
+# months and it survives the publication lag precisely because it never claims
+# to be about tonight. The map wants much less, because a pin is read as a thing
+# that happened -- and a gap that began four weeks ago, drawn beside a live
+# position, is a claim about *when* that nothing on the tile contradicts. The
+# whole 30 days used to be stored and served, so that claim was being made
+# roughly 20,000 times.
+#
+# Ten rather than three, and the difference is the publisher's rather than ours.
+# GFW issues this batch five or more days behind wall clock: measured on
+# 2026-08-07, a four-day window returned zero events and the newest gap in the
+# feed began 2026-08-02. A three-day pin window would therefore draw an empty
+# layer every day of the year, and an empty layer reads as a broken feed rather
+# than as calm water -- so it would be a worse lie than the one it fixed. Ten
+# clears the lag with a few days of usable content behind it, and every record
+# still states its own `age_days` so a reader is never asked to infer it.
+#
+# The rows this stops refreshing age out on their own: config.ENTITY_STALE_AFTER
+# gives this kind two days, and eviction is measured from the last write, so a
+# gap that leaves this window is simply no longer re-upserted and is gone within
+# two days. Nothing here has to delete anything.
+PIN_LOOKBACK_DAYS = 10
 
 # The API's ceiling is generous: limit=1000 was accepted and returned 1000
 # entries. `offset` is not optional -- sending `limit` without it is a 422 --
@@ -288,6 +333,26 @@ def is_ship_mmsi(value: str | None) -> bool:
     return bool(value) and value.isdigit() and len(value) == 9
 
 
+def drawable(records: list[dict], now: float) -> list[dict]:
+    """The slice of a sweep recent enough to put on the map.
+
+    Everything outside it stays in `records` and still builds the hull priors --
+    that is the point of slicing here rather than narrowing the fetch. A shorter
+    request would save nothing worth having (the sweep is ~20 paged requests
+    against a quota it uses 0.5% of) and would cost the prior the history that
+    makes it worth reading.
+
+    A gap with no start time is not drawn. Every other layer on this map keeps an
+    undated record rather than hiding data over a missing field, and the
+    exception is argued rather than inherited: `age_days` is on every record here
+    *because* the failure this layer risks is a five-day-old gap rendering like a
+    live one, and a record with no start cannot make that statement at all.
+    parse_gap already drops a gap with no coordinates on the same reasoning.
+    """
+    cutoff = now - PIN_LOOKBACK_DAYS * 86400
+    return [r for r in records if (r.get("went_dark_at") or 0.0) >= cutoff]
+
+
 def vessel_priors(records: list[dict]) -> dict[str, dict]:
     """Records -> what is known about each hull, keyed by MMSI.
 
@@ -401,20 +466,29 @@ async def ingest_once():
         records.sort(key=lambda r: r.get("went_dark_at") or 0.0, reverse=True)
         records = records[:MAX_RECORDS]
 
+        # The prior is built from the whole window and the pins from its recent
+        # end -- see drawable(). Order matters: priors first, off `records`, so
+        # narrowing what the map draws can never quietly narrow what
+        # dark_vessels knows.
         priors = vessel_priors(records)
-        state.data = records
+        pins = drawable(records, now)
+        state.data = pins
         state.last_success = time.time()
         state.last_error = None
-        await storage.record_snapshot("gfw_gaps", records, id_field="id")
+        await storage.record_snapshot("gfw_gaps", pins, id_field="id")
         await storage.record_reference("gfw_vessel_priors", priors)
-        await storage.record_source_health("gfw_gaps", len(records), True)
+        # The pin count, because this is the number a reader compares against an
+        # empty layer. The sweep total is in the log line below.
+        await storage.record_source_health("gfw_gaps", len(pins), True)
 
-        intentional = sum(1 for r in records if r.get("intentional_disabling"))
+        intentional = sum(1 for r in pins if r.get("intentional_disabling"))
         newest = max((r.get("went_dark_at") or 0.0) for r in records) if records else 0.0
         log.info(
-            "GFW gaps: %d disabling events over %d days (%d called intentional), "
-            "%d vessels with a prior, dataset %s, newest event %.1f days old",
-            len(records), LOOKBACK_DAYS, intentional, len(priors),
+            "GFW gaps: %d disabling events over %d days, %d of them inside the "
+            "%d-day pin window (%d called intentional), %d vessels with a prior, "
+            "dataset %s, newest event %.1f days old",
+            len(records), LOOKBACK_DAYS, len(pins), PIN_LOOKBACK_DAYS,
+            intentional, len(priors),
             version or DATASET,
             (now - newest) / 86400.0 if newest else -1.0,
         )

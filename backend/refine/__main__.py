@@ -29,12 +29,22 @@ async def main() -> None:
     # Postgres and writes back to it, so a refine process without a pool has
     # nothing to do but produce empty results over real data.
     await storage.init_pool()
+    # Optional read replica for the heavy, lag-tolerant reads this process makes.
+    # No-ops unless READ_REPLICA_URL is set; get_read_pool() falls back to the
+    # primary until it opens. Writes, and any read this process depends on being
+    # current, stay on the primary.
+    #
+    # Not awaited, unlike init_pool: on a cold stack the standby is still running
+    # pg_basebackup when refine starts, so opening the pool now retries for
+    # minutes (see storage.init_read_pool). Waiting for that would delay every
+    # job for an optimisation they are all designed to run without.
+    tasks = [asyncio.create_task(storage.init_read_pool())]
 
     # Inputs first, and given a moment to land: fusion's own _wait_for_inputs
     # blocks up to 60s on the acled and gdelt_conflict states this fills, so
     # starting them together merely means fusion spends that budget waiting on a
     # read that is already in flight.
-    tasks = [asyncio.create_task(mirror.follow(INPUTS))]
+    tasks.append(asyncio.create_task(mirror.follow(INPUTS)))
     tasks += [asyncio.create_task(run_job(job)) for job in all_jobs()]
     log.info(
         "Refine running: %d jobs, %d mirrored inputs",

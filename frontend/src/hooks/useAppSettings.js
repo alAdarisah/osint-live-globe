@@ -601,6 +601,17 @@ export function useAppSettings() {
     [update]
   );
 
+  /**
+   * Which of the three reader panels the public page carries.
+   *
+   * A patch rather than a whole table, same as setUi above: the panel toggles
+   * one checkbox at a time and has no business restating the other two.
+   */
+  const setPublicPanels = useCallback(
+    (patch) => update((prev) => ({ ...prev, publicPanels: { ...prev.publicPanels, ...patch } })),
+    [update]
+  );
+
   // --- Task 31's Water section -------------------------------------------
 
   const setWater = useCallback(
@@ -974,6 +985,7 @@ export function useAppSettings() {
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
       setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
       moveLayerInStack, resetLayerStack, setUi, setTileDial, setTilePreset, setTilesApplyAtRest, setCityZones,
+      setPublicPanels,
       setWater, setWaterClassHidden,
       saveFilterPreset, deleteFilterPreset,
       setInferenceProductMode,
@@ -988,6 +1000,7 @@ export function useAppSettings() {
       setIconScale, setColor, resetColors, setTokenSize, resetSizes,
       setTokenZoom, setTokenZoomMax, setTokenGlyph, resetZooms, setLayerStyle, setLayerWish, clearLayerWishes,
       moveLayerInStack, resetLayerStack, setUi, setTileDial, setTilePreset, setTilesApplyAtRest, setCityZones,
+      setPublicPanels,
       setWater, setWaterClassHidden,
       saveFilterPreset, deleteFilterPreset,
       setInferenceProductMode,

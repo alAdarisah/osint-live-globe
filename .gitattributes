@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers (e.g. the Postgres init script and
+# the replica entrypoint). CRLF would break the shebang and heredocs, so keep
+# them LF regardless of the checkout platform.
+*.sh text eol=lf
