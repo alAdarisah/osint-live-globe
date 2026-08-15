@@ -40,7 +40,16 @@ export async function fetchJson(url) {
     rememberEtag(url, cached.etag, cached.data); // refresh its recency
     return cached.data;
   }
-  if (!resp.ok) throw new Error(`${url}: ${resp.status}`);
+  if (!resp.ok) {
+    // The status is attached as a property, not left to be parsed back out of
+    // the message: the boot screen wants to say "HTTP 503" without also putting
+    // this URL on screen, and recovering a number from a log string would tie
+    // that display to this message's exact format. The message itself is
+    // unchanged, so every existing caller behaves as before.
+    const err = new Error(`${url}: ${resp.status}`);
+    err.status = resp.status;
+    throw err;
+  }
 
   const data = await resp.json();
   const etag = resp.headers.get("ETag");
