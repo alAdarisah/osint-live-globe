@@ -116,3 +116,13 @@ export function layerGroupOf(key) {
   const group = LAYER_GROUPS.find((g) => g.keys.includes(key));
   return group ? group.id : null;
 }
+
+/** The keys a reader-side "n of m" count for this group should include:
+ *  everything filed in it, less the rows the reader does not draw. An unknown
+ *  group id answers with an empty list rather than throwing -- a heading that
+ *  reports 0/0 is a smaller failure than a panel that will not render. */
+export function countedKeysFor(groupId) {
+  const group = LAYER_GROUPS.find((g) => g.id === groupId);
+  if (!group) return [];
+  return group.keys.filter((key) => !NOT_COUNTED_IN_READER.includes(key));
+}

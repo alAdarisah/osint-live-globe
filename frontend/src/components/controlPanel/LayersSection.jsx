@@ -14,6 +14,7 @@ import {
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
 import { countryForCallsign } from "../../utils/callsignPrefix";
+import { countedKeysFor } from "../../settings/layerGroups";
 import LayerIcon from "./LayerIcon";
 import LayerCheck from "./LayerCheck";
 import FilterBar from "./FilterBar";
@@ -113,39 +114,6 @@ function activeCount(layerVisibility, keys) {
   return keys.filter((k) => layerVisibility[k]).length;
 }
 
-// `gdelt` is deliberately absent: news is a sub-ticker of Conflict & Violence,
-// not a layer in its own right, and the group heading counts layers.
-const GROUP_LAYERS = {
-  conflict: ["events", "conflictHistory", "officials"],
-  // The two GFW layers sit directly after darkVessels: same subject, different
-  // publisher, and a reader comparing this map's inference against somebody
-  // else's record should not have to hunt for the second one.
-  traffic: [
-    "aisNavy", "aisTanker", "aisCivilian", "aisDigitraffic", "darkVessels", "gfwGaps", "gfwDetections",
-    "adsbMilitary", "adsbCivilian", "adsbFlagged",
-  ],
-  // Airfields sit with infrastructure rather than with the aircraft layers:
-  // it is a place layer, and the aircraft that need it already get their
-  // nearest field named inside their own popup.
-  ground: [
-    "infra", "osmInfra", "powerPlants", "airDefense", "airports", "ports", "dams", "deflock",
-    "railways", "railLive", "powerLines", "shippingLanes",
-    "water", "cables", "firms", "jamming", "laneDensity", "terminator",
-    // Task 50: last in the group, deliberately -- it is a diagnostic
-    // instrument for reading every other row above it, not one more
-    // subject alongside them.
-    "coverage",
-  ],
-  // Its own group rather than a ninth row under traffic: a regulator's ruling
-  // about a volume of airspace is neither traffic nor infrastructure, and
-  // traffic already carries nine layers.
-  airspace: ["czib"],
-  hazards: ["hazards", "floods"],
-  space: [
-    "satellites", "satNavigation", "satWeather", "satImaging", "satScience",
-    "satGeo", "satStarlink", "satOneweb", "launches",
-  ],
-};
 
 // Per-kind rows under the hazards toggle. Same "the swatch is the real glyph"
 // discipline as INFRA_ROWS above -- read from the map's own table, and left in
@@ -205,7 +173,14 @@ export default function LayersSection({
   // whole panel down through the error boundary.
   isOpen = () => true, setOpen = () => {},
 }) {
-  const groupCount = (id) => `${activeCount(layerVisibility, GROUP_LAYERS[id])}/${GROUP_LAYERS[id].length}`;
+  // The table behind this moved to settings/layerGroups.js so Admin Mode's
+  // dial list could group by the same one -- see that module. countedKeysFor
+  // is what keeps this denominator equal to the number of checkboxes actually
+  // rendered under the heading.
+  const groupCount = (id) => {
+    const keys = countedKeysFor(id);
+    return `${activeCount(layerVisibility, keys)}/${keys.length}`;
+  };
 
   // Every layer the band cap is currently thinning, other than events -- that
   // one keeps its own note beside its own row, where it has always been.

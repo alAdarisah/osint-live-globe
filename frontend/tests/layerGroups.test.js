@@ -25,7 +25,7 @@ globalThis.window = {
   matchMedia: () => ({ matches: false }),
 };
 
-const { LAYER_GROUPS, NOT_COUNTED_IN_READER, layerGroupOf } = await import("../src/settings/layerGroups.js");
+const { LAYER_GROUPS, NOT_COUNTED_IN_READER, layerGroupOf, countedKeysFor } = await import("../src/settings/layerGroups.js");
 const { SETTINGS_LAYERS } = await import("../src/settings/defaults.js");
 
 const ALL_GROUPED = LAYER_GROUPS.flatMap((g) => g.keys);
@@ -72,4 +72,23 @@ test("layerGroupOf answers with the group id, or null for an unknown key", () =>
   assert.equal(layerGroupOf("cities"), "ground");
   assert.equal(layerGroupOf("gdelt"), "conflict");
   assert.equal(layerGroupOf("nosuchlayer"), null);
+});
+
+// The reader's group headings show "n of m" where m is the number of
+// checkboxes under them. Two layers are filed in groups here but have no
+// checkbox there, so m has to exclude them -- otherwise a heading reads 3/4
+// while showing three rows, and the missing one is unfindable because it does
+// not exist.
+test("countedKeysFor drops the layers the reader does not draw as rows", () => {
+  const conflict = countedKeysFor("conflict");
+  assert.ok(!conflict.includes("gdelt"), "gdelt is a sub-row, not a counted layer");
+  assert.deepEqual(conflict, ["events", "conflictHistory", "officials"]);
+
+  const ground = countedKeysFor("ground");
+  assert.ok(!ground.includes("cities"), "cities lives in the Places section");
+});
+
+test("countedKeysFor leaves a group with no exceptions untouched", () => {
+  assert.deepEqual(countedKeysFor("hazards"), ["hazards", "floods"]);
+  assert.deepEqual(countedKeysFor("nosuchgroup"), []);
 });
