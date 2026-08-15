@@ -55,7 +55,17 @@ export default function LayerDialsSection({ settings, actions, isOpen, onToggle 
         world board.
       </div>
       {LAYER_GROUPS.map((group) => (
-        <div key={group.id} className="admin-layer-group">
+        <div key={group.id} className="admin-layer-group" role="group" aria-labelledby={`grp-${group.id}`}>
+          {/* Prefixed "grp-", not the bare group id, on purpose: a group id
+              and a layer key can be the same string on the page below (see
+              layerGroups.js -- the "hazards" group files the "hazards"
+              layer), and layer rows key their own ids off `adm-layer-<key>`.
+              The "grp-" prefix is what keeps the two namespaces apart; write
+              this id as the bare group id instead -- it would look like a
+              harmless tidy-up, since nothing collides today -- and a layer
+              key that ever doubles as some other element's bare id would
+              start colliding with a heading's id, breaking whichever one
+              aria-labelledby or a CSS/JS id lookup was actually pointed at. */}
           <h4 className="admin-group-heading" id={`grp-${group.id}`}>{group.title}</h4>
           {group.keys.map((key) => {
             const layer = LAYER_BY_KEY[key];

@@ -7,25 +7,12 @@
 // error, it simply is not there. This is the test that makes adding a layer
 // without filing it a red build instead.
 
+import "./helpers/nodeTestEnv.js";
+
 import test from "node:test";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
 
-registerHooks({
-  resolve(specifier, context, next) {
-    if (specifier.startsWith(".") && !specifier.endsWith(".js")) {
-      return next(`${specifier}.js`, context);
-    }
-    return next(specifier, context);
-  },
-});
-
-globalThis.window = {
-  L: { Layer: { extend: () => ({}) }, DomUtil: {} },
-  matchMedia: () => ({ matches: false }),
-};
-
-const { LAYER_GROUPS, NOT_COUNTED_IN_READER, layerGroupOf, countedKeysFor } = await import("../src/settings/layerGroups.js");
+const { LAYER_GROUPS, NOT_COUNTED_IN_READER, countedKeysFor } = await import("../src/settings/layerGroups.js");
 const { SETTINGS_LAYERS } = await import("../src/settings/defaults.js");
 
 const ALL_GROUPED = LAYER_GROUPS.flatMap((g) => g.keys);
@@ -51,27 +38,11 @@ test("group ids and titles are unique", () => {
   assert.equal(new Set(titles).size, titles.length, "two groups share a title");
 });
 
-// The group id "hazards" and the layer key "hazards" are the same string, and
-// that is fine: headings key off `grp-<id>` and rows off `adm-layer-<key>`, so
-// the two never share a namespace. Asserted so nobody "fixes" the collision by
-// renaming one of them and breaking the other's DOM id.
-test("a group id may equal a layer key -- they are different namespaces", () => {
-  assert.ok(LAYER_GROUPS.some((g) => g.id === "hazards"));
-  assert.ok(SETTINGS_KEYS.includes("hazards"));
-});
-
 test("NOT_COUNTED_IN_READER names only real, grouped layers", () => {
   for (const key of NOT_COUNTED_IN_READER) {
     assert.ok(SETTINGS_KEYS.includes(key), `${key} is not a layer`);
     assert.ok(ALL_GROUPED.includes(key), `${key} is not in any group`);
   }
-});
-
-test("layerGroupOf answers with the group id, or null for an unknown key", () => {
-  assert.equal(layerGroupOf("aisDigitraffic"), "traffic");
-  assert.equal(layerGroupOf("cities"), "ground");
-  assert.equal(layerGroupOf("gdelt"), "conflict");
-  assert.equal(layerGroupOf("nosuchlayer"), null);
 });
 
 // The reader's group headings show "n of m" where m is the number of
@@ -91,4 +62,26 @@ test("countedKeysFor drops the layers the reader does not draw as rows", () => {
 test("countedKeysFor leaves a group with no exceptions untouched", () => {
   assert.deepEqual(countedKeysFor("hazards"), ["hazards", "floods"]);
   assert.deepEqual(countedKeysFor("nosuchgroup"), []);
+});
+
+// The reader's six headings are hand-written JSX rows in LayersSection.jsx --
+// only the "n/m" denominator comes from this module (see groupCount there).
+// SETTINGS_LAYERS is walked by the *other* completeness test above, which
+// forces every new layer key into some group -- so an admin-only layer added
+// without a matching reader checkbox does not fail that test, it just quietly
+// changes one of these six numbers, and a heading like "3/20" ships sitting
+// above 19 checkboxes with a fully green suite.
+//
+// Pinning the six numbers as a fixture turns that silent drift into a failing
+// test: if one of these goes red, it means a layer was added to (or removed
+// from) a group, and the fix is not to update the number here -- it is to go
+// add (or remove) the matching checkbox in LayersSection.jsx first, then
+// update this fixture to match what the reader now actually draws.
+test("the reader's six group denominators", () => {
+  assert.equal(countedKeysFor("conflict").length, 3);
+  assert.equal(countedKeysFor("traffic").length, 10);
+  assert.equal(countedKeysFor("ground").length, 19);
+  assert.equal(countedKeysFor("airspace").length, 1);
+  assert.equal(countedKeysFor("hazards").length, 2);
+  assert.equal(countedKeysFor("space").length, 9);
 });

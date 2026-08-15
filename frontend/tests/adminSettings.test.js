@@ -8,25 +8,14 @@
 // tileTint.test.js already taught the loader to resolve extensionlessly.
 // map/water.js pulls in map/leafletGlobal.js, which reads `window.L` at
 // import time -- the same obstacle those two tests already solve by
-// stubbing `window` before the dynamic import below.
+// stubbing `window` before the dynamic import below. Both fixes now live in
+// helpers/nodeTestEnv.js, imported first below for the reason its own header
+// comment explains.
+
+import "./helpers/nodeTestEnv.js";
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
-
-registerHooks({
-  resolve(specifier, context, next) {
-    if (specifier.startsWith(".") && !specifier.endsWith(".js")) {
-      return next(`${specifier}.js`, context);
-    }
-    return next(specifier, context);
-  },
-});
-
-globalThis.window = {
-  L: { Layer: { extend: () => ({}) }, DomUtil: {} },
-  matchMedia: () => ({ matches: false }),
-};
 
 const { defaultSettings, mergeSettings, SETTINGS_VERSION } = await import("../src/settings/defaults.js");
 const { MARINE_CLASSES } = await import("../src/map/water.js");

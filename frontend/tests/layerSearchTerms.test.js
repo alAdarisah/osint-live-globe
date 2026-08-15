@@ -12,29 +12,16 @@
 //
 // layerSectionTerms.js's SEARCH_TERMS also pulls in SETTINGS_LAYERS from
 // settings/defaults.js, whose own imports are not extension-qualified --
-// exactly the obstacle tokenSearchTerms.js's header comment describes. The
-// registerHooks call below is the same extensionless-resolution patch
-// layerGroups.test.js and adminSettings.test.js already carry; the window
-// stub is for map/water.js's leafletGlobal.js, which reads window.L at
-// import time and sits on defaults.js's import chain.
+// exactly the obstacle tokenSearchTerms.js's header comment describes.
+// helpers/nodeTestEnv.js carries the extensionless-resolution patch and the
+// window stub map/water.js's leafletGlobal.js needs (it reads window.L at
+// import time and sits on defaults.js's import chain) -- see that file for
+// why it must stay the first import here.
+
+import "./helpers/nodeTestEnv.js";
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
-
-registerHooks({
-  resolve(specifier, context, next) {
-    if (specifier.startsWith(".") && !specifier.endsWith(".js")) {
-      return next(`${specifier}.js`, context);
-    }
-    return next(specifier, context);
-  },
-});
-
-globalThis.window = {
-  L: { Layer: { extend: () => ({}) }, DomUtil: {} },
-  matchMedia: () => ({ matches: false }),
-};
 
 import { matchesQuery } from "../src/components/admin/sections/adminSearch.js";
 import { ALL_TOKEN_LABELS } from "../src/components/admin/sections/tokenSearchTerms.js";
@@ -62,9 +49,23 @@ test("group titles are searchable", async (t) => {
     assert.ok(SEARCH_TERMS.includes(group.title), `"${group.title}" is not searchable`);
   }
 
+  // matchesQuery is a plain case-insensitive substring test, so a query only
+  // constrains anything if its text is not already a substring of some other
+  // term SEARCH_TERMS carries for an unrelated reason. Three of the six group
+  // titles fail that test: "space" is a literal substring of "Airspace
+  // warnings (EASA CZIB)" (the czib layer's own label), "hazards" of "Natural
+  // hazards" (the hazards layer's own label), and "aviation" of "General
+  // aviation" (a pin-type label under Aircraft). Querying any of those three
+  // would pass even with every group title stripped out of SEARCH_TERMS, so
+  // it would not be testing group-title searchability at all -- it would just
+  // be re-discovering an unrelated label. The two queries below are the ones
+  // left that do not have that problem: "environment" and "sea traffic" occur
+  // in SEARCH_TERMS only via "Infrastructure & Environment" and "Air & Sea
+  // Traffic" respectively, so each one genuinely depends on its title being
+  // present. The exact-membership loop above this block already covers all
+  // six titles, including the three that can't be substring-tested here.
   await t.test("and findable by the words an operator would actually type", () => {
-    assert.ok(SEARCH_TERMS.some((term) => matchesQuery(term, "space")));
-    assert.ok(SEARCH_TERMS.some((term) => matchesQuery(term, "hazards")));
     assert.ok(SEARCH_TERMS.some((term) => matchesQuery(term, "sea traffic")));
+    assert.ok(SEARCH_TERMS.some((term) => matchesQuery(term, "environment")));
   });
 });

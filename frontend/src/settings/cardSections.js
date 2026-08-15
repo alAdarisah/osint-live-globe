@@ -5,10 +5,11 @@
 //
 // Restated by hand from map/popups.js's own countryCardSections/
 // waterCardSections/subdivisionCardSections/districtCardSections rather than
-// generated from them, the same relationship LayersSection.jsx's GROUP_LAYERS
-// has with SETTINGS_LAYERS (frontend/src/components/admin/sections/shared.jsx
-// says so explicitly for that table): each of those four functions builds its
-// section list inline, keyed off live data, with a section carrying no html
+// generated from them, the same relationship settings/layerGroups.js's
+// LAYER_GROUPS has with SETTINGS_LAYERS (frontend/src/components/admin/
+// sections/shared.jsx says so explicitly for that table): each of those four
+// functions builds its section list inline, keyed off live data, with a
+// section carrying no html
 // dropped before it ever reaches a card -- there is no static list on that
 // side for an admin table to import instead of restating. A section id this
 // table does not know is never hidden and never moved (see

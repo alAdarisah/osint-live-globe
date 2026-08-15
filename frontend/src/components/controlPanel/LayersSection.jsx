@@ -14,7 +14,7 @@ import {
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
 import { countryForCallsign } from "../../utils/callsignPrefix";
-import { countedKeysFor } from "../../settings/layerGroups";
+import { countedKeysFor, groupTitle } from "../../settings/layerGroups";
 import LayerIcon from "./LayerIcon";
 import LayerCheck from "./LayerCheck";
 import FilterBar from "./FilterBar";
@@ -114,7 +114,6 @@ function activeCount(layerVisibility, keys) {
   return keys.filter((k) => layerVisibility[k]).length;
 }
 
-
 // Per-kind rows under the hazards toggle. Same "the swatch is the real glyph"
 // discipline as INFRA_ROWS above -- read from the map's own table, and left in
 // the panel's text colour because the map colours these by severity, not by
@@ -204,7 +203,7 @@ export default function LayersSection({
         Zoom in for the rest.
       </div>
 
-      <PanelGroup id="grp-conflict" title="Conflict & Events" count={groupCount("conflict")}
+      <PanelGroup id="grp-conflict" title={groupTitle("conflict")} count={groupCount("conflict")}
         open={isOpen("grp-conflict")} onToggle={setOpen}>
         <label className="layer-row" data-layer="events">
           <LayerCheck
@@ -417,7 +416,7 @@ export default function LayersSection({
         </LayerDetails>
       </PanelGroup>
 
-      <PanelGroup id="grp-traffic" title="Air & Sea Traffic" count={groupCount("traffic")}
+      <PanelGroup id="grp-traffic" title={groupTitle("traffic")} count={groupCount("traffic")}
         open={isOpen("grp-traffic")} onToggle={setOpen}>
         {/* Vessel filter bar (Task 18): free text against callsign, name,
             mmsi and imo -- `*` as an explicit wildcard, an implicit prefix
@@ -855,7 +854,7 @@ export default function LayersSection({
         </LayerDetails>
       </PanelGroup>
 
-      <PanelGroup id="grp-ground" title="Infrastructure & Environment" count={groupCount("ground")}
+      <PanelGroup id="grp-ground" title={groupTitle("ground")} count={groupCount("ground")}
         open={isOpen("grp-ground")} onToggle={setOpen}>
         <label className="layer-row" data-layer="infra">
           <LayerCheck
@@ -1631,7 +1630,7 @@ export default function LayersSection({
         </LayerDetails>
       </PanelGroup>
 
-      <PanelGroup id="grp-airspace" title="Airspace &amp; Aviation" count={groupCount("airspace")}
+      <PanelGroup id="grp-airspace" title={groupTitle("airspace")} count={groupCount("airspace")}
         open={isOpen("grp-airspace")} onToggle={setOpen}>
         <label className="layer-row" data-layer="czib">
           <LayerCheck
@@ -1683,7 +1682,7 @@ export default function LayersSection({
         </LayerDetails>
       </PanelGroup>
 
-      <PanelGroup id="grp-hazards" title="Natural Hazards" count={groupCount("hazards")}
+      <PanelGroup id="grp-hazards" title={groupTitle("hazards")} count={groupCount("hazards")}
         open={isOpen("grp-hazards")} onToggle={setOpen}>
         <label className="layer-row" data-layer="hazards">
           <LayerCheck
@@ -1773,7 +1772,7 @@ export default function LayersSection({
         </LayerDetails>
       </PanelGroup>
 
-      <PanelGroup id="grp-space" title="Space" count={groupCount("space")}
+      <PanelGroup id="grp-space" title={groupTitle("space")} count={groupCount("space")}
         open={isOpen("grp-space")} onToggle={setOpen}>
         <label className="layer-row" data-layer="satellites">
           <LayerCheck

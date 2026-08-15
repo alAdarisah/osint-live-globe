@@ -11,20 +11,43 @@
 // Copying the table into the admin section would have been the same mistake
 // LayerDialsSection.jsx's own header comment already records one tier down --
 // "split is how the same dial ended up offered twice" -- so it moves here
-// instead and both screens read it. One table, one order, one set of titles.
+// instead and both screens read it: one table, one set of keys, one set of
+// titles.
+//
+// Order is only one of those three, and deliberately not shared. Admin Mode
+// walks this table directly, so its group order IS this table's order. The
+// reader's control drawer does not: its six groups are still six hand-written
+// PanelGroup elements in LayersSection.jsx, each full of its own hand-written
+// checkbox rows, and reading that order out of this table would mean either
+// restructuring 1500 lines of JSX to be generated from data, or maintaining a
+// second ordering that could drift from the first. So the reader's *order* of
+// groups is authored by hand, in LayersSection.jsx, where the PanelGroup
+// elements happen to sit -- only each group's *title* and *membership* are
+// read from here, via groupTitle() and countedKeysFor() below.
+//
+// Adding a layer is therefore a two-step job, not a one-step one: file the key
+// in a group below, and -- if the reader draws no top-level checkbox for it,
+// the way it does not for gdelt or cities -- also add it to
+// NOT_COUNTED_IN_READER, or its group's reader-side heading will silently
+// count a checkbox that is not there. tests/layerGroups.test.js pins each
+// group's counted length as a fixture for exactly this reason: a change to
+// that number should always be a deliberate line in a diff, matched by an
+// added or removed checkbox in LayersSection.jsx, never a silent side effect
+// of filing a new layer.
 //
 // Imports nothing, deliberately: frontend/tests/*.test.js run under plain
 // `node --test` with no build step, and a module that reaches for anything
 // browser-shaped cannot be tested there. See map/scene.js for the same rule.
 
 /**
- * The six groups, in the order both screens show them, with the titles the
- * reader's control panel has always used. Two screens that group the same
- * things should name the groups the same way: an operator who has just read
- * "Air & Sea Traffic" in the drawer should not have to work out that some
- * other wording in Admin Mode means the same set.
+ * The six groups, in the order Admin Mode shows them (see the header comment
+ * above for why the reader's own group order is authored separately), with
+ * the titles the reader's control panel has always used. Two screens that
+ * group the same things should name the groups the same way: an operator who
+ * has just read "Air & Sea Traffic" in the drawer should not have to work out
+ * that some other wording in Admin Mode means the same set.
  *
- * Within a group, key order is display order.
+ * Within a group, key order is display order on both screens.
  */
 export const LAYER_GROUPS = [
   {
@@ -109,12 +132,14 @@ export const LAYER_GROUPS = [
  */
 export const NOT_COUNTED_IN_READER = ["gdelt", "cities"];
 
-/** The group id this layer is filed under, or null if it is filed nowhere.
- *  Null is a real answer for an unknown key, not an error -- but for a key
- *  that has a dial row it is a bug, which tests/layerGroups.test.js catches. */
-export function layerGroupOf(key) {
-  const group = LAYER_GROUPS.find((g) => g.keys.includes(key));
-  return group ? group.id : null;
+/** The title to show for a group id -- the one string both screens' headings
+ *  now read, instead of each hand-typing "Conflict & Events" et al. and
+ *  hoping the two copies stay in step. An unknown id answers with "" rather
+ *  than throwing, same reasoning as countedKeysFor below: a blank heading is
+ *  a smaller failure than a panel that will not render. */
+export function groupTitle(groupId) {
+  const group = LAYER_GROUPS.find((g) => g.id === groupId);
+  return group ? group.title : "";
 }
 
 /** The keys a reader-side "n of m" count for this group should include:

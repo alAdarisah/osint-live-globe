@@ -3895,7 +3895,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
   text-transform: uppercase;
   color: var(--text-dim);
 }
-.admin-layer-group:first-of-type .admin-group-heading { margin-top: 4px; }
+.admin-note + .admin-layer-group .admin-group-heading { margin-top: 4px; }
 
 .admin-field-note {
   display: block;
