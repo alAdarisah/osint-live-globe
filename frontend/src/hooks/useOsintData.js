@@ -683,8 +683,19 @@ export function useOsintData({
         }
         // Above the try, not inside it, so the catch branch can measure a
         // failure as well as a success -- how long a source took to fail is as
-        // much a fact about the boot as how long it took to load.
+        // much a fact about the boot as how long it took to load. Measured
+        // through to the map, not just the network: it is differenced after
+        // the transform and publishFetchOutcome below, both of which run
+        // synchronously before the "ms" it becomes. That is "time until it
+        // was on the map", not round-trip time, and deliberately so -- it is
+        // the number a reader waiting at the boot screen actually cares
+        // about, even though for a large source local work (parsing,
+        // rebuilding layers) can be a material share of it.
         const startedAt = Date.now();
+        // Set true the instant the payload has landed, so the catch branch
+        // below can tell "the fetch itself failed" apart from "something
+        // downstream of a successful fetch threw" -- see its own comment.
+        let landed = false;
         try {
           // Captured before the await, so the signature recorded below is the
           // one this request was actually made under rather than whatever the
@@ -696,6 +707,7 @@ export function useOsintData({
             sourceQuery(key)
           );
           const fetched = await fetchJson(scopedUrl);
+          landed = true;
           if (cancelled) return;
           fetchedRef.current[key] = fetched;
           fetchedScopeRef.current[key] = signature;
@@ -729,13 +741,25 @@ export function useOsintData({
           // not part of what this pass was asked to change.
           console.warn(`Failed to fetch ${key}:`, err);
           firstFetchDone = true;
-          if (!bootReported) {
-            bootReported = true;
-            markSourceLoaded(key, false, {
-              ms: Date.now() - startedAt,
-              detail: failureDetail(err),
-            });
-          }
+          bootReported = true;
+          // Unconditional, for the same reason the success path's own call is:
+          // markSourceLoaded only touches rows still pending or deferred, so
+          // this upgrades a deferred source that has now genuinely failed and
+          // is a no-op on every poll after the row has resolved. Without this,
+          // a source that was deferred and later fetched-and-failed could
+          // never reach `warn` -- its row would keep showing "below zoom gate"
+          // next to a coverage record that already says "error".
+          markSourceLoaded(key, false, {
+            ms: Date.now() - startedAt,
+            // `landed` tells apart two different failures. If the payload
+            // never arrived, failureDetail(err) is true: an HTTP status or
+            // "unreachable". If it did arrive (landed), whatever threw here is
+            // the app failing to draw the data, not the source failing to
+            // arrive -- failureDetail has nothing true to say about a
+            // transport error that didn't happen, so this reports null and
+            // lets the boot log fall back to showing the elapsed time instead.
+            detail: landed ? null : failureDetail(err),
+          });
           // fetchedAt/bbox untouched -- an error says nothing about the data
           // already sitting in raw[key] from a previous success, if any.
           // No publishFetchOutcome ordering concern here either: no fetch
