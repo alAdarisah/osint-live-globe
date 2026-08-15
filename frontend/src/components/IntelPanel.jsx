@@ -31,7 +31,7 @@ import {
   DEFAULT_EVENT_FILTER, CONFIDENCE_THRESHOLD,
 } from "../map/severity";
 import { OFFICIALS_KIND_LABEL } from "../map/decorators";
-import { timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
+import { safeUrl, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
 import { useDraggablePanel, migratePanelPosition } from "../hooks/useDraggablePanel";
 import {
   SCOPE_OPTIONS, SCOPE_WORLD, SCOPE_VIEWPORT, SCOPE_COUNTRY, SCOPE_REGION, SCOPE_WATER,
@@ -209,12 +209,19 @@ function NewsRow({ item, onLocate }) {
   const headline = item.real_title.trim();
   const when = timeAgoFromDateAdded(item.date_added);
   const meta = [item.source_name, when, item.corroborated ? "corroborated" : null].filter(Boolean).join(" · ");
+  // safeUrl returns "" for anything that is not http(s), so the headline falls
+  // back to plain text rather than becoming a link to a scheme nobody vetted.
+  // The URL is the publisher's, not this app's: React will render whatever
+  // scheme a feed hands it, and `javascript:` in an href is the whole reason
+  // this is not simply `item.source_url`. Same treatment ConflictBriefingCard
+  // and map/popups.js give the same field.
+  const link = safeUrl(item.source_url);
 
   return (
     <div className="news-item">
       <div className="news-item-row">
-        {item.source_url ? (
-          <a href={item.source_url} target="_blank" rel="noopener noreferrer">
+        {link ? (
+          <a href={link} target="_blank" rel="noopener noreferrer">
             {headline}
           </a>
         ) : (
