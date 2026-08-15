@@ -37,6 +37,15 @@ threading `asyncio.to_thread` through every call site, and it is a trade this
 module makes deliberately, not an oversight: do not "fix" it by blocking the
 request on the background computation, which is the exact stall this design
 exists to avoid.
+
+Known, accepted race: if a poller bumps a version while the *previous*
+version's hash is still being computed on a thread, and that stale
+computation finishes after the new one starts, `_digests[name]` is briefly
+overwritten back to the stale `(old_version, old_digest)` pair. This is
+harmless rather than a bug worth chasing -- `content_hash`'s version guard
+(`cached[0] == version`) means the stale entry simply fails to match on the
+next call, which re-hashes rather than ever handing out a wrong ETag for the
+current version. The cost is one wasted computation, not a correctness gap.
 """
 
 import asyncio
@@ -96,7 +105,18 @@ def _hash_now(name: str, version: int, payload) -> str | None:
         # is the honest answer; a fabricated-but-unstable digest is worse
         # than admitting the payload could not be hashed.
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    except (TypeError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 -- see below for why this is deliberately broad
+        # TypeError/ValueError cover the documented ways json.dumps refuses a
+        # payload (unserialisable types, circular references), but that is not
+        # the only way serialising an arbitrary reference document can fail --
+        # a deeply nested one raises RecursionError, for instance, which is
+        # neither. A hash that fails is a caching problem, not a serving one:
+        # the correct response to *any* failure here is the same one, falling
+        # back to the process-token ETag, so there is no failure mode worth
+        # letting escape into the endpoint (synchronous path) or into an
+        # unretrieved Task exception that asyncio would otherwise log and
+        # discard (background path). Better to catch broadly and say so than
+        # to have the next new failure mode rediscovered by an outage.
         log.warning("Could not hash the %s document, falling back to the process ETag: %s", name, exc)
         _digests[name] = (version, None)
         return None

@@ -109,16 +109,42 @@ individual pins, minus:
   same thing in a different vocabulary is how the two end up disagreeing.
 - `firms`, `jamming`, `laneDensity` — density canvases, not pins. There is no
   per-item mark to clip, and the payloads run to hundreds of thousands of rows.
-- `cables`, `railways`, `powerLines`, `shippingLanes`, `water` — polylines and
-  polygons. A line is only legible whole; clipping one to a border draws a
-  fragment that claims the cable ends there. A lake or a sea is a shape, not a
-  mark on one.
+- `water` — a lake or a sea is a shape, not a mark on one.
+- `cables`, `shippingLanes` — lines that live in the ocean. Line layers are gated
+  by keeping whole lines that touch the selection (below), and a submarine cable
+  or a shipping corridor almost never has a vertex inside a country, so the test
+  would hide them permanently rather than scope them.
 
 The satellite layers are deliberately in, the bulk WebGL groups included. A
 satellite is a pin with a real propagated position, and "only the passes over
 the country I am reading about" is exactly the question the gate exists for.
 
 A layer outside the set gets no checkbox rather than a checkbox that half works.
+
+### The overland line layers
+
+`railways` and `powerLines` were excluded in the first version of this design, on
+the argument that a line clipped at a border draws a fragment claiming the line
+ends there. They are in now, because the renderers answer that objection rather
+than accepting it: a line is kept or dropped **whole**, never cut.
+`lineInCountryScope` keeps a line if any of its vertices lies inside the
+selection.
+
+Any vertex is enough. These are OpenStreetMap ways swept per theatre, dense
+enough that a line crossing a country without a single vertex inside it is not
+worth the cost of real segment/polygon intersection — and being too generous
+draws one extra whole line, which is the right direction to be wrong in.
+
+These are also the two layers where it matters most: an OSM sweep across eleven
+theatres is tens of thousands of ways, drawn as real geometry at every zoom, and
+gating them is the difference the setting was asked for.
+
+Their counts changed with them. `counts.railways` and `counts.powerLines` were
+the number of lines in the served document, which was correct while every served
+line was drawn — these layers have no viewport filter. The gate is the first
+thing that can make drawn and served differ, so they now report lines drawn
+against lines served; otherwise the drawer would read 27,729 beside six visible
+lines.
 
 ### How it draws
 
@@ -143,6 +169,7 @@ Applied in eight places:
 | Renderer | Covers |
 |---|---|
 | `renderMarkerLayer` | every layer with a decorator — about twenty, in one call site |
+| `renderPowerLines`, `renderRailways` | whole lines, via `lineInCountryScope` |
 | `renderInfra` | critical infrastructure |
 | `renderSatellites` | the curated satellite layer |
 | `renderSatElementLayer` | the DOM-marker satellite groups |

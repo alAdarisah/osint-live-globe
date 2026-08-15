@@ -126,7 +126,7 @@ test("the country gate on a layer", async (t) => {
     // something the renderers do not implement.
     for (const key of [
       "cities", "firms", "jamming", "laneDensity",
-      "cables", "railways", "powerLines", "water", "shippingLanes",
+      "water", "cables", "shippingLanes",
     ]) {
       assert.equal(COUNTRY_ONLY_LAYERS.has(key), false, `${key} should not be on offer`);
       const stored = defaultSettings();
@@ -147,6 +147,9 @@ test("the country gate on a layer", async (t) => {
       "satellites", "satNavigation", "satStarlink",
       // Layers that did not exist when this gate was first written.
       "powerPlants", "airDefense", "railLive",
+      // Overland lines. Kept whole rather than clipped at the border, which is
+      // what lets them be gated at all -- see lineInCountryScope.
+      "railways", "powerLines",
     ]) {
       assert.equal(COUNTRY_ONLY_LAYERS.has(key), true, `${key} should be on offer`);
     }

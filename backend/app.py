@@ -134,12 +134,6 @@ async def lifespan(app: FastAPI):
     # attempt anyway; this only changes the degraded cases.
     _background_tasks.append(asyncio.create_task(storage.init_pool()))
 
-    # The optional read-replica pool, scheduled the same fire-and-forget way. It
-    # no-ops unless READ_REPLICA_URL is set, and storage.get_read_pool() falls
-    # back to the primary until (and unless) it opens, so this only ever adds a
-    # faster read path for the consumers that opt into it -- never a dependency.
-    _background_tasks.append(asyncio.create_task(storage.init_read_pool()))
-
     # Before the mirror starts, so its first read can already hit a warm cache
     # after a restart instead of pulling every kind out of Postgres in full.
     # Never blocks: with no Redis configured or reachable, every call is a miss

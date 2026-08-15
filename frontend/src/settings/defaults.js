@@ -197,23 +197,34 @@ const DEFAULT_LAYER_STYLE = { scale: 1, opacity: 1, minZoom: null, maxZoom: null
  *   firms,    density canvases rather than pins, and a quarter of a million
  *   jamming,  rows apiece. There is no individual mark to keep or drop.
  *   laneDensity
- *   cables,   polylines and polygons. A cable, a transmission line or a
- *   railways, shipping corridor is only legible as a whole line -- clipping one
- *   powerLines, to a border draws a fragment that claims the cable ends there --
- *   water,    and a lake or a sea is a shape, not a mark on one.
- *   shippingLanes
+ *   water     a lake or a sea is a shape, not a mark on one.
+ *   cables,   lines that live in the ocean. The line layers below are gated by
+ *   shippingLanes  keeping whole lines that touch the selection, and a submarine
+ *             cable or a shipping corridor almost never has a vertex inside a
+ *             country -- the test would hide them permanently rather than scope
+ *             them, which is a checkbox that does not do what it says.
  *
- * The satellite layers are deliberately in rather than out. A satellite is a
- * pin with a real position, and "only the passes over the country I am reading
- * about" is exactly the question the gate exists for -- see renderSatellites,
- * which applies the clip to the propagated position like any other point.
+ * Two kinds of layer are deliberately in.
+ *
+ * The satellite layers, bulk WebGL groups included: a satellite is a pin with a
+ * real position, and "only the passes over the country I am reading about" is
+ * exactly the question the gate exists for.
+ *
+ * The overland line layers -- railways and powerLines -- which were out while
+ * the gate could only clip geometry, because a line cut at a border draws a
+ * fragment claiming the line ends there. They are in now because the renderers
+ * do not clip them: a line is kept or dropped whole, by whether any part of it
+ * lies inside the selection (see lineInCountryScope in createMapController.js).
+ * That answers the objection rather than accepting it, and these are the two
+ * layers where it matters most -- an OSM sweep of eleven theatres is tens of
+ * thousands of ways, drawn as real geometry at every zoom.
  *
  * A layer outside this set gets no checkbox at all, rather than a checkbox that
  * half works.
  */
 const NO_COUNTRY_GATE = new Set([
   "cities", "firms", "jamming", "laneDensity",
-  "cables", "railways", "powerLines", "water", "shippingLanes",
+  "water", "cables", "shippingLanes",
 ]);
 
 export const COUNTRY_ONLY_LAYERS = new Set(

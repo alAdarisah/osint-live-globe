@@ -2483,6 +2483,31 @@ export function createMapController(container, initial, callbacks) {
   }
 
   /**
+   * Does any part of this line lie inside the selection?
+   *
+   * The country gate keeps or drops a line whole. It never cuts one at the
+   * border, which is the objection that kept the line layers off the gate
+   * entirely for a while: a transmission line clipped to a boundary draws a
+   * fragment that claims the line ends there, which is a worse lie than drawing
+   * the whole thing.
+   *
+   * Any vertex inside is enough. These are OSM ways swept per theatre, dense
+   * enough that a line crossing a country without a single vertex in it is not
+   * a case worth the cost of real segment/polygon intersection -- and the
+   * failure mode of being too generous here is drawing one extra line, which is
+   * the right direction to be wrong in.
+   *
+   * `clip` null means the layer is not gated, so everything is in scope.
+   */
+  function lineInCountryScope(clip, path) {
+    if (!clip) return true;
+    for (const point of path) {
+      if (clip(point[0], point[1])) return true;
+    }
+    return false;
+  }
+
+  /**
    * Tell React which countries are selected, in click order.
    *
    * The borders ride along (by reference -- nothing is copied) because the
@@ -7022,9 +7047,14 @@ export function createMapController(container, initial, callbacks) {
       "survey data, and will <b>not</b> line up exactly with the OpenStreetMap railway station points " +
       "drawn alongside it on this same layer.</p>" +
       '<div class="meta">Source: Natural Earth</div>';
+    // As with the transmission lines: whole lines only, never a cut one.
+    const countryClip = countryClipFor("railways");
+    let kept = 0;
     for (const line of lines) {
       const path = line?.path;
       if (!Array.isArray(path) || path.length < 2) continue;
+      if (!lineInCountryScope(countryClip, path)) continue;
+      kept += 1;
       const isOsm = line.source === "osm";
       const style = {
         color: railwayLineColor(line),
@@ -7050,9 +7080,9 @@ export function createMapController(container, initial, callbacks) {
         railwaysGroup.addLayer(poly);
       }
     }
-    // Per line in the document, not per drawn line, for the same reason the cable
-    // and pipeline counts are.
-    counts.railways = lines.length;
+    // Drawn against served, for the reason the transmission-line count gives:
+    // the country gate is the first thing that can make the two differ.
+    counts.railways = kept;
     totals.railways = lines.length;
     // Task 27 fix (post-review): which theatres' OSM rail-line coverage hit
     // osm_infra.py's own MAX_RAIL_LINE_WAYS cap this sweep -- read straight
@@ -7075,9 +7105,14 @@ export function createMapController(container, initial, callbacks) {
     const doc = raw.powerLines || {};
     const lines = Array.isArray(doc.lines) ? doc.lines : [];
     const color = gridLineColor();
+    // Kept or dropped whole, never cut at the border -- see lineInCountryScope.
+    const countryClip = countryClipFor("powerLines");
+    let kept = 0;
     for (const line of lines) {
       const path = line?.path;
       if (!Array.isArray(path) || path.length < 2) continue;
+      if (!lineInCountryScope(countryClip, path)) continue;
+      kept += 1;
       const label = line.name ? esc(line.name) : "Transmission line";
       const popupHtml =
         `<h3>${label}</h3>` +
@@ -7098,9 +7133,12 @@ export function createMapController(container, initial, callbacks) {
         powerLinesGroup.addLayer(poly);
       }
     }
-    // Per line in the document, not per drawn line, same reason the cable and
-    // railway counts are.
-    counts.powerLines = lines.length;
+    // Lines drawn against lines in the document. These used to be the same
+    // number -- this layer has no viewport filter, so everything served was
+    // drawn -- and the country gate is the first thing that can make them
+    // differ. Reporting the document figure as the count would then say 27,729
+    // while six were on screen.
+    counts.powerLines = kept;
     totals.powerLines = lines.length;
     // Same "a cap that truncates silently is a defect" treatment railways'
     // own truncated-region note gets -- read straight from the document since
