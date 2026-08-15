@@ -139,7 +139,19 @@ export const WINDOW_OPTIONS = [
   { hours: 72, label: "72h" },
   { hours: 168, label: "7d" },
 ];
-export const DEFAULT_WINDOW_HOURS = 168;
+// 72 rather than 168, because this constant is what actually decides the
+// shipped age window -- not DEFAULT_EVENT_FILTER.maxAgeDays, which reads like
+// it does. IntelPanel's mount effect pushes windowMaxAgeDays(windowHours) into
+// that field unconditionally, so whatever severity.js defaults it to survives
+// only until this panel mounts, which is every load. Leaving this at 168 while
+// severity.js defaulted to AGE_WINDOW_DATE_STEPS gave a map that argued for
+// three days in two comments and a legend and then served seven.
+//
+// 72h is windowMaxAgeDays' exact inverse of AGE_WINDOW_DATE_STEPS (ceil(72/24)
+// - 1 = 2), so the panel now writes the same window map/scene.js gates every
+// other layer on. "7d" is still in WINDOW_OPTIONS and still means a real seven
+// days; it is one click away rather than the state the map opens in.
+export const DEFAULT_WINDOW_HOURS = 72;
 
 /**
  * The panel's hour-based window, translated into ageDays' whole-day units --

@@ -314,15 +314,29 @@ export default function LayersSection({
           Showing the {zoomNotes.eventsCapped} most severe here &mdash; zoom in for the rest.
         </div>
 
+        {/* The age window's equivalent of the cap note above, and it exists for
+            the same reason: the window is applied by default now, so on a quiet
+            day a layer could show a fraction of its own count with nothing to
+            say why. That reads as a broken feed. Saying the number, and naming
+            the control that changes it, makes it an answer instead. */}
+        <div
+          id="conflictAgeNote"
+          className={`sublegend${layerVisibility.events && zoomNotes.eventsAged ? " visible" : ""}`}
+        >
+          {zoomNotes.eventsAged} older than the window &mdash; widen <b>Window</b> above to include them.
+        </div>
+
         <LayerDetails id="det-events" open={isOpen("det-events")} onToggle={setOpen}>
           <div className="sublegend">
             ACLED (where an account is configured) + UCDP GED Candidate + GDELT, cross-referenced and merged
             into one pin per real incident. <b>Violence only</b> &mdash; armed clashes, assaults and mass
             violence; verbal and diplomatic conflict (accusations, demands, threats) is excluded here and
             has its own layer, Officials &amp; Diplomacy, below. Pin size and colour follow severity; blue
-            means independently corroborated. Pins fade as they age. The backend keeps roughly the last
-            three days; <b>Window</b> above narrows that further and defaults to showing all of it. Events
-            are dated to the day by every source here, so the window counts whole dates rather than hours.
+            means independently corroborated. Pins fade as they age. <b>Window</b> defaults to the last three
+            days, which is what this map is a record of &mdash; the backend serves a little more than that,
+            because a report filed today can be about an event weeks old, and those are the pins the
+            window holds back. Widen it to see them. Events are dated to the day by every source here,
+            so the window counts whole dates rather than hours.
             Where a pin absorbed the news coverage of its incident, the headlines are listed inside it.
           </div>
           <div className="sublegend">
