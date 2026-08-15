@@ -87,9 +87,9 @@ One taxonomy, one named exception whose reason is written down, rather than two 
 
 `LayerDialsSection` maps over `LAYER_GROUPS`, emitting a heading per group followed by that group's `LayerBlock` rows, each row exactly as it renders today.
 
-**Headings are plain headers, not a third accordion tier.** The section itself already collapses (`PanelGroup id="adm-layers"`), and every layer row already collapses (`adm-layer-<key>`). A collapsible middle tier would put two clicks between an operator and any dial, and would have to be force-opened whenever the admin search matched something inside it — a control that opens itself is not a control.
+**Headings are plain headers, not a third accordion tier.** The section itself already collapses (`PanelGroup id="adm-layers"`), and every layer row already collapses (`adm-layer-<key>`). A collapsible middle tier would put two clicks between an operator and any dial, on a screen whose whole purpose is reaching one.
 
-Under an active search, a heading whose group has no surviving rows is not rendered. An empty heading tells an operator a group exists but says nothing about why it is empty, which is worse than its absence.
+There is no empty-heading case to handle. The admin search filters whole sections against their `SEARCH_TERMS` (`AdminPanel.jsx:135`) and never hides individual rows, so a rendered Layers section always renders all 46 of them. If row-level filtering is ever added, suppressing headings with no surviving rows becomes part of that change, not this one.
 
 Display order becomes group order, then key order within each group. `SETTINGS_LAYERS` remains the source of every row's key, label and defaults; `LAYER_GROUPS` supplies only the order and the heading it sits under.
 
