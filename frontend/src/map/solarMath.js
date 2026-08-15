@@ -117,11 +117,24 @@ export function sunElevation(lat, lon, date) {
 }
 
 /**
- * When, within the UTC calendar day containing `date`, the sun's elevation
- * at (lat, lon) crosses `thresholdDeg` -- the building block for
- * sunrise/sunset (threshold -0.833, the standard allowance for atmospheric
- * refraction plus the sun's own angular radius) and for the three twilight
- * bands (civil -6, nautical -12, astronomical -18).
+ * When, within one day at (lat, lon), the sun's elevation there crosses
+ * `thresholdDeg` -- the building block for sunrise/sunset (threshold -0.833,
+ * the standard allowance for atmospheric refraction plus the sun's own
+ * angular radius) and for the three twilight bands (civil -6, nautical -12,
+ * astronomical -18).
+ *
+ * The day scanned is the *place's* day, not the UTC calendar day: the window
+ * runs from local solar midnight to local solar midnight, anchored on the UTC
+ * date `date` falls in. That distinction is the whole of what this window has
+ * to get right. A UTC-bounded scan is only the same thing near Greenwich; at
+ * 85 degrees east the sun is already up when the UTC day begins and does not
+ * rise again until after it ends, so such a scan finds the sunset, no
+ * sunrise, and no polar flag to explain the absence -- an ordinary latitude
+ * on an ordinary date reported as though the computation had failed.
+ * Bounding on local midnight instead puts both crossings inside the window
+ * for every non-polar place, because local midnight is when the sun is at its
+ * lowest and a day either climbs away from that low point and returns to it
+ * or does neither.
  *
  * A numeric scan-then-bisect over the day rather than the closed-form hour-
  * angle formula: it reuses sunElevation() directly, the same function "current
@@ -134,9 +147,24 @@ export function sunElevation(lat, lon, date) {
  * different fact from a computation that failed, so it gets its own field
  * (`alwaysAbove`/`alwaysBelow`) a caller has to read before assuming the
  * absence of a rise/set time means something went wrong.
+ *
+ * One crossing without the other survives that window fix and is also a real
+ * answer, on the two dates a year a place near a polar circle changes regime:
+ * the sun comes up and does not go down again (the first day of midnight sun)
+ * or goes down and does not come up. Both flags are false there, because
+ * neither is true -- the sun was on both sides of the horizon that day -- so a
+ * caller reading rise/set must handle one of them being null even after
+ * checking the flags. See buildSunSectionForPoint in map/popups.js, which
+ * words all four cases.
  */
 export function elevationCrossings(date, lat, lon, thresholdDeg, stepMinutes = 10) {
-  const dayStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  // Local solar midnight for this date at this longitude: fifteen degrees of
+  // longitude is one hour of solar time, and east of Greenwich local midnight
+  // has already happened when UTC midnight arrives.
+  const dayStart = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+      - (lon / 15) * 60 * MINUTE_MS
+  );
   const totalMinutes = 24 * 60;
   const samples = [];
   for (let m = 0; m <= totalMinutes; m += stepMinutes) {

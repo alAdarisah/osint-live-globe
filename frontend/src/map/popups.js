@@ -2032,8 +2032,16 @@ function buildSunSection(bounds) {
  * The rendered wording for the sun-position fold at a specific point and
  * instant -- exported so frontend/tests/terminator.test.js (or a card test)
  * can pin a polar-latitude point and a fixed date and assert on the actual
- * three branches a reader sees, not just on the solarMath.js maths behind
+ * four branches a reader sees, not just on the solarMath.js maths behind
  * them. See buildSunSection's own docstring for why this split exists.
+ *
+ * Four, not three: the two flags do not cover every day. On the day the sun
+ * comes up and stays up -- and on its mirror, the first sunset after a season
+ * of midnight sun -- there is exactly one crossing, so neither flag is set and
+ * one of `rise`/`set` is null. Reading both times on those days is what took
+ * the country card down: this section is built inline by countryCardFor, so a
+ * throw here does not blank one fold, it stops the card opening at all and a
+ * click on the country appears to do nothing.
  */
 export function buildSunSectionForPoint(lat, lon, date) {
   const elevationDeg = sunElevation(lat, lon, date);
@@ -2044,6 +2052,12 @@ export function buildSunSectionForPoint(lat, lon, date) {
     riseSetLine = "The sun does not set today at this latitude &mdash; polar day.";
   } else if (alwaysBelow) {
     riseSetLine = "The sun does not rise today at this latitude &mdash; polar night.";
+  } else if (rise && !set) {
+    riseSetLine = `Sunrise ${fmtUtcClock(rise)}, and the sun does not set again today `
+      + "&mdash; the turn into midnight sun at this latitude.";
+  } else if (set && !rise) {
+    riseSetLine = `Sunset ${fmtUtcClock(set)}, and the sun does not rise again today `
+      + "&mdash; the turn out of midnight sun at this latitude.";
   } else {
     riseSetLine = `Sunrise ${fmtUtcClock(rise)}, sunset ${fmtUtcClock(set)} (today, this place's centre point).`;
   }

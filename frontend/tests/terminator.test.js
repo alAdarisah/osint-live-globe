@@ -408,3 +408,82 @@ test("sun section wording: an ordinary mid-latitude day states a real sunrise an
   assert.match(html, /Sun elevation right now/);
   assert.match(html, /Derived: arithmetic/);
 });
+
+// --- the day the scan windows on ----------------------------------------
+//
+// Every test above sits at a longitude within a few degrees of Greenwich or
+// inside the polar cases, where a UTC calendar day and the place's own solar
+// day are close enough to the same thing that the difference never shows.
+// East of roughly 60 degrees it stops being the same thing: the sun is
+// already up when the UTC day begins and its next rise falls after the UTC
+// day ends, so a scan bounded by UTC midnight finds the sunset and no
+// sunrise at all. That is not a polar fact and neither flag explains it --
+// it is the window being drawn in the wrong place -- and it reached the
+// country card as a crash rather than as a wrong time (see the sun-section
+// test below).
+
+test("an eastern-longitude day reports both a sunrise and a sunset, not a lone sunset", () => {
+  // 20N 85E -- eastern India, an ordinary latitude on an ordinary date.
+  // Nothing here is polar, so both crossings exist and both must be found.
+  const result = sunriseSunset(new Date("2026-08-15T12:00:00Z"), 20, 85);
+  assert.equal(result.alwaysAbove, false);
+  assert.equal(result.alwaysBelow, false);
+  assert.ok(result.rise instanceof Date, `expected a sunrise, got ${result.rise}`);
+  assert.ok(result.set instanceof Date, `expected a sunset, got ${result.set}`);
+  // And in the order a day happens in: the sun comes up, then it goes down.
+  assert.ok(result.rise < result.set, "sunrise should precede sunset within the same day");
+});
+
+test("no ordinary latitude ever returns a rise or set the flags do not explain", () => {
+  // The contract elevationCrossings' own docstring states: a null rise or
+  // set means something a caller can name. Swept rather than spot-checked,
+  // because the failure is a moving band -- which longitudes lose a crossing
+  // depends on the date, so any single point passes on most days.
+  const failures = [];
+  for (let month = 0; month < 12; month++) {
+    const day = new Date(Date.UTC(2026, month, 15, 12));
+    for (let lat = -55; lat <= 55; lat += 5) {
+      for (let lon = -180; lon < 180; lon += 15) {
+        const r = sunriseSunset(day, lat, lon);
+        if (!r.rise || !r.set) failures.push(`${lat},${lon} on ${day.toISOString().slice(0, 10)}`);
+      }
+    }
+  }
+  assert.deepEqual(failures, [], "every point between 55S and 55N has a sunrise and a sunset every day");
+});
+
+test("sun section wording: an eastern-longitude day states both times rather than throwing", () => {
+  // The country card's own failure mode, at the card level: countryCardFor
+  // builds this section inline, so a throw here takes the whole card down
+  // and a click on the country silently does nothing at all.
+  const html = buildSunSectionForPoint(20, 85, new Date("2026-08-15T12:00:00Z"));
+  assert.match(html, /Sunrise \d\d:\d\d UTC, sunset \d\d:\d\d UTC/);
+  assert.doesNotMatch(html, /polar/);
+});
+
+// --- the two turning days, which are neither ordinary nor polar ----------
+//
+// Near a polar circle there are two dates a year when the sun crosses the
+// horizon exactly once: the day it comes up and stays up, and the day it
+// goes down and stays down. Neither `alwaysAbove` nor `alwaysBelow` is true
+// on those days -- the sun was on both sides of the horizon -- so a caller
+// that reads the flags and then trusts both times is still one Antarctic
+// country card away from a crash.
+
+test("sun section wording: a day with only a sunrise names the sunrise and says no sunset follows", () => {
+  // 83S -- Antarctica's own centroid latitude -- on the day the sun comes up
+  // for the season and does not set again.
+  const html = buildSunSectionForPoint(-83, 0, new Date("2026-10-08T12:00:00Z"));
+  assert.match(html, /Sunrise \d\d:\d\d UTC/);
+  assert.match(html, /does not set again today/);
+  assert.doesNotMatch(html, /sunset \d\d:\d\d/);
+});
+
+test("sun section wording: a day with only a sunset names the sunset and says no sunrise follows", () => {
+  // The mirror case: 67S on the day the sun sets for the first time after a
+  // season of midnight sun.
+  const html = buildSunSectionForPoint(-67, 0, new Date("2026-01-08T12:00:00Z"));
+  assert.match(html, /Sunset \d\d:\d\d UTC/);
+  assert.match(html, /does not rise again today/);
+  assert.doesNotMatch(html, /Sunrise \d\d:\d\d/);
+});
