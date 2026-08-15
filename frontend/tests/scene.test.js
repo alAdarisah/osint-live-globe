@@ -33,6 +33,11 @@ import {
   AUTO,
   CORROBORATING,
   MANUAL,
+  AGE_WINDOW_DAYS,
+  AGE_WINDOW_DATE_STEPS,
+  hasAgeWindow,
+  maxAgeDaysFor,
+  withinAgeWindow,
 } from "../src/map/scene.js";
 
 // DECLUTTER_MIN_ZOOM in createMapController.js: the zoom the placement pass
@@ -191,6 +196,46 @@ test("shipped draw gates match the band table", async (t) => {
         `${key} fetches at ${fetchZoom} but draws from ${drawZoom} -- it would draw an empty layer`
       );
     }
+  });
+});
+
+test("the FIRMS fetch gate", async (t) => {
+  // Measured against the running backend before this gate existed: the unclipped
+  // feed is 184,770 records and 28.2 MB of JSON, and a WORLD viewport is the
+  // whole world, so the layer's `scoped` bbox clipped nothing at the one band
+  // where the layer also draws nothing. Every reader parsed all of it, every
+  // three minutes, from the moment the map opened.
+  //
+  // These four assertions are the whole trade, and each one is load-bearing: the
+  // saving is the first, the reason it is safe is the second and third, and the
+  // fourth is the promise the second must not quietly grow into.
+  await t.test("a world view does not fetch the global thermal feed", () => {
+    const world = resolveScene({ zoom: 3 });
+    assert.equal(world.fetchZoom.get("firms"), floorOf("THEATRE"));
+    assert.ok(!world.active.has("firms"), "firms drew at a band it does not fetch at");
+  });
+
+  await t.test("a focused country fetches its fires however far out the camera is", () => {
+    // What keeps the country card's "active fires" row: the fetch carries that
+    // country's bounds (see bboxCell in useOsintData.js), so the row counts the
+    // country rather than the planet -- 435 kB over Ukraine against 28.2 MB.
+    const focused = resolveScene({ zoom: 3, focus: { kind: "country", key: "UA" } });
+    assert.equal(focused.fetchZoom.get("firms"), null);
+  });
+
+  await t.test("a focus does not put the heat canvas on a world view", () => {
+    // FOCUS_FETCH_ONLY rather than FOCUS_PROMOTE. A promotion would lift the
+    // draw band too, which is the thing the layer's own comment argues against:
+    // a global thermal feed at world zoom is mostly agricultural burning.
+    const focused = resolveScene({ zoom: 3, focus: { kind: "country", key: "UA" } });
+    assert.equal(focused.drawZoom.get("firms"), floorOf("THEATRE"));
+    assert.ok(!focused.active.has("firms"), "a country focus painted fires over the world board");
+  });
+
+  await t.test("the gate opens exactly where the layer starts drawing", () => {
+    const theatre = resolveScene({ zoom: floorOf("THEATRE") });
+    assert.equal(theatre.fetchZoom.get("firms"), floorOf("THEATRE"));
+    assert.ok(theatre.active.has("firms"), "firms fetches at a band it does not draw at");
   });
 });
 
@@ -419,6 +464,121 @@ test("the ADS-B class filter", async (t) => {
         `${key} should not be sending a class filter`
       );
     }
+  });
+});
+
+test("the display age window", async (t) => {
+  // This map is a record of the last three days. A pin older than that drawn
+  // beside a live one is not extra information -- it is a false claim about
+  // when something happened, made silently, and it is the one error a reader
+  // cannot detect by looking. So every layer that can carry an old record
+  // declares how old is too old, here, next to the band and the cap.
+  //
+  // The rule is not "delete the data": the backend keeps its own windows for
+  // its own reasons (event_fusion needs GDELT's 30-day report lag to
+  // corroborate, dark_vessels needs three days of AIS history to infer a gap),
+  // and none of that changes. This thins the *presentation* only.
+  const DAY = 86400;
+  const NOW = Date.UTC(2026, 7, 14, 12, 0, 0); // 2026-08-14T12:00:00Z
+  const daysAgo = (n) => (NOW / 1000) - n * DAY;
+
+  await t.test("is three days", () => {
+    assert.equal(AGE_WINDOW_DAYS, 3);
+  });
+
+  await t.test("counts one fewer boundary than it does days", () => {
+    // The off-by-one this pair exists to hold still. Three days of history is
+    // today plus the two dates before it, so a filter counting date boundaries
+    // wants 2 where one counting elapsed time wants 3. severity.js's
+    // DEFAULT_EVENT_FILTER reads the second, and it cannot be tested here --
+    // severity.js imports through the bundler's extensionless resolution and
+    // will not load under `node --test` -- so this asserts the number it reads
+    // instead. The Window control's "Last 3 days" option carries the same 2.
+    assert.equal(AGE_WINDOW_DATE_STEPS, 2);
+    assert.equal(AGE_WINDOW_DATE_STEPS, AGE_WINDOW_DAYS - 1);
+  });
+
+  await t.test("no layer is allowed a wider one without saying why", () => {
+    // The exception list is the point of this assertion. A layer may exceed
+    // three days only where the *publisher's* cadence is slower than three
+    // days, which is a fact about the source rather than a preference of ours,
+    // and it has to be argued for in the manifest before it can appear here.
+    const ARGUED_EXCEPTIONS = { hazards: 7 }; // GVP issues one volcano report a week
+    for (const key of Object.keys(LAYER_MANIFEST)) {
+      if (!hasAgeWindow(key)) continue;
+      const widest = Math.max(
+        ...[{}, { kind: "volcano" }, { kind: "earthquake" }].map((item) => maxAgeDaysFor(key, item))
+      );
+      const allowed = ARGUED_EXCEPTIONS[key] ?? AGE_WINDOW_DAYS;
+      assert.ok(
+        widest <= allowed,
+        `${key} draws pins up to ${widest} days old, and only ${allowed} is argued for`
+      );
+    }
+  });
+
+  await t.test("a layer that declares no window keeps everything", () => {
+    // Absence must mean "this layer cannot carry a stale record", not "nobody
+    // got round to it" -- so the default is deliberately permissive and the
+    // audit above is what stops it hiding an omission.
+    assert.equal(hasAgeWindow("cities"), false);
+    assert.ok(withinAgeWindow("cities", { time: daysAgo(400) }, NOW));
+  });
+
+  await t.test("an undated item is kept", () => {
+    // Same rule passesEventFilter already applies: hiding a record on the
+    // basis of a missing field drops data on the strength of nothing.
+    assert.ok(withinAgeWindow("hazards", {}, NOW));
+    assert.ok(withinAgeWindow("hazards", { time: null }, NOW));
+    assert.ok(withinAgeWindow("floods", { is_current: false, updated: undefined }, NOW));
+  });
+
+  await t.test("floods: what GDACS still calls open is never aged out", () => {
+    // `is_current` is the publisher's own judgement that the event is still
+    // happening, and an ongoing flood is a fact about now however long ago it
+    // started. Only what GDACS has closed is aged, and it is aged from the
+    // last revision rather than from onset -- a flood revised yesterday is
+    // current information about an old event.
+    assert.ok(withinAgeWindow("floods", { is_current: true, time: daysAgo(60) }, NOW));
+    assert.ok(withinAgeWindow("floods", { is_current: false, updated: daysAgo(1) }, NOW));
+    assert.ok(!withinAgeWindow("floods", { is_current: false, updated: daysAgo(9) }, NOW));
+    // No revision stamp at all: fall back to onset rather than keeping it.
+    assert.ok(!withinAgeWindow("floods", { is_current: false, time: daysAgo(9) }, NOW));
+  });
+
+  await t.test("launches: a scheduled launch is not an old one", () => {
+    // `upcoming` is a T-0 in the future, so it has no age to be outside a
+    // window. The `previous` half is what this gates: PREVIOUS_LIMIT takes the
+    // 15 most recent launches whatever their dates, and on a slow cadence the
+    // tail of that list is weeks back.
+    assert.ok(withinAgeWindow("launches", { upcoming: true, net: daysAgo(-30) }, NOW));
+    assert.ok(withinAgeWindow("launches", { upcoming: false, net: daysAgo(2) }, NOW));
+    assert.ok(!withinAgeWindow("launches", { upcoming: false, net: daysAgo(11) }, NOW));
+  });
+
+  await t.test("hazards: the volcano half gets the publisher's week, the quake half does not", () => {
+    // Two publishers on two clocks in one layer (see backend/sources/
+    // hazards.py), so one number cannot answer for both. A GVP report *is* a
+    // week -- aging it at three days would evict a live eruption four days
+    // before the next report supersedes it. USGS's 2.5_day feed cannot serve a
+    // quake older than a day, so three days there is a floor that should never
+    // bite; it is declared anyway, because "cannot happen" is what the feed
+    // does today and not what this map promises.
+    assert.equal(maxAgeDaysFor("hazards", { kind: "volcano" }), 7);
+    assert.equal(maxAgeDaysFor("hazards", { kind: "earthquake" }), AGE_WINDOW_DAYS);
+    assert.ok(withinAgeWindow("hazards", { kind: "volcano", time: daysAgo(6) }, NOW));
+    assert.ok(!withinAgeWindow("hazards", { kind: "volcano", time: daysAgo(8) }, NOW));
+    assert.ok(withinAgeWindow("hazards", { kind: "earthquake", time: daysAgo(2) }, NOW));
+    assert.ok(!withinAgeWindow("hazards", { kind: "earthquake", time: daysAgo(4) }, NOW));
+  });
+
+  await t.test("the conflict layer is gated by the reader's filter, not by this table", () => {
+    // events is the one layer whose window is adjustable -- the Window control
+    // in LayersSection writes eventFilter.maxAgeDays, and passesEventFilter
+    // applies it. A manifest entry as well would be a second gate that a
+    // reader widening the first could not reach past, and the two would
+    // disagree the moment either number moved.
+    assert.equal(hasAgeWindow("events"), false);
   });
 });
 

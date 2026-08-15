@@ -143,7 +143,6 @@ export const FETCH_ALWAYS_BECAUSE = {
   energyFlows: "the country card",
   foodTrade: "the country card",
   foodPriceIndex: "the country card",
-  firms: "the country card's live picture counts fires in the country bbox",
   jamming: "the country card's live picture counts jamming cells in the country bbox",
   ais: "the country card counts navy hulls and tankers; Navy is ungated anyway",
   adsb: "the country card counts military aircraft; flagged and military are ungated anyway",
@@ -186,6 +185,39 @@ export const FETCH_ALWAYS_BECAUSE = {
 export const AUTO = "auto";
 export const CORROBORATING = "corroborating";
 export const MANUAL = "manual";
+
+/**
+ * How old a pin may be before this map stops drawing it. Three days, because
+ * that is what this map claims to be a record of.
+ *
+ * Declared up here rather than beside the functions that read it, at the bottom
+ * of the file, for one mechanical reason: the manifest below names it, and a
+ * `const` declared after the table would be in its temporal dead zone when the
+ * table is built. The argument for the number, and the shape of the per-layer
+ * rule it anchors, are with those functions -- see "the display age window".
+ */
+export const AGE_WINDOW_DAYS = 3;
+
+/**
+ * The same window, counted in whole UTC dates instead of elapsed time.
+ *
+ * Two units for one number because the data comes in two resolutions, and
+ * pretending otherwise is what makes an age filter subtly wrong. The layers
+ * gated by the manifest below carry exact unix timestamps -- a GDACS revision
+ * stamp, a launch T-0, a quake origin time -- so AGE_WINDOW_DAYS is a rolling
+ * 72 hours there and means what it says. The conflict layer has nothing finer
+ * than a date: every source behind it truncates to YYYYMMDD (see
+ * event_fusion.py), so its age is a count of date boundaries crossed and its
+ * window has to be one too.
+ *
+ * Which makes the two numbers differ by one, and the off-by-one is the whole
+ * reason this is a named constant rather than a `- 1` written at the call site.
+ * "Three days of history" is today plus the two dates before it, so the
+ * date-granular window is 2 -- the value the Window control's "Last 3 days"
+ * option already carries. Read off AGE_WINDOW_DAYS so moving the window moves
+ * both together.
+ */
+export const AGE_WINDOW_DATE_STEPS = AGE_WINDOW_DAYS - 1;
 
 /**
  * The table.
@@ -308,10 +340,19 @@ export const LAYER_MANIFEST = {
     // than it saves in bytes.
   },
   gfwGaps: {
-    // Raised from 5. A 30-day global window of AIS disabling events is ~20k
-    // rows, every one of them five or more days old. Corroborating for the
-    // reason App.jsx gave: that the inference is Global Fishing Watch's rather
-    // than this app's does not change what kind of claim it is.
+    // Raised from 5. This used to be a 30-day global window of AIS disabling
+    // events -- ~20k rows, every one of them five or more days old -- and the
+    // backend now serves only the recent end of that sweep (gfw_gaps.py's
+    // PIN_LOOKBACK_DAYS), keeping the full month for the vessel priors nobody
+    // draws. Corroborating for the reason App.jsx gave: that the inference is
+    // Global Fishing Watch's rather than this app's does not change what kind
+    // of claim it is.
+    //
+    // No `age` entry, and that is not an oversight. This layer cannot meet the
+    // window -- its publisher is five days behind, so the rule would empty it
+    // permanently -- so the honest gate is the one already here: a reader
+    // reaches it by focusing a country or clicking a tanker, and every pin
+    // states its own age_days rather than being asked to pass for live.
     draw: { band: "COUNTRY" },
     fetch: "COUNTRY",
     cap: { COUNTRY: 400 },
@@ -703,6 +744,20 @@ export const LAYER_MANIFEST = {
     rank: (d) => Number(d.magnitude) || 0,
     collapse: { mode: "proximity", maxZoom: 6 },
     disposition: AUTO,
+    // Two publishers on two clocks in one layer, so one number cannot answer
+    // for both -- which is what `maxDays` being allowed to read the item is
+    // for. GVP issues one volcanic activity report a week and revises nothing
+    // in between, so a volcano pin *is* a week: aging it at three days would
+    // take a live eruption off the map four days before the next report
+    // supersedes it, and the layer would go quiet while the mountain did not.
+    // USGS's 2.5_day feed cannot serve a quake older than a day, so the three
+    // days on that half is a floor that should never bite. Declared anyway --
+    // "cannot happen" is a property of the feed as it stands today, not a
+    // promise this map should be making on its behalf.
+    age: {
+      maxDays: (d) => (d.kind === "volcano" ? 7 : AGE_WINDOW_DAYS),
+      at: (d) => d.time,
+    },
   },
   floods: {
     // Raised from 3. A GLOFAS basin centroid is a modelled point, and it should
@@ -713,6 +768,23 @@ export const LAYER_MANIFEST = {
     collapse: { mode: "proximity", maxZoom: 8 },
     disposition: AUTO,
     scoped: true,
+    // GDACS keeps a flood event open for weeks and revises it in place, and
+    // `is_current` is its own word for whether the event is still running (see
+    // backend/sources/floods.py, which carries the field verbatim for exactly
+    // this filter). An open flood is a fact about now however long ago the
+    // water rose, so it is exempt rather than aged -- what this gates is the
+    // *closed* ones, which the layer used to keep drawing at 0.75 opacity for
+    // up to the fourteen days config.py gives the kind.
+    //
+    // Aged from the last revision rather than from onset: an event GDACS
+    // closed yesterday is current information about an old flood, which is a
+    // different thing from an old record. Onset is the fallback for a record
+    // with no revision stamp, which is the honest reading when the publisher
+    // has told us nothing more recent.
+    age: {
+      maxDays: AGE_WINDOW_DAYS,
+      at: (d) => (d.is_current ? null : d.updated ?? d.time),
+    },
   },
 
   // ---- space --------------------------------------------------------------
@@ -729,6 +801,16 @@ export const LAYER_MANIFEST = {
     draw: { band: "THEATRE" },
     fetch: "THEATRE",
     disposition: AUTO,
+    // An upcoming launch has a T-0 in the future and therefore no age to be
+    // outside a window -- exempt, not aged. What this gates is the other half:
+    // launches.py's PREVIOUS_LIMIT takes the fifteen most recent launches
+    // whatever their dates, with no cutoff of its own, so on a slow week the
+    // tail of that list is a pad that last fired a fortnight ago drawn beside
+    // one firing tomorrow.
+    age: {
+      maxDays: AGE_WINDOW_DAYS,
+      at: (d) => (d.upcoming ? null : d.net),
+    },
   },
 
   // Task 24: client-propagated satellite layers. Stored CelesTrak element
@@ -835,11 +917,26 @@ export const LAYER_MANIFEST = {
     // THEATRE rather than WORLD: at world zoom a global thermal feed is mostly
     // agricultural burning, which is a smear rather than a signal. Over one
     // theatre it is the layer that shows something burning that should not be.
-    // The fetch cannot be gated at all -- the country card counts fires inside
-    // the country bbox -- which is precisely why this feed earns a viewport
-    // bbox instead of a band gate.
+    //
+    // The fetch used to be FETCH_ALWAYS, on the argument that the country card
+    // counts fires inside the country bbox and a band gate would take that row
+    // away -- with the viewport bbox standing in for the gate. Measured against
+    // the running backend, the bbox was not standing in for anything at the one
+    // band where it mattered: a WORLD viewport *is* the whole world, so
+    // `bboxCell` resolves to null there (see useOsintData.js) and the poll ships
+    // the unclipped feed. That is 184,770 records and 28.2 MB of JSON parsed
+    // every three minutes, at the one band where the layer draws nothing at all.
+    // A theatre-sized box over Europe and the Middle East is 1.8 MB; a country
+    // box over Ukraine is 435 kB.
+    //
+    // So the gate is the same THEATRE the layer draws at, and the country card
+    // keeps its row through FOCUS_FETCH_ONLY below rather than through a
+    // permanent global poll: focusing a country fetches the fires inside that
+    // country's bounds however far out the camera is, which is the only scope
+    // the card was ever reporting anyway ("Counted within the area currently
+    // loaded", see buildLivePicture in popups.js).
     draw: { band: "THEATRE" },
-    fetch: FETCH_ALWAYS,
+    fetch: "THEATRE",
     disposition: AUTO,
     scoped: true,
   },
@@ -972,6 +1069,81 @@ export const REFERENCE_ONLY_FEEDS = new Set([
 /** Every layer key the manifest knows about. */
 export const LAYER_KEYS = Object.keys(LAYER_MANIFEST);
 
+// --- the display age window ------------------------------------------------
+//
+// This map is a record of the last three days, and a pin older than that drawn
+// beside a live one is not extra information. It is a claim about *when*
+// something happened, made silently, and it is the one error a reader cannot
+// detect by looking -- a two-week-old radar return and a position reported
+// eight minutes ago are the same shape on the same tile.
+//
+// So the window lives here, beside the band and the cap, for the same reason
+// those do: it is a statement about what the map shows, and the file already
+// exists to hold exactly one copy of each of those.
+//
+// **This thins the presentation. It does not touch the data.** Every backend
+// window stays where it is and stays as wide as its own argument requires --
+// event_fusion needs GDELT's 30-day report lag to corroborate, dark_vessels
+// needs three days of AIS history before it can call a gap a gap, and the
+// eviction windows in config.py are measured from when a row was last written
+// rather than from when the world moved. None of that is this rule's business.
+// What a reader is *shown* is.
+//
+// A layer opts in with an `age` entry:
+//
+//   age: {
+//     maxDays  a number, or (item) => number when one layer carries two
+//              publishers on two clocks (see hazards below)
+//     at       (item) => unix SECONDS, or null/undefined to exempt this item
+//              from the window entirely -- which is how an open flood and a
+//              scheduled launch pass a rule about how old things are
+//   }
+//
+// Absence means "this layer cannot carry a stale record". That is a claim, not
+// a shrug, and tests/scene.test.js audits it.
+//
+// AGE_WINDOW_DAYS itself is declared above the manifest, which names it.
+
+const DAY_SECONDS = 86400;
+
+/** Does this layer gate on age at all? */
+export function hasAgeWindow(key) {
+  return Boolean(LAYER_MANIFEST[key]?.age);
+}
+
+/**
+ * How old an item on this layer may be, in days. Infinity where no rule exists.
+ *
+ * Takes the item because one layer can carry two publishers on two clocks, and
+ * a single number would have to be wrong for one of them.
+ */
+export function maxAgeDaysFor(key, item) {
+  const rule = LAYER_MANIFEST[key]?.age;
+  if (!rule) return Infinity;
+  return typeof rule.maxDays === "function" ? rule.maxDays(item) : rule.maxDays;
+}
+
+/**
+ * Is this item recent enough to draw?
+ *
+ * Undated items are kept, matching passesEventFilter: hiding a record because
+ * a field is missing drops data on the strength of nothing, and an absent
+ * timestamp is the publisher's silence rather than the reader's choice.
+ *
+ * `now` is a parameter rather than a Date.now() inside, so replay can age items
+ * against the moment being scrubbed to instead of against wall clock -- the
+ * same reason severity.js's ageDays takes one.
+ */
+export function withinAgeWindow(key, item, nowMs = Date.now()) {
+  const rule = LAYER_MANIFEST[key]?.age;
+  if (!rule) return true;
+  const at = rule.at(item);
+  if (!Number.isFinite(at)) return true;
+  const maxDays = maxAgeDaysFor(key, item);
+  if (!Number.isFinite(maxDays)) return true;
+  return nowMs / 1000 - at <= maxDays * DAY_SECONDS;
+}
+
 // --- promotion -------------------------------------------------------------
 //
 // What the camera is looking at may move a layer one band shallower or deeper.
@@ -997,6 +1169,16 @@ const HOT_PROMOTE = [
 // focus is an explicit act: it may also make corroborating layers eligible,
 // which no camera position may do.
 const FOCUS_PROMOTE = ["cities", "conflictHistory", "infra", "osmInfra"];
+
+// A focus lifts these layers' *fetch* gate and nothing else -- no band
+// promotion, so what draws at a given zoom is unchanged by clicking a country.
+//
+// Separate from FOCUS_PROMOTE because the two answer different questions, and
+// firms is the case that separates them. The country card needs the fire rows
+// for the country the reader just clicked, which is a fetch. It does not need
+// the global thermal heat canvas painted over a world view, which is what a band
+// promotion would also do -- and what the layer's own comment argues against.
+const FOCUS_FETCH_ONLY = ["firms"];
 
 /**
  * @param {object} ctx
@@ -1099,6 +1281,7 @@ function fetchZoomOf(key, entry, { focus, bypass }) {
   // A focused country is a request for that country's whole picture, so its
   // feeds are fetched regardless of how far out the camera happens to be.
   if (focus?.kind === "country" && FOCUS_PROMOTE.includes(key)) return null;
+  if (focus?.kind === "country" && FOCUS_FETCH_ONLY.includes(key)) return null;
   return floorOf(entry.fetch);
 }
 
