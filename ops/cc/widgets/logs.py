@@ -6,7 +6,7 @@ from textual.widgets import RichLog
 from ops.cc.collectors.logs import LogLine
 from ops.cc.theme import severity_style
 
-_LEVEL_STYLE = {"error": severity_style("down"), "warn": severity_style("warn"), "info": ""}
+_LEVEL_SEVERITY = {"error": "down", "warn": "warn"}
 
 
 class LogPane(RichLog):
@@ -16,6 +16,15 @@ class LogPane(RichLog):
         super().__init__(wrap=False, markup=False, max_lines=2000, **kwargs)
         self._filter = ""
         self._frozen = False
+        # Resolved on mount rather than at import: the styles are theme
+        # dependent, and there is no app -- and so no theme -- at import time.
+        self._level_style: dict[str, str] = {}
+
+    def on_mount(self) -> None:
+        self._level_style = {
+            level: severity_style(severity, self.app.theme)
+            for level, severity in _LEVEL_SEVERITY.items()
+        }
 
     def set_filter(self, text: str) -> None:
         self._filter = text.lower()
@@ -33,7 +42,7 @@ class LogPane(RichLog):
         if not self.matches(line):
             return
         text = Text(f"{line.service:<12} {line.text}")
-        style = _LEVEL_STYLE[line.level]
+        style = self._level_style.get(line.level)
         if style:
             text.stylize(style)
         self.write(text)

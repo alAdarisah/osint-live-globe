@@ -311,16 +311,23 @@ Remove each `animation: popup-in ...` declaration and the `@keyframes popup-in` 
 - [ ] **Step 4: Point the news list at the shared stagger**
 
 `.news-list` and `.notable-list` gain `.stagger-children`'s rules. Rather than
-editing JSX, add the selectors to the stagger block:
+editing JSX, add the selectors to the stagger block — **including the delay
+ladder**, not only the base rule. The animation without the per-child delays is
+every item entering in unison, which is the thing this step exists to prevent:
 
 ```css
+.stagger-children > *,
 .news-list > *,
 .notable-list > * {
   animation: panel-enter var(--t-panel) var(--e-out) both;
+  animation-delay: calc(var(--stagger-step) * 8);
 }
 ```
 
-and delete `news-item-in` and its keyframes, which is this animation with a
+and add `.news-list > :nth-child(N)` and `.notable-list > :nth-child(N)`
+alongside each of the eight `.stagger-children > :nth-child(N)` selectors.
+
+Then delete `news-item-in` and its keyframes, which is this animation with a
 different name and a 5px offset.
 
 - [ ] **Step 5: Run the token test**
@@ -476,13 +483,24 @@ function motionIsReduced() {
 export function useCountUp(target) {
   const [shown, setShown] = useState(target);
   const from = useRef(target);
-  // First load hands these counters their first real value at once -- a source
-  // going from 0 to 150,000 must not spend 420ms visibly spinning through six
-  // digits, which reads as a loading state rather than as an update.
   const seeded = useRef(false);
 
   useEffect(() => {
-    if (!seeded.current) {
+    // Two cases snap rather than tween, and they are the same case wearing two
+    // hats: a counter that has nothing to count up from.
+    //
+    // The mount run is the obvious one. The second is not: every counts object
+    // in this app starts as EMPTY_COUNTS, every key literally zero (see
+    // map/useLeafletMap.js), and the control panel mounts before the first poll
+    // lands. So the mount run seeds zero and the *first real value* arrives as
+    // an ordinary update -- which is how a source going from 0 to 150,000 spends
+    // 420ms visibly spinning through six digits and reads as a loading state
+    // rather than as an update.
+    //
+    // Hence: counting up from nothing is a load. The cost is that a layer
+    // genuinely going 0 -> 3 snaps too, which is a fair price for never
+    // spinning the odometer on page load.
+    if (!seeded.current || from.current === 0) {
       seeded.current = true;
       from.current = target;
       setShown(target);
@@ -500,19 +518,19 @@ export function useCountUp(target) {
     const startedAt = from.current;
     let frame = requestAnimationFrame(function step(now) {
       const value = tweenValue(startedAt, target, now - start, COUNT_DURATION_MS);
+      // Written here rather than in the cleanup, which is the subtle part.
+      // React keeps the destroy function from the run that created it and does
+      // not refresh it on renders where the deps did not change -- and setShown
+      // re-renders this component ~25 times without `target` moving. A cleanup
+      // that read `shown` would therefore read the value from before the tween
+      // started, so a counts update arriving mid-tween would visibly jump the
+      // number backwards before rolling up again. Counts change several times
+      // inside 420ms during a pan, so that is the common path, not the corner.
+      from.current = value;
       setShown(value);
       if (value !== target) frame = requestAnimationFrame(step);
-      else from.current = target;
     });
-    return () => {
-      cancelAnimationFrame(frame);
-      // Whatever was on screen is where the next tween starts, so a target that
-      // changes mid-tween continues from here instead of snapping back.
-      from.current = shown;
-    };
-    // `shown` is deliberately not a dependency: it changes every frame, and
-    // depending on it would restart the tween on each one.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => cancelAnimationFrame(frame);
   }, [target]);
 
   return shown;
@@ -702,6 +720,10 @@ const AMBIENT = 6;
  * @returns {string|null} a CSS duration, or null for "do not animate"
  */
 export function dotPeriod(secondsSinceSuccess) {
+  // Before the coercion, not after: Number(null) is 0, so a source that has
+  // never reported would otherwise read as one that reported this instant --
+  // the single most wrong answer this function can give.
+  if (secondsSinceSuccess === null || secondsSinceSuccess === undefined) return null;
   const age = Number(secondsSinceSuccess);
   if (!Number.isFinite(age) || age < 0 || age >= STALE_AFTER_SECONDS) return null;
 
@@ -1076,18 +1098,42 @@ if (FLASHES_ON_ARRIVAL.has(key)) {
 }
 ```
 
-In `buildMarker`, where the marker's icon `className` is assembled, append the
-class for an arriving record:
+The class goes on `d.icon.options.className`, in **both** `buildMarker` and
+`updateMarker`:
 
 ```js
 // One flash as it lands. buildMarker also runs when a known record scrolls
 // back into view, which is why the test is against the arrival set and not
 // against "is this marker new".
+//
+// className, never options.html: the html string is this file's repaint
+// change-test (see updateMarker), so a class baked into it makes every
+// arriving marker compare unequal on the next pass and get its DOM rebuilt --
+// which tears down the very animation it was added to start. className is
+// outside that test, which is what makes it free.
 const arriving = arrivedByKey[key]?.has(item[ID_FIELD[key]]) ? " marker-arrived" : "";
 ```
 
-and concatenate `arriving` onto the `className` string that decorator already
-produces.
+`updateMarker` must apply it too, or the layer's synchronous second pass strips
+it: `settlePlacement` marks the layer dirty whenever a declutter offset moves,
+which calls `renderMarkerLayer` again inside the same task, before the browser
+has painted once.
+
+That second pass is also why `arrivedByKey` cannot have a one-render lifetime.
+Store `{id → timestamp}` and treat an entry as live for `--t-settle`, expiring
+on read. The plan previously argued a timer would be "a second source of truth"
+about when the flash ends; that was wrong, because the layer reliably
+re-renders within milliseconds and the render count is the unreliable clock.
+
+Finally, in `skipHiddenLayer`, clear both maps for the layer:
+
+```js
+// A layer that goes dark stops being updated, so its id set goes stale. Coming
+// back is a re-seed, not an update -- without this, a conflict layer switched
+// off for an hour flashes every record that arrived meanwhile.
+delete seenIdsByKey[key];
+delete arrivedByKey[key];
+```
 
 - [ ] **Step 6: Write the CSS**
 
@@ -1098,8 +1144,20 @@ produces.
 
    Conflict, news, infrastructure and airspace only. The ship and aircraft
    layers turn over thousands of markers a refresh and a vessel appearing is
-   not news. */
-.marker-arrived {
+   not news.
+
+   Targets the inner <svg>, and that is load-bearing. Leaflet positions the
+   outer marker div with an inline translate3d, so animating transform there
+   parks the pin at the pane origin for the whole flash. One element in --
+   .entity-icon-wrap -- is no better: it carries the declutter offset and
+   rotation inline, so a transform animation on it snaps the glyph up to ~87px
+   back to its true point while its leader line keeps pointing where the glyph
+   used to be. A line that exists to say "the glyph is not where the record is"
+   would spend 420ms asserting the opposite. The wrapper also carries inline
+   opacity for age and confidence dimming, so animating opacity there flashes a
+   low-confidence event at full strength -- briefly claiming more certainty
+   than the record has. The <svg> child carries neither. */
+.marker-arrived .entity-icon-wrap > svg {
   animation: marker-arrived var(--t-settle) var(--e-out);
 }
 
@@ -1245,26 +1303,28 @@ git commit -m "Slide the folds open and let the controls give under a press"
 - [ ] **Step 1: Stagger the log lines**
 
 The loading screen is already the best-animated surface here; the radar sweep
-and the pending pulse stay exactly as they are. Only the log changes:
+and the pending pulse stay exactly as they are. Only the log changes.
+
+Do **not** restate the eight `nth-child` delay rules — Task 2 already wrote
+them once, under `.stagger-children`. Reuse that definition by adding
+`.loading-log` to the selector lists Task 2 created, exactly as `.news-list`
+and `.notable-list` are already there:
 
 ```css
-/* The boot log lands as a block, which reads as a repaint of a finished list.
-   In sequence it reads as a system coming up, which is what is actually
-   happening behind it. Eight steps, then flat -- same ceiling as every other
-   staggered list here. */
-.loading-log-line {
+.news-list > *,
+.notable-list > *,
+.loading-log > * {
   animation: panel-enter var(--t-panel) var(--e-out) both;
-  animation-delay: calc(var(--stagger-step) * 8);
 }
-.loading-log-line:nth-child(1) { animation-delay: 0ms; }
-.loading-log-line:nth-child(2) { animation-delay: var(--stagger-step); }
-.loading-log-line:nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
-.loading-log-line:nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
-.loading-log-line:nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
-.loading-log-line:nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
-.loading-log-line:nth-child(7) { animation-delay: calc(var(--stagger-step) * 6); }
-.loading-log-line:nth-child(8) { animation-delay: calc(var(--stagger-step) * 7); }
 ```
+
+and add `.loading-log > :nth-child(N)` alongside each of Task 2's eight
+`.stagger-children > :nth-child(N)` selectors, so the delay ladder has one
+definition in the stylesheet rather than two.
+
+`.loading-log` is the `<ul>` and `.loading-log-line` its `<li>` children, so
+the child combinator lands on the right element without touching
+`LoadingScreen.jsx`.
 
 The existing `transition: opacity ..., color ...` on `.loading-log-line` stays:
 it carries the pending → ok → warn transitions, which are a different thing
@@ -1371,7 +1431,7 @@ existing comment and extend it:
 :root.reduce-motion .country-shape.country-hot,
 :root.reduce-motion .dot.breathing,
 :root.reduce-motion .infra-hot-badge,
-:root.reduce-motion .marker-arrived,
+:root.reduce-motion .marker-arrived .entity-icon-wrap > svg,
 :root.reduce-motion .panel-enter,
 :root.reduce-motion .stagger-children > *,
 :root.reduce-motion .loading-log-line,
@@ -1400,7 +1460,7 @@ too:
   .country-shape.country-hot,
   .dot.breathing,
   .infra-hot-badge,
-  .marker-arrived,
+  .marker-arrived .entity-icon-wrap > svg,
   .panel-enter,
   .stagger-children > *,
   .loading-log-line,
