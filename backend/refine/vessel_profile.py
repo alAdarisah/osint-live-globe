@@ -113,6 +113,7 @@ import copy
 import logging
 
 from backend import config, infrastructure, storage
+from backend.refine import _cursor
 
 log = logging.getLogger("osint-globe.vessel_profile")
 
@@ -120,6 +121,21 @@ CURSOR_NAME = "vessel_profile_cursor"
 STATE_NAME = "vessel_profile_state"
 PROFILES_NAME = "vessel_profiles"
 HEALTH_NAME = "vessel_profiles"
+
+# Bump this whenever vessel_profile_state's own on-disk shape changes -- see
+# backend/refine/_cursor.py's load_state and port_calls.py's own identical
+# comment (Task 52), which this mirrors exactly: every vessel_profile_state
+# document on disk before this change is a bare {mmsi: entry} map with no
+# "schema_version" key, which _cursor.load_state treats as version 1 by
+# default. This change wraps that map under its own "entities" key alongside
+# the version stamp -- a bare top-level "schema_version" key would otherwise
+# collide with a real mmsi, since every other top-level key in this document
+# is read as one (see apply_history/_evict_lru). Version 2 is deliberately
+# the *first* version this deploy expects, so that wrapping change is itself
+# what this guard visibly (logged, not silent) recovers from on rollout.
+# Bump again, past 2, whenever a *later* shape change happens to the
+# per-hull accumulator entry shape inside "entities".
+STATE_SCHEMA_VERSION = 2
 
 # Rows read from entity_history per pass. Same figure and the same reasoning as
 # port_calls.BATCH_LIMIT: bounded so a job that has fallen behind (a restart, a
@@ -241,9 +257,13 @@ def apply_history(rows: list[dict], state: dict, now_ts: float) -> tuple[dict, s
     returns them) -> (the state to persist for next time, which hulls this
     batch actually touched).
 
-    Pure and DB-free -- `state` is a plain dict shaped like the
-    "vessel_profile_state" reference document, not a live connection, which is
-    what makes this testable without a database. The input `state` is never
+    Pure and DB-free -- `state` is a plain {mmsi: entry} dict, not a live
+    connection, which is what makes this testable without a database. This is
+    the unwrapped shape "vessel_profile_state" actually persists under its
+    own "entities" key alongside a "schema_version" stamp -- see _load_state
+    and STATE_SCHEMA_VERSION's own comment -- so apply_history itself, and
+    every existing test of it, never has to know that wrapper exists. The
+    input `state` is never
     mutated, matching apply_positions in port_calls.py and for the same
     reason: a caller retrying a batch on `state` it already holds must get an
     independent result, not one built on an entry an earlier attempt already
@@ -350,14 +370,17 @@ def build_profile(
 # --- storage plumbing ---------------------------------------------------------
 
 
-async def _load_cursor() -> int:
-    doc = await storage.reference(CURSOR_NAME)
-    return int(doc["last_id"]) if isinstance(doc, dict) and isinstance(doc.get("last_id"), (int, float)) else 0
-
-
 async def _load_state() -> dict:
-    doc = await storage.reference(STATE_NAME)
-    return doc if isinstance(doc, dict) else {}
+    """vessel_profile_state's own {mmsi: entry} accumulator, or {} if there
+    is none yet or the stored shape does not match STATE_SCHEMA_VERSION --
+    see _cursor.load_state and this module's own STATE_SCHEMA_VERSION
+    comment. The document on disk wraps that flat map under its own
+    "entities" key, alongside the version stamp; unwrapped back here so
+    apply_history/_evict_lru/build_profile (and every existing test of them)
+    keep operating on the same plain {mmsi: entry} dict they always have."""
+    doc = await _cursor.load_state(storage, STATE_NAME, STATE_SCHEMA_VERSION, job_name="vessel_profile")
+    entities = doc.get("entities")
+    return entities if isinstance(entities, dict) else {}
 
 
 async def _load_port_labels() -> dict:
@@ -409,7 +432,7 @@ async def run_once() -> dict:
     See the module docstring for why the cursor advances unconditionally here,
     unlike port_calls.run_once's write-verified advance.
     """
-    cursor = await _load_cursor()
+    cursor = await _cursor.load_cursor(storage, CURSOR_NAME)
     rows = await storage.entity_history_since("ais", cursor, BATCH_LIMIT)
     if not rows:
         return {"read": 0, "touched": 0, "profiles": 0, "ok": True}
@@ -450,11 +473,22 @@ async def run_once() -> dict:
         for mmsi, entry in new_state.items()
     }
 
-    await storage.record_reference(STATE_NAME, new_state)
+    await storage.record_reference(
+        STATE_NAME, {"schema_version": STATE_SCHEMA_VERSION, "entities": new_state},
+    )
     await storage.record_reference(PROFILES_NAME, profiles)
-    await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    # Unlike STATE_NAME/PROFILES_NAME above -- deliberately unverified, see
+    # this function's own docstring -- the cursor write's bool is not safe to
+    # discard (pre-merge review, Also fix 1). A dropped cursor write is
+    # harmless to the *data* here (apply_history/build_profile are idempotent
+    # under replay, so reprocessing the same rows next pass just recomputes
+    # the same numbers), but reporting "ok": True regardless meant
+    # source_health stayed green while this job silently reprocessed the same
+    # backlog forever, never actually advancing -- a real defect even though
+    # it is a health-reporting one rather than a data-loss one.
+    cursor_ok = await _cursor.advance_cursor(storage, CURSOR_NAME, rows[-1]["id"])
 
-    return {"read": len(rows), "touched": len(touched), "profiles": len(profiles), "ok": True}
+    return {"read": len(rows), "touched": len(touched), "profiles": len(profiles), "ok": cursor_ok}
 
 
 async def derive_forever():
@@ -467,12 +501,30 @@ async def derive_forever():
     while True:
         try:
             summary = await run_once()
-            log.info(
-                "Vessel profiles: read %d AIS movement rows, %d hull(s) reported this "
-                "pass, %d profile(s) held",
-                summary["read"], summary["touched"], summary["profiles"],
-            )
-            await storage.record_source_health(HEALTH_NAME, summary["profiles"], True)
+            if summary["ok"]:
+                log.info(
+                    "Vessel profiles: read %d AIS movement rows, %d hull(s) reported this "
+                    "pass, %d profile(s) held",
+                    summary["read"], summary["touched"], summary["profiles"],
+                )
+                await storage.record_source_health(HEALTH_NAME, summary["profiles"], True)
+            else:
+                # run_once's data itself is fine here -- see its own docstring
+                # on why STATE_NAME/PROFILES_NAME are unverified by design --
+                # it is only the cursor write that failed (pre-merge review,
+                # Also fix 1). Reported red anyway: a cursor that never
+                # advances means this job silently reprocesses the same
+                # backlog every pass, which source_health has to be able to
+                # show rather than read as a quiet, healthy no-op.
+                log.warning(
+                    "Vessel profiles: read %d AIS movement rows but the cursor write "
+                    "failed -- the same batch will be re-read next pass",
+                    summary["read"],
+                )
+                await storage.record_source_health(
+                    HEALTH_NAME, None, False,
+                    "the cursor write failed; the same rows will be re-read next pass",
+                )
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
             log.warning("Vessel profile derivation failed: %s", exc)
             await storage.record_source_health(HEALTH_NAME, None, False, str(exc))

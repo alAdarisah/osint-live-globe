@@ -99,6 +99,7 @@ import math
 from datetime import date, datetime, timedelta, timezone
 
 from backend import config, storage
+from backend.refine import _cursor
 from backend.refine.vessel_profile import cargo_class
 
 log = logging.getLogger("osint-globe.lane_density")
@@ -262,6 +263,24 @@ CHOKEPOINT_STATE_NAME = "chokepoint_state"
 # The brief's own name -- this is what GET /api/chokepoints reads.
 CHOKEPOINT_DOC_NAME = "chokepoint_transits"
 
+# Bump this whenever chokepoint_state's own day-entry shape changes -- see
+# backend/refine/_cursor.py's load_state and port_calls.py's own
+# STATE_SCHEMA_VERSION comment for the incident this guards against (Task
+# 52): _finalize_and_prune's own dict access on a day entry (`entry.pop
+# ("mmsis", {})`, `entry["total"]`) would raise on a future shape it does not
+# recognise, the same way port_calls' _advance would. Unlike port_calls.py/
+# flight_legs.py/vessel_profile.py, this document's top level is already a
+# fixed set of named fields ("boxes", "days_seen", "latest_day") rather than
+# a flat map keyed by entity id -- adding "schema_version" as one more named
+# field alongside them is not itself a shape change the way wrapping a flat
+# {mmsi: entry} map would be (see those three modules' own comments), so this
+# starts at plain 1 rather than a deliberate 1->2 bump: every chokepoint_state
+# document already on disk is compatible with version 1 by construction, and
+# _cursor.load_state's own "missing key defaults to 1" rule (see its
+# docstring) means adopting this guard does not, by itself, discard anything
+# already durably accumulated.
+CHOKEPOINT_STATE_SCHEMA_VERSION = 1
+
 # How many trailing calendar days the served document covers. Also the bound
 # on how many day-entries this job keeps per box once a day is old enough to
 # have collapsed to a plain count -- see _finalize_and_prune.
@@ -394,6 +413,13 @@ def compute_chokepoints(rows: list[dict], state: dict) -> dict:
     compute_cells applies.
     """
     new_state = copy.deepcopy(state) if state else {}
+    # Stamped on every call, including a fresh {} -- see
+    # CHOKEPOINT_STATE_SCHEMA_VERSION's own comment and _cursor.load_state,
+    # which run_once already routes `state` through before it ever reaches
+    # here (Task 52). Idempotent under replay of the same (rows, state) pair
+    # like every other field this function sets, since `state` already
+    # carries whatever version it was itself stamped with.
+    new_state["schema_version"] = CHOKEPOINT_STATE_SCHEMA_VERSION
     boxes = new_state.setdefault("boxes", {})
     days_seen = set(new_state.get("days_seen", []))
     latest_day = new_state.get("latest_day")
@@ -535,11 +561,6 @@ def build_chokepoint_document(state: dict) -> dict:
     }
 
 
-async def _load_cursor() -> int:
-    doc = await storage.reference(CURSOR_NAME)
-    return int(doc["last_id"]) if isinstance(doc, dict) and isinstance(doc.get("last_id"), (int, float)) else 0
-
-
 async def run_once() -> dict:
     """One incremental pass over new AIS positions. Returns a small summary
     for logging and health.
@@ -576,13 +597,21 @@ async def run_once() -> dict:
     call upsert_lane_cells a second time on a batch it had already durably
     applied.
     """
-    cursor = await _load_cursor()
+    cursor = await _cursor.load_cursor(storage, CURSOR_NAME)
     rows = await storage.entity_history_since("ais", cursor, BATCH_LIMIT)
     if not rows:
         return {"read": 0, "cells": 0, "ok": True}
 
-    old_choke_state = await storage.reference(CHOKEPOINT_STATE_NAME)
-    new_choke_state = compute_chokepoints(rows, old_choke_state if isinstance(old_choke_state, dict) else {})
+    # _cursor.load_state discards (and logs) a stored chokepoint_state whose
+    # own schema_version does not match CHOKEPOINT_STATE_SCHEMA_VERSION,
+    # rather than handing a shape _finalize_and_prune's own dict access does
+    # not recognise straight to compute_chokepoints (Task 52) -- see that
+    # constant's own comment. A reset here never touches CURSOR_NAME, so it
+    # costs at most this job's own trailing chokepoint trend, never a rewind.
+    old_choke_state = await _cursor.load_state(
+        storage, CHOKEPOINT_STATE_NAME, CHOKEPOINT_STATE_SCHEMA_VERSION, job_name="lane_density",
+    )
+    new_choke_state = compute_chokepoints(rows, old_choke_state)
     choke_doc = build_chokepoint_document(new_choke_state)
     choke_state_ok = await storage.record_reference(CHOKEPOINT_STATE_NAME, new_choke_state)
     choke_doc_ok = choke_state_ok and await storage.record_reference(CHOKEPOINT_DOC_NAME, choke_doc)
@@ -594,8 +623,29 @@ async def run_once() -> dict:
     if not wrote:
         return {"read": len(rows), "cells": 0, "ok": False}
 
-    await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
-    return {"read": len(rows), "cells": len(cells), "ok": True}
+    # This function's own docstring calls the cursor "the outermost gate of
+    # all" -- pre-merge review, Also fix 1: that bool used to be discarded
+    # here, so a Postgres hiccup on exactly this one write still reported
+    # "ok": True. Checking it doesn't undo upsert_lane_cells' own
+    # non-idempotence -- that write already landed durably, and if the cursor
+    # write above it fails, the next pass reads the same rows from the same
+    # unmoved cursor and calls upsert_lane_cells on them a second time,
+    # double-counting every cell this batch touched (see the module
+    # docstring's own note on why the two writes are ordered idempotent-first
+    # for exactly this reason). What checking the bool does fix is health
+    # reporting: this failure is now visible as a red source_health row
+    # rather than silently reprocessing on every subsequent pass while
+    # looking healthy. Actually preventing the double-count on a cursor-write
+    # failure would need retrying that one write in place, which is a bigger
+    # change than this pass -- Task 52 gave every state-holding refine job a
+    # shared, versioned load_state (see backend/refine/_cursor.py), but
+    # deliberately left this ordering -- which write has to durably land
+    # before which other one, and in what sequence -- exactly as bespoke and
+    # visible at each job's own call site as it already was; see that
+    # module's own docstring for why collapsing this into the shared module
+    # too was judged the riskier move, not merely an unmade one.
+    cursor_ok = await _cursor.advance_cursor(storage, CURSOR_NAME, rows[-1]["id"])
+    return {"read": len(rows), "cells": len(cells), "ok": cursor_ok}
 
 
 async def _tick() -> None:

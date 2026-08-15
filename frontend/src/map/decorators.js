@@ -2864,6 +2864,18 @@ export const WATER_STYLE = {
   svg: SVG.wave, color: WATER_FILL_COLOR, label: "Water bodies (Natural Earth)", token: "water.fill",
 };
 
+// ---- day/night terminator (Task 46, computed client-side -- map/solarMath.js) ----
+//
+// No palette token, deliberately: the fill colour is a fixed constant in
+// createTerminatorLayer (map/layers.js), the same "the palette system has
+// never driven this" treatment the heat-layer gradients get (see that
+// file's own note by createFirmsLayers) -- a single translucent night-shade
+// fill has no per-kind variation for a colour picker to choose between, and
+// this layer draws no marker for icons.colors to reach either.
+export const TERMINATOR_STYLE = {
+  svg: SVG.dayNight, color: "#3a4a6b", label: "Day/night terminator",
+};
+
 export function cableLandingStyle(d) {
   return themedStyle(d?.planned ? CABLE_PLANNED_STYLE : CABLE_LANDING_STYLE, "cables");
 }
@@ -3647,6 +3659,14 @@ const EMERGENCY_SQUAWK_LABEL = {
   "7600": "radio failure",
   "7700": "general emergency",
 };
+
+// The three codes above, as a plain list -- exported so a squawk-equals
+// alert rule (Task 42's AlertRulesSection) can offer exactly these three as
+// its picker options rather than a free-text field that could be typed as
+// any of the 4,096 possible transponder codes almost none of which mean
+// anything. One source of truth for "which codes are reserved emergency
+// codes" rather than a second copy of EMERGENCY_SQUAWK_LABEL's own keys.
+export const EMERGENCY_SQUAWK_CODES = Object.keys(EMERGENCY_SQUAWK_LABEL);
 
 /** What a squawk means, if it is one of the three reserved emergency codes --
  *  null for every other code, which is the overwhelming majority and carries

@@ -221,7 +221,7 @@ export const POLL_CONFIG = [
   // the same document. Not zoom-gated despite attaching to a zoom-gated layer:
   // it is ~180 kB once, and the airfields toggle can be switched on at any time.
   { key: "airfieldActivity", url: "/api/airfield-activity", intervalMs: 30 * 60000 },
-  // Navy-classified AIS presence per theatre/port with a 7-day trend
+  // Navy-classified AIS presence per theatre/port with a day-over-day trend
   // (backend/refine/naval_presence.py), recomputed there four times a day --
   // same "poll no faster than the document actually changes" reasoning as
   // escalation/airfieldActivity above.
@@ -839,37 +839,49 @@ export function useOsintData({
       })
       .catch((err) => console.warn("Failed to load submarine cables:", err));
 
-    // Documents fetched on demand rather than at boot, once each, and never
-    // polled. The whole document is handed on so a popup can state its own
-    // provenance rather than having it restated in the renderer.
+    // Whole documents fetched the first time something switches their layer on,
+    // once each, never polled. The document is handed on entire so a popup can
+    // state its own provenance rather than having it restated in the renderer.
     //
-    // Railways is here because its manifest entry already says it should be:
-    // `fetch: FETCH_MANUAL` and `disposition: MANUAL`, which together mean the
-    // resolver never switches it on and a country focus never drags it in --
-    // only an operator ticking its box in the control drawer does. It was
-    // nevertheless fetched at boot beside the cables document, which measured
-    // against the running backend is 20.4 MB of JSON (4.7 MB on the wire) parsed
-    // and held by every reader, for linework that is off by default and that
-    // most sessions never draw a metre of.
+    // The same shape the lakes fetch in createMapController.js's setLayerVisible
+    // already uses, and for the same reason -- it lives here rather than there
+    // only because these two have real layers of their own, so their documents
+    // belong beside the cables/water/infrastructure fetches below.
     //
-    // Cables deliberately stays at boot above: it is a twentieth of the size,
-    // and unlike railways it is CORROBORATING, so clicking a port or a landing
+    // Both entries are here because their own manifest entries already say they
+    // should be: `fetch: FETCH_MANUAL` and `disposition: MANUAL` together mean
+    // the resolver never switches them on and a country focus never drags them
+    // in -- only a checkbox, a stored configuration or a followed link does.
+    // They were nevertheless fetched at boot, which measured against the running
+    // backend is 20.4 MB and 20.7 MB of JSON (4.7 MB and 6.3 MB on the wire)
+    // parsed and held by every reader, for two layers that are off by default
+    // and that most sessions never draw a metre of.
+    //
+    // Cables and marine water deliberately stay at boot below. Cables is a
+    // twentieth of the size and CORROBORATING, so clicking a port or a landing
     // point is enough to put it on the map -- there is no single toggle to hang
-    // a lazy fetch off.
+    // a lazy fetch off. Marine water is 1.0 MB and is the basemap's own
+    // coastline context, on from the start.
     const ONE_SHOT = {
       railways: {
         url: "/api/railways",
         deliver: (data) => onDataRef.current("railways", data || { lines: [] }),
         label: "railway linework",
       },
+      powerLines: {
+        url: "/api/power-lines",
+        deliver: (data) => onDataRef.current("powerLines", data || { lines: [] }),
+        label: "transmission lines",
+      },
     };
 
     fetchOneShotRef.current = (key) => {
       const entry = ONE_SHOT[key];
       if (!entry || oneShotStartedRef.current.has(key)) return;
-      // Marked before the request, not after, so a reader toggling the layer off
-      // and on again while the first one is still in flight does not start a
-      // second copy of a multi-megabyte download.
+      // Marked before the request, not after -- the same in-flight guard the
+      // lakes fetch keeps, so a reader flipping the checkbox off and on again
+      // while the first one is still arriving does not start a second copy of a
+      // multi-megabyte download.
       oneShotStartedRef.current.add(key);
       fetchJson(entry.url)
         .then((data) => {
@@ -877,23 +889,13 @@ export function useOsintData({
           entry.deliver(data);
         })
         .catch((err) => {
-          // Cleared on failure so the next toggle retries. A layer that failed
-          // to load once and then silently refuses to ever try again is worse
-          // than one that is slow.
+          // Cleared on failure so the next toggle retries, exactly as the lakes
+          // fetch resets waterLakesFeatures to null. A layer that failed once and
+          // then silently refuses to ever try again is worse than a slow one.
           oneShotStartedRef.current.delete(key);
           console.warn(`Failed to load ${entry.label}:`, err);
         });
     };
-
-    // Transmission-line geometry (Task 28, backend/sources/power_lines.py) --
-    // same treatment as railways just above: a whole document, hard-cached
-    // for a day, fetched once at boot rather than polled.
-    fetchJson("/api/power-lines")
-      .then((data) => {
-        if (cancelled) return;
-        onDataRef.current("powerLines", data || { lines: [] });
-      })
-      .catch((err) => console.warn("Failed to load transmission lines:", err));
 
     // Seas, gulfs, bays and straits -- marine only (see backend/sources/
     // water_bodies.py and backend/app.py's water_endpoint for why lakes and
@@ -1071,7 +1073,7 @@ export function useOsintData({
     reapplyTransform,
     // Fetches an on-demand document the first time something asks for it. Wired
     // to the layer toggle in App.jsx -- see ONE_SHOT above for what is in it and
-    // why railways in particular is not fetched at boot.
+    // why railways and power lines in particular are not fetched at boot.
     ensureOneShot,
   };
 }

@@ -364,19 +364,108 @@ def test_callsign_is_backfilled_from_a_later_row_without_overwriting():
     assert upserts[0]["callsign"] == "ABC123"
 
 
+# --- FLIGHT_LEGS_STATE_CAP: a population bound STATE_PRUNE_SECONDS alone
+# does not provide (a busy window can hold an unbounded number of distinct
+# airframes before any of them individually ages out) -----------------------
+
+
+def _closable_entry(ts):
+    """A state entry with no open leg -- just the "last" bridge -- so it is
+    eligible for _evict_state to drop."""
+    return {"last": {"on_ground": True, "altitude_state": None, "ts": ts}}
+
+
+def _open_leg_entry(ts):
+    """A state entry with an open leg, at whatever "last" ts -- ineligible
+    for _evict_state to drop no matter how old."""
+    entry = _closable_entry(ts)
+    entry["leg"] = {
+        "departed_at": ts, "departure_observed": True, "origin_code": None,
+        "callsign": None, "max_alt_ft": None, "distance_km": 0.0,
+        "last_lat": 0.0, "last_lon": 0.0, "arrived_at": None, "dest_code": None,
+        "arrival_observed": False, "last_seen_at": ts,
+    }
+    return entry
+
+
+def test_evict_state_is_a_no_op_under_the_cap():
+    state = {"a": _closable_entry(1.0), "b": _closable_entry(2.0)}
+    assert fl._evict_state(state, cap=5) == state
+
+
+def test_evict_state_drops_the_oldest_closable_entries_first():
+    state = {
+        "old": _closable_entry(0.0),
+        "mid": _closable_entry(100.0),
+        "new": _closable_entry(200.0),
+    }
+    kept = fl._evict_state(state, cap=2)
+    assert set(kept) == {"mid", "new"}
+
+
+def test_evict_state_never_drops_an_open_leg_even_when_it_is_the_oldest():
+    """The Task 23 failure mode reached by a different door: dropping the
+    oldest entry blindly would preferentially evict exactly the open legs,
+    since a leg waiting on an arrival is often the longest-lived entry in
+    the state. An evicted open leg never closes -- see _evict_state's own
+    docstring."""
+    state = {
+        "stale_open": _open_leg_entry(0.0),        # oldest of all -- must survive
+        "newer_closable_1": _closable_entry(100.0),
+        "newer_closable_2": _closable_entry(200.0),
+    }
+    kept = fl._evict_state(state, cap=1)
+    assert "stale_open" in kept
+    assert kept["stale_open"]["leg"]["arrived_at"] is None
+    # Both closable entries lost to the cap -- only the protected leg remains
+    # plus nothing else, since keep_count = max(1 - 1, 0) == 0.
+    assert "newer_closable_1" not in kept
+    assert "newer_closable_2" not in kept
+
+
+def test_evict_state_can_leave_the_population_over_cap_when_open_legs_alone_exceed_it():
+    """Not a promise this function breaks -- it only ever bounds the entries
+    it is safe to touch (see its own docstring's last paragraph)."""
+    state = {"a": _open_leg_entry(0.0), "b": _open_leg_entry(1.0), "c": _closable_entry(2.0)}
+    kept = fl._evict_state(state, cap=1)
+    assert set(kept) == {"a", "b"}  # both open legs kept; the closable one is dropped
+
+
+def test_run_once_caps_the_persisted_state_population(monkeypatch):
+    """End to end: a batch that leaves far more no-open-leg entries than
+    FLIGHT_LEGS_STATE_CAP must not persist all of them."""
+    small_cap = 3
+    monkeypatch.setattr(fl, "FLIGHT_LEGS_STATE_CAP", small_cap)
+    rows = [
+        pos(i + 1, float(i), on_ground=True, altitude=30000.0, icao24=f"air{i:02d}")
+        for i in range(10)
+    ]
+    fake = _FakeStorage(rows)
+    monkeypatch.setattr(fl, "storage", fake)
+
+    result = _run(fl.run_once())
+    assert result["ok"] is True
+    entities = fake.docs[fl.STATE_NAME]["entities"]
+    assert len(entities) == small_cap
+
+
 # --- the cursor: advancing, and never asked twice ----------------------------
 
 
 class _FakeStorage:
     """Just enough of backend.storage to drive run_once() without Postgres --
-    mirrors test_port_calls.py's own _FakeStorage exactly."""
+    mirrors test_port_calls.py's own _FakeStorage exactly, including
+    `fail_names` for failing only the named reference_snapshots write (see
+    test_a_failed_state_write_holds_the_cursor_back_and_does_not_double_the_
+    open_leg below, the aviation twin of test_port_calls.py's own equivalent)."""
 
-    def __init__(self, rows, write_ok=True):
+    def __init__(self, rows, write_ok=True, fail_names=frozenset()):
         self.history = rows
         self.docs = {}
         self.calls = []
         self.leg_batches = []
         self.write_ok = write_ok
+        self.fail_names = set(fail_names)
 
     async def entity_history_since(self, kind, after_id, limit):
         self.calls.append(after_id)
@@ -386,7 +475,10 @@ class _FakeStorage:
         return self.docs.get(name)
 
     async def record_reference(self, name, payload):
+        if not self.write_ok or name in self.fail_names:
+            return False
         self.docs[name] = payload
+        return True
 
     async def record_flight_legs(self, rows):
         self.leg_batches.append(rows)
@@ -449,6 +541,80 @@ def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     assert retry["legs"] == 1
     assert fake.calls == [0, 0]  # both passes started from the same cursor
     assert fake.docs["flight_legs_cursor"] == {"last_id": 2}
+
+
+def test_a_failed_state_write_holds_the_cursor_back_and_does_not_double_the_open_leg(monkeypatch):
+    """Pre-merge review, Critical: the aviation twin of test_port_calls.py's
+    own equivalent test. record_flight_legs durably wrote the open leg, but
+    the state document write that follows it failed on its own -- the old
+    code discarded that bool and wrote the cursor anyway, which lost the only
+    durable record that this airframe already has an open leg. The next
+    transition this icao24 makes would then open a second, unrelated leg
+    rather than ever closing the first one."""
+    rows = [pos(1, 0.0, on_ground=True, airfield_km=1.0), pos(2, 60.0, on_ground=False, airfield_km=1.0)]
+    fake = _FakeStorage(rows, fail_names={fl.STATE_NAME})
+    monkeypatch.setattr(fl, "storage", fake)
+
+    first = _run(fl.run_once())
+    assert first["ok"] is False
+    assert first["legs"] == 0
+    # The leg itself did land durably (record_flight_legs is idempotent and
+    # ran first) -- what's missing is the state that would stop it being
+    # opened a second time.
+    assert len(fake.leg_batches) == 1
+    assert fake.leg_batches[0][0]["departed_at"] == 60.0  # the row that observed the transition
+    assert fake.leg_batches[0][0]["arrived_at"] is None
+    # Nothing else is durable: neither the state document nor the cursor.
+    assert fl.STATE_NAME not in fake.docs
+    assert fl.CURSOR_NAME not in fake.docs
+
+    # The database recovers; the same batch -- read from the same untouched
+    # cursor, against the same (still-empty) state -- is replayed.
+    fake.fail_names.clear()
+    retry = _run(fl.run_once())
+    assert retry["ok"] is True
+    assert retry["legs"] == 1
+    assert fake.calls == [0, 0]  # both passes started from the same cursor
+    assert fake.docs[fl.CURSOR_NAME] == {"last_id": 2}
+
+    # Idempotent replay, not a second leg: the retry's own batch is exactly
+    # the first attempt's batch, not a second departure opened alongside it.
+    assert len(fake.leg_batches) == 2
+    assert fake.leg_batches[0] == fake.leg_batches[1]
+    assert fake.docs[fl.STATE_NAME]["entities"][ICAO]["leg"]["arrived_at"] is None
+
+
+# --- Task 52: recovering from an old-shaped state document -----------------
+
+
+def test_run_once_recovers_from_the_pre_wrap_state_shape(monkeypatch, caplog):
+    """Every flight_legs_state document on disk before Task 52 is a bare
+    {icao24: entry} map -- no "entities" key, no "schema_version" key -- the
+    aviation twin of test_port_calls.py's own equivalent test. Drives the
+    whole stack through run_once() itself -- _load_state, apply_positions,
+    both writes -- not just the version check in isolation."""
+    old_shaped_state = {ICAO: {"last": {"on_ground": True, "altitude_state": None, "ts": -600.0}}}
+    rows = [pos(1, 0.0, on_ground=True, airfield_km=1.0), pos(2, 60.0, on_ground=False, airfield_km=1.0)]
+    fake = _FakeStorage(rows)
+    fake.docs[fl.STATE_NAME] = old_shaped_state
+    monkeypatch.setattr(fl, "storage", fake)
+
+    with caplog.at_level("WARNING", logger="osint-globe.refine"):
+        result = _run(fl.run_once())
+    assert result["ok"] is True  # did not raise
+    assert any("schema_version" in r.message for r in caplog.records)  # logged, not silent
+
+    # The old "last" pointer is gone -- state was discarded wholesale, not
+    # selectively repaired -- so this pass's own on_ground transition opens a
+    # fresh leg exactly as it would against a genuinely empty state (not, for
+    # instance, comparing against the discarded on_ground=True and treating
+    # this as a continuation of a leg that was never durably recorded).
+    assert result["legs"] == 1
+    assert fake.docs[fl.STATE_NAME]["schema_version"] == fl.STATE_SCHEMA_VERSION
+    assert fake.docs[fl.STATE_NAME]["entities"][ICAO]["leg"]["departure_observed"] is True
+    # The cursor still advanced past this pass's own rows -- a state reset
+    # must never rewind or stall the cursor.
+    assert fake.docs[fl.CURSOR_NAME] == {"last_id": 2}
 
 
 def test_apply_positions_does_not_mutate_the_state_it_was_given():

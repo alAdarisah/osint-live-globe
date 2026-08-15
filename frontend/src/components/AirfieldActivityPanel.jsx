@@ -24,8 +24,9 @@ import LocateIcon from "./icons/LocateIcon";
 import { fetchJson } from "../api";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import {
-  AIRFIELD_SORT_KEYS, airfieldRows, militaryShare, sortAirfields, trafficTrend,
+  AIRFIELD_SORT_KEYS, airfieldActivityEmptyMessage, airfieldRows, militaryShare, sortAirfields, trafficTrend,
 } from "./airfieldPanelLogic";
+import { REFINE_PANEL_STATUS, REFINE_PANEL_STATUS_BADGE, REFINE_PANEL_STATUS_TEXT, classifyRefinePanelStatus } from "./refinePanelStatus";
 
 const SORT_LABEL = {
   aircraft: "Total movements", military_aircraft: "Military movements",
@@ -96,14 +97,26 @@ export default function AirfieldActivityPanel({ onLocate, isMobile }) {
   const [sortDir, setSortDir] = useState("desc");
 
   const [activity, setActivity] = useState(null);
+  const [hasFetchedOnce, setHasFetchedOnce] = useState(false);
+  const [fetchFailed, setFetchFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       fetchJson("/api/airfield-activity")
         .then((data) => {
-          if (!cancelled) setActivity(data || {});
+          if (cancelled) return;
+          setActivity(data || {});
+          setHasFetchedOnce(true);
+          setFetchFailed(false);
         })
-        .catch(() => {}); // an empty panel on a failed fetch, not an error banner
+        .catch(() => {
+          // Same discipline as ChokepointPanel/InfraRiskPanel (see
+          // refinePanelStatus.js): only flips `fetchFailed`, and only changes
+          // what renders when no earlier attempt has ever succeeded, so a
+          // transient hiccup after a working panel does not blank out data
+          // the reader already has.
+          if (!cancelled) setFetchFailed(true);
+        });
     };
     load();
     const id = setInterval(load, REFRESH_INTERVAL_MS);
@@ -141,7 +154,58 @@ export default function AirfieldActivityPanel({ onLocate, isMobile }) {
     [activity, sortKey, sortDir]
   );
 
-  if (!rows.length) return null;
+  // `hasDocument: true` unconditionally, not a real check of `activity`'s own
+  // shape -- see airfieldActivityEmptyMessage's module note for why this
+  // panel, unlike ChokepointPanel/InfraRiskPanel, has no reliable way to
+  // tell "the refine process has not written a pass yet" apart from "it
+  // has, and genuinely no field had any traffic": GET /api/airfield-activity
+  // carries no wrapper key that survives an empty result the way `boxes`/
+  // `events_searched` do for those two. So this only ever classifies LOADING
+  // (nothing back yet) and ERROR (the fetch itself failed) -- both true
+  // client-side facts independent of the document -- and never claims
+  // MISSING. A successful-but-empty fetch is READY, same as any other, and
+  // gets its own honest sentence below rather than a status this module
+  // cannot actually back up.
+  const status = classifyRefinePanelStatus({ hasFetchedOnce, fetchFailed, hasDocument: true });
+
+  // LOADING: the ordinary first instant after mount, before any response has
+  // landed -- nothing renders yet, no flash of an error state that turns out
+  // not to be one.
+  if (status === REFINE_PANEL_STATUS.LOADING) return null;
+
+  // ERROR: the fetch itself failed and no earlier attempt ever succeeded --
+  // a real, visible header (not silence) with its own badge word and, once
+  // expanded, refinePanelStatus.js's own sentence, worded consistently with
+  // ChokepointPanel/InfraRiskPanel's identical handling. No sort controls or
+  // list, since there is nothing fetched to sort.
+  if (status === REFINE_PANEL_STATUS.ERROR) {
+    return (
+      <aside id="airfieldPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+        <div
+          {...handleProps}
+          className={`notable-header ${handleProps.className || ""}`}
+          role="button"
+          tabIndex={0}
+          aria-expanded={!collapsed}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              toggleCollapsed();
+            }
+          }}
+          onClick={isMobile ? toggleCollapsed : undefined}
+        >
+          <span className="notable-pulse" />
+          <span className="notable-title">AIRFIELDS</span>
+          <span className={`news-updated panel-status-${status}`}>{REFINE_PANEL_STATUS_BADGE[status]}</span>
+          <span className="notable-caret" aria-hidden="true">&#9662;</span>
+        </div>
+        {!collapsed && (
+          <p className="meta" style={{ padding: "4px 10px" }}>{REFINE_PANEL_STATUS_TEXT[status]}</p>
+        )}
+      </aside>
+    );
+  }
 
   return (
     <aside id="airfieldPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
@@ -189,11 +253,15 @@ export default function AirfieldActivityPanel({ onLocate, isMobile }) {
             (no free global feed publishes those under a usable licence). A training field with a handful of
             movements, nearly all military, ranks by <i>share</i> the same way a busy civil hub ranks by volume.
           </p>
-          <div className="notable-list">
-            {rows.map((entry) => (
-              <AirfieldRow key={entry.code} entry={entry} airport={airportsByCode?.[entry.code]} onLocate={onLocate} />
-            ))}
-          </div>
+          {rows.length ? (
+            <div className="notable-list">
+              {rows.map((entry) => (
+                <AirfieldRow key={entry.code} entry={entry} airport={airportsByCode?.[entry.code]} onLocate={onLocate} />
+              ))}
+            </div>
+          ) : (
+            <p className="notable-empty">{airfieldActivityEmptyMessage()}</p>
+          )}
         </>
       )}
     </aside>

@@ -4,6 +4,7 @@
 // Called once by useLeafletMap when the map is created.
 
 import { L } from "./leafletGlobal";
+import { OWM_WEATHER_LAYERS, owmTileUrl } from "./weatherLayers";
 
 // The single world every tile layer is clipped to.
 //
@@ -162,24 +163,33 @@ export function createWeatherLayers(map) {
     attribution: 'Weather data by <a href="https://www.rainviewer.com" target="_blank" rel="noopener noreferrer">RainViewer</a>',
   }).addTo(map);
 
-  const cloudsLayer = L.tileLayer("/api/weather/tile/clouds_new/{z}/{x}/{y}.png", {
-    opacity: 0.45,
-    pane: "weatherPane",
-    noWrap: true, // see createBaseLayer above
-    bounds: WORLD_TILE_BOUNDS,
-    // OWM's clouds_new tiles are only meaningfully distinct up to about z9 --
-    // past that it's the same low-res data upscaled. Without this cap, every
-    // zoom-in past z9 requested a brand new set of unique {z}/{x}/{y} tiles
-    // the backend cache had never seen, which (a) hammered OWM with fetches
-    // for pixels that carried no new information and (b) blew past the
-    // backend's 8000-entry cache cap fast enough to trigger repeated
-    // full-cache clears -- the combination is what showed up as "laggy" pan
-    // and zoom.
-    maxNativeZoom: 9,
-    attribution: "Weather: OpenWeatherMap",
-  });
+  // Task 45: clouds_new used to be the only one of OWM's five allowed tile
+  // layers (see _WEATHER_LAYERS in backend/app.py) this ever asked for. The
+  // other four -- wind, precipitation, temperature, pressure -- come through
+  // the exact same backend route and the exact same OWM tile set, so they
+  // get exactly the arrangement clouds_new already proved out below: their
+  // own tile layer in this same pane, the same noWrap/bounds guard, and the
+  // same z9 native-zoom cap. That cap was measured against clouds_new
+  // specifically -- OWM's tiles for it are only meaningfully distinct up to
+  // about z9, and asking past that just requested more {z}/{x}/{y} variants
+  // of the same low-res data, which both hammered OWM for pixels carrying no
+  // new information and blew past the backend's 8000-entry cache cap fast
+  // enough to trigger repeated full clears. OWM serves all five layers from
+  // the same tile pyramid, so the same cap applies to all five here rather
+  // than re-measuring it four more times.
+  const owmLayers = {};
+  for (const { key, owmId } of OWM_WEATHER_LAYERS) {
+    owmLayers[key] = L.tileLayer(owmTileUrl(owmId), {
+      opacity: 0.45,
+      pane: "weatherPane",
+      noWrap: true, // see createBaseLayer above
+      bounds: WORLD_TILE_BOUNDS,
+      maxNativeZoom: 9,
+      attribution: "Weather: OpenWeatherMap",
+    });
+  }
 
-  return { precip: precipLayer, clouds: cloudsLayer };
+  return { precip: precipLayer, ...owmLayers };
 }
 
 // leaflet.heat paints by reading back its own canvas (getImageData), which
@@ -596,6 +606,90 @@ export function createRailwaysGroup() {
 // map/scene.js).
 export function createPowerLinesGroup() {
   return L.layerGroup();
+}
+
+// Task 50: the coverage overlay -- rectangles for the last bbox a scoped
+// source actually fetched, on their own pane above the water fill and below
+// every marker pane, so a reader can see a checked area without it hiding
+// what's drawn on top of it. See map/coverageOverlay.js for the logic that
+// decides what gets drawn here; this factory only owns the Leaflet objects.
+// Not added to the map here -- MANUAL and off by default (see its
+// LAYER_MANIFEST entry in map/scene.js), same deferred-add every other
+// MANUAL layer in this file uses.
+export function createCoverageLayer(map) {
+  if (!map.getPane("coveragePane")) {
+    // 346: above waterPane (345, water.js), below every marker overlay pane
+    // (400+) -- a coverage rectangle should never swallow a click meant for
+    // a pin drawn on top of it, and this layer's own rectangles carry their
+    // own tooltip instead of needing to win a stacking fight.
+    map.createPane("coveragePane").style.zIndex = 346;
+  }
+  return L.layerGroup();
+}
+
+// A plain Leaflet control rather than a React component. The legend's
+// content is rebuilt from raw.fetchCoverage on every poll and every camera
+// move while the layer is on (see createMapController.js's renderCoverage),
+// and threading that live data through App.jsx into a new panel component
+// would touch a file this task was told to leave alone -- Leaflet already
+// owns a live, imperative surface this controller can write straight into.
+// `setContent` is the only method this control adds beyond the stock
+// L.Control API; the HTML itself is built once, in map/coverageOverlay.js's
+// coverageLegendHtml, and never composed here.
+export function createCoverageLegend() {
+  const control = L.control({ position: "bottomleft" });
+  control.onAdd = function onAdd() {
+    const div = L.DomUtil.create("div", "coverage-legend leaflet-control");
+    // A click or scroll inside the legend must not reach the map underneath
+    // it -- the same guard Leaflet's stock controls get for free, needed
+    // here because this div is hand-built rather than one of them.
+    L.DomEvent.disableClickPropagation(div);
+    L.DomEvent.disableScrollPropagation(div);
+    control._div = div;
+    return div;
+  };
+  control.setContent = function setContent(html) {
+    if (control._div) control._div.innerHTML = html;
+  };
+  return control;
+}
+
+// Task 46: the day/night terminator, in its own pane below the country
+// outlines (350) -- 340 keeps it above every raster pane (imagery 205,
+// weather 210) so the night shading reads over them, and still well under
+// the vector overlays so a country's hover/selection highlight, and every
+// point layer, keeps painting on top of it rather than under it.
+// pointerEvents is off for the same reason the uncertainty pane's is: a
+// polygon covering roughly half the globe would swallow clicks meant for
+// whatever is drawn on top of it otherwise.
+export function createTerminatorLayer(map) {
+  if (!map.getPane("terminatorPane")) {
+    const pane = map.createPane("terminatorPane");
+    pane.style.zIndex = 340;
+    pane.style.pointerEvents = "none";
+  }
+  const nightStyle = {
+    pane: "terminatorPane",
+    stroke: false,
+    fill: true,
+    fillColor: "#0a1120",
+    fillOpacity: 0.38,
+    interactive: false,
+  };
+  // Three concentric bands, faintest first (astronomical, drawn under civil)
+  // so each band's own fillOpacity adds up toward the terminator rather than
+  // one band's paint hiding the ring inside it -- civil (closest to the
+  // terminator line) ends up the least additionally-dark of the three, which
+  // matches how a reader's eye actually reads a dusk gradient. Off the map by
+  // default (see createMapController.js's terminatorTwilightVisible); built
+  // here regardless so the first toggle has geometry to show immediately
+  // rather than waiting on a render that only happens post-toggle.
+  const astronomicalRing = L.layerGroup();
+  const nauticalRing = L.layerGroup();
+  const civilRing = L.layerGroup();
+  const twilightLayer = L.layerGroup([astronomicalRing, nauticalRing, civilRing]);
+  const nightLayer = L.layerGroup().addTo(map);
+  return { nightLayer, twilightLayer, astronomicalRing, nauticalRing, civilRing, nightStyle };
 }
 
 export function createWindFlowLayer(map) {

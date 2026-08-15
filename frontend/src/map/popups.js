@@ -19,6 +19,7 @@ import { countryContainsPoint } from "./countryHitTest";
 import { CLASS_LABEL as WATER_CLASS_LABEL, WATER_SCALE_CAVEAT } from "./water";
 import { SUBDIVISION_SCALE_CAVEAT } from "./subdivisions";
 import { DISTRICT_METRICS, DISTRICT_NO_RECORD_CAVEAT } from "./districts";
+import { sunElevation, sunriseSunset } from "./solarMath";
 
 // ACLED/GDELT country names don't always match Natural Earth's ADMIN name
 // (e.g. "Russian Federation" vs "Russia") -- this covers the common cases.
@@ -1334,20 +1335,27 @@ const NAVAL_PRESENCE_THEATRE_CAVEAT =
   "Reported for the wider conflict theatre this sits inside, not this exact area -- a hull anywhere in the theatre counts here.";
 
 // One sentence per zone/port -- "N naval hulls here, up/down/unchanged from
-// last week", or, honestly, that the trend cannot be stated at all when
+// the day before", or, honestly, that the trend cannot be stated at all when
 // backend/refine/naval_presence.py's own coverage check tripped (see that
 // module's docstring on why the check exists and what it protects against:
 // a change in how much of the world this map is listening to, read as a
 // change in how many hulls are at sea).
+//
+// Day-over-day, not week-over-week: the comparison this reports is whatever
+// entity_history can still hold when the job runs (pruned at
+// config.HISTORY_RETENTION_SECONDS, 3 days), so the baseline is the 24h
+// before the current 24h -- see that module's "The baseline compares against
+// the day before, not a week before" section. `week_ago` is still the field
+// name the served document uses; the period it covers is a day.
 function navalPresenceSentence(label, entry) {
   const current = entry.current || 0;
   const noun = current === 1 ? "naval hull" : "naval hulls";
   if (!entry.trend_computable) {
     return `${current} ${noun} in ${esc(label)} right now &mdash; trend not shown: ${esc(entry.reason || "AIS coverage changed across the comparison window")}.`;
   }
-  if (entry.trend > 0) return `${current} ${noun} in ${esc(label)} right now, up from ${entry.week_ago} last week.`;
-  if (entry.trend < 0) return `${current} ${noun} in ${esc(label)} right now, down from ${entry.week_ago} last week.`;
-  return `${current} ${noun} in ${esc(label)} right now, unchanged from last week.`;
+  if (entry.trend > 0) return `${current} ${noun} in ${esc(label)} right now, up from ${entry.week_ago} the day before.`;
+  if (entry.trend < 0) return `${current} ${noun} in ${esc(label)} right now, down from ${entry.week_ago} the day before.`;
+  return `${current} ${noun} in ${esc(label)} right now, unchanged from the day before.`;
 }
 
 function navalPresenceHtml(bounds, raw) {
@@ -1362,9 +1370,12 @@ function navalPresenceHtml(bounds, raw) {
       <div class="meta">${NAVAL_PRESENCE_THEATRE_CAVEAT}</div>` : ""}
     ${ports.map((p) => `<div>${navalPresenceSentence(p.name, p.entry)}</div>`).join("")}
     <p class="meta">Navy-classified AIS contacts (ITU-R M.1371 &ldquo;military operations&rdquo;), <i>derived</i>
-      from a 7-day window of this map's own recorded AIS history (backend/refine/naval_presence.py's own
-      WINDOW_DAYS). A warship broadcasting no AIS, or a navy that does not use this classification, is
-      invisible to this count entirely -- absence here is not evidence of absence at sea.</p>`;
+      from the last 24 hours of this map's own recorded AIS history, compared against the 24 hours before
+      that (backend/refine/naval_presence.py's own CURRENT_WINDOW_HOURS and WINDOW_DAYS). The comparison is
+      day-over-day rather than week-over-week because that history is pruned after 3 days, so a week-old
+      baseline no longer exists to compare against. A warship broadcasting no AIS, or a navy that does not
+      use this classification, is invisible to this count entirely -- absence here is not evidence of
+      absence at sea.</p>`;
 }
 
 // EASA's Conflict Zone Information Bulletins (backend/sources/czib.py),
@@ -1961,6 +1972,93 @@ function buildSatellitePasses(raw, key) {
   return satellitePassesSectionHtml(raw.satellitePasses?.[key] || { status: "loading" });
 }
 
+/** The centroid of a {south, west, north, east} bounds object, or null when
+ *  `bounds` is missing or carries a non-finite edge -- the same "no
+ *  coordinate, no section" gate buildSatellitePasses' own callers apply
+ *  before this ever runs. Antimeridian-aware the same way
+ *  createMapController.js's own boundsCentroid is (Russia/Fiji-shaped
+ *  countries straddle 180, and averaging west/east directly would land the
+ *  centroid on the far side of the planet from the sliver the bbox names). */
+function sunSectionCentroid(bounds) {
+  if (!bounds) return null;
+  const { south, west, north, east } = bounds;
+  if (![south, west, north, east].every((v) => typeof v === "number" && Number.isFinite(v))) return null;
+  const lat = (south + north) / 2;
+  const unwrappedEast = east < west ? east + 360 : east;
+  let lon = (west + unwrappedEast) / 2;
+  if (lon > 180) lon -= 360;
+  return { lat, lon };
+}
+
+function fmtUtcClock(date) {
+  return `${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")} UTC`;
+}
+
+/**
+ * Task 46's per-point illumination fold: sunrise, sunset and current sun
+ * elevation for this place's centre point, computed client-side from the
+ * current clock (see map/solarMath.js) -- essential context for reading a
+ * thermal detection or a satellite image, not decoration (see that task's
+ * own brief), which is why it sits in the Situation group next to the
+ * satellite-overpass fold rather than with the structural, rarely-changing
+ * country facts.
+ *
+ * The polar ruling this task's brief calls out by name: at high latitudes
+ * some dates have no sunrise and no sunset at all, and that has to read as a
+ * distinct, positive fact ("the sun does not set today here") rather than as
+ * an empty rise/set pair that looks like a computation that failed -- see
+ * solarMath.js's elevationCrossings, whose alwaysAbove/alwaysBelow flags this
+ * reads rather than inferring the polar case from a null.
+ *
+ * `null` centroid (no bounds yet) drops the whole fold rather than rendering
+ * it empty -- the same convention every other bounds-gated fold in this file
+ * follows (see e.g. buildConflictSummary's callers).
+ *
+ * The actual wording lives in the exported buildSunSectionForPoint below,
+ * which takes lat/lon/date directly rather than reading `bounds`/`new Date()`
+ * itself -- the review fix this split exists for: nothing reached the three
+ * branches (normal/polar day/polar night) this fold renders until a real
+ * point and instant could be pinned in a test, the same "no user-visible
+ * sentence node --test cannot reach" rule the rest of this codebase's
+ * sentence-building already follows.
+ */
+function buildSunSection(bounds) {
+  const point = sunSectionCentroid(bounds);
+  if (!point) return "";
+  return buildSunSectionForPoint(point.lat, point.lon, new Date());
+}
+
+/**
+ * The rendered wording for the sun-position fold at a specific point and
+ * instant -- exported so frontend/tests/terminator.test.js (or a card test)
+ * can pin a polar-latitude point and a fixed date and assert on the actual
+ * three branches a reader sees, not just on the solarMath.js maths behind
+ * them. See buildSunSection's own docstring for why this split exists.
+ */
+export function buildSunSectionForPoint(lat, lon, date) {
+  const elevationDeg = sunElevation(lat, lon, date);
+  const { rise, set, alwaysAbove, alwaysBelow } = sunriseSunset(date, lat, lon);
+
+  let riseSetLine;
+  if (alwaysAbove) {
+    riseSetLine = "The sun does not set today at this latitude &mdash; polar day.";
+  } else if (alwaysBelow) {
+    riseSetLine = "The sun does not rise today at this latitude &mdash; polar night.";
+  } else {
+    riseSetLine = `Sunrise ${fmtUtcClock(rise)}, sunset ${fmtUtcClock(set)} (today, this place's centre point).`;
+  }
+
+  return `
+    <div class="meta">Sun elevation right now: <b>${elevationDeg.toFixed(1)}&deg;</b>
+      ${esc(elevationDeg >= 0 ? "above the horizon" : "below the horizon")}.</div>
+    <div class="meta">${riseSetLine}</div>
+    <p class="meta">Derived: arithmetic over the current time and this place's centre point using standard
+      low-precision solar-position formulas, not an observation of the sky. Sunrise/sunset use the
+      standard -0.833&deg; elevation threshold (atmospheric refraction plus the sun's own angular radius).
+      A large country's true sunrise varies noticeably across its own width; this is one point's answer,
+      not the whole country's.</p>`;
+}
+
 // Task 10: fifteen sections is too many to scan at once, so PlaceInfoCard's
 // optional `groups` prop folds them into three questions a reader actually
 // asks -- what is happening right now (Situation), what does this country
@@ -1973,7 +2071,7 @@ function buildSatellitePasses(raw, key) {
 export const COUNTRY_CARD_GROUPS = [
   {
     id: "situation", title: "Situation",
-    sectionIds: ["conflict", "live", "satellitePasses", "connectivity", "events", "verified", "trend"],
+    sectionIds: ["conflict", "live", "satellitePasses", "sun", "connectivity", "events", "verified", "trend"],
   },
   {
     id: "country", title: "Country",
@@ -2042,6 +2140,12 @@ export function countryCardSections(props, raw, bounds) {
     // loadSatellitePasses), so it has something to say even before this
     // country's boundary layer has resolved a Leaflet bbox of its own.
     { id: "satellitePasses", title: "Satellite overpasses", html: buildSatellitePasses(raw, satelliteKey) },
+    // Task 46: same "not gated on bounds" reasoning does not apply here --
+    // unlike satellite passes, this reads bounds directly (see
+    // buildSunSection) rather than a centroid the controller already
+    // computed for a different purpose, so it drops out gracefully until a
+    // bbox exists rather than needing one plumbed to it separately.
+    { id: "sun", title: "Sun position", html: buildSunSection(bounds) },
     // Joined on ISO2 rather than on the country name: IODA and Natural Earth
     // disagree about several names ("Cote D Ivoire" vs "Côte d'Ivoire") and a
     // name join silently drops exactly those.
@@ -2161,21 +2265,26 @@ export function countVesselsByClass(ships, feature, bounds) {
 
 function buildWaterTraffic(feature, raw, bounds) {
   const { counts, total } = countVesselsByClass(raw.ais, feature, bounds);
-  // Task 29: the 7-day naval trend can have something to say even when this
-  // instant's live navy count is zero (a hull that was here a week ago and
+  // Task 29: the day-over-day naval trend can have something to say even when
+  // this instant's live navy count is zero (a hull that was here yesterday and
   // has since moved on), so this is checked and shown regardless of `total`
   // -- the one place in this function that is not itself gated on it.
   const navalTrend = navalPresenceRegion(bounds, raw);
   if (!total && !navalTrend) {
-    const reason = emptyFoldReason(["ais"], bounds, raw, { boundsOptional: true });
+    // navalTrend reads raw.navalPresence (navalPresenceRegion, just above), so
+    // a section that can say nothing about either has to check both feeds'
+    // coverage, not just ais' -- otherwise a navalPresence poll that has not
+    // landed yet (or landed for a different theatre) reads as "checked, no
+    // navy hulls" instead of "not checked".
+    const reason = emptyFoldReason(["ais", "navalPresence"], bounds, raw, { boundsOptional: true });
     return reason ? emptyFoldNote(reason) : "";
   }
   const rows = VESSEL_TRAFFIC_ORDER.map((k) => statRow("", VESSEL_TRAFFIC_LABEL[k], counts[k])).join("");
   return `${total ? `<div class="cstats">${rows}${statRow("", "total", total, "hot")}</div>${AIS_COVERAGE_CAVEAT}` : ""}
     ${navalTrend ? `<p>${navalPresenceSentence(navalTrend.label, navalTrend)}</p>
     <p class="meta">${NAVAL_PRESENCE_THEATRE_CAVEAT} Navy-classified AIS contacts (ITU-R M.1371
-      &ldquo;military operations&rdquo;), <i>derived</i> from a 7-day window of this map's own recorded AIS
-      history.</p>` : ""}`;
+      &ldquo;military operations&rdquo;), <i>derived</i> from the last 24 hours of this map's own recorded
+      AIS history, compared against the 24 hours before that.</p>` : ""}`;
 }
 
 /**
@@ -2255,7 +2364,17 @@ function buildWaterDark(feature, raw, bounds) {
   const stsPairs = (raw.darkVessels || []).filter((d) => d.kind === "sts_pair" && inside(d));
   const gfwGaps = (raw.gfwGaps || []).filter(inside);
   const total = wentDark.length + stsPairs.length + gfwGaps.length;
-  if (!total) return "";
+  if (!total) {
+    // Task 32's own fix, missed here: both feeds this fold counts (darkVessels,
+    // gfwGaps) are gated at COUNTRY (see scene.js), so at world or theatre zoom
+    // this returned "" unconditionally -- a silent drop indistinguishable from
+    // "checked and found nothing dark", right below a Chokepoint watch fold
+    // that confidently describes the same layer's scope. buildWaterTraffic and
+    // buildWaterInfrastructure both already ask emptyFoldReason first; this is
+    // the one counting water fold that did not.
+    const reason = emptyFoldReason(["darkVessels", "gfwGaps"], bounds, raw, { boundsOptional: true });
+    return reason ? emptyFoldNote(reason) : "";
+  }
 
   const timed = [
     ...wentDark.map((d) => ({
@@ -2317,21 +2436,53 @@ const WATCHED_WATERS = [
   { label: "Suez Canal", box: [29.5, 32.0, 31.5, 33.0] },
 ];
 
-function watchedWaterOverlap(feature) {
-  if (!Array.isArray(feature?.rawBbox)) return null;
-  return WATCHED_WATERS.find((w) => bboxesOverlap(feature.rawBbox, w.box)) || null;
+/**
+ * Every watched-water box this water feature's own bbox *overlaps* -- not
+ * "is inside", and not just the first match.
+ *
+ * Both were wrong, and for the same underlying reason: WATCHED_WATERS' eight
+ * boxes are hand-drawn approximations of one strait or approach each,
+ * feature.rawBbox is the bounding box of a whole named sea, and two
+ * rectangles overlapping is not the same claim as one containing the other.
+ * Live data makes this concrete: INDIAN OCEAN's rawBbox is
+ * [-60.53, 19.62, 10.43, 166.07], which overlaps the Gulf of Aden box
+ * ([10, 43, 15, 52]) because an ocean-sized rectangle sweeps across
+ * everything near it -- so the old find()-based version reported clicking
+ * the Indian Ocean as "Inside Gulf of Aden / Bab-el-Mandeb approach", and
+ * once the refine job writes chokepoint counts for that box,
+ * buildWaterChokepointTraffic would attribute the strait's own hull counts
+ * to the whole ocean.
+ *
+ * The honest fix is not a tighter containment test: even a real point-in-
+ * polygon check of the water feature's own shape against WATCHED_WATERS'
+ * boxes would still be answering "does this shape reach into that box"
+ * rather than "is this shape that box", and for a feature the size of an
+ * ocean the answer to the first question is often yes for boxes that are not
+ * remotely what a reader would call "inside". So this only ever claims
+ * overlap -- see buildWaterChokepoint's own wording below -- and every
+ * caller iterates every match rather than taking WATCHED_WATERS.find()'s
+ * first one arbitrarily, which is the other half of the bug: a water body
+ * overlapping two boxes used to silently report only whichever WATCHED_WATERS
+ * happened to list first.
+ */
+function watchedWaterOverlaps(feature) {
+  if (!Array.isArray(feature?.rawBbox)) return [];
+  return WATCHED_WATERS.filter((w) => bboxesOverlap(feature.rawBbox, w.box));
 }
 
-// Whether this water body overlaps one of the eight chokepoint boxes, and
-// what that does and does not mean for the Dark Vessels layer -- always
-// answerable, so unlike every other fold this one never drops itself.
+// Which watched-water boxes this water body overlaps, and what that does and
+// does not mean for the Dark Vessels layer -- always answerable, so unlike
+// every other fold this one never drops itself.
 function buildWaterChokepoint(feature) {
-  const hit = watchedWaterOverlap(feature);
-  if (hit) {
-    return `<div>Inside <b>${esc(hit.label)}</b>, one of the eight theatres the Dark Vessels layer is
-        willing to draw a &ldquo;went dark&rdquo; conclusion from.</div>
-      <p class="meta">Its ship-to-ship pairing and Global Fishing Watch's own AIS-disabling findings are
-        not scoped this way &mdash; both run wherever AIS reaches, chokepoint or not.</p>`;
+  const hits = watchedWaterOverlaps(feature);
+  if (hits.length) {
+    const names = hits.map((h) => `<b>${esc(h.label)}</b>`).join(", ");
+    return `<div>Overlaps ${hits.length === 1 ? "" : `${hits.length} of `}the eight theatres the Dark
+        Vessels layer is willing to draw a &ldquo;went dark&rdquo; conclusion from: ${names}.</div>
+      <p class="meta">This is a bounding-box overlap, not containment -- a large sea's own bbox can sweep
+        across a strait's watch box without the sea actually bordering it, so treat this as "reaches into",
+        not "is". Its ship-to-ship pairing and Global Fishing Watch's own AIS-disabling findings are not
+        scoped this way &mdash; both run wherever AIS reaches, chokepoint or not.</p>`;
   }
   return `<div>Outside every chokepoint the Dark Vessels layer is scoped to.</div>
     <p class="meta">Its &ldquo;went dark&rdquo; inference will not draw a conclusion here even where a real
@@ -2365,13 +2516,15 @@ const CHOKEPOINT_STATUS_WORD = { counted: "counted", partial: "still counting", 
 // data rendering as zero traffic), and a reader skimming a popup is exactly
 // who would otherwise misread "0" as "nothing crossed" rather than "this job
 // never looked".
-function buildWaterChokepointTraffic(feature, raw) {
-  const hit = watchedWaterOverlap(feature);
-  if (!hit) return ""; // outside every watched box -- this section has nothing to say
+/** One watched box's own count section -- pulled out of buildWaterChokepointTraffic
+ *  so a feature overlapping several boxes (see watchedWaterOverlaps' own note
+ *  on the Indian Ocean/Gulf of Aden case) gets one of these per box instead of
+ *  find()'s old arbitrary first match. */
+function buildOneChokepointTraffic(hit, raw, heading) {
   const box = raw.chokepoints?.boxes?.[hit.label];
   if (!box || !Array.isArray(box.trend) || !box.trend.length) {
-    return `<p class="meta">No chokepoint count recorded yet for <b>${esc(hit.label)}</b> &mdash; this map's
-      own distinct-hull counter (backend/refine/lane_density.py) has not written a pass yet.</p>`;
+    return `${heading}<p class="meta">No chokepoint count recorded yet for <b>${esc(hit.label)}</b> &mdash;
+      this map's own distinct-hull counter (backend/refine/lane_density.py) has not written a pass yet.</p>`;
   }
   const today = box.today || box.trend[box.trend.length - 1];
   const statusWord = CHOKEPOINT_STATUS_WORD[today.status] || today.status;
@@ -2393,7 +2546,7 @@ function buildWaterChokepointTraffic(feature, raw) {
     .slice(-7)
     .map((d) => `${esc(d.date.slice(5))}: ${d.total == null ? "&mdash;" : fmtNumber(d.total)}`)
     .join(" &middot; ");
-  return `
+  return `${heading}
     <div>${totalLine}</div>
     ${classRows}
     <p class="meta">Last 7 days: ${recentLine}. (&ldquo;&mdash;&rdquo; marks a day this job never observed,
@@ -2404,6 +2557,18 @@ function buildWaterChokepointTraffic(feature, raw) {
       own aisstream.io AIS history (backend/refine/lane_density.py) &mdash; not a published source, and not
       a traffic census: AIS reception is not uniform, so a quiet day can mean genuinely little traffic or it
       can mean this map's own receivers simply heard less that day.</p>`;
+}
+
+function buildWaterChokepointTraffic(feature, raw) {
+  const hits = watchedWaterOverlaps(feature);
+  if (!hits.length) return ""; // outside every watched box -- this section has nothing to say
+  // A heading only when there is more than one box to tell apart -- the
+  // common single-box case renders exactly as it always did.
+  return hits
+    .map((hit) => buildOneChokepointTraffic(
+      hit, raw, hits.length > 1 ? `<div class="csection-h">${esc(hit.label)}</div>` : ""
+    ))
+    .join("");
 }
 
 const INFRA_LIST_CAP = 6;
@@ -2502,6 +2667,10 @@ export function waterCardSections(feature, raw, bounds) {
     // ("water:<id>") -- see waterCardFor's own use of feature.id elsewhere
     // for the same identity.
     { id: "satellitePasses", title: "Satellite overpasses", html: buildSatellitePasses(raw, `water:${feature.id}`) },
+    // Task 46: see buildSunSection's own docstring -- drops out when
+    // `bounds` is not available yet, the same as every other bounds-gated
+    // fold in this card.
+    { id: "sun", title: "Sun position", html: buildSunSection(bounds) },
     { id: "traffic", title: "Traffic now", html: buildWaterTraffic(feature, raw, bounds) },
     { id: "dark", title: "Dark activity", html: buildWaterDark(feature, raw, bounds) },
     { id: "chokepoint", title: "Chokepoint watch", html: buildWaterChokepoint(feature) },
@@ -2876,7 +3045,14 @@ function buildAdminConnectivity(props, raw) {
   const isDistrict = !props?.code && !!props?.pcode;
   const outage = adminOutageRecord(props, raw);
   if (!outage) {
-    const reason = coverageReason("outages", null, raw); // unscoped, same as connectivityTile
+    // adminOutageRecord reads raw.outagesRegions exclusively (via
+    // regionOutageFor) -- a separate POLL_CONFIG row from raw.outages with its
+    // own fetchCoverage entry (see FETCH_ALWAYS_BECAUSE's "outagesRegions" row
+    // in map/scene.js). Checking "outages" here was checking the wrong feed's
+    // coverage: a country whose national score had landed but whose
+    // region-level poll had not (or had errored) still read as "checked,
+    // nothing here" instead of "not checked yet".
+    const reason = coverageReason("outagesRegions", null, raw); // unscoped, same as connectivityTile
     if (reason) return emptyFoldNote(reason);
     // State and district entries both carry their own country_code (ISO3 --
     // see subdivisionCardSections/districtCardSections' own docstrings), so
@@ -2935,6 +3111,14 @@ function buildAdminConnectivity(props, raw) {
 function buildAdminCoverage(props, raw) {
   const list = ADMIN2_COUNTRIES.map((c) => esc(c.name)).join(", ");
   const regionSummary = regionMatchSummary(iso2ForIso3(props?.country_code, raw), raw);
+  // regionMatchSummary reads raw.outagesRegions and returns null both when
+  // that feed has genuinely never scored anything here *and* when it has
+  // never been fetched (or was fetched for a different area) at all -- this
+  // fold used to print "no region-level reporting" for both, which is exactly
+  // the "found nothing" vs "did not look" conflation this fold exists to
+  // close for everything else on the card. coverageReason tells the two
+  // apart the same way every other section on this card already does.
+  const regionCoverageReason = regionSummary ? null : coverageReason("outagesRegions", null, raw);
   const regionLine = regionSummary
     ? `<div class="meta">Internet outages (IODA): ${regionSummary.matched} of ${regionSummary.total}
         region(s) IODA scored in this country over the current window matched to an admin-1 boundary here${
@@ -2943,7 +3127,9 @@ function buildAdminCoverage(props, raw) {
                 or district card, though IODA did report them`
             : ""
         }.</div>`
-    : `<div class="meta">Internet outages (IODA): no region-level reporting for this country in the current
+    : regionCoverageReason
+      ? `<div class="meta">Internet outages (IODA): ${esc(regionCoverageReason)}</div>`
+      : `<div class="meta">Internet outages (IODA): no region-level reporting for this country in the current
         window.</div>`;
   return `
     <div class="meta">${SUBDIVISION_SCALE_CAVEAT}</div>

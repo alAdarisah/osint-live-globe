@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  airfieldRows, militaryShare, sortAirfields, trafficTrend, AIRFIELD_SORT_KEYS,
+  airfieldActivityEmptyMessage, airfieldRows, militaryShare, sortAirfields, trafficTrend, AIRFIELD_SORT_KEYS,
 } from "../src/components/airfieldPanelLogic.js";
 
 function entry(code, overrides = {}) {
@@ -127,4 +127,20 @@ test("trend is null without at least two hourly buckets to compare", () => {
   assert.equal(trafficTrend([]), null);
   assert.equal(trafficTrend([5]), null);
   assert.equal(trafficTrend(null), null);
+});
+
+// --- airfieldActivityEmptyMessage ---------------------------------------
+//
+// GET /api/airfield-activity's own empty `{}` conflates "no database",
+// "the refine process has not written a pass yet" and "a pass ran and found
+// no field with any traffic" (see storage.airfield_activity/the endpoint's
+// own docstring) -- unlike ChokepointPanel/InfraRiskPanel's documents, which
+// always carry a wrapper key (`boxes`/`events_searched`) that survives an
+// otherwise-empty result. This module has no way to tell those apart, so the
+// message has to say so honestly rather than assert either specific reading.
+
+test("airfieldActivityEmptyMessage does not claim to know which of the two situations this is", () => {
+  const msg = airfieldActivityEmptyMessage();
+  assert.match(msg, /No airfield movements recorded/);
+  assert.match(msg, /or the refine process has not written a pass yet/);
 });

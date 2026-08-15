@@ -342,6 +342,15 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
   // and for why the editor's list is a snapshot rather than a live view.
   const recordsFor = useCallback((key) => controllerRef.current?.recordsFor(key) ?? [], []);
 
+  // Task 43: viewport export's own accessor -- see exportLayerRecords in
+  // createMapController.js for why it returns { rows, total } rather than a
+  // plain array. `total: 0` before the map exists, same "empty rather than
+  // throw" contract recordsFor above follows.
+  const exportLayerRecords = useCallback(
+    (key) => controllerRef.current?.exportLayerRecords(key) ?? { rows: [], total: 0 },
+    []
+  );
+
   const setImagery = useCallback((key, date) => {
     controllerRef.current?.setImagery(key, date);
   }, []);
@@ -381,6 +390,7 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     closeCountryCard, focusCountry, deselectCountry, clearCountrySelection,
     setIconTheme, setLayerZoomOverrides, setLayerZoomMaxOverrides, setLayerCountryOnly,
     setLayerWishes, setCityZones, setImagery, recordDetail, recordsFor,
+    exportLayerRecords,
     choropleth, setChoroplethMetric,
     borderEdit, countryFingerprints,
     refreshCountriesNow, beginBorderEdit, endBorderEdit, setBorderLinkMode, undoBorderEdit,

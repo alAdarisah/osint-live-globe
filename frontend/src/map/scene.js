@@ -654,6 +654,47 @@ export const LAYER_MANIFEST = {
     fetch: FETCH_ALWAYS,
     disposition: AUTO,
   },
+  pipelines: {
+    // Not a layer anyone can toggle: the pipeline lines ride the infrastructure
+    // layer's own group (infraLayer wraps infraGroup + pipelinesGroup), so this
+    // entry is a cap holder, the same shape firmsPoints and airfieldActivity
+    // have. No `draw`, because `infra` above is what decides whether any of this
+    // is on the map at all.
+    //
+    // It needs a cap because Task 28 changed what this layer is without changing
+    // how it draws. It used to be backend/infrastructure.py's ten hand-written
+    // schematic routes; it is now those ten plus 16,739 real OSM ways, and
+    // renderPipelines built one Leaflet polyline per route per world copy, each
+    // with a bound tooltip and a bound popup. At THEATRE band with three copies
+    // of the world in view that is ~50,000 SVG paths in the document, for a
+    // layer that is on by default.
+    //
+    // Ranked by vertex count, which is the closest thing to "how much pipeline
+    // is this" that the record actually carries -- a trunk line runs to hundreds
+    // of points (the longest is 1,857) where a yard stub is two or three. Not
+    // length in kilometres, and the popup does not claim it is.
+    //
+    // The numbers rise with the band because the question narrows: a theatre
+    // view wants the trunk network legible, a town view wants what is actually
+    // under it. Measured against the served document, that is also where they
+    // stop mattering -- routes whose extent falls in the padded viewport:
+    //
+    //   zoom 4, Europe and the Middle East   12,131   capped to 600
+    //   zoom 6, Ukraine                       4,152   capped to 1,500
+    //   zoom 9, one town                        226   uncapped, all drawn
+    //
+    // which is the shape to keep if these are ever retuned: the bounds filter
+    // does all the work where the detail is wanted, and the cap only bites at
+    // the zooms where no individual line could be read anyway.
+    //
+    // Only the OSM half is ever capped or bounds-filtered -- see renderPipelines
+    // for why the ten curated routes are exempt from both.
+    cap: { THEATRE: 600, COUNTRY: 1500, LOCAL: 3000 },
+    rank: (d) => (Array.isArray(d.path) ? d.path.length : 0),
+    fetch: FETCH_ALWAYS,
+    disposition: AUTO,
+    virtual: true,
+  },
   osmInfra: {
     // Unchanged at 9, and this entry is the precedent the whole file
     // generalises rather than an exception to it: crowd-sourced geometry
@@ -906,6 +947,52 @@ export const LAYER_MANIFEST = {
   precip: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   clouds: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
   windArrows: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  // Task 45: OWM's other four tile layers (see map/weatherLayers.js), same
+  // treatment as clouds right above -- never switched on by the resolver,
+  // reachable only by ticking the checkbox in WeatherSection.jsx.
+  wind: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  precipitation: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  temp: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  pressure: { draw: null, fetch: FETCH_MANUAL, disposition: MANUAL },
+  // Task 46: the day/night line. AUTO rather than MANUAL, unlike every other
+  // reference layer in this file (water, cables, railways...) -- the brief is
+  // explicit that this is "essential context for reading thermal detections
+  // and imagery, which is why it is here and not decoration", the same
+  // reasoning that keeps outagePoints/countries/czib ungated-AUTO rather than
+  // opt-in. Ungated (draw: null) like those three, so it is simply on unless
+  // a reader unticks it. `fetch: FETCH_MANUAL` is still the honest word for
+  // its network behaviour, just not for the reason it usually is here: this
+  // layer has no endpoint at all, ever -- it is computed from the clock alone
+  // (see map/solarMath.js) and refreshed on a timer in createMapController.js,
+  // so "never polled" is trivially true rather than "not yet ticked".
+  // draw:null/AUTO puts it in SCENE_APPLY_KEYS (see below), which is what
+  // lets the reader's checkbox override the resolver the same way every
+  // other layer's does.
+  terminator: {
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: AUTO,
+  },
+  // Task 50: the coverage overlay -- where this map has actually looked,
+  // read from raw.fetchCoverage rather than fetched from anywhere.
+  // Deliberately MANUAL, and off by default, same as `water`/`railways`
+  // just above: it draws rectangles and a legend over the reader's whole
+  // view, and the brief this task was written from is explicit -- "Default
+  // off. This is an instrument for interrogating the map, not part of the
+  // default reading." draw: null (ungated -- once switched on it draws at
+  // every zoom; there is no zoom at which "where has this map looked" stops
+  // being a fair question). fetch: FETCH_MANUAL is the honest word for its
+  // network behaviour for the same reason terminator's own note gives just
+  // below: this layer has no endpoint at all, ever. It is computed entirely
+  // from raw.fetchCoverage, which every other polled and one-shot fetch
+  // already publishes for its own reasons (see COVERAGE_FEEDS in
+  // map/popups.js) -- this layer adds no fetch of its own, so it needs
+  // neither a POLL_CONFIG row nor a boot fetch of its own.
+  coverage: {
+    draw: null,
+    fetch: FETCH_MANUAL,
+    disposition: MANUAL,
+  },
   firms: {
     // One toggle covers two things -- the heat canvas and the interactive
     // per-point circles -- and only the second of them was ever gated. So this
@@ -920,21 +1007,25 @@ export const LAYER_MANIFEST = {
     //
     // The fetch used to be FETCH_ALWAYS, on the argument that the country card
     // counts fires inside the country bbox and a band gate would take that row
-    // away -- with the viewport bbox standing in for the gate. Measured against
-    // the running backend, the bbox was not standing in for anything at the one
-    // band where it mattered: a WORLD viewport *is* the whole world, so
-    // `bboxCell` resolves to null there (see useOsintData.js) and the poll ships
-    // the unclipped feed. That is 184,770 records and 28.2 MB of JSON parsed
-    // every three minutes, at the one band where the layer draws nothing at all.
-    // A theatre-sized box over Europe and the Middle East is 1.8 MB; a country
-    // box over Ukraine is 435 kB.
+    // away -- with `scoped` standing in for the gate. Measured against the
+    // running backend, the bbox was not standing in for anything at the one band
+    // where it mattered: a WORLD viewport *is* the whole world, so `bboxCell`
+    // resolves to null there (see useOsintData.js) and the poll ships the
+    // unclipped feed. That is 184,770 records and 28.2 MB of JSON parsed every
+    // three minutes, from the moment the map opens, at the one band where this
+    // layer draws nothing at all. A theatre-sized box over Europe and the Middle
+    // East is 1.8 MB; a country box over Ukraine is 435 kB.
     //
-    // So the gate is the same THEATRE the layer draws at, and the country card
-    // keeps its row through FOCUS_FETCH_ONLY below rather than through a
-    // permanent global poll: focusing a country fetches the fires inside that
-    // country's bounds however far out the camera is, which is the only scope
-    // the card was ever reporting anyway ("Counted within the area currently
-    // loaded", see buildLivePicture in popups.js).
+    // So the gate is the same THEATRE the layer draws at, and the two cards that
+    // count fires keep their rows through FOCUS_FETCH_ONLY below rather than
+    // through a permanent global poll: focusing a country fetches the fires
+    // inside that country's bounds however far out the camera is.
+    //
+    // Below the gate with nothing focused, the fires row does not silently read
+    // zero. firms has no coverage record until it has fetched, so
+    // coverageStateFor returns "not_loaded" and both buildLivePicture and
+    // buildAdminLive say so in the words they already had for it: an empty
+    // section here is "not checked", not "checked and empty".
     draw: { band: "THEATRE" },
     fetch: "THEATRE",
     disposition: AUTO,
@@ -1014,6 +1105,13 @@ export const TRAIL_PARENT = {
 export const UNGATED_FEEDS = new Set([
   "escalation", "conflictStats", "conflictDistricts", "humanitarian",
   "energyFlows", "foodTrade", "foodPriceIndex", "outages",
+  // The region-level half of the same poll ("outages" above is the country
+  // level). Fetched always for the same reason -- see FETCH_ALWAYS_BECAUSE's
+  // own "outagesRegions" row -- but it was missing from this set, so the
+  // dev-only warning below fired on every boot: outageRegionPoints (the
+  // derived point layer) has its own LAYER_MANIFEST entry, but the raw feed
+  // never did, the same split "outages"/"outagePoints" already has.
+  "outagesRegions",
   // Watched-water-box-keyed and sea-keyed respectively, read on demand by the
   // water card, ChokepointPanel.jsx and buildWaterTraffic -- no pin, no gate,
   // same footing as the country-keyed feeds above. navalPresence was missing
@@ -1064,6 +1162,34 @@ export const REFERENCE_ONLY_FEEDS = new Set([
   "conflictStats", "escalation", "conflictDistricts", "humanitarian",
   "energyFlows", "foodTrade", "foodPriceIndex", "fetchCoverage",
   "navalPresence", "chokepoints", "jamCrosscheck",
+  // Both ride the one-shot /api/infrastructure payload (see useOsintData.js's
+  // publishFetchOutcome call for it), the same boot fetch "infra"/"pipelines"/
+  // "shippingLanes" ride -- but unlike those three, neither has anything to
+  // draw of its own, so they belong here instead of getting an applyData
+  // branch or a DECORATORS entry.
+  //
+  // pipelinesTruncatedRegions is a list of region names the OSM pipeline
+  // sweep gave up on early (see osm_infra.py), read by zoomNotes.pipelinesTruncated
+  // for the "this map is drawing an incomplete pipeline picture" note -- no
+  // pin, ever.
+  //
+  // militaryBases is the curated MILITARY_BASES gazetteer, read only by the
+  // country card's Military & security fold (popups.js) -- Task 29 gave it a
+  // COVERAGE_FEEDS-style ride on infra's own coverage record but never a
+  // layer of its own, so there is nothing for applyData to draw either.
+  //
+  // Both were missing here before this fix. pipelinesTruncatedRegions is
+  // tuple 2 of the five ["infra", "pipelinesTruncatedRegions", "pipelines",
+  // "shippingLanes", "militaryBases"] onData calls publishFetchOutcome makes
+  // in landing order (see useOsintData.js), so a poll landing threw on the
+  // very next tuple after "infra" -- "markerMap is not iterable", the
+  // generic renderMarkerLayer catch-all trying to iterate an array of plain
+  // strings as though it were point records -- which meant tuples 3-5
+  // ("pipelines", "shippingLanes", "militaryBases") never published at all:
+  // pipeline routes and the ten shipping corridors drew nothing for the
+  // whole session, and militaryBases never reached the country card either,
+  // even though it was never the one that threw.
+  "pipelinesTruncatedRegions", "militaryBases",
 ]);
 
 /** Every layer key the manifest knows about. */
@@ -1174,10 +1300,10 @@ const FOCUS_PROMOTE = ["cities", "conflictHistory", "infra", "osmInfra"];
 // promotion, so what draws at a given zoom is unchanged by clicking a country.
 //
 // Separate from FOCUS_PROMOTE because the two answer different questions, and
-// firms is the case that separates them. The country card needs the fire rows
-// for the country the reader just clicked, which is a fetch. It does not need
-// the global thermal heat canvas painted over a world view, which is what a band
-// promotion would also do -- and what the layer's own comment argues against.
+// firms is the case that separates them. The cards need the fire counts for the
+// country the reader just clicked, which is a fetch. They do not need the global
+// thermal heat canvas painted over a world view, which is what a band promotion
+// would also do -- and what the layer's own entry argues against.
 const FOCUS_FETCH_ONLY = ["firms"];
 
 /**

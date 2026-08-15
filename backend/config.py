@@ -237,6 +237,17 @@ ENTITY_STALE_AFTER = {
 }
 ENTITY_STALE_AFTER_DEFAULT = int(os.getenv("ENTITY_STALE_AFTER_DEFAULT", "86400"))
 
+# How long entity_history rows are kept before storage.py's retention sweep
+# deletes them. 3 days, matching the replay timeline's range and ACLED's own
+# fetch window -- no point keeping ship/aircraft history the rest of the
+# replay range can't use anyway.
+#
+# Defined here, ahead of REPLAY_WINDOW_SECONDS just below, specifically so
+# that dict can reference this name directly for "events" rather than
+# restating the number -- see that entry's own comment (Task 44 review) for
+# why the two must never drift apart by hand.
+HISTORY_RETENTION_SECONDS = int(os.getenv("HISTORY_RETENTION_SECONDS", str(3 * 24 * 3600)))
+
 # How stale a recorded fix may be and still count as "where this thing was"
 # when the replay scrubber asks for a moment (see storage.history_at). Kept
 # apart from ENTITY_STALE_AFTER above, which answers a different question --
@@ -259,6 +270,26 @@ REPLAY_WINDOW_SECONDS = {
     # without moving a metre -- a window as tight as the aircraft's would
     # replay a busy anchorage as empty water.
     "ais": 3 * 3600,
+    # Task 44 review: ENTITY_STALE_AFTER["events"] is 7 days -- an *eviction*
+    # figure, sized for how long a conflict-event row should sit in
+    # entity_history before it is forgotten, not for how wide a single
+    # replay query should be allowed to run. Left to fall through to that
+    # eviction figure (the "anything absent" fallback above), it made
+    # app.py's window-ceiling check refuse `?kind=events` outright: 7 days
+    # exceeds HISTORY_RETENTION_SECONDS's 3-day ceiling on paper, even
+    # though entity_history physically never holds more than 3 days of rows
+    # for *any* kind (storage.py's prune sweep is not kind-scoped) -- so a
+    # 7-day query and a 3-day query against this table cost the same index
+    # seek and return the identical rows. The refusal bought nothing and
+    # produced a real contradiction: the legacy no-kind bundle (which calls
+    # storage.history_at("events", at) with no window_seconds at all, and so
+    # inherits this same fallback chain) happily replayed events the whole
+    # time, while asking for the identical kind by name through `?kind=`
+    # alone was rejected. An explicit entry at the retention ceiling itself
+    # fixes both: it matches what entity_history can physically answer
+    # (nothing wider would ever return a different row), and it makes
+    # `?kind=events` agree with what the bundle already does.
+    "events": HISTORY_RETENTION_SECONDS,
 }
 
 # How often the backend re-checks whether a mirrored kind has changed (see
@@ -361,12 +392,6 @@ READ_REPLICA_URL = os.getenv("READ_REPLICA_URL", "").strip() or None
 # table -- purely an operational log (what succeeded/failed, when, how many
 # items), so it doesn't need the long window the event archive gets.
 SOURCE_HEALTH_RETENTION_DAYS = int(os.getenv("SOURCE_HEALTH_RETENTION_DAYS", "14"))
-
-# How long entity_history rows are kept before storage.py's retention sweep
-# deletes them. 3 days, matching the replay timeline's range and ACLED's own
-# fetch window -- no point keeping ship/aircraft history the rest of the
-# replay range can't use anyway.
-HISTORY_RETENTION_SECONDS = int(os.getenv("HISTORY_RETENTION_SECONDS", str(3 * 24 * 3600)))
 
 # How long storage.py's vessel_port_calls rows are kept. Far longer than
 # HISTORY_RETENTION_SECONDS's 3 days on purpose: a port call is already the

@@ -157,12 +157,13 @@ class _FakeStorage:
     successful one -- see storage.upsert_lane_cells's docstring.
     """
 
-    def __init__(self, rows, write_ok=True):
+    def __init__(self, rows, write_ok=True, fail_names=frozenset()):
         self.history = rows
         self.docs = {}
         self.calls = []
         self.lane_batches = []
         self.write_ok = write_ok
+        self.fail_names = set(fail_names)
         # A tiny stand-in for the real lane_cells table, merged with the real
         # storage._combine_lane_cell -- not a second, hand-rolled copy of that
         # accumulation logic -- so a test asserting on cross-pass behaviour
@@ -185,6 +186,11 @@ class _FakeStorage:
         return self.docs.get(name)
 
     async def record_reference(self, name, payload):
+        # `fail_names` lets a test fail one named write (e.g. CURSOR_NAME)
+        # without touching the others -- pre-merge review, Also fix 1: see
+        # test_run_once_reports_not_ok_when_only_the_cursor_write_fails.
+        if name in self.fail_names:
+            return False
         self.docs[name] = payload
         # True (durable write) by default -- Task 36's run_once now checks
         # this return value to gate the cursor advance, mirroring
@@ -275,6 +281,27 @@ def test_a_failed_write_holds_the_cursor_back_for_a_retry(monkeypatch):
     assert retry["ok"] is True
     assert fake.calls == [0, 0]  # both passes started from the same cursor
     assert fake.docs["lane_density_cursor"] == {"last_id": 1}
+
+
+def test_run_once_reports_not_ok_when_only_the_cursor_write_fails(monkeypatch):
+    """Pre-merge review, Also fix 1: this function's own docstring calls the
+    cursor "the outermost gate of all", but its own return value used to be
+    discarded -- a Postgres hiccup on exactly that one write still reported
+    "ok": True. Distinct from test_a_failed_write_holds_the_cursor_back_for_
+    a_retry above, which fails upsert_lane_cells itself: here every write
+    below the cursor succeeds, including the non-idempotent upsert_lane_cells
+    one, and only the cursor write fails."""
+    rows = [pos(1, 0.0, 10.0, 10.0, "111", course=90.0)]
+    fake = _FakeStorage(rows, fail_names={lane_density.CURSOR_NAME})
+    monkeypatch.setattr(lane_density, "storage", fake)
+
+    result = _run(lane_density.run_once())
+    assert result["ok"] is False
+    assert lane_density.CURSOR_NAME not in fake.docs
+    # The lane-cell write itself did land -- this is the residual
+    # double-count risk the fix's own comment documents, not something a
+    # single-write test can eliminate.
+    assert len(fake.lane_batches) == 1
 
 
 # --- Task 19 review: transits accumulates sightings, not distinct hulls -----

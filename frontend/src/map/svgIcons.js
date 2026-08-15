@@ -353,6 +353,13 @@ export const SVG = {
   raindrop: '<path fill="currentColor" d="M12 2 C8 8 5 11 5 15 a7 7 0 0 0 14 0 C19 11 16 8 12 2 Z"/>',
   cloud: '<path fill="currentColor" d="M7 18 a4 4 0 0 1 0 -8 a5 5 0 0 1 9.6 -1.5 A4.5 4.5 0 0 1 17 18 Z"/>',
   wind: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M3 8 H14 a3 3 0 1 0 -3 -3"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M3 16 H17 a3 3 0 1 1 -3 3"/>',
+  // Task 45: OWM's temp_new and pressure_new, alongside clouds/wind/precip
+  // above. Neither a thermometer nor a gauge existed anywhere in this file --
+  // the closest things (flame, radarBase) already mean something specific
+  // elsewhere on this map (fire detections, a military radar site), so
+  // reusing either here would say the wrong thing rather than save a glyph.
+  thermometer: '<rect x="10" y="3" width="4" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12" y1="6" x2="12" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="18" r="3.4" fill="currentColor"/>',
+  pressureGauge: '<path fill="none" stroke="currentColor" stroke-width="2" d="M4 16 A8 8 0 0 1 20 16"/><line x1="12" y1="16" x2="16.4" y2="10.6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="16" r="1.6" fill="currentColor"/>',
   // ---- conflict & violence event types (see decorators.js's
   // ACLED_EVENT_ICON) ----
   //
@@ -572,6 +579,16 @@ export const SVG = {
     'd="M2.5 14.5c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>' +
     '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
     'd="M2.5 20c2 -2 4 -2 6 0s4 2 6 0 4 -2 6 0 4 2 6 0"/>',
+
+  // ---- day/night terminator (Task 46) ----
+  //
+  // A circle outline with its right half filled -- the conventional
+  // day/night glyph. Legend-row only, same treatment as `wave` just above:
+  // the layer itself is a polygon fill drawn straight from the ring points
+  // map/solarMath.js computes, not a marker this SVG is turned into (no
+  // GLYPH_CHOICES entry, for the same reason).
+  dayNight: '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/>' +
+    '<path fill="currentColor" d="M12 4a8 8 0 0 1 0 16z"/>',
 
   // ---- shipping lanes (Task 20) ----
   //

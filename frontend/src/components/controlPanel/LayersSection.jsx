@@ -9,7 +9,7 @@ import {
   CZIB_STYLE, CZIB_ORDER, FLOOD_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
   RAILWAY_OSM_STYLE, RAILWAY_LIVE_STYLE,
   WATER_STYLE, SHIPPING_LANE_STYLE, LANE_DENSITY_STYLE, SAT_ELEMENT_LAYERS,
-  POWER_PLANT_FUEL_STYLE,
+  POWER_PLANT_FUEL_STYLE, TERMINATOR_STYLE,
 } from "../../map/decorators";
 import { SEVERITY_BANDS, CORROBORATED_COLOR } from "../../map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../../utils/entityFilter";
@@ -130,7 +130,11 @@ const GROUP_LAYERS = {
   ground: [
     "infra", "osmInfra", "powerPlants", "airDefense", "airports", "ports", "dams", "deflock",
     "railways", "railLive", "powerLines", "shippingLanes",
-    "water", "cables", "firms", "jamming", "laneDensity",
+    "water", "cables", "firms", "jamming", "laneDensity", "terminator",
+    // Task 50: last in the group, deliberately -- it is a diagnostic
+    // instrument for reading every other row above it, not one more
+    // subject alongside them.
+    "coverage",
   ],
   // Its own group rather than a ninth row under traffic: a regulator's ruling
   // about a volume of airspace is neither traffic nor infrastructure, and
@@ -172,13 +176,21 @@ const LAYER_LABEL = {
   powerPlants: "Power plants (OSM)",
   // Task 29: same reasoning again -- airDefense carries the identical cap.
   airDefense: "Air defence & radar (OSM)",
+  // The OSM half of the pipeline layer, which gained a per-band cap when it
+  // gained 16,739 real ways beside the ten curated schematic routes (see
+  // LAYER_MANIFEST and renderPipelines). Named for the half that is capped: the
+  // curated ten are never thinned, so "Pipelines (n)" would overstate it.
+  pipelines: "Pipelines (OSM)",
 };
 
 // Task 27: railwayPoints has no checkbox of its own -- it mirrors "railways"'
 // visibility exactly (see setLayerVisible in createMapController.js) -- so
 // the cap note below has to ask about its *parent's* checkbox, not one that
 // will never exist. Every other capped layer answers for itself.
-const CAP_NOTE_VISIBILITY_KEY = { railwayPoints: "railways" };
+// pipelines is the second such case and arrives the same way: the lines ride the
+// infrastructure layer's own group, so "is this thinning visible to anyone right
+// now" is a question about the infrastructure checkbox.
+const CAP_NOTE_VISIBILITY_KEY = { railwayPoints: "railways", pipelines: "infra" };
 
 export default function LayersSection({
   counts, zoomNotes, layerVisibility, layerWish, onToggleLayer, infraFilterText, onInfraFilterChange,
@@ -1556,6 +1568,90 @@ export default function LayersSection({
             still for weeks keeps adding to the same number a busy strait would produce by real traffic
             &mdash; the wash cannot tell those two apart, and neither can you from the colour alone. Every
             popup repeats this in words.
+          </div>
+        </LayerDetails>
+
+        <label className="layer-row" data-layer="terminator">
+          <LayerCheck
+            layerKey="terminator"
+            on={layerVisibility.terminator}
+            wish={layerWish?.terminator}
+            onToggle={onToggleLayer}
+          />
+          <LayerIcon svg={TERMINATOR_STYLE.svg} color={TERMINATOR_STYLE.color} />
+          {" "}Day/Night Terminator
+        </label>
+        <label className="layer-row sub-row" data-layer="terminatorTwilight">
+          <LayerCheck
+            layerKey="terminatorTwilight"
+            on={layerVisibility.terminatorTwilight}
+            wish={layerWish?.terminatorTwilight}
+            onToggle={onToggleLayer}
+          />
+          Show twilight bands (civil / nautical / astronomical)
+        </label>
+        <LayerDetails id="det-terminator" open={isOpen("det-terminator")} onToggle={setOpen}>
+          <div className="sublegend">
+            Where it is currently day and night, computed from the clock alone (no fetch, refreshed once a
+            minute) &mdash; context for reading a thermal detection or a satellite pass: a FIRMS hotspot at
+            local midnight means something different from one at local noon.
+          </div>
+          <div className="sublegend">
+            <b>Twilight bands</b> shade the civil (-6&deg;), nautical (-12&deg;) and astronomical (-18&deg;)
+            sun-elevation thresholds around the terminator line. Off by default &mdash; the plain day/night
+            split is usually all a reader needs, and near a pole in that hemisphere&apos;s dark season a band
+            can wrap most of the way around it rather than staying a thin ring.
+          </div>
+          <div className="sublegend">
+            Click any country or sea to see its own sunrise, sunset and current sun elevation in that
+            place&apos;s card.
+          </div>
+        </LayerDetails>
+
+        {/* Task 50: the coverage overlay. No glyph -- it draws rectangles and
+            its own legend control, not markers, so it carries no LayerIcon
+            the way every layer above it does. No "N (Total)" count for the
+            same reason terminator's row just above has none: see counts.coverage
+            in createMapController.js's renderCoverage if a number is ever
+            wanted here, though a bare source count says little on its own
+            without the state breakdown the legend itself gives. */}
+        <label className="layer-row" data-layer="coverage">
+          <LayerCheck
+            layerKey="coverage"
+            on={layerVisibility.coverage}
+            wish={layerWish?.coverage}
+            onToggle={onToggleLayer}
+          />
+          Coverage &mdash; where this map has looked
+        </label>
+        <LayerDetails id="det-coverage" open={isOpen("det-coverage")} onToggle={setOpen}>
+          <div className="sublegend">
+            <b>An empty stretch of the map can mean two different things: nothing is there, or nothing
+            was ever checked.</b> Every fetch this map makes records what it asked for and what came
+            back (raw.fetchCoverage) -- the same ledger the country card&apos;s own &ldquo;Data
+            coverage&rdquo; fold reads for one place at a time. This layer draws that ledger for the
+            whole map instead: a legend, bottom-left, and a rectangle for every source whose last fetch
+            was clipped to an area.
+          </div>
+          <div className="sublegend">
+            Five states, each drawn differently rather than folded into one colour: <b>checked
+            worldwide</b> (no rectangle needed -- nothing was excluded), <b>checked in an outlined
+            area</b> (a rectangle; everywhere outside it is unknown for that source, not confirmed
+            empty), <b>not requested at this zoom</b> (a source&apos;s own gate has not lifted --
+            zoom in and it lifts), <b>last attempt failed</b>, and <b>no coverage record at all</b>
+            (this map has not even reported trying).
+          </div>
+          <div className="sublegend">
+            <b>The interesting one is usually &ldquo;not requested at this zoom&rdquo;.</b> Most of
+            what looks empty at world zoom is not absence -- it is a source that has not been asked
+            yet, because asking would mean fetching data nobody could see or read at that scale. The
+            legend names which sources those are and the zoom that would lift each one.
+          </div>
+          <div className="sublegend">
+            This is <b>derived</b> data in this map&apos;s own four-word sense: arithmetic over what
+            this browser tab recorded about its own fetches, not something any source reported. Off by
+            default &mdash; it is an instrument for interrogating the map, not part of its default
+            reading, and it draws over the whole current view rather than one place at a time.
           </div>
         </LayerDetails>
       </PanelGroup>

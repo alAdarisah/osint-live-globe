@@ -96,6 +96,7 @@ import logging
 import re
 
 from backend import config, storage
+from backend.refine import _cursor
 from backend.sources.proximity import haversine_km
 
 log = logging.getLogger("osint-globe.flight_legs")
@@ -103,6 +104,21 @@ log = logging.getLogger("osint-globe.flight_legs")
 CURSOR_NAME = "flight_legs_cursor"
 STATE_NAME = "flight_legs_state"
 HEALTH_NAME = "flight_legs"
+
+# Bump this whenever flight_legs_state's own on-disk shape changes -- see
+# backend/refine/_cursor.py's load_state and port_calls.py's own identical
+# comment (Task 52), which this mirrors exactly: every flight_legs_state
+# document on disk before this change is a bare {icao24: entry} map with no
+# "schema_version" key, which _cursor.load_state treats as version 1 by
+# default. This change wraps that map under its own "entities" key alongside
+# the version stamp -- a bare top-level "schema_version" key would otherwise
+# collide with a real icao24, since every other top-level key in this
+# document is read as one (see _prune_state). Version 2 is deliberately the
+# *first* version this deploy expects, so that wrapping change is itself what
+# this guard visibly (logged, not silent) recovers from on rollout. Bump
+# again, past 2, whenever a *later* shape change happens to the per-airframe
+# entry shape inside "entities".
+STATE_SCHEMA_VERSION = 2
 
 # Rows read from entity_history per pass -- see port_calls.BATCH_LIMIT for the
 # full reasoning. Kept at the same figure: the cost is an index-scan against
@@ -137,6 +153,35 @@ ALTITUDE_AIRFIELD_RADIUS_KM = 10.0
 # reappears already airborne just opens an `inferred` leg from that later
 # row, the same as any airframe this job has never seen before.
 STATE_PRUNE_SECONDS = 6 * 3600
+
+# How many per-airframe entries with no currently open leg this state
+# document keeps before the oldest of them are evicted on append -- a bound
+# STATE_PRUNE_SECONDS alone does not provide, because it only ages an entry
+# out once it personally goes quiet for six hours; it does nothing to limit
+# how many *distinct* airframes can pile up inside that same six-hour window
+# in the first place. Postgres is unreachable from this environment, so this
+# is not a fresh live measurement of flight_legs_state itself -- it is a
+# judgment call, sized from the closest citable analogue this codebase has:
+# jam_crosscheck_state's own per-airframe "last" bridge, the same shape
+# (on_ground/altitude bookkeeping, keyed by icao24, read off the same "adsb"
+# entity_history rows, pruned by this module's own STATE_PRUNE_SECONDS
+# figure), measured live in review at 9,928 entries (889 KB of a 910 KB
+# document) against ~26,873 distinct airframes seen in that six-hour window
+# -- a real ceiling near 2.4 MB for a document this job, like that one, deep-
+# copies and re-serialises on every pass. FLIGHT_LEGS_STATE_CAP is set with
+# headroom above that measured population (roughly 1.5x) rather than at it,
+# so an ordinary busy day is never the thing doing the evicting -- only a
+# population genuinely larger than any day this map has actually measured
+# (a flood of spoofed or transient ICAO24 addresses, for instance) is.
+# Worst case: at most FLIGHT_LEGS_STATE_CAP entries with no open leg
+# (on_ground, altitude_state, ts -- on the order of 100 bytes each, smaller
+# than jam_crosscheck's own per-entry figure above) plus every entry that
+# does have one, which this cap never evicts -- see _evict_state below for
+# why, and backend/app.py's own /api/aircraft docstring ("~17,000 aircraft
+# ... at once") for why that second population does not need a cap of its
+# own: this map cannot simultaneously track more open legs than it is
+# simultaneously tracking airframes in the air.
+FLIGHT_LEGS_STATE_CAP = 40_000
 
 # How much wall-clock time may separate two consecutive entity_history rows
 # before this job stops trusting the earlier one as "this airframe's own
@@ -364,9 +409,13 @@ def apply_positions(rows: list[dict], state: dict) -> tuple[list[dict], dict]:
     """One batch of entity_history rows (oldest first, as entity_history_since
     returns them) -> (legs to upsert, the state to persist for next time).
 
-    Pure and DB-free: `state` is a plain dict shaped like the
-    "flight_legs_state" reference document, not a live connection -- see
-    backend/tests/test_flight_legs.py. The input `state` is never mutated:
+    Pure and DB-free: `state` is a plain {icao24: entry} dict, not a live
+    connection -- see backend/tests/test_flight_legs.py. This is the
+    unwrapped shape "flight_legs_state" actually persists under its own
+    "entities" key alongside a "schema_version" stamp -- see _load_state and
+    STATE_SCHEMA_VERSION's own comment -- so apply_positions itself, and
+    every existing test of it, never has to know that wrapper exists. The
+    input `state` is never mutated:
     _advance is handed a deep copy of each airframe's entry, matching
     port_calls.apply_positions' own reasoning (a caller that retries a batch
     on `state` it already holds must get a second, independent result rather
@@ -403,14 +452,57 @@ def _prune_state(state: dict, now_ts: float) -> dict:
     return kept
 
 
-async def _load_cursor() -> int:
-    doc = await storage.reference(CURSOR_NAME)
-    return int(doc["last_id"]) if isinstance(doc, dict) and isinstance(doc.get("last_id"), (int, float)) else 0
+def _evict_state(state: dict, cap: int) -> dict:
+    """Bounds `state`'s population at `cap`, on top of (not instead of)
+    _prune_state's own time-based pruning -- see FLIGHT_LEGS_STATE_CAP's own
+    comment on why a time bound alone is not a population bound.
+
+    An entry with a currently open leg (`entry.get("leg") is not None`) is
+    never evicted here, no matter how far over `cap` the state has grown.
+    That asymmetry is deliberate, and mirrors vessel_profile.HULL_CAP's own
+    "evicted by staleness" ruling exactly for the entries this *does* evict:
+    an entry with no open leg exists only to bridge to the next
+    on_ground/altitude transition, so dropping the oldest of those first
+    keeps this job watching the present, the same trade-off HULL_CAP makes
+    for a hull profile nobody has heard from in weeks. But an *open* leg is
+    not a bridge to a future observation waiting to happen -- it is itself
+    unwritten data, a departure this job already watched, still waiting on
+    an arrival. Evicting it would not merely lose a stale bridge worth
+    rebuilding; the leg itself would cease to exist, unclosed, forever --
+    the exact failure this module's own "A coverage gap is not evidence of
+    anything" docstring section already names as a Task 23 review Critical,
+    reached here by a different door (a population cap instead of a stale
+    comparison). So open legs are excluded from both the count against
+    `cap` and the eviction candidates entirely: this only ever trims entries
+    that exist purely to watch for a transition that has not happened yet.
+
+    If open legs alone already meet or exceed `cap` -- which would mean this
+    map is simultaneously tracking as many in-flight departures as
+    FLIGHT_LEGS_STATE_CAP itself, well past the ~17,000-aircraft figure
+    FLIGHT_LEGS_STATE_CAP's own comment cites -- every closable entry is
+    evicted and the state is still left over `cap`. That is not a promise
+    this function breaks; it never promised to bound entries it will not
+    touch, only the ones it is safe to."""
+    open_legs = {icao24: entry for icao24, entry in state.items() if entry.get("leg") is not None}
+    closable = {icao24: entry for icao24, entry in state.items() if entry.get("leg") is None}
+    if len(open_legs) + len(closable) <= cap:
+        return state
+    keep_count = max(cap - len(open_legs), 0)
+    ranked = sorted(closable.items(), key=lambda kv: (kv[1].get("last") or {}).get("ts", 0.0), reverse=True)
+    return {**open_legs, **dict(ranked[:keep_count])}
 
 
 async def _load_state() -> dict:
-    doc = await storage.reference(STATE_NAME)
-    return doc if isinstance(doc, dict) else {}
+    """flight_legs_state's own {icao24: entry} map, or {} if there is none
+    yet or the stored shape does not match STATE_SCHEMA_VERSION -- see
+    _cursor.load_state and this module's own STATE_SCHEMA_VERSION comment.
+    The document on disk wraps that flat map under its own "entities" key,
+    alongside the version stamp; unwrapped back here so apply_positions/
+    _prune_state (and every existing test of them) keep operating on the
+    same plain {icao24: entry} dict they always have."""
+    doc = await _cursor.load_state(storage, STATE_NAME, STATE_SCHEMA_VERSION, job_name="flight_legs")
+    entities = doc.get("entities")
+    return entities if isinstance(entities, dict) else {}
 
 
 async def run_once() -> dict:
@@ -422,8 +514,28 @@ async def run_once() -> dict:
     both left exactly where they were, so the same batch is read again next
     pass rather than silently dropped (entity_history has its own retention,
     so a row once passed here is never offered again).
+
+    **Write order, and why the state write's own result has to gate the
+    cursor (pre-merge review, Critical).** Mirrors port_calls.run_once's own
+    fix exactly, and for the identical reason: this used to write the state
+    document and then the cursor unconditionally, discarding both bools. The
+    failing sequence is the aviation twin of port_calls' own: a leg opens (the
+    row lands via the durably-verified record_flight_legs above), the state
+    write fails, the cursor write still lands regardless -- so the rows that
+    opened this leg fall behind the cursor and are pruned from entity_history
+    at three days, taking the only durable record of "leg": {"arrived_at":
+    None, ...} with them. The leg never closes, and the next transition this
+    airframe makes opens a second, unrelated leg, because the state that
+    would have recognised "this icao24 already has an open leg" was never
+    written. record_flight_legs is upsert-keyed (see storage.py), so it can
+    run first, unconditionally -- but the state write can only be retried
+    blind because apply_positions above was handed whatever `state` was still
+    durably on disk; only once that write is itself confirmed durable is it
+    safe to move the cursor past these rows. See test_a_failed_state_write_
+    holds_the_cursor_back_and_does_not_double_the_open_leg in
+    backend/tests/test_flight_legs.py.
     """
-    cursor = await _load_cursor()
+    cursor = await _cursor.load_cursor(storage, CURSOR_NAME)
     rows = await storage.entity_history_since("adsb", cursor, BATCH_LIMIT)
     if not rows:
         return {"read": 0, "legs": 0, "ok": True}
@@ -435,8 +547,17 @@ async def run_once() -> dict:
     if not wrote:
         return {"read": len(rows), "legs": 0, "ok": False}
 
-    await storage.record_reference(STATE_NAME, _prune_state(new_state, rows[-1]["ts"]))
-    await storage.record_reference(CURSOR_NAME, {"last_id": rows[-1]["id"]})
+    pruned_state = _prune_state(new_state, rows[-1]["ts"])
+    pruned_state = _evict_state(pruned_state, FLIGHT_LEGS_STATE_CAP)
+    state_ok = await storage.record_reference(
+        STATE_NAME, {"schema_version": STATE_SCHEMA_VERSION, "entities": pruned_state},
+    )
+    if not state_ok:
+        return {"read": len(rows), "legs": 0, "ok": False}
+
+    cursor_ok = await _cursor.advance_cursor(storage, CURSOR_NAME, rows[-1]["id"])
+    if not cursor_ok:
+        return {"read": len(rows), "legs": 0, "ok": False}
 
     return {"read": len(rows), "legs": len(upserts), "ok": True}
 

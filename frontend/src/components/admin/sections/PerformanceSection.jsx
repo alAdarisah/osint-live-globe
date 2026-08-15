@@ -18,10 +18,15 @@ export const SEARCH_TERMS = [
   "Pause polling when the tab is hidden",
   "Track point budget",
   "Trail points",
+  "Replay playback",
+  "Timeline scrubber play button",
+  "Frame cadence",
+  "Step size",
 ];
 
 export default function PerformanceSection({ settings, actions, isOpen, onToggle }) {
   const perf = settings.performance;
+  const replay = settings.replay;
 
   return (
     <PanelGroup id="adm-performance" title="Performance" open={isOpen("adm-performance")} onToggle={onToggle}>
@@ -134,6 +139,36 @@ export default function PerformanceSection({ settings, actions, isOpen, onToggle
         max={200}
         step={1}
         onChange={(value) => actions.setPerformance({ satelliteTrailPoints: value })}
+      />
+
+      <div className="admin-subhead">Timeline scrubber: Play button</div>
+      <div className="admin-note">
+        How the play button on the bottom timeline bar sweeps the last 24 hours -- how long each
+        frame holds before the next one loads, and how far apart frames are. A shorter step gives a
+        smoother sweep at the cost of more requests against entity_history; a slow connection or a
+        heavily loaded server will still degrade to a coarser step on its own when frames start
+        arriving late (see the "Slowed to..." notice on the timeline bar itself), regardless of what
+        this is set to.
+      </div>
+      <SliderField
+        label="Frame hold"
+        value={replay.frameMs}
+        defaultValue={800}
+        min={200}
+        max={5000}
+        step={100}
+        format={(v) => `${(v / 1000).toFixed(1)}s`}
+        onChange={(value) => actions.setReplay({ frameMs: value })}
+      />
+      <SliderField
+        label="Step size"
+        value={replay.stepMinutes}
+        defaultValue={60}
+        min={5}
+        max={360}
+        step={5}
+        format={(v) => (v >= 60 ? `${(v / 60).toFixed(v % 60 ? 1 : 0)}h` : `${v}min`)}
+        onChange={(value) => actions.setReplay({ stepMinutes: value })}
       />
     </PanelGroup>
   );

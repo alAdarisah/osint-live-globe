@@ -216,17 +216,18 @@ test("the FIRMS fetch gate", async (t) => {
   });
 
   await t.test("a focused country fetches its fires however far out the camera is", () => {
-    // What keeps the country card's "active fires" row: the fetch carries that
-    // country's bounds (see bboxCell in useOsintData.js), so the row counts the
-    // country rather than the planet -- 435 kB over Ukraine against 28.2 MB.
+    // What keeps the "active fires" rows in buildLivePicture and buildAdminLive:
+    // the fetch carries that country's bounds (see bboxCell in useOsintData.js),
+    // so the rows count the country rather than the planet -- 435 kB over
+    // Ukraine against 28.2 MB.
     const focused = resolveScene({ zoom: 3, focus: { kind: "country", key: "UA" } });
     assert.equal(focused.fetchZoom.get("firms"), null);
   });
 
   await t.test("a focus does not put the heat canvas on a world view", () => {
     // FOCUS_FETCH_ONLY rather than FOCUS_PROMOTE. A promotion would lift the
-    // draw band too, which is the thing the layer's own comment argues against:
-    // a global thermal feed at world zoom is mostly agricultural burning.
+    // draw band too, which is the thing the layer's own entry argues against: a
+    // global thermal feed at world zoom is mostly agricultural burning.
     const focused = resolveScene({ zoom: 3, focus: { kind: "country", key: "UA" } });
     assert.equal(focused.drawZoom.get("firms"), floorOf("THEATRE"));
     assert.ok(!focused.active.has("firms"), "a country focus painted fires over the world board");
@@ -236,6 +237,68 @@ test("the FIRMS fetch gate", async (t) => {
     const theatre = resolveScene({ zoom: floorOf("THEATRE") });
     assert.equal(theatre.fetchZoom.get("firms"), floorOf("THEATRE"));
     assert.ok(theatre.active.has("firms"), "firms fetches at a band it does not draw at");
+  });
+});
+
+test("the two on-demand line documents", async (t) => {
+  // railways and powerLines are 20.4 MB and 20.7 MB of JSON respectively, and
+  // both were fetched at boot for every reader. These assertions are what makes
+  // the lazy fetch in useOsintData.js's ONE_SHOT correct rather than merely
+  // cheaper: nothing but an explicit act can put either layer on the map, so
+  // nothing but an explicit act needs to pay for its geometry.
+  for (const key of ["railways", "powerLines"]) {
+    await t.test(`${key} is reachable only by an explicit act`, () => {
+      assert.equal(LAYER_MANIFEST[key].disposition, MANUAL, `${key} is no longer admin-only`);
+      assert.equal(LAYER_MANIFEST[key].fetch, FETCH_MANUAL, `${key} is no longer fetch-manual`);
+
+      // Neither a deep camera, nor a war under it, nor a country focus may
+      // activate it -- the three things that move every other layer.
+      const deep = resolveScene({ zoom: 12 });
+      const hot = resolveScene({
+        zoom: 12,
+        profile: { isMaritime: false, hotCountries: ["UA"], landFraction: 0.9, dominantCountries: ["UA"] },
+      });
+      const focused = resolveScene({ zoom: 12, focus: { kind: "country", key: "UA" } });
+      for (const [label, scene] of [["a deep camera", deep], ["a war view", hot], ["a country focus", focused]]) {
+        assert.ok(!scene.active.has(key), `${label} switched ${key} on by itself`);
+        assert.equal(scene.fetchZoom.get(key), Infinity, `${label} lifted ${key}'s fetch gate`);
+      }
+    });
+  }
+});
+
+test("the pipeline cap", async (t) => {
+  // Task 28 changed what this layer is without changing how it drew. It was ten
+  // hand-written schematic routes; it became those ten plus 16,739 real OSM
+  // ways, still drawn one Leaflet polyline per route per world copy with a
+  // tooltip and a popup bound to each -- ~50,000 SVG paths at THEATRE band with
+  // three copies in view, for a layer that is on by default.
+  await t.test("is a cap holder, not a layer anyone can toggle", () => {
+    // The lines ride infraLayer's own group, so this entry must never become a
+    // checkbox -- the same arrangement firmsPoints and airfieldActivity have.
+    assert.equal(LAYER_MANIFEST.pipelines.virtual, true);
+    assert.ok(!SCENE_APPLY_KEYS.includes("pipelines"));
+    assert.equal(LAYER_MANIFEST.pipelines.draw, undefined, "infra decides whether pipelines draw");
+  });
+
+  await t.test("tightens as the camera pulls back", () => {
+    // The question narrows as the reader goes in, so the allowance widens. The
+    // ordering is the assertion: a cap that did not rise with the band would
+    // thin a town view as hard as a theatre one.
+    assert.equal(resolveScene({ zoom: 4 }).caps.get("pipelines"), 600);
+    assert.equal(resolveScene({ zoom: 6 }).caps.get("pipelines"), 1500);
+    assert.equal(resolveScene({ zoom: 9 }).caps.get("pipelines"), 3000);
+    assert.equal(resolveScene({ zoom: 14 }).caps.get("pipelines"), 3000);
+  });
+
+  await t.test("ranks by how much pipeline a record carries", () => {
+    // Vertex count is the closest thing the record holds to "how much of this
+    // is there" -- a trunk line runs to hundreds of points, a yard stub to two
+    // or three. Not kilometres, and nothing claims it is.
+    const { rank } = LAYER_MANIFEST.pipelines;
+    assert.ok(rank({ path: new Array(400) }) > rank({ path: new Array(3) }));
+    assert.equal(rank({}), 0, "a record with no path must not outrank a real one");
+    assert.equal(rank({ path: "not an array" }), 0);
   });
 });
 

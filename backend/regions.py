@@ -143,6 +143,32 @@ def _in_bounds(lat: float, lon: float, bounds: Bounds) -> bool:
     return south <= lat <= north and west <= lon <= east
 
 
+def bbox_contains_point(bbox, lat: float, lon: float) -> bool:
+    """Point-in-bbox, antimeridian-aware: `bbox` is [south, west, north, east],
+    and west > east means the box wraps the antimeridian -- the convention
+    backend/sources/water_bodies.py's own `_bbox` stores for a marine feature
+    like the Bering Sea (see that function's docstring for which six features
+    actually need it). backend/app.py's `_water_bbox_overlaps` already gives a
+    bbox-*vs*-bbox query this same two-range treatment; this is the point-vs-
+    bbox form Task 42's alert rules need for a geofence pinned to one stored
+    water feature's bbox, captured once at rule-creation time, rather than a
+    second query box built fresh per request.
+
+    Unlike `_in_bounds` above (which every REGIONS entry and every viewport
+    query already satisfies west <= east for -- regions.parse_bbox refuses a
+    wrapped *query* box outright), a geofence's stored bbox can legitimately
+    wrap, so this is the version a caller that cannot assume that reaches for.
+    """
+    if not bbox or len(bbox) != 4:
+        return False
+    south, west, north, east = bbox
+    if lat < south or lat > north:
+        return False
+    if west <= east:
+        return west <= lon <= east
+    return lon >= west or lon <= east
+
+
 def filter_points(items: list[dict], bounds: Bounds | None) -> list[dict]:
     if bounds is None:
         return items

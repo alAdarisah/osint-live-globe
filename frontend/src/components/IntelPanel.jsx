@@ -24,8 +24,29 @@
 // does: this file is JSX, and the project's headless frontend test suite
 // (`node --test`, no build step) cannot import it at all -- see
 // frontend/tests/intelPanel.test.js.
+//
+// A row here can open the same card a map pin (or a country-card row) opens
+// -- App.jsx's own openRecordDetail(kind, id) -> mapApi.recordDetail, the
+// generic "one record's full detail, by layer and id" createMapController.js
+// already exposes. See intelRecordRef in intelPanelLogic.js for which kind a
+// row belongs to (Escalation has none -- a zone is a region aggregate, not a
+// record with an id of its own) and which field its id lives under.
+//
+// Opening the card does *not* also fly the map to it. Every row already
+// carries its own "Show on map" button (the LocateIcon one, `onLocate`) --
+// this app's one locate precedent, reused unchanged here rather than
+// invented a second time -- and the card itself repeats that same button in
+// its header when the record has a coordinate (EventDetailCard.jsx). A click
+// that both opened a card *and* silently recentred the map underneath it
+// would either double up on a reader's explicit "show me where" request or
+// make one click do two different things depending on which affordance is
+// hovered; every other place this same card opens from (CountryInfoCard,
+// WaterInfoCard, SubdivisionInfoCard, DistrictInfoCard) already keeps map
+// movement and card-opening as two separate, explicit actions, and this
+// keeps that agreement rather than drawing a second rule for one more panel.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import LocateIcon from "./icons/LocateIcon";
+import DetailIcon from "./icons/DetailIcon";
 import {
   severityBand, severityColor, reliabilityBand, reliabilityColor,
   DEFAULT_EVENT_FILTER, CONFIDENCE_THRESHOLD,
@@ -38,6 +59,8 @@ import {
   WINDOW_OPTIONS, DEFAULT_WINDOW_HOURS, GROUP_BY_OPTIONS, UNKNOWN_GROUP,
   makeIntelScope, groupItems, intelPanelIsEmpty, windowMaxAgeDays,
   selectEscalationZones, selectEventItems, selectNewsItems, selectOfficialsItems,
+  escalationMiniBarTitle, eventReliabilityTooltip, intelRecordRef,
+  escalationEmptyMessage, eventsEmptyMessage, newsEmptyMessage, officialsEmptyMessage,
 } from "./intelPanelLogic";
 
 // Run once, at module scope rather than inside the component -- see
@@ -100,7 +123,7 @@ function EscalationMiniBar({ zone }) {
   return (
     <div
       className="escalation-minibar"
-      title={`${zone.current} events in the last 24h vs a ${zone.baseline_per_day}/day baseline over the trailing 7 days (baseline shown flat -- no day-by-day history behind this yet)`}
+      title={escalationMiniBarTitle(zone)}
     >
       {bars.map((v, i) => (
         <span
@@ -140,7 +163,26 @@ function EscalationRow({ zone, onLocate }) {
   );
 }
 
-function EventRow({ event, onLocate }) {
+// The row's own headline, as either the "open this record's detail card"
+// button (the same card a map pin opens -- see intelRecordRef's own note on
+// why the id/kind lookup lives in intelPanelLogic.js rather than here) or, for
+// a row intelRecordRef could never resolve (Escalation has no card at all;
+// News can lack event_id), a plain span. A row this can't open must not look
+// clickable -- the whole point of returning `null` rather than guessing.
+function RecordLine({ recordRef, onOpenRecord, children }) {
+  if (!recordRef || !onOpenRecord) return <span className="notable-line">{children}</span>;
+  return (
+    <button
+      type="button"
+      className="notable-line notable-line-btn"
+      onClick={() => onOpenRecord(recordRef.kind, recordRef.id)}
+    >
+      {children}
+    </button>
+  );
+}
+
+function EventRow({ event, onLocate, onOpenRecord }) {
   const severity = Number.isFinite(event.severity) ? event.severity : 0;
   const band = severityBand(severity);
   // How much to trust the *report*, as distinct from how bad it is -- scored
@@ -156,6 +198,12 @@ function EventRow({ event, onLocate }) {
   const where = event.location || event.country || "Location unknown";
   const actors = [event.actor1, event.actor2].filter(Boolean).join(" vs ");
   const line = (event.notes || "").trim() || actors || event.event_type || "Conflict event";
+  // Same card recordDetail("events", id) builds for a map pin (see
+  // eventDetail.js) -- resolved once, here, rather than re-derived inside
+  // RecordLine, so a row with no usable id (never happens for a fused event,
+  // which always carries one, but intelRecordRef is the one place that rule
+  // lives) renders as plain text instead of a button that would do nothing.
+  const recordRef = intelRecordRef(event, "events");
 
   return (
     <div className="notable-item">
@@ -171,12 +219,12 @@ function EventRow({ event, onLocate }) {
           <span
             className="notable-chip reliability-chip"
             style={{ background: reliabilityColor(trustBand) }}
-            title={`Reliability ${Number.isFinite(event.reliability) ? event.reliability : trustBand.min}/100 — who is behind this report, and how many independent sources`}
+            title={eventReliabilityTooltip(event, trustBand)}
           >
             {trustBand.label}
           </span>
         )}
-        <span className="notable-line">{line}</span>
+        <RecordLine recordRef={recordRef} onOpenRecord={onOpenRecord}>{line}</RecordLine>
         <button
           type="button"
           className="news-locate-btn"
@@ -205,7 +253,7 @@ function EventRow({ event, onLocate }) {
   );
 }
 
-function NewsRow({ item, onLocate }) {
+function NewsRow({ item, onLocate, onOpenRecord }) {
   const headline = item.real_title.trim();
   const when = timeAgoFromDateAdded(item.date_added);
   const meta = [item.source_name, when, item.corroborated ? "corroborated" : null].filter(Boolean).join(" · ");
@@ -216,6 +264,15 @@ function NewsRow({ item, onLocate }) {
   // this is not simply `item.source_url`. Same treatment ConflictBriefingCard
   // and map/popups.js give the same field.
   const link = safeUrl(item.source_url);
+  // Unlike Events/Officials, News' own headline is already the row's primary
+  // click target -- a real link to the cited article, which has to keep
+  // working as a link (including middle-click and open-in-new-tab). Making
+  // the headline itself open the detail card too would mean one element
+  // doing two different things depending on exactly where the click landed,
+  // so this gets its own explicit button next to Locate instead -- rendered
+  // only when intelRecordRef actually resolves (a News row without its own
+  // event_id, same as one with no coordinate, is a real state, not a bug).
+  const recordRef = intelRecordRef(item, "news");
 
   return (
     <div className="news-item">
@@ -226,6 +283,17 @@ function NewsRow({ item, onLocate }) {
           </a>
         ) : (
           <span>{headline}</span>
+        )}
+        {recordRef && onOpenRecord && (
+          <button
+            type="button"
+            className="news-locate-btn"
+            title="Open detail card"
+            aria-label="Open detail card"
+            onClick={() => onOpenRecord(recordRef.kind, recordRef.id)}
+          >
+            <DetailIcon />
+          </button>
         )}
         <button
           type="button"
@@ -242,7 +310,7 @@ function NewsRow({ item, onLocate }) {
   );
 }
 
-function OfficialsRow({ item, onLocate }) {
+function OfficialsRow({ item, onLocate, onOpenRecord }) {
   const kindLabel = OFFICIALS_KIND_LABEL[item.kind] || "Diplomatic activity";
   const lead = (item.headline || "").trim() || item.label || kindLabel;
   const where = item.location || item.country || "";
@@ -250,6 +318,7 @@ function OfficialsRow({ item, onLocate }) {
   const actors = [item.actor1, item.actor2].filter(Boolean).join(" → ");
   const publisher = item.outlet || item.government || "";
   const primary = item.origin === "official_feed";
+  const recordRef = intelRecordRef(item, "officials");
 
   return (
     <div className="notable-item">
@@ -257,7 +326,7 @@ function OfficialsRow({ item, onLocate }) {
         <span className="notable-chip officials-chip" title={kindLabel}>
           {kindLabel}
         </span>
-        <span className="notable-line">{lead}</span>
+        <RecordLine recordRef={recordRef} onOpenRecord={onOpenRecord}>{lead}</RecordLine>
         <button
           type="button"
           className="news-locate-btn"
@@ -284,17 +353,21 @@ function OfficialsRow({ item, onLocate }) {
 // near-identical tab bodies would be exactly the kind of drift this project's
 // "one definition" rule (see map/severity.js's own note on SEVERITY_BANDS)
 // exists to prevent.
-function TabList({ items, groupBy, tabKind, Row, rowKey, onLocate }) {
+function TabList({ items, groupBy, tabKind, Row, rowKey, onLocate, onOpenRecord }) {
   const groups = GROUPABLE_TABS.has(tabKind) ? groupItems(items, groupBy, tabKind) : null;
   if (!groups) {
-    return items.map((item) => <Row key={rowKey(item)} event={item} item={item} onLocate={onLocate} />);
+    return items.map((item) => (
+      <Row key={rowKey(item)} event={item} item={item} onLocate={onLocate} onOpenRecord={onOpenRecord} />
+    ));
   }
   return groups.map((g) => (
     <div key={g.key} className="intel-group">
       <div className="notable-section">
         {groupLabel(g.key, groupBy, tabKind)} &middot; {g.items.length}
       </div>
-      {g.items.map((item) => <Row key={rowKey(item)} event={item} item={item} onLocate={onLocate} />)}
+      {g.items.map((item) => (
+        <Row key={rowKey(item)} event={item} item={item} onLocate={onLocate} onOpenRecord={onOpenRecord} />
+      ))}
     </div>
   ));
 }
@@ -304,7 +377,7 @@ export default function IntelPanel({
   eventsRaw, gdeltRaw, officialsRaw, escalation,
   eventFilter = DEFAULT_EVENT_FILTER, onEventFilterChange,
   mapBounds, regions, currentRegionKey,
-  countryScope, water, onLocate, isMobile,
+  countryScope, water, onLocate, onOpenRecord, isMobile,
 }) {
   // Expanded by default on desktop -- this is the panel that answers "what
   // should I look at", so hiding it defeats the point; same reasoning
@@ -604,43 +677,40 @@ export default function IntelPanel({
                   {escalationZones.map((z) => <EscalationRow key={z.region} zone={z} onLocate={onLocate} />)}
                 </>
               ) : (
-                <div className="notable-empty">
-                  {scope.deliberate
-                    ? `No zone inside ${scope.label} is currently running above its own baseline.`
-                    : "No region is currently running above its own 7-day baseline."}
-                </div>
+                <div className="notable-empty">{escalationEmptyMessage(scope)}</div>
               )
             )}
 
             {activeTab === "events" && (
               eventItems.length ? (
-                <TabList items={eventItems} groupBy={groupBy} tabKind="events" Row={EventRow} rowKey={(e) => e.id} onLocate={onLocate} />
+                <TabList
+                  items={eventItems} groupBy={groupBy} tabKind="events" Row={EventRow}
+                  rowKey={(e) => e.id} onLocate={onLocate} onOpenRecord={onOpenRecord}
+                />
               ) : (
-                <div className="notable-empty">
-                  {scope.deliberate
-                    ? `No recorded conflict activity in ${scope.label} in the current window. Widen the window, or clear the scope to see the world board.`
-                    : "Nothing clears the significance bar right now. Narrow the scope to a place to see its own worst few regardless."}
-                </div>
+                <div className="notable-empty">{eventsEmptyMessage(scope)}</div>
               )
             )}
 
             {activeTab === "news" && (
               newsItems.length ? (
-                <TabList items={newsItems} groupBy={groupBy} tabKind="news" Row={NewsRow} rowKey={(i) => i.source_url || i.event_id} onLocate={onLocate} />
+                <TabList
+                  items={newsItems} groupBy={groupBy} tabKind="news" Row={NewsRow}
+                  rowKey={(i) => i.source_url || i.event_id} onLocate={onLocate} onOpenRecord={onOpenRecord}
+                />
               ) : (
-                <div className="notable-empty">
-                  {scope.deliberate ? `No recent headlines for ${scope.label}.` : "No recent headlines for this area."}
-                </div>
+                <div className="notable-empty">{newsEmptyMessage(scope)}</div>
               )
             )}
 
             {activeTab === "officials" && (
               officialsItems.length ? (
-                <TabList items={officialsItems} groupBy={groupBy} tabKind="officials" Row={OfficialsRow} rowKey={(i) => i.id || `${i.published_at}|${i.lat}|${i.lon}`} onLocate={onLocate} />
+                <TabList
+                  items={officialsItems} groupBy={groupBy} tabKind="officials" Row={OfficialsRow}
+                  rowKey={(i) => i.id || `${i.published_at}|${i.lat}|${i.lon}`} onLocate={onLocate} onOpenRecord={onOpenRecord}
+                />
               ) : (
-                <div className="notable-empty">
-                  {scope.deliberate ? `No diplomatic activity recorded for ${scope.label}.` : "No diplomatic activity in the current window."}
-                </div>
+                <div className="notable-empty">{officialsEmptyMessage(scope)}</div>
               )
             )}
           </div>

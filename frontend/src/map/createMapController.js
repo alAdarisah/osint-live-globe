@@ -48,7 +48,16 @@ import {
   createSatelliteGroup,
   createTrailLayers,
   createWindFlowLayer,
+  createTerminatorLayer,
+  createCoverageLayer,
+  createCoverageLegend,
 } from "./layers";
+import {
+  summarizeCoverage, coverageLegendHtml, COVERAGE_RECTANGLE_STYLE, COVERAGE_OVERLAY_SOURCES,
+} from "./coverageOverlay";
+import {
+  nightPolygonRings, CIVIL_TWILIGHT_DEG, NAUTICAL_TWILIGHT_DEG, ASTRONOMICAL_TWILIGHT_DEG,
+} from "./solarMath";
 import { attachTileTintMotionGate } from "./tileTintMotion";
 import {
   decorateEvent,
@@ -158,7 +167,7 @@ import {
 } from "./crossSource";
 import {
   resolveScene, drawZoomFor, shippedDrawZoom, SCENE_APPLY_KEYS, LAYER_MANIFEST,
-  hasAgeWindow, withinAgeWindow, REFERENCE_ONLY_FEEDS,
+  hasAgeWindow, withinAgeWindow, REFERENCE_ONLY_FEEDS, bandFor, bboxSnapDegrees,
 } from "./scene";
 import { reachLineEnds, reachContourRings, reachOnScreen } from "./reachGeometry";
 import { profileViewport } from "./viewportProfile";
@@ -196,6 +205,7 @@ import { esc, fmtNumber, fmtFrp, fmtConfidence, fmtFirmsDateTime, haversineKm } 
 import {
   nearestLon, unwrapPath, boundsContainsPoint,
   worldCopyOffsets, worldCopyDraws, worldCopyKey, worldCopyPlacer, shiftPathLon,
+  pathExtent, extentInView,
 } from "../utils/geo";
 import { createGenerationGuard } from "../utils/fetchGeneration";
 import { fetchJson, vesselDetailUrl, portCallsUrl, aircraftDetailUrl } from "../api";
@@ -719,6 +729,17 @@ export function createMapController(container, initial, callbacks) {
     createLaneDensityLayers(map);
   laneDensityLayer.addTo(map);
   const { groups } = createEntityClusterGroups(map);
+  // Task 46: the day/night line. AUTO disposition (see map/scene.js), so like
+  // firms/jamming/laneDensity above it starts on the map here and
+  // applyLayerWishes below corrects it to whatever the resolver's initial
+  // answer is before the first paint. twilightLayer is NOT added here -- its
+  // own sub-toggle defaults off (see terminatorTwilightVisible below) and it
+  // is added/removed by setLayerVisible("terminatorTwilight") instead.
+  const {
+    nightLayer: terminatorLayer, twilightLayer: terminatorTwilightLayer,
+    astronomicalRing: terminatorAstronomicalRing, nauticalRing: terminatorNauticalRing,
+    civilRing: terminatorCivilRing, nightStyle: terminatorNightStyle,
+  } = createTerminatorLayer(map);
   // The area a conflict event could actually be in, drawn under its pin. Tied
   // to the events layer rather than toggled separately -- it is the same claim
   // as the pin, drawn honestly, not a layer a reader should have to find.
@@ -762,6 +783,13 @@ export function createMapController(container, initial, callbacks) {
   // Seas, lakes and rivers. Also NOT added to the map here, for the same
   // reason -- MANUAL and off by default, see map/scene.js's `water` entry.
   const waterLayer = createWaterLayer(map);
+  // Task 50: the coverage overlay -- rectangles for scoped sources' last-
+  // fetched bbox, plus a legend control naming every one of the five states
+  // (see map/coverageOverlay.js). Same MANUAL, off-by-default, deferred-add
+  // treatment as waterLayer just above; renderCoverage/coverageVisible are
+  // defined near renderWater further down this file.
+  const coverageLayer = createCoverageLayer(map);
+  const coverageLegend = createCoverageLegend();
   // NASA GIBS imagery. Not added to the map until a reader picks a layer.
   const imageryLayer = createImageryLayer(map);
   let imageryKey = null;   // null == off; otherwise a key of GIBS_LAYERS
@@ -1156,6 +1184,9 @@ export function createMapController(container, initial, callbacks) {
   // Debounced re-check of the rivers sub-toggle's loaded extent -- see
   // maybeRefetchRivers below, wired to moveend next to moveEndWindTimer above.
   let moveEndRiversTimer = null;
+  // Task 46: redraws the terminator/twilight geometry -- see refreshTerminator
+  // below for the cadence and why it is what it is.
+  let terminatorRefreshTimer = null;
 
   // ---------- cities gate + country selection/highlight ----------
   // Cities only render once the user has opted into a scope (clicking a
@@ -1203,6 +1234,11 @@ export function createMapController(container, initial, callbacks) {
   // the click/hover chain below so a hidden water layer never answers for a
   // click that landed on a sea nobody asked to see.
   let waterVisible = false;
+  // Same mirror again for "coverage" -- MANUAL and off by default (see its
+  // LAYER_MANIFEST entry in scene.js). Read by renderCoverage so a poll or a
+  // camera move while the layer is off does nothing rather than rebuilding
+  // rectangles nobody can see.
+  let coverageVisible = false;
   // These three mirror their own dedicated "*Trails" sub-ticker toggle (see
   // LayersSection.jsx's "Show ... trails" rows and the matching keys in
   // setLayerVisible below) -- entityWebglLayer/renderSatellites keep
@@ -1219,6 +1255,11 @@ export function createMapController(container, initial, callbacks) {
   // the whole thing off. Filters the pool renderSatellites works from, so
   // both the markers and their orbital trails follow it.
   let satellitesMilitaryVisible = true;
+  // Sub-toggle under "Day/night terminator" (Task 46): civil/nautical/
+  // astronomical twilight bands, off by default per the brief -- see
+  // syncTerminatorTwilight below for how this combines with "terminator"'s
+  // own on/off state, the same shape syncNewsLayer gives gdelt/events.
+  let terminatorTwilightVisible = false;
 
   // News is a sub-ticker of Conflict & Violence, not a layer of its own (see
   // LayersSection.jsx): it draws only when both its own checkbox and its
@@ -1557,6 +1598,12 @@ export function createMapController(container, initial, callbacks) {
     sceneSelectionSignature = [...selectedCountryKeys].join(",");
 
     reportLayerState();
+    // Task 50: re-derive the coverage overlay against the scene that was
+    // just recomputed -- its "gated" sentences name the zoom that would lift
+    // each source's gate, which is a fact about *this* scene, not the one
+    // the last poll happened to land under. No-op while the layer is off
+    // (see renderCoverage's own guard).
+    renderCoverage();
   }
 
   // The panel's checkboxes read this rather than a React copy of their own,
@@ -1574,6 +1621,7 @@ export function createMapController(container, initial, callbacks) {
     on.satellitesMilitary = satellitesMilitaryVisible;
     on.waterLakes = waterLakesVisible;
     on.waterRivers = waterRiversVisible;
+    on.terminatorTwilight = terminatorTwilightVisible;
     const signature = `${JSON.stringify(on)}|${JSON.stringify(userLayerWish)}|${sceneBypass}`;
     if (signature === lastLayerStateSignature) return;
     lastLayerStateSignature = signature;
@@ -2810,9 +2858,21 @@ export function createMapController(container, initial, callbacks) {
     if (key === "powerLines") return powerLinesGroup;
     if (key === "shippingLanes") return shippingLanesGroup;
     if (key === "water") return waterLayer;
+    if (key === "coverage") return coverageLayer;
+    if (key === "terminator") return terminatorLayer;
     if (key === "windArrows") return windFlowLayer;
     if (key === "precip") return weatherLayers.precip;
+    // Task 45: the five OWM tile layers, keyed exactly as
+    // map/weatherLayers.js's OWM_WEATHER_LAYERS names them. Note two pairs
+    // that read alike and are not: "precip" above is RainViewer's radar (its
+    // URL is filled in on a timer, see refreshPrecipRadar), while
+    // "precipitation" here is OWM's own; and "windArrows" above is the
+    // computed flow field, not OWM's "wind" tile.
     if (key === "clouds") return weatherLayers.clouds;
+    if (key === "wind") return weatherLayers.wind;
+    if (key === "precipitation") return weatherLayers.precipitation;
+    if (key === "temp") return weatherLayers.temp;
+    if (key === "pressure") return weatherLayers.pressure;
     if (key === "jamming") return jammingLayerWithPing;
     if (key === "laneDensity") return laneDensityLayer;
     if (key === "satellites") return satelliteGroup;
@@ -2952,6 +3012,17 @@ export function createMapController(container, initial, callbacks) {
       renderWater();
       return;
     }
+    // Task 46: no Leaflet layer of its own to add/remove -- like
+    // satellitesMilitary/waterLakes/waterRivers above, it rides a layer
+    // that already exists (terminatorTwilightLayer, built once in
+    // createTerminatorLayer) rather than layerForKey having anything to
+    // hand back for this key.
+    if (key === "terminatorTwilight") {
+      terminatorTwilightVisible = visible;
+      syncTerminatorTwilight();
+      if (visible) refreshTerminator(); // draw the bands now rather than waiting out the rest of the minute
+      return;
+    }
 
     const trailToggle = TRAIL_TOGGLES[key];
     if (trailToggle) {
@@ -3024,6 +3095,33 @@ export function createMapController(container, initial, callbacks) {
       // so a water body already selected before the layer was switched off
       // needs its highlight repainted rather than left to the next click.
       else updateWaterHighlights();
+    }
+
+    // Task 50: the coverage overlay -- coverageLayer's own add/remove already
+    // ran through the generic layerForKey block above; this owns what that
+    // block does not know about: the legend control (a plain Leaflet
+    // control, not a Leaflet *layer*, so it needs its own addTo/remove) and
+    // the catch-up render that draws the rectangles the moment the layer
+    // comes on, rather than leaving it empty until the next poll or pan.
+    if (key === "coverage") {
+      coverageVisible = visible;
+      if (visible) {
+        coverageLegend.addTo(map);
+        renderCoverage();
+      } else {
+        coverageLegend.remove();
+        coverageLayer.clearLayers();
+      }
+    }
+
+    if (key === "terminator") {
+      // The twilight sub-toggle's real visibility is an AND of its own
+      // checkbox and this one (see syncTerminatorTwilight) -- switching the
+      // parent off has to take the bands with it even though the reader
+      // never touched their checkbox, the same "parent off overrides the
+      // sub-ticker" rule the satellites branch below applies to trails.
+      syncTerminatorTwilight();
+      if (visible) refreshTerminator(); // draw now rather than waiting out the rest of the minute
     }
 
     if (key === "satellites") {
@@ -3481,9 +3579,13 @@ export function createMapController(container, initial, callbacks) {
    * the key comparison and costs a string compare per layer.
    */
   function renderWorldCopyLayers() {
-    const key = worldCopies().join(",");
+    const offsets = worldCopies();
+    const key = offsets.join(",");
     if (worldCopyKeys.cables !== key) renderCables();
-    if (worldCopyKeys.pipelines !== key) renderPipelines();
+    // Its own key, not the shared one: pipelines is the only line layer here
+    // that is bounds-filtered and capped, so a pan or a zoom can change what it
+    // draws while the copy count sits still. See pipelineDrawKey.
+    if (worldCopyKeys.pipelines !== pipelineDrawKey(offsets)) renderPipelines();
     if (worldCopyKeys.railways !== key) renderRailways();
     if (worldCopyKeys.powerLines !== key) renderPowerLines();
     if (worldCopyKeys.shippingLanes !== key) renderShippingLanes();
@@ -6873,23 +6975,119 @@ export function createMapController(container, initial, callbacks) {
     settlePlacement();
   }
 
+  // The per-route extents the viewport test below compares against, computed
+  // once per route and held off to the side rather than stamped onto the record.
+  // A WeakMap because Admin Mode's override transform hands the renderer a fresh
+  // copy of an edited feed (see applyOverrides): a bbox cached on the object
+  // would either outlive the geometry it described or keep the old copies alive.
+  const pipelineExtents = new WeakMap();
+
+  function pipelineExtentOf(route) {
+    if (pipelineExtents.has(route)) return pipelineExtents.get(route);
+    // Cached even when null -- "this route has no usable geometry" is an answer
+    // worth not recomputing sixteen thousand times a pan.
+    const box = pathExtent(route.path);
+    pipelineExtents.set(route, box);
+    return box;
+  }
+
+  /**
+   * Is this route's own extent anywhere in the padded viewport?
+   *
+   * A box test rather than viewportFilter's per-point containment, because the
+   * two answer different questions once the record is a line: a segment can
+   * cross the whole screen with both of its endpoints off it, and a per-vertex
+   * test would drop exactly that route -- the long trunk lines this layer most
+   * wants to keep. Built once per render pass, like viewportFilter, for the same
+   * reason its own comment gives.
+   *
+   * Padded by the same 0.25 every point layer uses, so a route just off-screen
+   * is already drawn by the time the reader pans onto it.
+   */
+  function pipelineInViewFilter() {
+    const bounds = map.getBounds().pad(0.25);
+    const view = {
+      south: bounds.getSouth(), north: bounds.getNorth(),
+      west: bounds.getWest(), east: bounds.getEast(),
+    };
+    const refLon = map.getCenter().lng;
+    return (route) => extentInView(pipelineExtentOf(route), view, refLon);
+  }
+
+  /**
+   * What renderWorldCopyLayers compares to decide whether pipelines needs
+   * redrawing.
+   *
+   * The other line layers key on the copy count alone, which is all they need:
+   * nothing else about the camera changes what they draw. This one is
+   * bounds-filtered and capped per band, so it has to notice a pan and a zoom as
+   * well -- snapped to the same grid the fetch bboxes use (see bboxSnapDegrees),
+   * so ordinary panning inside one cell still redraws nothing. Without the
+   * snapping this would rebuild sixteen thousand records' worth of filtering on
+   * every pixel of drag, which is the cost the filter exists to avoid.
+   */
+  function pipelineDrawKey(offsets = worldCopies()) {
+    const view = map.getBounds().pad(0.25);
+    const band = bandFor(map.getZoom());
+    const snap = bboxSnapDegrees(band);
+    const cell = [
+      Math.floor(view.getSouth() / snap), Math.floor(view.getWest() / snap),
+      Math.ceil(view.getNorth() / snap), Math.ceil(view.getEast() / snap),
+    ].join(",");
+    // The band is in the key in its own right, not left implied by the cell: the
+    // cap is a function of the band, so crossing a band boundary changes what is
+    // drawn even when the snapped cell happens not to move.
+    return `${offsets.join(",")}|${band}|${cell}`;
+  }
+
   // Pipeline routes -- backend/infrastructure.py's curated PIPELINE_ROUTES,
   // plus (Task 28) real OSM pipeline geometry, merged server-side by
   // app.py's infrastructure_list into one `raw.pipelines` array, each entry
   // stamped `source: "curated" | "osm"`. Fetched once (see useOsintData.js),
-  // so this just draws every route once rather than diff-syncing
-  // per-viewport like the point layers.
+  // so this redraws from the held array rather than diff-syncing per record the
+  // way the point layers do.
   //
   // Drawn on every copy of the world in view, same as the cables below: a route
   // is a line across the globe, not a point, so it has to repeat where the
   // basemap repeats or it stops dead at the seam. See worldCopies above.
+  //
+  // The two halves are drawn under different rules, and the split is the whole
+  // point of this function. renderCables states the argument this layer used to
+  // share: "a polyline is already clipped by Leaflet and a cable only makes
+  // sense as a whole line, so cropping it to the viewport would cut cables in
+  // half at the edge of the screen for no saving." That is true of 718
+  // globe-spanning cables and it is true of the ten curated schematic pipeline
+  // routes, which are the same kind of object -- Druzhba drawn from Samara to
+  // Hungary, six waypoints, meaningless in pieces. Those ten keep the cables
+  // treatment exactly: never filtered, never capped, every copy, always.
+  //
+  // It was never true of the 16,739 OSM ways Task 28 merged in beside them.
+  // Those average twelve vertices and sit inside the eleven conflict theatres;
+  // dropping one that is four thousand kilometres off-screen cuts nothing in
+  // half, it just declines to build a DOM node nobody can see. So the OSM half
+  // is bounds-filtered and then capped by rank, which is what every other dense
+  // layer on this map already does.
   function renderPipelines() {
     pipelinesGroup.clearLayers();
     const offsets = worldCopies();
-    worldCopyKeys.pipelines = offsets.join(",");
+    worldCopyKeys.pipelines = pipelineDrawKey(offsets);
+
+    const curated = [];
+    const osm = [];
     for (const route of raw.pipelines) {
+      if (!Array.isArray(route?.path) || route.path.length < 2) continue;
+      (route.source === "osm" ? osm : curated).push(route);
+    }
+    // Filter before capping, not after: a cap applied to the whole world and
+    // then clipped to the view would hand back whatever survived both, which on
+    // a quiet theatre is far less than the cap allows and on a busy one is the
+    // wrong 600. Filtering first means the cap always describes what is on
+    // screen, which is the only thing the panel's note can honestly be about.
+    const inView = pipelineInViewFilter();
+    const drawn = curated.concat(capByRank("pipelines", osm.filter(inView)));
+
+    for (const route of drawn) {
       const path = route.path;
-      if (!Array.isArray(path) || path.length < 2) continue;
       const isOsm = route.source === "osm";
       const label = route.name ? esc(route.name) : "Pipeline";
       const popupHtml = isOsm
@@ -6926,7 +7124,12 @@ export function createMapController(container, initial, callbacks) {
     }
     // Per route, not per drawn line. A copy of a pipeline is the same pipeline,
     // and a count that triples when the reader zooms out would be a lie.
-    counts.pipelineRoutes = raw.pipelines.length;
+    //
+    // `counts` is now what is actually drawn and `totals` what the feed holds,
+    // which is the split every other layer here already reports -- before the
+    // bounds filter the two were necessarily the same number, because
+    // everything in the feed was always drawn.
+    counts.pipelineRoutes = drawn.length;
     totals.pipelineRoutes = raw.pipelines.length;
     // Review fix (Task 28, Critical): same "a cap that truncates silently is
     // a defect" treatment railways'/powerLines' own truncated-region notes
@@ -7272,6 +7475,38 @@ export function createMapController(container, initial, callbacks) {
     scheduleReports({ counts: true });
   }
 
+  /**
+   * Rebuild the coverage overlay from raw.fetchCoverage and the current
+   * scene -- one rectangle per "scoped" source's last-fetched bbox, plus a
+   * legend control naming every one of the five states a tracked source can
+   * be in (see map/coverageOverlay.js for the logic; this only owns the
+   * Leaflet objects). Called on toggle-on (setLayerVisible), on every
+   * "fetchCoverage" poll (applyData), and at the tail of applyScene so the
+   * "gated -- needs zoom N" sentences track the live camera position rather
+   * than whatever zoom happened to be current the last time a poll landed.
+   * All three call sites are cheap to call unconditionally -- the guard
+   * below is what actually skips the work while the layer is off.
+   */
+  function renderCoverage() {
+    if (!coverageVisible) return;
+    coverageLayer.clearLayers();
+    const { rectangles } = summarizeCoverage(raw, scene);
+    for (const rect of rectangles) {
+      L.rectangle(
+        [[rect.bbox.south, rect.bbox.west], [rect.bbox.north, rect.bbox.east]],
+        { pane: "coveragePane", interactive: true, ...COVERAGE_RECTANGLE_STYLE }
+      ).bindTooltip(rect.sentence, { sticky: true }).addTo(coverageLayer);
+    }
+    coverageLegend.setContent(coverageLegendHtml(raw, scene));
+    // Rectangles actually drawn vs. every source this layer tracks -- the
+    // same "drawn count vs. known-about total" shape LayersSection.jsx's own
+    // "N (Total)" convention already uses for every other layer, reused
+    // rather than inventing a second one just for this row.
+    counts.coverage = rectangles.length;
+    totals.coverage = COVERAGE_OVERLAY_SOURCES.length;
+    scheduleReports({ counts: true });
+  }
+
   // Same technique updateCountryHighlights/updateSubdivisionHighlights use:
   // Leaflet applies a path's `className` once, at creation, so hover and
   // selection are toggled on the already-rendered element rather than by
@@ -7315,12 +7550,49 @@ export function createMapController(container, initial, callbacks) {
   function fetchRivers() {
     if (waterRiversFetchInFlight) return;
     waterRiversFetchInFlight = true;
-    const bounds = map.getBounds().pad(1.0);
+    // pad(1.0) doubles the viewport on every side, and at WORLD/THEATRE zoom
+    // that overshoots the coordinate range entirely -- a bbox like
+    // "-207.57,-322.56,220.16,352.44" -- which backend/regions.py's
+    // parse_bbox cannot parse (it rejects anything outside +-90/+-180) and
+    // water_endpoint then 400s, since kind=rivers refuses to serve unbounded.
+    // A 400 means fetchRivers' own .catch swallows it, waterRiversLoadedBounds
+    // never gets set, and maybeRefetchRivers retries on every moveend forever
+    // -- rivers simply never load below zoom ~4, which per this function's
+    // own docstring reads to a reader as "we looked and there are no rivers
+    // here" rather than "we never actually asked". useOsintData.js's own
+    // bboxCell clamps south/north to +-90 and west/east to +-180 for exactly
+    // this reason; this is the one bbox producer that had not been brought
+    // into line with it.
+    const padded = map.getBounds().pad(1.0);
+    const bounds = L.latLngBounds(
+      [Math.max(-90, padded.getSouth()), Math.max(-180, padded.getWest())],
+      [Math.min(90, padded.getNorth()), Math.min(180, padded.getEast())]
+    );
     const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
     fetchJson(`/api/water?kind=rivers&bbox=${encodeURIComponent(bbox)}`)
       .then((data) => {
-        waterRiversFeatures = data?.features || [];
-        waterRiversLoadedBounds = bounds;
+        const features = data?.features || [];
+        waterRiversFeatures = features;
+        // Only record an extent as loaded when something actually came back.
+        //
+        // The clamp above made the world-zoom request legal, which is the
+        // whole point of it -- but a legal request that answers with zero
+        // features is not the same fact as "there are no rivers in the
+        // world", and treating it as one is worse than the 400 this replaced.
+        // waterRiversLoadedBounds is what maybeRefetchRivers checks to decide
+        // the viewport is still inside what it already has, so setting it to
+        // the whole world on an empty answer makes every later pan a
+        // no-op: rivers stay absent for the rest of the session, everywhere,
+        // with nothing on screen distinguishing that from genuinely empty
+        // water. Found in review against the live backend, where the exact
+        // clamped world bbox hit a _WATER_CACHE entry (app.py's 1h TTL) that
+        // had been filled with an empty payload -- the same bounds a
+        // ten-thousandth of a degree in returned 1,454 features.
+        //
+        // Leaving the extent unset means the next moveend simply asks again,
+        // which is the correct behaviour for "we have not successfully loaded
+        // this yet" and costs one request per pan until the cache expires.
+        if (features.length) waterRiversLoadedBounds = bounds;
         renderWater();
       })
       .catch((err) => console.warn("Failed to load rivers:", err))
@@ -7333,8 +7605,19 @@ export function createMapController(container, initial, callbacks) {
    * and, debounced, from moveend below -- both funnel through the same
    * "has the viewport actually left the loaded extent" check, so a reader
    * cannot end up re-fetching the same rivers on every pan inside a city.
+   *
+   * destroy()'s own map.stop() (called just before map.remove(), see its
+   * comment) makes Leaflet's _resetView fire one last synchronous 'moveend'
+   * on its way out -- which re-arms moveEndRiversTimer for 500ms in the
+   * future, after map.remove() has already deleted _mapPane. Without this
+   * guard that stale timer calls map.getBounds() on a torn-down map and
+   * throws "Cannot read properties of undefined (reading '_leaflet_pos')"
+   * into the console on every teardown (StrictMode's dev-only double mount
+   * hits this on every load). Same pane check createEntityWebglLayer uses to
+   * detect a map removed out from under a pending attach.
    */
   function maybeRefetchRivers() {
+    if (!map._mapPane) return;
     if (!waterRiversVisible) return;
     if (waterRiversLoadedBounds && waterRiversLoadedBounds.contains(map.getBounds())) return;
     fetchRivers();
@@ -7520,8 +7803,9 @@ export function createMapController(container, initial, callbacks) {
     // viewport's positions -- eight passes per pan, most of them wrong.
     // Before the marker layers, and outside the placement suspension: these three
     // are polylines, so they take no part in the declutter pass at all. Almost
-    // always a no-op -- it only does work on the pan or zoom that changes how many
-    // copies of the world are on screen.
+    // always a no-op -- the copy-count layers only do work on the pan or zoom
+    // that changes how many copies of the world are on screen, and pipelines only
+    // when the snapped viewport cell or the band moves (see pipelineDrawKey).
     renderWorldCopyLayers();
     settleSuspended += 1;
     try {
@@ -7631,6 +7915,15 @@ export function createMapController(container, initial, callbacks) {
 
   let firstWindLoadDone = false;
   async function refreshWindArrows() {
+    // Same torn-down-map guard maybeRefetchRivers carries, for the same
+    // reason: destroy() clears moveEndWindTimer and moveEndRiversTimer, then
+    // calls map.stop(), whose synchronous 'moveend' re-arms *both* one line
+    // before map.remove() deletes _mapPane. The rivers half of that was found
+    // and fixed; this half was missed because windArrows defaults off, so the
+    // early return below usually hides it -- a reader with the wind layer on
+    // gets the identical "_leaflet_pos" throw on every teardown. Guard first,
+    // before that early return, so being switched off is not what protects it.
+    if (!map._mapPane) return;
     // The layer is off by default (see DEFAULT_LAYER_VISIBILITY in App.jsx), and
     // this used to run regardless: a debounced round trip on every moveend, plus
     // a five-minute interval, plus a visibilitychange catch-up, all to hand data
@@ -7676,6 +7969,78 @@ export function createMapController(container, initial, callbacks) {
     } catch (err) {
       console.warn("Failed to fetch precip radar frame:", err);
     }
+  }
+
+  // ---------- terminator: day/night line, computed from the clock ----------
+  //
+  // Cadence: the subsolar point moves ~15deg of longitude an hour (Earth's
+  // rotation, ~0.25deg/min, ~28km/min at the equator). A minute-old
+  // terminator is therefore off by at most ~28km at the equator and less at
+  // higher latitudes -- imperceptible at any zoom this map opens at (WORLD
+  // is a whole hemisphere on screen), and still well under one pixel of
+  // drift even at COUNTRY zoom by the time the next tick corrects it. A
+  // faster timer would buy accuracy nobody could see for a polygon rebuild
+  // this map does not otherwise need; a much slower one (RainViewer's own
+  // 10min radar-pass cadence, say) would let the line visibly lag a
+  // fast-moving news event's local time-of-day. One minute matches neither
+  // constant exactly because this is not fetched or rate-limited data --
+  // it is the shortest round number that keeps the drift below what a
+  // reader could ever notice.
+  const TERMINATOR_REFRESH_MS = 60 * 1000;
+
+  function refreshTerminator() {
+    // Same torn-down-map guard refreshWindArrows carries and for the
+    // identical reason (see that function's own note): destroy() clears
+    // this timer and then calls map.stop(), whose synchronous 'moveend' can
+    // re-arm timers a beat before map.remove() deletes _mapPane. This one
+    // touches Leaflet layer geometry directly (no network round trip to
+    // race), so the guard has to come before that geometry write, not just
+    // before a fetch.
+    if (!map._mapPane) return;
+    // Same "off means don't bother" guard refreshWindArrows carries -- a
+    // reader who has switched the layer off should not pay for a polygon
+    // rebuild every minute for a layer nothing is displaying. setLayerVisible
+    // catches up with an immediate call when the layer (or the twilight
+    // sub-toggle) is switched back on.
+    if (layerOnMap.terminator === false) return;
+    const now = new Date();
+
+    // The main terminator: always exactly one ring (see nightPolygonRings'
+    // own docstring), rebuilt in place rather than diffed -- it is one
+    // polygon, not hundreds of markers, so there is nothing updateMarker's
+    // diff-and-skip discipline would be saving here.
+    terminatorLayer.clearLayers();
+    for (const ring of nightPolygonRings(now, 0)) {
+      L.polygon(ring, terminatorNightStyle).addTo(terminatorLayer);
+    }
+
+    // Twilight bands only cost anything to rebuild while a reader has
+    // actually asked to see them -- see setLayerVisible's "terminatorTwilight"
+    // branch, which calls this once immediately on the first toggle rather
+    // than waiting out the rest of the minute.
+    if (!terminatorTwilightVisible) return;
+    const bandStyle = (fillOpacity) => ({ ...terminatorNightStyle, fillOpacity });
+    const rebuildRing = (group, thresholdDeg, fillOpacity) => {
+      group.clearLayers();
+      for (const ring of nightPolygonRings(now, thresholdDeg)) {
+        L.polygon(ring, bandStyle(fillOpacity)).addTo(group);
+      }
+    };
+    // Faintest (astronomical) drawn first, so each band's own opacity adds up
+    // toward the terminator rather than one band's fill hiding the ring
+    // inside it -- see createTerminatorLayer's own note on the ordering.
+    rebuildRing(terminatorAstronomicalRing, ASTRONOMICAL_TWILIGHT_DEG, 0.12);
+    rebuildRing(terminatorNauticalRing, NAUTICAL_TWILIGHT_DEG, 0.12);
+    rebuildRing(terminatorCivilRing, CIVIL_TWILIGHT_DEG, 0.12);
+  }
+
+  // Combines "terminator"'s own on/off state with the twilight sub-toggle's,
+  // the same AND-of-two-toggles shape syncNewsLayer gives gdelt/events.
+  function syncTerminatorTwilight() {
+    const show = layerOnMap.terminator === true && terminatorTwilightVisible;
+    layerOnMap.terminatorTwilight = show;
+    if (show) map.addLayer(terminatorTwilightLayer);
+    else map.removeLayer(terminatorTwilightLayer);
   }
 
   // ---------- region flyTo ----------
@@ -8050,6 +8415,8 @@ export function createMapController(container, initial, callbacks) {
   windRefreshTimer = setInterval(refreshWindArrows, 5 * 60 * 1000); // catches slow wind changes even if the view sits still
   refreshPrecipRadar();
   precipRefreshTimer = setInterval(refreshPrecipRadar, 10 * 60 * 1000); // matches RainViewer's own pass cadence
+  refreshTerminator();
+  terminatorRefreshTimer = setInterval(refreshTerminator, TERMINATOR_REFRESH_MS);
   // Task 24: navigation/weather/imaging (on by default -- see map/scene.js)
   // are fetched by useOsintData.js's own POLL_CONFIG, which lands here
   // through applyData's "key in SAT_ELEMENT_CELESTRAK_GROUP" branch below,
@@ -8071,6 +8438,42 @@ export function createMapController(container, initial, callbacks) {
   // stop a later flight from undoing it. whenReady is the first moment the clamp can
   // actually stick.
   map.whenReady(() => applyWorldFence());
+  // A polygon spanning most of the globe, built (via the refreshTerminator()
+  // call above) before the map's real pixel origin is established, projects
+  // to degenerate coordinates -- Leaflet's SVG renderer then draws that ring
+  // as an empty or collapsed-to-a-point path, not an error, so it is
+  // invisible with nothing to say why. This is the reference layer.js's own
+  // makeHeatResilient and webglLayer.js's createEntityWebglLayer both guard
+  // against the same class of "added before the map/container was truly
+  // ready" problem, each for its own layer type.
+  //
+  // Neither whenReady() nor a one-time 'moveend' listener turned out to be
+  // reliable here (verified manually, repeatedly, against the running dev
+  // server): both fire once Leaflet considers itself loaded, which is not
+  // the same guarantee as the container having settled into its real,
+  // laid-out size and the map having recomputed its pixel origin from it --
+  // on some loads the ring still drew empty, or drew as a single collapsed
+  // point at the coordinate origin, for over three full refresh-timer
+  // cycles with nothing but a manual zoom fixing it. What a zoom reliably
+  // fixes is exactly what invalidateSize() does on demand: force Leaflet to
+  // re-read the container's current size and recompute from it, which is
+  // the one thing whenReady/moveend do not guarantee has happened yet.
+  //
+  // So this forces that recompute itself, a few times across consecutive
+  // animation frames rather than once: invalidateSize()+refreshTerminator()
+  // is cheap (one polygon rebuild, no network), and repeating it after the
+  // browser has had a few more paint cycles to finish settling the layout
+  // costs nothing extra while removing the guesswork about which single
+  // trigger will have caught up by then.
+  let terminatorReadyAttempts = 0;
+  function settleTerminatorOnceReady() {
+    if (!map._mapPane) return; // torn down before this ever got to run
+    map.invalidateSize({ pan: false, debounceMoveend: true });
+    refreshTerminator();
+    terminatorReadyAttempts += 1;
+    if (terminatorReadyAttempts < 5) requestAnimationFrame(settleTerminatorOnceReady);
+  }
+  requestAnimationFrame(settleTerminatorOnceReady);
   callbacks.onBoundsChange?.(boundsToPlainObject(map.getBounds()));
   reportZoom();
 
@@ -8229,6 +8632,14 @@ export function createMapController(container, initial, callbacks) {
       // the same shape and was missing here from the day it shipped; see
       // REFERENCE_ONLY_FEEDS above for what that cost and for the test that now
       // stops the next one going the same way.
+      // Task 50: the one REFERENCE_ONLY_FEEDS key with a real side effect --
+      // every recordCoverage call (useOsintData.js) republishes this whole
+      // dict on every poll, gated tick and boot-time one-shot fetch, and the
+      // coverage overlay has to catch up with each one while it is on.
+      // Explicit branch, ahead of the generic REFERENCE_ONLY_FEEDS check
+      // below, the same way "outages"/"outagesRegions" earn their own
+      // branches above rather than falling through to it.
+      else if (key === "fetchCoverage") renderCoverage();
       else if (REFERENCE_ONLY_FEEDS.has(key)) {
         /* reference data read on demand by popups.js -- no marker layer */
       }
@@ -8656,6 +9067,36 @@ export function createMapController(container, initial, callbacks) {
       return Array.isArray(value) ? value : [];
     },
 
+    /**
+     * Task 43: viewport export. `raw[key]`, split into what viewportFilter()
+     * currently considers in view (the same padded "in view" every rendered
+     * point layer already uses -- map.getBounds().pad(0.25), see
+     * viewportFilter's own note) and the feed's full current total.
+     *
+     * Returning both rather than only the filtered array is the point: `total`
+     * is what tells frontend/src/map/exportBuilder.js's classifyLayerStatus
+     * apart "this feed has never returned anything" (total === 0, paired with
+     * /api/health showing no success -- LAYER_STATUS.DOWN) from "it returned
+     * plenty, just none of it is on screen right now" (total > 0, rows.length
+     * === 0 -- LAYER_STATUS.EMPTY). Neither fact is visible from the filtered
+     * array alone, and conflating them is exactly the "found nothing must
+     * never render the same as did not look" failure that task's brief names.
+     *
+     * Items without a numeric lat/lon are dropped rather than crashing --
+     * this export only ever handles the map's uniform point shape (see
+     * exportBuilder.js's own scope note), and a malformed row here should
+     * disappear from the count, not the export.
+     */
+    exportLayerRecords(key) {
+      const items = raw[key];
+      if (!Array.isArray(items)) return { rows: [], total: 0 };
+      const inView = viewportFilter();
+      const rows = items.filter(
+        (item) => typeof item.lat === "number" && typeof item.lon === "number" && inView(item.lat, item.lon)
+      );
+      return { rows, total: items.length };
+    },
+
     setCityZones(next) {
       const previousScale = cityZoneSettings.radiusScale;
       cityZoneSettings = { ...cityZoneSettings, ...(next || {}) };
@@ -8692,6 +9133,7 @@ export function createMapController(container, initial, callbacks) {
       clearInterval(windRefreshTimer);
       clearInterval(precipRefreshTimer);
       clearInterval(satElementTickTimer);
+      clearInterval(terminatorRefreshTimer);
       clearTimeout(moveEndWindTimer);
       clearTimeout(moveEndRiversTimer);
       clearTimeout(regionFlightTimer);

@@ -20,6 +20,8 @@ import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "../utils/entityF
 import { DEFAULT_EVENT_FILTER } from "../map/severity";
 import { mergeInferenceMode } from "./inferenceProducts";
 import { CARD_TYPES, CARD_SECTIONS } from "./cardSections";
+import { sanitizeAlertRules } from "./alertRules";
+import { DEFAULT_FRAME_MS, DEFAULT_STEP_MINUTES, FRAME_MS_BOUNDS, STEP_MINUTES_BOUNDS } from "../replay/playback";
 
 // Bumped only when a saved config could no longer be merged onto the defaults
 // safely. Every load runs through mergeSettings below, which takes the shipped
@@ -48,13 +50,32 @@ import { CARD_TYPES, CARD_SECTIONS } from "./cardSections";
 // mergeSettings leaves defaultSettings()' shipped `{ system: "metric",
 // timezone: "utc" }` in place for it.
 //
-// 5: added `publicPanels` -- which of the intel panel's four tabs, and the
+// 5 (Task 42): added `alertRules` -- "tell me when X happens here", stored
+// as a plain array and evaluated by the cache worker (see
+// backend/alert_rules.py). Additive again: a config saved before this task
+// has no `stored.alertRules` at all, and mergeSettings' own
+// Array.isArray(stored.alertRules) guard below leaves the shipped empty
+// list in place for it, same as every bump above.
+//
+// 6 (Task 44): added `replay` -- the timeline scrubber's play-button cadence
+// (how long a frame is held on screen) and step size (how far each frame
+// advances), see hooks/useReplay.js and replay/playback.js. Additive for the
+// same reason as every bump above: a config saved before this task has no
+// `stored.replay` at all, and mergeSettings' own isPlainObject(stored.replay)
+// guard below leaves defaultSettings()' shipped `{ frameMs: 800,
+// stepMinutes: 60 }` in place for it -- the exact cadence useReplay.js
+// already ran at before this became a dial.
+//
+// 7: added `publicPanels` -- which of the intel panel's four tabs, and the
 // conflict briefing card, a deployment carries -- and `countryOnly` on each
-// entry in `layers`. Additive for the same reason as every bump above it, and
-// both are default-permissive besides: an absent publicPanels leaves all five
-// showing, and an absent countryOnly leaves the layer ungated, so a config
-// saved before this task describes exactly the behaviour it had.
-export const SETTINGS_VERSION = 5;
+// entry in `layers`. Numbered 7 rather than the 5 it was written as: this
+// landed on a branch alongside 5 and 6 above, and two configurations claiming
+// the same version number while describing different shapes is the one thing
+// this counter exists to prevent. Additive for the same reason as every bump
+// above it, and both are default-permissive besides: an absent publicPanels
+// leaves all five showing, and an absent countryOnly leaves the layer ungated,
+// so a config saved before this task describes exactly the behaviour it had.
+export const SETTINGS_VERSION = 7;
 
 /**
  * The layers whose appearance can be configured, in the order the admin panel
@@ -126,6 +147,13 @@ export const SETTINGS_LAYERS = [
   { key: "jamming", label: "GPS/radio jamming (GPSJam)" },
   { key: "shippingLanes", label: "Shipping corridors (schematic)" },
   { key: "laneDensity", label: "AIS traffic density (this map's own coverage)" },
+  // Task 46: computed from the clock, not fetched -- see its own note in
+  // map/scene.js's LAYER_MANIFEST for why it still has a MANUAL entry there.
+  { key: "terminator", label: "Day/night terminator" },
+  // Task 50: derived from raw.fetchCoverage, not fetched either -- same
+  // "no endpoint of its own" reasoning as terminator just above, see its
+  // own note in map/scene.js's LAYER_MANIFEST.
+  { key: "coverage", label: "Coverage -- where this map has looked (diagnostic)" },
 ].map((layer) => ({ ...layer, zoomGate: shippedDrawZoom(layer.key) }));
 
 /**
@@ -260,12 +288,17 @@ export const INTEL_TAB_KEYS = ["escalation", "events", "news", "officials"];
  * both ride the single `water` layer key, filtering what is currently synced
  * into it rather than adding or removing a Leaflet layer of their own (see
  * setLayerVisible in createMapController.js).
+ *
+ * terminatorTwilight joins them for the identical reason (Task 46): it rides
+ * "terminator"'s own on/off state -- see syncTerminatorTwilight in
+ * createMapController.js -- rather than having a manifest entry of its own.
  */
 export const TOGGLEABLE_LAYER_KEYS = new Set([
   ...SCENE_APPLY_KEYS,
   ...Object.keys(TRAIL_PARENT),
   "satellitesMilitary",
   "waterLakes", "waterRivers",
+  "terminatorTwilight",
 ]);
 
 /**
@@ -683,6 +716,24 @@ export function defaultSettings() {
     // { [countryKey]: { fp, rings: { "<polygon>:<ring>": [[lon, lat], ...] } } }
     // See settings/borderOverrides.js for the schema and why it is that shape.
     borders: {},
+    // Task 42: "tell me when X happens here" -- see settings/alertRules.js
+    // for the full shape and backend/alert_rules.py for how it is evaluated.
+    // Empty by default, the same "nothing chosen yet" state every other
+    // reader-authored list in this file (filters.presets, data.*.added)
+    // ships with.
+    alertRules: [],
+    // Task 44: the timeline scrubber's play button. `frameMs` is the floor
+    // on how long one frame is held on screen (hooks/useReplay.js awaits
+    // each frame's fetch and then waits out whatever's left of this before
+    // stepping again, so a fast response doesn't flash by); `stepMinutes` is
+    // how far each step advances the replayed moment. Both ship at exactly
+    // what useReplay.js ran at as bare constants before this task turned
+    // them into dials -- see replay/playback.js for the shared defaults and
+    // the bounds mergeSettings clamps a stored value to below.
+    replay: {
+      frameMs: DEFAULT_FRAME_MS,
+      stepMinutes: DEFAULT_STEP_MINUTES,
+    },
   };
 }
 
@@ -1037,6 +1088,17 @@ export function mergeSettings(stored) {
     base.performance.pausePollingWhenHidden = p.pausePollingWhenHidden !== false;
   }
 
+  // Task 44's replay cadence/step. Additive (see SETTINGS_VERSION's own
+  // note above) -- a config saved before this task has no `stored.replay`
+  // at all, and the isPlainObject guard leaves defaultSettings()' shipped
+  // { frameMs: 800, stepMinutes: 60 } in place for it.
+  if (isPlainObject(stored.replay)) {
+    base.replay.frameMs = Math.round(pickNumber(stored.replay.frameMs, DEFAULT_FRAME_MS, ...FRAME_MS_BOUNDS));
+    base.replay.stepMinutes = Math.round(
+      pickNumber(stored.replay.stepMinutes, DEFAULT_STEP_MINUTES, ...STEP_MINUTES_BOUNDS)
+    );
+  }
+
   // Repaired rather than validated: an order that has lost a layer is worse than
   // no order at all, because a layer with no rank draws unfaded on top of
   // everything. setStack in map/iconTheme.js applies the same rule to whatever
@@ -1078,6 +1140,17 @@ export function mergeSettings(stored) {
   // ceiling that keeps the whole configuration inside what the backend will
   // accept. See settings/borderOverrides.js.
   if (isPlainObject(stored.borders)) base.borders = sanitizeBorders(stored.borders).borders;
+
+  // Task 42's alert rules. No live REGIONS set is available at merge time
+  // (this runs synchronously from localStorage before /api/regions has ever
+  // been fetched -- see useAppSettings.js's own load order), so a stored
+  // region-keyed geofence is accepted here on shape alone; a key this build
+  // no longer recognises is caught downstream instead, the same "repair at
+  // read time" deferral base.cards.order takes above for a section id --
+  // and backend/alert_rules.py's own parse_rules refuses it outright before
+  // it could ever fire, so an unrecognised key never does anything worse
+  // than sit inert in the rule list.
+  if (Array.isArray(stored.alertRules)) base.alertRules = sanitizeAlertRules(stored.alertRules);
 
   return base;
 }

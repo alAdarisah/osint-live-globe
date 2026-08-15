@@ -56,6 +56,7 @@ import PerformanceSection, { SEARCH_TERMS as PERFORMANCE_TERMS } from "./section
 import BordersSection, { SEARCH_TERMS as BORDERS_TERMS } from "./sections/BordersSection";
 import InterfaceSection, { SEARCH_TERMS as UI_TERMS } from "./sections/InterfaceSection";
 import ConfigSection, { SEARCH_TERMS as CONFIG_TERMS } from "./sections/ConfigSection";
+import AlertRulesSection, { SEARCH_TERMS as ALERT_RULES_TERMS } from "./sections/AlertRulesSection";
 
 const DEFAULT_OPEN = { "adm-icons": true };
 const STORAGE_KEY = "osint-admin-accordion";
@@ -80,6 +81,7 @@ const SECTIONS = [
   { Component: PerformanceSection, terms: PERFORMANCE_TERMS },
   { Component: BordersSection, terms: BORDERS_TERMS },
   { Component: InterfaceSection, terms: UI_TERMS },
+  { Component: AlertRulesSection, terms: ALERT_RULES_TERMS },
   { Component: ConfigSection, terms: CONFIG_TERMS },
 ];
 
@@ -87,6 +89,14 @@ export default function AdminPanel({
   settings, actions, recordsFor, sync, staleBorders, onClose,
   eventFilter, onEventFilterChange, vesselFilter, onVesselFilterChange,
   aircraftFilter, onAircraftFilterChange,
+  // Task 42's Alert rules section: source-health status per layer plus the
+  // rule engine's own heartbeat (health), the live REGIONS table for the
+  // region picker (regions), and the three already-existing map selection
+  // states that stand in for a geofence-drawing tool the rest of the app
+  // does not otherwise need -- see AlertRulesSection.jsx's own module note
+  // for why "click a country", "click a water body" and "pan/zoom the map"
+  // were reused rather than building a fourth.
+  health, regions, mapBounds, countrySelection, selectedWater,
 }) {
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN, STORAGE_KEY);
   const [query, setQuery] = useState("");
@@ -139,6 +149,11 @@ export default function AdminPanel({
               onVesselFilterChange={onVesselFilterChange}
               aircraftFilter={aircraftFilter}
               onAircraftFilterChange={onAircraftFilterChange}
+              health={health}
+              regions={regions}
+              mapBounds={mapBounds}
+              countrySelection={countrySelection}
+              selectedWater={selectedWater}
             />
           )
         )}
