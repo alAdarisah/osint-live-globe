@@ -1623,7 +1623,11 @@ details[open] > .layer-details-body {
 /* A list arriving as one block reads as a repaint; arriving in sequence reads
    as the panel filling. Stops at eight because past that the cascade stops
    being one gesture and becomes a queue -- everything from the ninth child on
-   shares the eighth child's delay rather than getting a later one of its own. */
+   shares the eighth child's delay rather than getting a later one of its own.
+   .loading-log is the one exception, carried past eight below: its twelve
+   rows are fixed and arrive as one sequence, not an open-ended list, and the
+   whole cascade finishes well inside the boot screen's own minimum visible
+   time -- so it never becomes the queue this rule is guarding against. */
 .stagger-children > *,
 .news-list > *,
 .notable-list > * {
