@@ -1673,6 +1673,13 @@ details[open] > .layer-details-body {
 .news-list > :nth-child(8),
 .notable-list > :nth-child(8),
 .loading-log > :nth-child(8) { animation-delay: calc(var(--stagger-step) * 7); }
+/* Four more than the shared ladder above covers: BOOT_SOURCES has twelve
+   entries, and without these the last four rows all land on the fallback delay
+   at once instead of continuing the cascade. */
+.loading-log > :nth-child(9) { animation-delay: calc(var(--stagger-step) * 8); }
+.loading-log > :nth-child(10) { animation-delay: calc(var(--stagger-step) * 9); }
+.loading-log > :nth-child(11) { animation-delay: calc(var(--stagger-step) * 10); }
+.loading-log > :nth-child(12) { animation-delay: calc(var(--stagger-step) * 11); }
 
 .leaflet-popup-tip { background: var(--popup-bg); }
 .leaflet-popup-content { margin: 10px 12px; }
@@ -3320,32 +3327,24 @@ details[open] > .layer-details-body {
   max-width: 380px;
 }
 
-.loading-radar {
-  position: relative;
-  width: 110px;
-  height: 110px;
+/* The wire globe. Its rotation lives in BootGlobe.jsx rather than in a CSS
+   animation, because the far half of the sphere has to be clipped every frame
+   and no transform can do that -- which is also why reduced motion is handled
+   in the component instead of by an `animation: none` override down at the
+   bottom of this file. */
+.boot-globe {
+  display: block;
+  overflow: visible;
 }
-.loading-radar-ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1px solid rgba(111, 227, 255, 0.22);
+.boot-globe-line {
+  fill: none;
+  stroke: rgba(111, 227, 255, 0.22);
+  stroke-width: 1;
 }
-.loading-radar-ring-2 { inset: 22px; }
-.loading-radar-sweep {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: conic-gradient(from 0deg, rgba(111, 227, 255, 0.9), rgba(111, 227, 255, 0) 40%);
-  -webkit-mask: radial-gradient(circle, transparent 0, transparent 2px, black 3px);
-  mask: radial-gradient(circle, transparent 0, transparent 2px, black 3px);
-  /* Exempt from the tempo scale on purpose: this is mechanism, not status. The
-     tempo tokens answer "how urgent is this condition", and a spinner saying
-     work is in progress is not in a position to be asked that. */
-  animation: loading-radar-spin 1.7s linear infinite;
-}
-@keyframes loading-radar-spin {
-  to { transform: rotate(360deg); }
+.boot-globe-rim {
+  fill: none;
+  stroke: rgba(111, 227, 255, 0.34);
+  stroke-width: 1;
 }
 
 .loading-title {
@@ -3375,7 +3374,7 @@ details[open] > .layer-details-body {
 
 .loading-log-line {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 3px 0;
   color: var(--text-dim);
@@ -3385,6 +3384,10 @@ details[open] > .layer-details-body {
 .loading-log-line.ok { color: #cfe8f2; opacity: 1; }
 .loading-log-line.warn { opacity: 0.7; }
 .loading-log-line.timeout { opacity: 0.85; color: #ff8c3a; }
+/* A source below its zoom gate was correctly not fetched. Colouring it with
+   warn's orange would report a failure that did not happen, so it gets its own
+   muted slate instead. */
+.loading-log-line.deferred { opacity: 0.75; color: #93a7b4; }
 
 .loading-log-status {
   width: 14px;
@@ -3400,10 +3403,29 @@ details[open] > .layer-details-body {
 .loading-log-line.ok .loading-log-status { color: #34c759; }
 .loading-log-line.warn .loading-log-status { color: #ff9500; }
 .loading-log-line.timeout .loading-log-status { color: #ff8c3a; }
+.loading-log-line.deferred .loading-log-status { color: #93a7b4; }
 
 @keyframes loading-ellipsis-pulse {
   0%, 100% { opacity: 0.25; }
   50% { opacity: 1; }
+}
+
+.loading-log-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.loading-log-label { line-height: 1.35; }
+/* Counts and timings sit below the label rather than beside it: the column is
+   380px and the alternative was cutting the source names down further, which
+   would have cost the attribution the labels exist to carry. Tabular figures so
+   a column of numbers does not shimmer as it counts up. */
+.loading-log-meta {
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  color: rgba(207, 232, 242, 0.45);
+  font-variant-numeric: tabular-nums;
 }
 
 .loading-bar {
