@@ -1,7 +1,19 @@
 // Everything else about how a layer draws -- its size, its opacity, its zoom
-// gate, and the colour of every kind of pin in it. Grouped by layer rather
-// than split across two sections, because split is how the same dial ended up
-// offered twice (see LayerBlock below).
+// gate, and the colour of every kind of pin in it. One row per layer, filed
+// under the six subject headings the reader's own control drawer uses (see
+// settings/layerGroups.js, which both lists read).
+//
+// The rows are grouped by layer rather than split across two sections,
+// because split is how the same dial ended up offered twice (see LayerBlock
+// below). The subject headings are the opposite problem, arriving later: the
+// list was flat and in the order layers were added to the app, so ships from
+// one AIS feed sat rows away from ships from another and an operator looking
+// for "everything about ships" read all 46 rows.
+//
+// The headings are plain headers, not a third collapsible tier: this section
+// already collapses, and so does every layer row inside it. A middle tier
+// would put two clicks between an operator and any dial, on a screen whose
+// whole purpose is reaching one.
 //
 // Named LayerDialsSection, not LayersSection, so it does not collide with the
 // control-panel's own LayersSection (frontend/src/components/controlPanel/
@@ -12,28 +24,20 @@ import { SliderField, IconField, CheckField } from "../fields";
 import { DEFAULT_COLORS, TOKEN_LAYER, tokenHasSize, tokenHasZoom, glyphChoicesFor } from "../../../map/iconTheme";
 import { shippedDrawZoom } from "../../../map/scene";
 import { SETTINGS_LAYERS, COUNTRY_ONLY_LAYERS } from "../../../settings/defaults";
+import { LAYER_GROUPS } from "../../../settings/layerGroups";
 import {
   EXTRA_TOKENS_UNDER, TOKENS_BY_LAYER, perPinDials,
   SharedColours, PinTypesNote,
 } from "./shared";
-import { ALL_TOKEN_LABELS } from "./tokenSearchTerms";
 
-// The four generic dial names, every layer's own name, and every pin type's
-// own label -- a layer row and its pin types are both real controls a search
-// should find. See tokenSearchTerms.js for why the token half comes from
-// there rather than from TOKENS_BY_LAYER/SHARED_TOKENS directly, and
-// frontend/tests/layerSearchTerms.test.js for the regression test.
-export const SEARCH_TERMS = [
-  "Layers",
-  "Size",
-  "Opacity",
-  "Shows from zoom",
-  "Hides past zoom",
-  "Only with a country selected",
-  "Shared colours",
-  ...SETTINGS_LAYERS.map((l) => l.label),
-  ...ALL_TOKEN_LABELS,
-];
+// The terms live in a plain .js module so `node --test` can assert on them --
+// this file is JSX and cannot be imported there. See layerSectionTerms.js.
+export { SEARCH_TERMS } from "./layerSectionTerms";
+
+// Keyed once at module scope rather than searched per row: the render walks
+// LAYER_GROUPS now, which holds keys, while every row's label and defaults
+// still come from SETTINGS_LAYERS.
+const LAYER_BY_KEY = Object.fromEntries(SETTINGS_LAYERS.map((l) => [l.key, l]));
 
 // `isOpen`/`onToggle` are the raw pair from AdminPanel's useAccordion, not a
 // single boolean -- this section needs one open/closed state per layer
@@ -50,15 +54,28 @@ export default function LayerDialsSection({ settings, actions, isOpen, onToggle 
         aircraft squawking an emergency or a rescinded airspace warning is worth seeing from the
         world board.
       </div>
-      {SETTINGS_LAYERS.map((layer) => (
-        <LayerBlock
-          key={layer.key}
-          layer={layer}
-          settings={settings}
-          actions={actions}
-          open={isOpen(`adm-layer-${layer.key}`)}
-          onToggle={onToggle}
-        />
+      {LAYER_GROUPS.map((group) => (
+        <div key={group.id} className="admin-layer-group">
+          <h4 className="admin-group-heading" id={`grp-${group.id}`}>{group.title}</h4>
+          {group.keys.map((key) => {
+            const layer = LAYER_BY_KEY[key];
+            // Filed in a group but with no SETTINGS_LAYERS row to render.
+            // tests/layerGroups.test.js makes this impossible to ship, so this
+            // is a guard against a half-applied hot reload rather than a state
+            // the built app can reach.
+            if (!layer) return null;
+            return (
+              <LayerBlock
+                key={layer.key}
+                layer={layer}
+                settings={settings}
+                actions={actions}
+                open={isOpen(`adm-layer-${layer.key}`)}
+                onToggle={onToggle}
+              />
+            );
+          })}
+        </div>
       ))}
       <SharedColours settings={settings} actions={actions} />
     </PanelGroup>

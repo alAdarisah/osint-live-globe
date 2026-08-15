@@ -3882,6 +3882,21 @@ button.notable-line:hover, button.notable-line:focus-visible {
   line-height: 1.4;
   color: var(--text-dim);
 }
+
+/* The subject headings in Admin Mode's Layers section. Deliberately quieter
+   than a PanelGroup's own title: these separate rows, they do not open or
+   close anything, and a heading that looks clickable but is not is worse than
+   no heading. */
+.admin-group-heading {
+  margin: 12px 0 4px;
+  font-size: calc(10px * var(--ui-text-scale));
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.admin-layer-group:first-of-type .admin-group-heading { margin-top: 4px; }
+
 .admin-field-note {
   display: block;
   font-size: calc(9.5px * var(--ui-text-scale));
