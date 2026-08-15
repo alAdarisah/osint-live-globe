@@ -137,7 +137,9 @@ A new component, `frontend/src/components/BootGlobe.jsx`, with its projection
 math in a sibling module `frontend/src/components/bootGlobeGeometry.js`. The
 split follows the pattern already used by `sanctionsBoardLogic.js` and
 `countryCompareLogic.js`: the geometry is plain functions over numbers, testable
-in the existing Vitest suite without React or a DOM.
+in the existing suite without React or a DOM. That suite runs on Node's built-in
+runner (`npm test` → `node --test`, with `node:test` and `node:assert/strict`),
+not Vitest.
 
 No third-party 3D library is involved. The repository has just moved Leaflet to
 same-origin hosting and tightened its content policy; pulling in a WebGL globe
@@ -228,17 +230,27 @@ component already declines to start.
 
 ## Tests
 
-`frontend/tests/bootGlobeGeometry.test.js` covers the projection: a point at
-0°N 0°E under zero spin projects to the centre of the viewport; a point on the
-far side of the sphere is excluded from the emitted path rather than folded onto
-the visible face; parallels are symmetric about the tilted equator; and advancing
-the spin by 2π returns the same paths as spin 0.
+`frontend/tests/bootGlobeGeometry.test.js` covers the projection. The point that
+lands at the centre of the viewport is 20°N 0°E, not 0°N 0°E — the tilt is the
+projection's centre latitude, so the equator sits below the middle of the disc,
+and asserting otherwise would encode the bug rather than catch it. Half a turn
+of spin puts 20°N 180°E at the centre instead. A point on the far side of the
+sphere is excluded from the emitted path rather than folded onto the visible
+face. Longitudes mirror about the vertical axis at zero spin. Advancing the spin
+by a full 2π reproduces the spin-0 paths exactly, which holds because
+coordinates are rounded to one decimal before being written into the path
+string.
 
 `frontend/tests/bootSourceMeta.test.js` covers `countOf` for an array, a GeoJSON
-`FeatureCollection`, an empty array (0, not `null`), and a scalar or object with
-no countable rows (`null`).
+`FeatureCollection`, an empty array (0, not `null`), and a scalar, string or
+plain object with no countable rows (`null`) — a string must not be counted by
+its `.length`. It also covers the meta-line formatter and the failure-detail
+classifier.
 
-Both are pure-function suites in the style of the existing `safeUrl.test.js`.
+`frontend/tests/api.test.js` covers the new `err.status`: a non-ok response
+carries the numeric status, and a `fetch` that throws outright carries none.
+
+All are in the style of the existing `safeUrl.test.js`.
 
 ## What could go wrong
 
