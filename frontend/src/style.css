@@ -795,7 +795,14 @@ html, body {
 #panelToggle {
   position: fixed;
   top: calc(var(--chrome-top) + 20px);
-  left: 0;
+  /* Against whatever currently owns the left edge, not against the window.
+     In Admin Mode with the drawer *closed*, the feed rail is open (they are
+     mutually exclusive -- see chromeLayout.js's feedRailOpen), so a handle at
+     left: 0 was a 26x46 tab pasted over the rail's own watchlist header. Reading
+     --chrome-left means it sits against the rail when the rail is there and against
+     the window when it is not, and the .open rule below no longer has to restate
+     the drawer's width either. */
+  left: var(--chrome-left);
   z-index: var(--z-admin-toggle);
   width: 26px;
   height: 46px;
@@ -808,7 +815,9 @@ html, body {
   font-size: 11px;
   transition: left var(--t-panel) var(--e-out);
 }
-#panelToggle.open { left: 320px; }
+/* Nothing to add: opening the drawer closes the feed, and --chrome-left becomes
+   the drawer's own 320px. The literal that used to live here was a third copy of
+   that width. */
 
 #controlPanel {
   position: fixed;
@@ -1526,16 +1535,9 @@ details[open] > .layer-details-body {
 }
 .copy-link-button:hover { background: rgba(var(--accent-rgb), 0.16); }
 
-/* The title bar's own copy, sized to sit next to #adminToggle/#themeToggle
-   rather than the smaller card-header buttons above. */
-#titleBar .copy-link-button {
-  font-size: 9.5px;
-  letter-spacing: 0.6px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  color: var(--text-dim);
-}
-#titleBar .copy-link-button:hover { color: var(--text-bright); border-color: var(--accent); }
+/* #titleBar's copy-link variant used to sit here. That bar is gone (see the note
+   where its own rules were, further up); the sub bar's copy of this button takes its
+   sizing from .ghost-btn in chrome.css instead. */
 
 /* UrlStateNotice.jsx. Sits under the title bar, centred, the same "fixed,
    translateX(-50%)" placement #borderEditBar uses for its own notice -- but
@@ -1995,7 +1997,7 @@ details[open] > .layer-details-body {
   pointer-events: none;
 }
 
-.news-header, .news-list {
+.news-list {
   pointer-events: auto;
 }
 
@@ -2233,17 +2235,10 @@ details[open] > .layer-details-body {
 .country-info-body h3 { margin: 0 20px 6px 0; font-size: 13px; color: var(--text-heading); }
 .country-info-body .meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 6px; }
 
-.news-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--panel-border);
-  flex: none;
-  cursor: move;
-  -webkit-tap-highlight-color: transparent;
-  touch-action: none;
-}
+/* .news-header's own block used to sit here -- the draggable header of the old
+   floating news ticker, with `cursor: move` and touch-action: none. No JSX renders
+   that class any more: IntelPanel's header is `.notable-header .feed-head`, and the
+   rail does not drag. */
 
 /* OSINT-Main's .news-caret-btn / .news-caret / #newsBroadcast.collapsed rules
    are deliberately not carried across this merge. Task 12 replaced the news
@@ -2319,15 +2314,23 @@ details[open] > .layer-details-body {
 
 /* Conflict-zone briefing widget (ConflictBriefingCard.jsx) -- pops up at the
    top-right whenever a conflict zone is picked from RegionBar, same
-   fixed-corner-card treatment as #countryInfoCard. IntelPanel now lives at
-   the bottom-right (see #intelPanel), so the two no longer compete for the
+   fixed-corner-card treatment as #countryInfoCard. IntelPanel is a left rail now,
+   so nothing on the right competes with this at all -- which is why the 364px
+   gutter this used to reserve for it is gone. The rest of the note below is
+   history: it explains the arrangement that produced that number.
+   IntelPanel used to live at the bottom-right, so the two no longer competed for the
    same corner the way this card and the old #newsBroadcast ticker once did.
    Reuses .news-item/.news-list wholesale for its headline rows instead of
    duplicating that styling. */
 #conflictBriefing {
   position: fixed;
   top: calc(var(--chrome-top) + 10px);
-  right: 364px;
+  /* 14px, not 364px. The 364 was IntelPanel's old floating width plus its inset,
+     reserved so the two would not overlap at the bottom right -- and the feed is a
+     left rail now, so all that offset did was leave the card floating with an empty
+     364px gutter beside it. The comment above still described the arrangement that
+     produced the number. */
+  right: 14px;
   width: 340px;
   max-width: calc(100vw - 28px);
   max-height: 60vh;
@@ -2515,8 +2518,9 @@ details[open] > .layer-details-body {
   color: var(--accent);
   transition: transform var(--t-ui) var(--e-out);
 }
-#intelPanel.collapsed .notable-caret { transform: rotate(-90deg); }
-#intelPanel.collapsed .notable-header { border-bottom: none; }
+/* The `#intelPanel.collapsed` pair used to sit here. The rail does not fold any
+   more -- chrome.css hides its caret outright -- so nothing ever puts that class on
+   it. */
 
 /* Distinct from .live-dot's steady pulse -- this one only exists when
    something is actually on the board, so it reads as an alert rather than a
@@ -2971,14 +2975,23 @@ button.notable-line:hover, button.notable-line:focus-visible {
 .squawk-alert-dismiss:hover { color: var(--text-bright); }
 
 /* ---------- rule alert toasts (Task 42, AlertToast.jsx) ---------------
-   Bottom-right, above the map and its panes but under #controlPanel (Admin
-   Mode's drawer) and #adminPanel -- an operator editing a rule should still
-   be able to reach every control while a toast from that very rule is
-   showing. Anchored opposite #squawkAlertStrip (top) so the two independent
-   alert surfaces this map now has never compete for the same corner. */
+   Above the map and its panes but under #controlPanel (Admin Mode's drawer) and
+   #adminPanel -- an operator editing a rule should still be able to reach every
+   control while a toast from that very rule is showing. Anchored opposite
+   #squawkAlertStrip (top) so the two independent alert surfaces this map now has
+   never compete for the same corner.
+
+   Bottom-*left* since the redesign, not bottom-right. #boardStack took the
+   bottom-right corner with the same offset and a near-identical width, 35 bands
+   lower, so a firing rule covered the top board in that stack and -- each toast
+   being pointer-events: auto -- intercepted clicks on it. The toasts auto-dismiss,
+   so it was transient, but "transient" is not a property an operator can rely on
+   while trying to click through one. The corner opposite is free apart from
+   Leaflet's zoom control, which the 60px inset clears; --chrome-left keeps the
+   whole stack out from under the feed rail. */
 #alertToastStack {
   position: fixed;
-  right: 16px;
+  left: calc(var(--chrome-left) + 60px);
   bottom: calc(var(--chrome-bottom) + 10px);
   z-index: var(--z-strips); /* same band as #squawkAlertStrip, for the same reason */
   display: flex;
@@ -3736,25 +3749,27 @@ button.notable-line:hover, button.notable-line:focus-visible {
 
 :root.hide-leaders .pin-leader { display: none; }
 
-/* --- Admin Mode toggle in the title bar --- */
-#adminToggle {
-  border: 1px solid var(--panel-border);
-  background: var(--control-bg);
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 9.5px;
-  letter-spacing: 1.4px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-#adminToggle:hover { color: var(--text-bright); border-color: var(--accent); }
-/* Unmistakably on: an editing mode that looks like the reading mode is how
-   accidental edits happen. */
+/* --- Admin Mode toggle ---
+   Written for the title bar that no longer exists, and it was outliving it by
+   id-specificity: every declaration here beat .ghost-btn (chrome.css), which is the
+   idiom the button now shares with Boards, Copy link and Export. Three ways that
+   showed:
+
+     `font: inherit` wiped .ghost-btn's font-family, so Admin rendered in the body
+     font while every button beside it was mono.
+
+     `font-size: 9.5px` is a raw pixel value where .ghost-btn uses
+     calc(9.5px * var(--ui-text-scale)) -- so Admin Mode's own text-size slider
+     stopped moving the Admin button. chrome.css:64 says in as many words that
+     reaching for px is how that slider silently stops applying to half the screen.
+
+     `.active` used #ff8c3a where .ghost-btn.active uses var(--warn), leaving one
+     control with its own private idea of the warning colour.
+
+   What is left is the one thing .ghost-btn does not express: that this is the
+   button whose mode changes what every other reader of the deployment sees, so it
+   is heavier when on. Everything else is inherited now. */
 #adminToggle.active {
-  background: #ff8c3a;
-  border-color: #ff8c3a;
-  color: #1a0d00;
   font-weight: 700;
 }
 /* A hairline along the top of the viewport for as long as Admin Mode is on,
@@ -5241,7 +5256,12 @@ tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
 .briefing-summary, .briefing-events { font-size: calc(11.5px * var(--ui-text-scale)); }
 .leaflet-popup-content { font-size: calc(12px * var(--ui-text-scale)); }
 
-@media (max-width: 720px) {
+/* 700, not 720. This block cites useDraggablePanel's `enabled`, which is keyed on
+   useIsMobileViewport -- and that is 700. At 720 there was a 20px band in which the
+   panel was laid out as a full-width sheet while the JS still believed it was
+   draggable: exactly the disagreement MOBILE_MAX_WIDTH exists to prevent, in the
+   one block that names the JS it was disagreeing with. */
+@media (max-width: 700px) {
   /* Dragging is off on phones (see useDraggablePanel's `enabled`), and the
      admin panel becomes a full-width sheet rather than a floating window in a
      viewport with no room to float one. */
@@ -5253,7 +5273,13 @@ tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
     max-width: none;
     max-height: 70vh;
   }
-  #countrySelection { bottom: 92px; }
+  /* Against the chrome, not a literal. This was `bottom: 92px`, chosen before the
+     scrub strip went public: while replaying on a phone --chrome-bottom is 98px
+     (34 HUD + 64 for the wrapped strip), so the bar sat *inside* the chrome, and
+     --z-scrub is 20 bands above --z-selection -- which buried the only control
+     that clears a multi-country selection behind the scrubber. Exactly the
+     literal-versus-property failure hooks/chromeLayout.js was written to end. */
+  #countrySelection { bottom: calc(var(--chrome-bottom) + 10px); }
   .country-selection-hint { display: none; }
 }
 

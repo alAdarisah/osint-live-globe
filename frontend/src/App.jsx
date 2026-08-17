@@ -152,8 +152,10 @@ export default function App() {
   // which is the same set of decisions the thirty-four checkboxes used to ask
   // them to make before they had seen anything.
   //
-  // Derived rather than stored, so `#map.panel-open` (style.css) can never be
-  // set for a reader and the 320px shift it applies needs no separate guard.
+  // Derived rather than stored, so the drawer can never be open for a reader who
+  // is not in Admin Mode, and the left-edge shift it applies needs no separate
+  // guard. (It used to say `#map.panel-open`, a selector deleted with the
+  // redesign -- the shift arrives as --chrome-left now.)
   // The preference underneath survives leaving and re-entering Admin Mode.
   const [panelOpenPref, setPanelOpenPref] = useState(() => !isMobileViewport);
   const panelOpen = adminMode && panelOpenPref;

@@ -320,6 +320,14 @@ export function useDraggablePanel(id, { onClick, enabled = true, resizable = fal
  * A no-op once `newId` has its own entry, whether from a previous run of this
  * migration or from the reader having since dragged the new panel themselves
  * -- it must never overwrite a real choice with a stale one.
+ *
+ * Currently has no callers. IntelPanel's call went when the panel became a fixed
+ * rail with no position to migrate, so the instruction above to call it from there
+ * describes a file that no longer does. Kept rather than deleted because the next
+ * panel merge will want exactly this, and because the reasoning about *which*
+ * predecessor's position to inherit is the part that would have to be rediscovered.
+ * migratePanelPositionsIntoChrome below is a different thing: same storage record,
+ * but a geometry migration rather than an identity one.
  */
 export function migratePanelPosition(newId, oldIds) {
   try {

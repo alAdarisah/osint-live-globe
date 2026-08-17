@@ -1,8 +1,18 @@
 import { useEffect, useState } from "react";
 
-// Matches the breakpoint in the mobile media query in style.css -- keep the
-// two in sync if it ever changes.
-const QUERY = "(max-width: 700px)";
+import { MOBILE_MAX_WIDTH } from "./chromeLayout";
+
+// Built from the one exported constant rather than restating the number.
+//
+// chromeLayout.js exports MOBILE_MAX_WIDTH and says it is "exported so the three
+// cannot drift about what a phone means" -- but this file, one of the three, had
+// the 700 hard-coded and imported nothing. So the guard was a comment, not a
+// mechanism: changing the breakpoint in one place would have left the JS and the
+// CSS disagreeing, which is the exact state chromeLayout.js's own note calls a
+// layout nobody can reason about. The stylesheets are the third reader and still
+// carry their own literal, because a media query cannot read a JS constant -- that
+// one is held by tests/chromeLayout.test.js instead.
+const QUERY = `(max-width: ${MOBILE_MAX_WIDTH}px)`;
 
 export function useIsMobileViewport() {
   const [isMobile, setIsMobile] = useState(() => window.matchMedia(QUERY).matches);

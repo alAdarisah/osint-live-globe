@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 import {
   chromeInsets,
@@ -67,11 +70,53 @@ test("the scrub strip is taller on a phone, and the inset knows it", () => {
   assert.equal(chromeInsets({ scrubVisible: true }).bottom, HUD_HEIGHT + SCRUB_STRIP_HEIGHT);
 });
 
-test("the breakpoint matches the one the stylesheet and the hook use", () => {
-  // useIsMobileViewport.js and style.css's phones block both key off 700px. A
-  // layout the JS thinks is mobile and the CSS thinks is not is a layout nobody
-  // can reason about, so the number has exactly one home.
+test("the breakpoint matches the one the stylesheets and the hook use", () => {
+  // A layout the JS thinks is mobile and the CSS thinks is not is a layout nobody
+  // can reason about, so the number has exactly one home -- and this is what makes
+  // that true rather than merely stated.
+  //
+  // useIsMobileViewport.js imports MOBILE_MAX_WIDTH now; it used to hard-code 700
+  // and import nothing, so the "cannot drift" this constant claims to guarantee was
+  // a comment. A media query cannot read a JS constant, so the stylesheets are held
+  // here instead: every `max-width` phone query in src must be this number.
   assert.equal(MOBILE_MAX_WIDTH, 700);
+
+  const root = fileURLToPath(new URL("../src", import.meta.url));
+  const queries = [];
+  for (const entry of readdirSync(root, { recursive: true })) {
+    const rel = entry.toString().replace(/\\/g, "/");
+    if (!rel.endsWith(".css")) continue;
+    const css = readFileSync(path.join(root, rel), "utf8");
+    for (const m of css.matchAll(/@media[^{]*\(\s*max-width\s*:\s*(\d+)px\s*\)/g)) {
+      queries.push({ file: rel, width: Number(m[1]) });
+    }
+  }
+  assert.ok(queries.length, "no max-width media queries found; the scan is broken");
+
+  // Every other tier is declared, so adding one is a decision rather than a
+  // coincidence. The design thins the chrome in stages before it becomes a phone
+  // layout (pill badges at 1330, two stats at 1150, pill labels at 1080, the board
+  // stack at 900), and the two full-screen modal tiers are about how much room a
+  // dialog needs rather than about what a phone is -- so they are their own number
+  // and say so.
+  const DECLARED_TIERS = new Set([MOBILE_MAX_WIDTH, 720, 900, 1080, 1150, 1330]);
+  const undeclared = queries.filter((q) => !DECLARED_TIERS.has(q.width));
+  assert.deepEqual(
+    undeclared,
+    [],
+    "these media queries use a breakpoint nothing declares. If it is the phone tier "
+    + `it must be MOBILE_MAX_WIDTH (${MOBILE_MAX_WIDTH}); if it is a new tier, add it `
+    + "to DECLARED_TIERS here: "
+    + undeclared.map((q) => `${q.file} @ ${q.width}px`).join(", "),
+  );
+
+  // And the phone tier itself really is in use, in both stylesheets that have a
+  // phone layout -- otherwise this whole test could pass with the phone block
+  // silently renamed to some other width.
+  assert.ok(
+    queries.some((q) => q.width === MOBILE_MAX_WIDTH),
+    `no stylesheet has a ${MOBILE_MAX_WIDTH}px block; the phone layout has drifted`,
+  );
 });
 
 test("a defaulted rail follows the viewport, and a chosen one does not", () => {

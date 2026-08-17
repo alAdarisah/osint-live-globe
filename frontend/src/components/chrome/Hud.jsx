@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import Attribution from "../Attribution";
+import Attribution, { ATTRIBUTION_TEXT } from "../Attribution";
 import { setCursorReadoutSink } from "../../map/cursorReadout";
 import {
   UNKNOWN,
@@ -111,7 +111,14 @@ export default function Hud({
         </div>
       )}
 
-      <div className="hud-cell hud-attribution">
+      {/* The title chrome.css has claimed twice, in two comments, that this cell
+          carried -- and did not. This is the one cell allowed to ellipsis away,
+          and the disclaimer is the last thing in it, so on anything narrower than
+          about 1400px the sentence that says this is not authoritative military
+          intelligence was the first casualty, with nothing to recover it.
+          A tooltip alone would still leave out every touch reader, so the Legend
+          repeats the full text as well (see Legend.jsx). */}
+      <div className="hud-cell hud-attribution" title={ATTRIBUTION_TEXT}>
         <Attribution />
       </div>
 

@@ -1,6 +1,7 @@
 import { useAccordion } from "../../hooks/useAccordion";
 import { paletteColor } from "../../map/iconTheme";
 import { glyphLegend, severityLegend, QUALIFIER_ROWS } from "./legendRows";
+import { ATTRIBUTION_DISCLAIMER } from "../Attribution";
 
 const FOLD_KEY = "osint-chrome-folds";
 
@@ -74,6 +75,17 @@ export default function Legend() {
               </span>
             ))}
           </div>
+
+          {/* The disclaimer, in full, where it cannot be truncated.
+              Its home is the HUD's attribution cell, which is the one cell there
+              allowed to ellipsis away -- and the disclaimer sits at the end of it,
+              so it is the first thing lost on any window narrower than about
+              1400px. That cell now carries the full text as a tooltip, but a
+              tooltip never fires on a touch screen, and this panel is the reference
+              surface a reader can always open. Repeated rather than moved: the
+              credits belong beside the data they credit. */}
+          <div className="lg-section">This map</div>
+          <p className="lg-note">{ATTRIBUTION_DISCLAIMER}</p>
         </div>
       )}
     </div>

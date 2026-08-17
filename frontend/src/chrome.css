@@ -569,8 +569,12 @@
 
 /* Attribution. The one cell allowed to shrink, because it is prose rather than
    a figure and it is the only thing here that can be re-read at leisure --
-   everything else is a number that is useless truncated. It keeps its full
-   text as a tooltip so the disclaimer is never actually lost. */
+   everything else is a number that is useless truncated.
+
+   It carries its full text as a tooltip, which this comment used to claim while
+   no title existed anywhere -- so the disclaimer at the end of it was simply lost
+   below about 1400px. The Legend repeats the disclaimer as well, because a tooltip
+   never fires on a touch screen. */
 .hud-attribution {
   flex: 1 1 auto;
   min-width: 0;
@@ -926,8 +930,20 @@
    the three reasons country cards appeared not to work. */
 #legend {
   position: fixed;
-  top: calc(var(--chrome-top) + 10px);
-  right: 12px;
+  /* Below #regionBar rather than beside it. Both used to sit at the map's top
+     right, two pixels apart, and #regionBar spans the full width with a
+     --header-fade gradient whose opaque end landed exactly on this panel's
+     collapsed header -- so the one affordance that opens the legend was washed
+     out to near-invisible. It is still clickable (#regionBar is pointer-events:
+     none), which is the worst version of the problem: present, working, and
+     unfindable. 46px is #regionBar's own height plus its gap, the same offset
+     #squawkAlertStrip already uses to clear it. */
+  top: calc(var(--chrome-top) + 46px);
+  /* Clear of #eventDetailCard, which is fixed at right: 14px, 340px wide, and at
+     --z-selection -- so it does not merely overlap this panel, it contains it. A
+     reader who opened a record detail card lost the legend entirely until they
+     closed it again. */
+  right: 366px;
   width: 250px;
   max-height: calc(100vh - var(--chrome-top) - var(--chrome-bottom) - 30px);
   overflow-y: auto;
@@ -942,6 +958,17 @@
 #legend .lg-head,
 #legend .lg-body {
   pointer-events: auto;
+}
+
+/* The disclaimer, repeated in full where it cannot be truncated. Prose, so it
+   wraps -- unlike every .lg-label above it, which is a single line beside a
+   swatch. */
+.lg-note {
+  margin: 0;
+  padding: 2px 10px 8px;
+  color: var(--text-dim);
+  font-size: calc(9.5px * var(--ui-text-scale, 1));
+  line-height: 1.45;
 }
 
 #legend .lg-head {
@@ -1234,8 +1261,9 @@
   /* No pointer, so no cursor to report. */
   .hud-coords { display: none; }
   /* The attribution needs a line of its own to be readable at all; on a strip
-     this narrow it would be three words and an ellipsis. It stays reachable
-     through its own cell's title. */
+     this narrow it would be three words and an ellipsis. Reachable through its
+     own cell's title -- which now exists -- and, since this is the width where the
+     reader most likely has no pointer to hover with, through the Legend. */
   .hud-attribution { min-width: 120px; }
   .hud-cell { padding: 0 9px; }
 
