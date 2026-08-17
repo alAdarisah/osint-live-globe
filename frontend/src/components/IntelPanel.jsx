@@ -62,6 +62,7 @@ import {
   SCOPE_OPTIONS, SCOPE_WORLD, SCOPE_VIEWPORT, SCOPE_COUNTRY, SCOPE_REGION, SCOPE_WATER,
   WINDOW_OPTIONS, DEFAULT_WINDOW_HOURS, windowOptionValue, windowHoursFromValue,
   GROUP_BY_OPTIONS, UNKNOWN_GROUP,
+  EVENT_SORT_OPTIONS, DEFAULT_EVENT_SORT, sortEventItems,
   makeIntelScope, groupItems, intelPanelIsEmpty,
   selectEscalationZones, selectEventItems, selectNewsItems, selectOfficialsItems,
   escalationMiniBarTitle, eventReliabilityTooltip, intelRecordRef,
@@ -466,6 +467,11 @@ export default function IntelPanel({
   }, [shownTabs, activeTab]);
   const [scopeKind, setScopeKind] = useState(SCOPE_WORLD);
   const [groupBy, setGroupBy] = useState("none");
+  // Events only, and held here rather than in the shared eventFilter for that
+  // reason: eventFilter is the contract between this panel and the *map*, and the
+  // map has no list to order. A sort that lived there would be a control the map
+  // silently ignored.
+  const [eventSort, setEventSort] = useState(DEFAULT_EVENT_SORT);
   const [chip, setChip] = useState("all");
 
   // `windowHours` is no longer this panel's state, and the effect that pushed
@@ -570,10 +576,16 @@ export default function IntelPanel({
     () => filterByChip(eventItems, chip),
     [eventItems, chip]
   );
+  // Ordered last, after the chip, so the sort applies to what the reader can
+  // actually see rather than to a list the chip is about to cut down.
+  const sortedEventItems = useMemo(
+    () => sortEventItems(chippedEventItems, eventSort),
+    [chippedEventItems, eventSort]
+  );
 
   const activeItems = activeTab === "escalation" ? escalationZones
     : activeTab === "activity" ? activityItems
-      : activeTab === "events" ? chippedEventItems
+      : activeTab === "events" ? sortedEventItems
         : activeTab === "news" ? newsItems
           : officialsItems;
 
@@ -592,7 +604,9 @@ export default function IntelPanel({
   // else. Emphatically not on new data: the rail refetches every 60 seconds, and
   // resetting there would drag a reader who had scrolled to row 300 back to the
   // top, once a minute, for no reason they could see.
-  const resetKey = pagingResetKey({ tab: activeTab, scopeKind, windowHours, chip });
+  const resetKey = pagingResetKey({
+    tab: activeTab, scopeKind, windowHours, chip, sort: eventSort,
+  });
   useEffect(() => {
     setPages(1);
     // The scroll position belongs to the old list; leaving it makes a fresh
@@ -822,6 +836,34 @@ export default function IntelPanel({
               />
               Include country-level placements
             </label>
+            {/* Events only, and disabled rather than hidden elsewhere, like every
+                other control in this row: a control that vanishes takes with it the
+                information that the option exists. News and Officials are strictly
+                reverse-chronological and Escalation is a backend computation, so
+                there is nothing for this to reorder there.
+
+                "Significance" is named for what it ranks rather than for the field
+                it reads, because the field is severity decayed by age and neither
+                word on its own is the promise being made. */}
+            <label>
+              Sort by
+              <select
+                value={eventSort}
+                onChange={(e) => setEventSort(e.target.value)}
+                disabled={activeTab !== "events"}
+                title={
+                  activeTab === "events"
+                    ? "Significance ranks by severity, faded by age. Reliability ranks by "
+                      + "what is behind the report: the masthead, how many independent "
+                      + "newsrooms carried it, and whether an analyst coded it."
+                    : "Only the Events tab is ranked -- News and Officials are newest first."
+                }
+              >
+                {EVENT_SORT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </label>
             <label>
               Group by
               <select
@@ -872,9 +914,9 @@ export default function IntelPanel({
             )}
 
             {activeTab === "events" && (
-              chippedEventItems.length ? (
+              sortedEventItems.length ? (
                 <TabList
-                  items={paged(chippedEventItems)} groupBy={groupBy} tabKind="events" Row={EventRow}
+                  items={paged(sortedEventItems)} groupBy={groupBy} tabKind="events" Row={EventRow}
                   rowKey={(e) => e.id} onLocate={onLocate} onOpenRecord={onOpenRecord}
                 />
               ) : (

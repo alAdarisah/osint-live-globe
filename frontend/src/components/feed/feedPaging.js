@@ -81,14 +81,19 @@ export function feedCountReadout(total, pages) {
  * Should the reveal reset to the first page?
  *
  * Everything the reader chose that changes *what the list is about* resets it --
- * a different tab, a different scope, a different window, a different chip.
- * A poll landing does not, which is the whole point: the rail refetches every 60
- * seconds, and resetting on new data would snap a reader who had scrolled to row
- * 300 back to the top, repeatedly, for no reason they could see.
+ * a different tab, a different scope, a different window, a different chip, a
+ * different sort. A poll landing does not, which is the whole point: the rail
+ * refetches every 60 seconds, and resetting on new data would snap a reader who had
+ * scrolled to row 300 back to the top, repeatedly, for no reason they could see.
+ *
+ * A sort counts, and it is the one entry here that does not change *which* rows are
+ * in the list. It changes which of them is first, and the reader who just asked for
+ * the most reliable reports is looking at row 300 of the old order -- so leaving the
+ * reveal where it was would answer the question below the fold.
  *
  * Returned as a string rather than compared field by field so the caller can
  * hand it straight to a dependency array.
  */
-export function pagingResetKey({ tab, scopeKind, windowHours, chip }) {
-  return [tab ?? "", scopeKind ?? "", windowHours ?? "all", chip ?? ""].join("|");
+export function pagingResetKey({ tab, scopeKind, windowHours, chip, sort }) {
+  return [tab ?? "", scopeKind ?? "", windowHours ?? "all", chip ?? "", sort ?? ""].join("|");
 }

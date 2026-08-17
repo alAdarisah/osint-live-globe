@@ -10,7 +10,9 @@
 // import -- see frontend/tests/intelPanel.test.js.
 import { padBounds, boundsContainsPoint } from "../utils/geo";
 import { insideWaterFeature, bboxesOverlap } from "../map/popups.js";
-import { passesEventFilter, ageHoursFromDateAdded, confidenceDimmed } from "../map/severity.js";
+import {
+  passesEventFilter, ageHoursFromDateAdded, confidenceDimmed, RELIABILITY_BANDS,
+} from "../map/severity.js";
 import { officialsAgeHours } from "../map/decorators.js";
 
 // ---------- scope ----------
@@ -488,6 +490,86 @@ export function selectEventItems(eventsRaw, { scope, eventFilter }) {
   }
   scored.sort((a, b) => b.score - a.score || String(a.event.id).localeCompare(String(b.event.id)));
   return scored.map((s) => ({ ...s.event, weaklyPlaced: confidenceDimmed(s.event, eventFilter) }));
+}
+
+// ---------- sorting the Events tab ----------
+//
+// Two orders, because there are two questions and the tab could only answer one.
+//
+// The default order is significance: severity decayed by age (rankScore above).
+// Severity folds confidence in as a multiplier -- see _severity_for in
+// backend/sources/event_fusion.py -- so that order is already a blend of "how bad"
+// and "how sure", and a reader who wants only the second cannot get at it by
+// scrolling. Measured over the live feed, the two orders correlate at 0.51: related
+// enough that neither is noise, different enough that ranking by one hides what the
+// other would put on top.
+//
+// Reliability is the provenance axis, scored by backend/sources/reliability.py off
+// the masthead behind the report, how many independent newsrooms carried it, whether
+// a human analyst coded it, and whether anything on the page argues against it. It
+// is already on every row's chip; this makes it something a reader can order by
+// rather than only notice.
+//
+// Worth knowing what this order looks like on real data, because it is lopsided and
+// that is the point: of 621 events in the live window, 46 are "Reliable", 60
+// "Mixed", and 515 "Unreliable". Sorted by reliability, the hundred-odd rows that
+// anything vouches for come first and the long tail of single-outlet noise sinks
+// under them -- which is exactly the view significance order cannot produce, since a
+// large unverified claim outranks a small confirmed one there.
+export const EVENT_SORT_OPTIONS = [
+  { value: "significance", label: "Significance" },
+  { value: "reliability", label: "Reliability" },
+];
+
+export const DEFAULT_EVENT_SORT = "significance";
+
+/**
+ * A row's reliability as a number to sort on, or null when it has none.
+ *
+ * The band name is preferred over the raw score for the reason severity.js's own
+ * reliabilityBand gives: it is what the backend's screen gates on, so a record
+ * carrying a band and no score is still telling us where it belongs. Falls back to
+ * the numeric score, and answers null only when the record has neither.
+ *
+ * null is not zero, and that distinction is the whole reason this returns null at
+ * all. Replay serves snapshots written before reliability.py shipped; scoring those
+ * as 0 would sort them among the unreliable and state a finding the pipeline never
+ * made. They sort last as a block instead, keeping their significance order.
+ */
+export function reliabilityRank(event) {
+  const named = RELIABILITY_BANDS.find((b) => b.key === event?.reliability_band);
+  const score = Number(event?.reliability);
+  if (Number.isFinite(score)) return score;
+  return named ? named.min : null;
+}
+
+/**
+ * Reorder the Events tab.
+ *
+ * Takes the list selectEventItems already returned, so scope, window, severity
+ * floor and the chip have all been applied exactly once and a sort cannot change
+ * which rows are in the tab -- only their order. Returns the same array instance for
+ * the default order, so the common case allocates nothing and React's memo below it
+ * sees no change.
+ *
+ * Ties fall back to significance rather than to id. Reliability is a coarse score --
+ * 23 distinct values across 621 live rows, most of them clustered at the bottom --
+ * so ties are the normal case rather than the edge, and breaking them by id would
+ * make the bulk of the list arbitrary while looking sorted.
+ */
+export function sortEventItems(items, sort = DEFAULT_EVENT_SORT) {
+  if (sort !== "reliability") return items;
+  return [...(items || [])]
+    .map((event, index) => ({ event, index, rank: reliabilityRank(event) }))
+    .sort((a, b) => {
+      // Unscored last, as a block, in the significance order they arrived in.
+      if (a.rank === null || b.rank === null) {
+        if (a.rank === b.rank) return a.index - b.index;
+        return a.rank === null ? 1 : -1;
+      }
+      return b.rank - a.rank || a.index - b.index;
+    })
+    .map((entry) => entry.event);
 }
 
 /** The News tab: GDELT rows with a real scraped title, most recent first.

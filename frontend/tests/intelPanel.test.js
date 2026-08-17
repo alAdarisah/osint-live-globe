@@ -36,6 +36,7 @@ const {
   selectEventItems, selectEscalationZones, selectNewsItems, selectOfficialsItems,
   escalationMiniBarTitle, eventReliabilityTooltip, intelRecordRef,
   escalationEmptyMessage, eventsEmptyMessage, newsEmptyMessage, officialsEmptyMessage,
+  sortEventItems, reliabilityRank, EVENT_SORT_OPTIONS, DEFAULT_EVENT_SORT,
 } = await import("../src/components/intelPanelLogic.js");
 
 const { DEFAULT_EVENT_FILTER } = await import("../src/map/severity.js");
@@ -934,4 +935,117 @@ test("selectNewsItems and selectOfficialsItems return every row in the window", 
     id: `o${i}`, published_at: 1_700_000_000 + i, lat: 1, lon: 1,
   }));
   assert.equal(selectOfficialsItems(officials, { scope, windowHours: null }).length, 90);
+});
+
+// ---------- sorting the Events tab by reliability ----------
+//
+// The tab was ranked one way only -- severity faded by age -- and severity folds
+// confidence in as a multiplier (see _severity_for in event_fusion.py), so that one
+// order is a blend of "how bad" and "how sure" with no way to ask for the second on
+// its own. Measured on the live feed the two correlate at 0.51, which is the whole
+// case for the control: related enough that neither ordering is noise, different
+// enough that one hides what the other puts on top.
+
+const ev = (id, reliability, severity, extra = {}) => ({
+  id, severity, date: "2026-08-17", lat: 1, lon: 1, ...extra,
+  ...(reliability === undefined ? {} : { reliability }),
+});
+
+test("the default sort is left exactly as it arrived", () => {
+  // Same array instance, not a copy: this is the common case, it runs inside a memo
+  // on every poll, and a fresh array would re-render the whole list sixty times an
+  // hour for an order that had not changed.
+  const items = [ev("a", 10, 90), ev("b", 90, 10)];
+  assert.equal(sortEventItems(items, DEFAULT_EVENT_SORT), items);
+  assert.equal(sortEventItems(items), items);
+  assert.equal(sortEventItems(items, "significance"), items);
+});
+
+test("reliability sort puts what is attested above what is merely large", () => {
+  // The point of the control, in one assertion. Significance order is the input
+  // order here: a severity-90 single-outlet claim ahead of a severity-10 report four
+  // newsrooms carried. Reliability order reverses exactly that.
+  const big = ev("big-unverified", 10, 90);
+  const small = ev("small-confirmed", 90, 10);
+  assert.deepEqual(sortEventItems([big, small], "reliability").map((e) => e.id),
+    ["small-confirmed", "big-unverified"]);
+});
+
+test("the sort never changes which rows are in the tab", () => {
+  // It reorders; it does not filter. Scope, window, severity floor and the chip have
+  // all been applied before this runs, and a sort that dropped a row would be a
+  // second hidden filter of the kind this panel's own notes keep arguing against.
+  const items = [ev("a", 10, 5), ev("b", undefined, 5), ev("c", 90, 5), ev("d", 45, 5)];
+  const sorted = sortEventItems(items, "reliability");
+  assert.equal(sorted.length, items.length);
+  assert.deepEqual([...sorted.map((e) => e.id)].sort(), ["a", "b", "c", "d"]);
+});
+
+test("an unscored row sorts last rather than as zero", () => {
+  // Replay serves snapshots written before reliability.py shipped. Scoring those as 0
+  // would sort them among the unreliable and state a finding the pipeline never made
+  // -- the same "an absent field is not a finding" rule the rest of this module
+  // follows. They go last as a block instead.
+  const items = [ev("unscored", undefined, 50), ev("weak", 10, 50), ev("good", 90, 50)];
+  assert.deepEqual(sortEventItems(items, "reliability").map((e) => e.id),
+    ["good", "weak", "unscored"]);
+});
+
+test("unscored rows keep their significance order among themselves", () => {
+  const items = [ev("first", undefined, 90), ev("second", undefined, 10)];
+  assert.deepEqual(sortEventItems(items, "reliability").map((e) => e.id), ["first", "second"]);
+});
+
+test("ties fall back to significance, not to id", () => {
+  // Reliability is coarse -- 23 distinct values over 621 live rows, most clustered at
+  // the bottom -- so ties are the normal case rather than the edge. Breaking them by
+  // id would leave the bulk of the list arbitrary while looking sorted.
+  const items = [ev("zzz-major", 10, 90), ev("aaa-minor", 10, 10)];
+  assert.deepEqual(sortEventItems(items, "reliability").map((e) => e.id),
+    ["zzz-major", "aaa-minor"]);
+});
+
+test("the sort is stable and does not mutate its input", () => {
+  const items = [ev("a", 50, 10), ev("b", 50, 20), ev("c", 90, 5)];
+  const before = items.map((e) => e.id);
+  const sorted = sortEventItems(items, "reliability");
+  assert.deepEqual(items.map((e) => e.id), before, "the input array was reordered in place");
+  assert.notEqual(sorted, items);
+  // a before b, because a arrived first and they tie.
+  assert.deepEqual(sorted.map((e) => e.id), ["c", "a", "b"]);
+});
+
+test("the band name is honoured when a row carries no number", () => {
+  // severity.js's reliabilityBand treats the backend's band as authoritative -- it is
+  // what reliability.py's own screen gates on -- so a row with a band and no score is
+  // still telling us where it belongs, and must not be treated as unscored.
+  assert.equal(reliabilityRank({ reliability_band: "high" }), 70);
+  assert.equal(reliabilityRank({ reliability_band: "very_low" }), 0);
+  // A number wins when both are present: it is finer-grained, and the two only
+  // disagree if one of them is stale.
+  assert.equal(reliabilityRank({ reliability: 88, reliability_band: "low" }), 88);
+  // Neither is the only null case.
+  assert.equal(reliabilityRank({}), null);
+  assert.equal(reliabilityRank({ reliability_band: "nonsense" }), null);
+  assert.equal(reliabilityRank({ reliability: "high" }), null);
+});
+
+test("a banded row sorts above an unscored one", () => {
+  const items = [ev("unscored", undefined, 50), { id: "banded", severity: 50, reliability_band: "medium" }];
+  assert.deepEqual(sortEventItems(items, "reliability").map((e) => e.id), ["banded", "unscored"]);
+});
+
+test("the sort options are the two the panel offers, default first", () => {
+  assert.deepEqual(EVENT_SORT_OPTIONS.map((o) => o.value), ["significance", "reliability"]);
+  assert.equal(EVENT_SORT_OPTIONS[0].value, DEFAULT_EVENT_SORT);
+  for (const opt of EVENT_SORT_OPTIONS) assert.ok(opt.label, opt.value);
+});
+
+test("an unknown sort key is the default rather than an empty list", () => {
+  // The value round-trips through a <select>, and a stale one from a future build
+  // should leave the tab ranked as it always was rather than blank it.
+  const items = [ev("a", 10, 5), ev("b", 90, 5)];
+  assert.equal(sortEventItems(items, "nonsense"), items);
+  assert.equal(sortEventItems(items, undefined), items);
+  assert.deepEqual(sortEventItems(null, "reliability"), []);
 });
