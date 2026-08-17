@@ -76,7 +76,8 @@ async def _probe(previous_evicted: int | None, uncached_streak: dict) -> Probe:
         except Exception:  # noqa: BLE001
             continue
         _, error = mirror.health_verdict(
-            newest, newest_ok, spec.expected_every, time.time(), spec.producer
+            newest, newest_ok, spec.expected_every, time.time(), spec.producer,
+            stale_after=config.ENTITY_STALE_AFTER.get(spec.kind),
         )
         producers[spec.name] = error
 

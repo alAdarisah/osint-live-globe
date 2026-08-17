@@ -58,6 +58,43 @@ def test_a_recent_successful_run_reports_the_ingests_own_timestamp():
     assert error is None
 
 
+def test_a_rate_limited_source_is_not_frozen_inside_its_configured_window():
+    """marinesia is scheduled every 1800s but its key affords one request an hour, so a
+    three-box rotation legitimately takes hours. Judged on the interval alone it was called
+    frozen while it was working -- 4729s old against a 4500s threshold -- and the alert said
+    so once a minute. ENTITY_STALE_AFTER already carries the real window for exactly these
+    sources; the verdict has to honour it."""
+    row = {"ts": _ts(4729), "item_count": 19, "ok": True, "error": None}
+    _, without = mirror.health_verdict(row, row, 1800, NOW, "the ingest service")
+    assert "frozen" in without, "the interval alone still calls this overdue"
+
+    _, with_window = mirror.health_verdict(
+        row, row, 1800, NOW, "the ingest service", stale_after=4 * 3600
+    )
+    assert with_window is None
+
+
+def test_the_configured_window_is_a_floor_and_never_a_ceiling():
+    """A source with a generous window still goes overdue once it passes it -- the floor
+    raises the threshold for a rate-limited source, it does not excuse a dead one."""
+    row = {"ts": _ts(5 * 3600), "item_count": 19, "ok": True, "error": None}
+    _, error = mirror.health_verdict(
+        row, row, 1800, NOW, "the ingest service", stale_after=4 * 3600
+    )
+    assert "frozen" in error
+
+
+def test_a_source_with_no_configured_window_keeps_the_interval_rule():
+    """Most sources have no ENTITY_STALE_AFTER entry, and nothing about them changes."""
+    row = {"ts": _ts(4000), "item_count": 5, "ok": True, "error": None}
+    _, floorless = mirror.health_verdict(row, row, 900, NOW, "the ingest service")
+    _, explicit_none = mirror.health_verdict(
+        row, row, 900, NOW, "the ingest service", stale_after=None
+    )
+    assert "frozen" in floorless
+    assert floorless == explicit_none
+
+
 def test_a_failing_source_carries_the_producers_message_and_its_last_good_time():
     failed = {"ts": _ts(10), "item_count": None, "ok": False, "error": "401 Unauthorized"}
     succeeded = {"ts": _ts(3600), "item_count": 12}

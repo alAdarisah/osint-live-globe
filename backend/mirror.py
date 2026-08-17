@@ -97,6 +97,7 @@ def health_verdict(
     now: float,
     producer: str,
     stale_multiplier: float | None = None,
+    stale_after: float | None = None,
 ) -> tuple[float | None, str | None]:
     """`(last_success, last_error)` for a mirrored source, from its health rows.
 
@@ -111,6 +112,15 @@ def health_verdict(
     it is.
     """
     multiplier = config.INGEST_STALE_MULTIPLIER if stale_multiplier is None else stale_multiplier
+    # A source whose staleness window is configured explicitly is not overdue until that window
+    # has passed, whatever its nominal interval says. Rate limiting is why this matters:
+    # marinesia is scheduled every 1800s but its key affords one request an hour, so a
+    # three-box rotation legitimately takes hours, and the interval-derived threshold called a
+    # working layer frozen. ENTITY_STALE_AFTER already carries the real answer for exactly
+    # those sources -- and its own comment explains the rotation arithmetic -- so the freeze
+    # check honours it rather than contradicting it. A source with no entry is unaffected: the
+    # floor is zero and the interval rule stands alone.
+    floor = 0.0 if stale_after is None else stale_after
     last_success = newest_ok["ts"].timestamp() if newest_ok else None
 
     if newest is None:
@@ -121,7 +131,7 @@ def health_verdict(
         return None, f"no data yet -- waiting for {producer} to run for the first time"
 
     age = now - newest["ts"].timestamp()
-    overdue = age > expected_every * multiplier
+    overdue = age > max(expected_every * multiplier, floor)
 
     if not newest["ok"]:
         reason = newest["error"] or "unknown error"
@@ -228,7 +238,8 @@ class _Follower:
         except Exception:  # noqa: BLE001 - health is advisory; the data still stands
             return
         last_success, last_error = health_verdict(
-            newest, newest_ok, spec.expected_every, time.time(), spec.producer
+            newest, newest_ok, spec.expected_every, time.time(), spec.producer,
+            stale_after=config.ENTITY_STALE_AFTER.get(spec.kind),
         )
         self.state.last_success = last_success
         self.state.last_error = last_error

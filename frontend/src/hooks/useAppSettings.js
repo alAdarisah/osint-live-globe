@@ -239,6 +239,14 @@ export function useAppSettings() {
   // with unsaved state is a settings panel that loses work when it is closed.
   useEffect(() => {
     if (!loadedRef.current || !dirtyRef.current) return undefined;
+    // On the public listener the write endpoint is refused, so nothing here should be armed --
+    // including the pagehide beacon registered below. The debounced save already gave up early
+    // on readOnly, but the beacon is registered by THIS effect and was outside that check, so
+    // closing or backgrounding the public tab still fired the whole settings object at a
+    // listener that caps bodies at 8k. nginx logged it as "client intended to send too large
+    // body", which was true about the size and misleading about the reason. The write was
+    // correctly refused either way; it should never have been sent.
+    if (readOnly) return undefined;
     let cancelled = false;
     setSync((prev) => (prev.state === "local-only" ? prev : { ...prev, state: "saving" }));
     const timer = setTimeout(async () => {
@@ -277,7 +285,7 @@ export function useAppSettings() {
       clearTimeout(timer);
       window.removeEventListener("pagehide", flush);
     };
-  }, [settings, loadTick]);
+  }, [settings, loadTick, readOnly]);
 
   // --- what the rest of the app reads -----------------------------------
 
