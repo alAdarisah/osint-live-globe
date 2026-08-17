@@ -32,9 +32,17 @@ export default function Legend() {
         <div className="lg-body">
           <div className="lg-section">Severity</div>
           <div className="lg-grid">
+            {/* Through paletteColor, exactly as the glyph rows below already were:
+                the map draws every event through the palette (decorators.js), so a
+                swatch painted from the shipped constant stopped matching the pins
+                the moment anyone recoloured a band in Admin Mode -- and a legend
+                that disagrees with the map is worse than no legend. */}
             {severityLegend().map((row) => (
               <span key={row.key} className="lg-row">
-                <span className="lg-swatch" style={{ background: row.color }} />
+                <span
+                  className="lg-swatch"
+                  style={{ background: row.token ? paletteColor(row.token, row.color) : row.color }}
+                />
                 <span className="lg-label">{row.label}</span>
               </span>
             ))}

@@ -119,8 +119,19 @@ test("the layer count counts what the map is drawing, not what was asked for", (
   // layerState.on, not the wish table: a layer pinned on and held back by its
   // own zoom gate is not a layer on screen, and this cell claims to say what is.
   assert.equal(layerCountReadout({ events: true, ais: false, adsb: true }).text, "2");
-  assert.equal(layerCountReadout({}).text, "0");
   assert.match(layerCountReadout({ events: true }).title, /held back by its own zoom gate is not counted/);
+
+  // `{}` is the map not having reported yet, not zero layers drawn -- and it is the
+  // only case the old guard was ever going to meet, because useLeafletMap seeds
+  // layerState as { on: {}, wish: {} }. It passed the typeof check and rendered a
+  // confident "0 layers currently drawn" over a map that had not answered. This
+  // test asserted that 0.
+  assert.equal(layerCountReadout({}).text, UNKNOWN);
+  assert.equal(layerCountReadout({}).known, false);
+  // All four ways of having nothing to say agree.
+  for (const nothing of [null, undefined, "not an object", {}]) {
+    assert.equal(layerCountReadout(nothing).known, false);
+  }
 });
 
 test("latency reports the stalest source, not the freshest", () => {
@@ -170,12 +181,18 @@ test("the dots spend their space on the sources that are wrong", () => {
   assert.deepEqual(out.dots.map((d) => d.state), ["err", "warn", "ok"]);
   assert.equal(out.dots[0].name, "dead");
   assert.match(out.title, /dead: failing/);
-  assert.match(out.title, /nokey: no key/);
+  // "not configured here" rather than "no key": it names what is true of this
+  // deployment rather than of the source, and a reader who sees it has nothing to
+  // fix. The old wording read like a fault.
+  assert.match(out.title, /nokey: not configured here/);
 });
 
 test("all-healthy says so rather than listing nothing", () => {
   const health = { a: { item_count: 1, last_success: 1, seconds_since_success: 5 } };
-  assert.equal(sourceReadout(health).title, "All 1 sources reporting fresh data.");
+  // "within their own cadence", because that is now the actual test -- each source
+  // against its own reporting interval rather than all 57 against one flat half
+  // hour. See utils/sourceState.js.
+  assert.equal(sourceReadout(health).title, "All 1 sources reporting within their own cadence.");
 });
 
 test("cursor coordinates are hemisphere-signed to three decimals", () => {

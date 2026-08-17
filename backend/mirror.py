@@ -146,6 +146,34 @@ def health_verdict(
     return last_success, None
 
 
+# The wording every collector uses when a credential this deployment has simply
+# not set is what stops it running: "<VAR> not set in .env", or "<VAR> / <VAR> not
+# set -- ..." for the pair ACLED wants. See firms.py, ais.py, marinesia.py,
+# gfw_detections.py, gfw_gaps.py, hapi_conflict.py, humanitarian.py, acled.py.
+#
+# It has to be recognised here because `key_configured` does not cross the process
+# boundary. The credentials all belong to the ingest process, which sets the flag
+# on *its* registry; the backend keeps a separate state per mirrored source and had
+# no way to know, so it hardcoded True. The consequence was that the frontend's
+# amber "not configured on this deployment" state was unreachable for every
+# mirrored source, and a source that is deliberately unconfigured rendered as a red
+# failure -- the same colour as a collector that is genuinely broken. marinesia has
+# been sitting red on this deployment for exactly that reason.
+#
+# The error text is the one signal that does cross, via source_health.error. Read
+# here rather than pattern-matched in the frontend so the convention has one owner:
+# a collector changing its wording should not silently repaint a light three layers
+# away.
+_UNCONFIGURED_MARKERS = ("not set in .env", "not set --")
+
+
+def credential_missing(last_error: str | None) -> bool:
+    """Is this source down only because a credential is absent here?"""
+    if not last_error:
+        return False
+    return any(marker in last_error for marker in _UNCONFIGURED_MARKERS)
+
+
 class _Follower:
     """One mirrored source's loop state. Split out so refresh() is testable."""
 
@@ -204,6 +232,11 @@ class _Follower:
         )
         self.state.last_success = last_success
         self.state.last_error = last_error
+        # Now that the error text is in hand, the key flag can stop being a guess.
+        # False means "this deployment has not configured it", which the frontend
+        # renders amber rather than red -- a different fact from a collector that
+        # is failing, and the one that was previously unreachable.
+        self.state.key_configured = not credential_missing(last_error)
 
 
 _wakeups: dict[str, asyncio.Event] = {}

@@ -60,11 +60,18 @@ export default function TopBar({ theme, onToggleTheme, counts, isReplaying, repl
           tone="accent"
           readout={sumCountReadout(counts, ["adsbCivilian", "adsbMilitary"], "aircraft")}
         />
+        {/* All four vessel layers, including the Baltic one. aisDigitraffic is a
+            separately counted layer from a second supplier (Fintraffic), and
+            leaving it out of the sum meant this stat read "—" during an aisstream
+            outage while the map was drawing several hundred Finnish ships. That
+            outage is not hypothetical: aisstream has been silent for days at a
+            time, which is the entire reason a second supplier exists, and this
+            cell is one of the places a reader would look to find out. */}
         <TopStat
           id="statVessels"
           label="Vessels"
           tone="accent"
-          readout={sumCountReadout(counts, ["aisCivilian", "aisNavy", "aisTanker"], "vessels")}
+          readout={sumCountReadout(counts, ["aisCivilian", "aisNavy", "aisTanker", "aisDigitraffic"], "vessels")}
         />
         <TopStat
           id="statEvents"

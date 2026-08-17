@@ -39,8 +39,17 @@ export const LAYER_HEALTH_KEY = {
   dams: "dams",
   deflock: "deflock",
   railways: "railways",
-  railLive: "digitraffic_rail",
-  railStations: "digitraffic_rail",
+  // These two were both "digitraffic_rail", which is the *module* name, not a
+  // registered source name -- backend/sources/digitraffic_rail.py registers
+  // "rail_live" and "rail_stations" separately. So both looked up a key that has
+  // never existed in /api/health, and did it silently: a missing key is
+  // indistinguishable from a source with no health entry, which this file's own
+  // header says several layers legitimately are. Two freshness badges showed
+  // nothing, and map/exportBuilder.js reads the same table, so an export
+  // containing live Finnish trains carried a provenance block with no collection
+  // time -- indistinguishable from an untracked curated feed.
+  railLive: "rail_live",
+  railStations: "rail_stations",
   powerLines: "power_lines",
   water: "water_bodies",
   cables: "cables",

@@ -1,4 +1,5 @@
-import { dotPeriod, STALE_AFTER_SECONDS } from "../../utils/tempo";
+import { dotPeriod } from "../../utils/tempo";
+import { sourceState, sourceStateLabel, sourceLatenessNote } from "../../utils/sourceState";
 
 export default function SourceStatusSection({ health }) {
   // /api/health carries the per-source states plus an `alerts` array from the
@@ -29,18 +30,29 @@ export default function SourceStatusSection({ health }) {
       <h2>Source status</h2>
       <ul id="healthList">
         {rows.map(([name, info]) => {
-          let cls = "err";
-          if (!info.key_configured && info.last_error) cls = "warn";
-          if (info.last_success && info.seconds_since_success < STALE_AFTER_SECONDS) cls = "ok";
+          // Imported, not restated. This was a hand-copy of the strip's own
+          // predicate, and both applied a flat half-hour threshold to sources
+          // whose real cadences run from ten seconds to seven days -- so this list
+          // called a weekly reference set "failing" three hours after it had
+          // fetched successfully, with no error to show for it. See
+          // utils/sourceState.js.
+          const cls = sourceState(info);
           const age = info.seconds_since_success != null ? `${info.seconds_since_success}s ago` : "never";
           const period = dotPeriod(info.seconds_since_success);
+          // How late it is by its own standards, which is the fact this row was
+          // missing. Only worth saying when something is off; a source inside its
+          // own window has the age above and needs no arithmetic.
+          const lateness = cls === "ok" ? null : sourceLatenessNote(info);
           return (
             <li key={name}>
               <span
                 className={`dot ${cls}${period ? " breathing" : ""}`}
                 style={period ? { "--period": period } : undefined}
+                title={sourceStateLabel(cls)}
               />{" "}
               {name.toUpperCase()}: {info.item_count} items, updated {age}
+              {cls !== "ok" ? ` — ${sourceStateLabel(cls)}` : ""}
+              {lateness ? ` (${lateness})` : ""}
               {info.last_error ? ` — ${info.last_error}` : ""}
             </li>
           );

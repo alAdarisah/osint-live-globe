@@ -1015,6 +1015,57 @@ async def source_health_latest(source: str) -> tuple[dict | None, dict | None]:
     return (dict(newest) if newest else None), (dict(newest_ok) if newest_ok else None)
 
 
+async def observed_cadence(days: int = 3) -> dict[str, float]:
+    """`{source: seconds}` -- how often each source *actually* reports.
+
+    Measured rather than declared, and that is the point. Every source knows its
+    own interval, but that number lives inside its own module as a constant of a
+    different name each time (REFRESH_INTERVAL, POLL_INTERVAL, SNAPSHOT_INTERVAL,
+    a config value, or an interval computed from whether a credential is present),
+    and threading forty-six of them out to the API by hand is forty-six chances to
+    declare a cadence a source does not keep. A wrong cadence is worse than none:
+    it makes a healthy source look failed, or a dead one look fine.
+
+    The health table already holds the answer. Every poll outcome writes a row, so
+    the gap between consecutive rows *is* the cadence, and it cannot disagree with
+    reality because it is a measurement of it.
+
+    The median gap, not the mean: a source that was restarted, rate-limited, or
+    briefly down has a handful of enormous gaps, and a mean would let those set the
+    yardstick that decides whether it is currently late. A source with fewer than
+    three rows in the window yields no entry at all -- one gap is not a cadence,
+    and the caller must be able to tell "reports every 6 hours" from "has not
+    reported enough to say".
+
+    Sources that only write a row when their upstream data actually changed (dams
+    and ports do this deliberately, to avoid re-serving an unchanged 3,555-record
+    payload) therefore measure as very slow, which is correct: they *are* very
+    slow, and judging them against anything faster is what made them read as
+    broken.
+    """
+    if _pool is None:
+        return {}
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT source,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY gap) AS median_gap,
+                   count(*) AS gaps
+            FROM (
+                SELECT source,
+                       EXTRACT(EPOCH FROM (ts - lag(ts) OVER (PARTITION BY source ORDER BY ts))) AS gap
+                FROM source_health
+                WHERE ts > now() - ($1 || ' days')::interval
+            ) spaced
+            WHERE gap IS NOT NULL AND gap > 0
+            GROUP BY source
+            HAVING count(*) >= 2
+            """,
+            str(int(days)),
+        )
+    return {r["source"]: float(r["median_gap"]) for r in rows if r["median_gap"]}
+
+
 async def record_alert(subject: str, condition: str, severity: str, detail: str) -> bool:
     """Upsert one alert. Returns True only the first time it starts firing.
 

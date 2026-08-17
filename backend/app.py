@@ -165,6 +165,10 @@ async def lifespan(app: FastAPI):
 
     _background_tasks.append(asyncio.create_task(storage.retention_sweep_loop()))
 
+    # After mirror.register above, so the mirrored sources' states exist to have
+    # their declared cadence attached on the first pass rather than the second.
+    _background_tasks.append(asyncio.create_task(_refresh_health_facts()))
+
     # Keeps the one metric that lives in the database off the scrape path --
     # see backend/metrics.py for why /metrics does no I/O of its own.
     _background_tasks.append(asyncio.create_task(metrics.refresh_loop()))
@@ -246,6 +250,48 @@ async def metrics_endpoint():
 # identical gap and are left for whichever task actually asks for them.
 _DERIVED_JOB_HEALTH_NAMES = {"port_calls", "vessel_profiles", "lane_density", "flight_legs"}
 
+# How often the two facts /api/health cannot work out for itself are refreshed:
+# each source's observed reporting cadence, and the item count it recorded for
+# itself. Both change on the scale of a source's own interval -- the slowest here
+# is weekly -- so this is deliberately lazy. It is one query per pass, off the
+# request path entirely, for the same reason metrics.py keeps its own database
+# read off /metrics.
+_HEALTH_FACTS_INTERVAL = 300
+
+
+async def _refresh_health_facts() -> None:
+    """Keep every registered source's cadence and recorded count up to date.
+
+    Neither can be known from inside the process. The cadence is measured from the
+    health table (see storage.observed_cadence -- and its note on why measuring
+    beats declaring it at forty-six call sites), and the item count has to be read
+    back because the count a source records for itself is right where
+    SourceState._item_count()'s inspection of `data` is wrong (see to_health).
+
+    A mirrored source keeps its *declared* interval instead: the job table states
+    it exactly, and an exact figure should not be replaced by an estimate of
+    itself.
+    """
+    declared = {spec.name: spec.expected_every for spec in _mirrored_specs()}
+    while True:
+        try:
+            cadence = await storage.observed_cadence()
+            for name, state in registry.all().items():
+                measured = declared.get(name) or cadence.get(name)
+                if measured:
+                    state.expected_every = float(measured)
+                newest_ok = (await storage.source_health_latest(name))[1]
+                if newest_ok and newest_ok.get("item_count") is not None:
+                    state.recorded_item_count = int(newest_ok["item_count"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A source list with no cadence attached degrades to the frontend's
+            # flat fallback, which is where it already was -- worth a log, not
+            # worth taking the health endpoint down for.
+            log.exception("Could not refresh health facts; will retry")
+        await asyncio.sleep(_HEALTH_FACTS_INTERVAL)
+
 
 async def _derived_job_health() -> dict:
     """Health rows for the derived-job names in _DERIVED_JOB_HEALTH_NAMES,
@@ -277,6 +323,10 @@ async def _derived_job_health() -> dict:
             "version": 0,
             "last_success": last_success,
             "seconds_since_success": round(now - last_success) if last_success else None,
+            # Declared by the job table, so it is exact here rather than measured
+            # (see cache.SourceState.expected_every for why the polled sources'
+            # cadence is observed instead).
+            "expected_every": job.expected_every(),
             "last_error": last_error,
         }
     return out
@@ -314,6 +364,7 @@ async def _alert_rules_health() -> dict:
             "version": 0,
             "last_success": last_success,
             "seconds_since_success": round(now - last_success) if last_success else None,
+            "expected_every": config.CACHE_WORKER_INTERVAL,
             "last_error": last_error,
         }
     }
@@ -2416,6 +2467,34 @@ metrics.track_token_bucket("weather_tile", _TILE_UPSTREAM_LIMIT)
 _TILE_MAX_ZOOM = 20
 
 
+def _note_weather_tile(*, ok: bool) -> None:
+    """Record that the weather proxy is (or is not) working, in memory only.
+
+    owm_weather is the one registered source with no polling loop -- it is proxied
+    tile by tile on demand -- and until now *nothing* recorded its health. Not one
+    call to record_source_health for it exists anywhere in the codebase, so its
+    last_success was structurally guaranteed to stay null however well it was
+    serving, and the admin drawer showed a permanently failed row for a working
+    proxy.
+
+    Not written to source_health, deliberately. A busy map requests hundreds of
+    tiles a minute; a row each would be a write storm, and worse, it would poison
+    storage.observed_cadence() -- which measures a source's cadence from the gaps
+    between its health rows and would conclude that this one reports every 200ms
+    and is therefore catastrophically late whenever nobody is looking at weather.
+    The in-memory state is the whole of what /api/health reads anyway.
+    """
+    try:
+        state = registry.get("owm_weather")
+    except KeyError:
+        return  # registered in lifespan; a tile before that is not worth a crash
+    if ok:
+        state.last_success = time.time()
+        state.last_error = None
+    else:
+        state.last_error = "the last weather tile request to OpenWeatherMap failed"
+
+
 @app.get("/api/weather/tile/{layer}/{z}/{x}/{y}.png")
 async def weather_tile(layer: str, z: int, x: int, y: int, request: Request):
     if layer not in _WEATHER_LAYERS:
@@ -2447,8 +2526,10 @@ async def weather_tile(layer: str, z: int, x: int, y: int, request: Request):
             # no negative cache (unlike wind above), and adding error handling
             # here beyond the counter would change that behaviour.
             metrics.upstream_requests.labels(upstream="owm_tile", result="error").inc()
+            _note_weather_tile(ok=False)
             raise
         metrics.upstream_requests.labels(upstream="owm_tile", result="success").inc()
+        _note_weather_tile(ok=True)
         etag = hashlib.sha256(resp.content).hexdigest()[:16]
         cached = (resp.content, etag)
         _TILE_CACHE.set(cache_key, cached)

@@ -30,17 +30,33 @@ function fromLayer(key, label) {
  * cannot work out by looking.
  */
 export function severityLegend() {
+  // Each row carries its palette token as well as its shipped colour, so the
+  // component can resolve the colour the map is *actually* drawing with. The rows
+  // used to hand over `band.color` alone -- the shipped constant -- while
+  // decorators.js draws every event through paletteColor(). So recolouring a
+  // severity band in Admin Mode moved the pins and left these swatches behind, and
+  // the legend then actively misstated what the colours on screen meant. The glyph
+  // half of this same file already did it correctly, which is how the two halves of
+  // one panel came to disagree.
   const bands = (SEVERITY_BANDS || []).map((band) => ({
     key: `sev-${band.key || band.name || band.label}`,
     color: band.color,
+    token: band.token || null,
     label: band.label || band.name || band.key,
   }));
   return [
     ...bands,
     // Not a severity at all -- a second source agreeing -- and it shares the
     // scale's visual channel, so it belongs beside it rather than in a fold of
-    // its own where the two would look unrelated.
-    { key: "corroborated", color: CORROBORATED_COLOR, label: "Corroborated by a second source" },
+    // its own where the two would look unrelated. Its own token for the same
+    // reason as the bands above: decorators.js draws a corroborated event with
+    // paletteColor("event.corroborated", ...).
+    {
+      key: "corroborated",
+      color: CORROBORATED_COLOR,
+      token: "event.corroborated",
+      label: "Corroborated by a second source",
+    },
   ];
 }
 

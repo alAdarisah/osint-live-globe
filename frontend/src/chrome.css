@@ -564,6 +564,8 @@
 .hud-dot.ok { background: var(--ok); }
 .hud-dot.warn { background: var(--warn); }
 .hud-dot.err { background: var(--danger); }
+/* No reading yet, which is not a severity -- see .dot.waiting in style.css. */
+.hud-dot.waiting { background: var(--text-dim); }
 
 /* Attribution. The one cell allowed to shrink, because it is prose rather than
    a figure and it is the only thing here that can be re-read at leisure --

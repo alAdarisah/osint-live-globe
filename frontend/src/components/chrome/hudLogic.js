@@ -15,6 +15,10 @@
 // Extension included: this module is imported straight by `node --test`, which
 // does not do Vite's extensionless resolution.
 import { STALE_AFTER_SECONDS } from "../../utils/tempo.js";
+import {
+  sourceState, sourceStateLabel, sourceLatenessNote,
+  SOURCE_OK, SOURCE_STATE_ORDER,
+} from "../../utils/sourceState.js";
 
 /** The value every cell shows when it does not know. */
 export const UNKNOWN = "—";
@@ -127,7 +131,13 @@ export function sumCountReadout(counts, keys, label) {
  * to say what is.
  */
 export function layerCountReadout(layerVisibility) {
-  if (!layerVisibility || typeof layerVisibility !== "object") {
+  // `{}` has to be caught as well as null, and it is the *only* case the guard was
+  // ever going to see: useLeafletMap seeds layerState as { on: {}, wish: {} }, so
+  // between mount and the map's first report this cell was handed an empty object,
+  // passed the typeof check, and rendered a confident "0 layers currently drawn"
+  // over a map that had not answered yet. Precisely what this module's own header
+  // calls the worst thing a status strip can do.
+  if (!layerVisibility || typeof layerVisibility !== "object" || !Object.keys(layerVisibility).length) {
     return unknown("The map has not reported which layers it is drawing.");
   }
   const on = Object.values(layerVisibility).filter(Boolean).length;
@@ -177,26 +187,34 @@ export function sourceReadout(health, dotLimit = 5) {
   const rows = sourceRows(health);
   if (!rows.length) return { ...unknown("/api/health has not answered yet."), dots: [], ok: null, total: 0 };
 
-  const states = rows.map(([name, info]) => {
-    let state = "err";
-    if (!info.key_configured && info.last_error) state = "warn";
-    if (info.last_success && info.seconds_since_success < STALE_AFTER_SECONDS) state = "ok";
-    return { name, state };
-  });
-  const ok = states.filter((s) => s.state === "ok").length;
+  // Imported rather than restated. This predicate existed twice, by hand, in this
+  // file and in the drawer's SourceStatusSection -- and both copies judged all 57
+  // sources against one flat half-hour threshold, which is why this cell read
+  // 26/57 on a deployment with one genuinely broken source. See
+  // utils/sourceState.js.
+  const states = rows.map(([name, info]) => ({ name, state: sourceState(info), info }));
+  const ok = states.filter((s) => s.state === SOURCE_OK).length;
 
   // Worst first, so the handful of dots that fit are the ones worth seeing. A
-  // strip with room for five dots out of twelve sources must not spend them on
-  // the five that are fine.
-  const order = { err: 0, warn: 1, ok: 2 };
-  const dots = [...states].sort((a, b) => order[a.state] - order[b.state]).slice(0, dotLimit);
+  // strip with room for five dots out of fifty-seven sources must not spend them
+  // on the five that are fine.
+  const dots = [...states]
+    .sort((a, b) => SOURCE_STATE_ORDER[a.state] - SOURCE_STATE_ORDER[b.state])
+    .slice(0, dotLimit);
 
   return {
     text: `${ok}/${states.length}`,
+    // Each troubled source says what kind of trouble, and how late it is against
+    // its *own* cadence. The old wording was `name: failing` for everything that
+    // was not green, which is how a seven-day reference set three hours past its
+    // last fetch came to be described as a failure.
     title: states
-      .filter((s) => s.state !== "ok")
-      .map((s) => `${s.name}: ${s.state === "warn" ? "no key" : "failing"}`)
-      .join(" · ") || `All ${states.length} sources reporting fresh data.`,
+      .filter((s) => s.state !== SOURCE_OK)
+      .map((s) => {
+        const note = sourceLatenessNote(s.info);
+        return `${s.name}: ${sourceStateLabel(s.state)}${note ? ` (${note})` : ""}`;
+      })
+      .join(" · ") || `All ${states.length} sources reporting within their own cadence.`,
     known: true,
     dots,
     ok,

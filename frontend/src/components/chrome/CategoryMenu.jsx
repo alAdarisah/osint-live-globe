@@ -61,7 +61,14 @@ export default function CategoryMenu({ groupId, layerVisibility, layerWish, coun
               so a thinned view never reads as a broken feed. A layer the map
               draws as geometry rather than as counted points has nothing to
               report and says nothing, rather than showing a zero. */}
-          {row.count && (
+          {/* Only once the map has actually reported a total for this layer.
+              `counts` starts as EMPTY_COUNTS -- every key a real zero -- and
+              CountUp coerces a missing value to 0 as well, so before the first
+              poll every row in this menu read "0 (0)": the app's own house style
+              for a dead feed, shown for feeds that had not been asked yet. The
+              same test countReadout in hudLogic.js applies, and for the same
+              reason. A row with nothing to report says nothing. */}
+          {row.count && Number.isFinite(counts?.[`${row.count}Total`]) && counts[`${row.count}Total`] !== 0 && (
             <span className="count">
               <CountUp value={counts[row.count]} /> (<CountUp value={counts[`${row.count}Total`]} />)
             </span>

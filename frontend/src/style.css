@@ -1651,6 +1651,12 @@ details[open] > .layer-details-body {
 .dot.ok { background: #34c759; }
 .dot.warn { background: #ff9500; }
 .dot.err { background: #ff3b30; }
+/* Has not reported yet, and nothing says it should have -- a first fetch still in
+   flight, or a source with no schedule at all (the weather proxy answers on
+   demand). Grey rather than a fourth colour on the traffic-light scale, because it
+   is not a severity: it is the absence of a reading. It used to render as `err`,
+   which said a source had failed when nothing had yet asked it anything. */
+.dot.waiting { background: var(--text-dim); }
 
 /* A source dot's pulse period is that source's own cadence (see
    utils/tempo.js), so the row reports how alive it is without anyone reading
