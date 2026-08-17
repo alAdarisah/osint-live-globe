@@ -1158,6 +1158,30 @@ INFRA_SITES: list[dict] = [
 # tell which claim they are looking at. Outside those theatres, and for any
 # route OSM has not mapped, this list is what a reader gets -- the fallback
 # the merge is built to fall back to, provenance intact.
+#
+# Four routes have since been removed, and the rule they were removed by is worth
+# stating because it decides what belongs here. A hand-drawn route whose corridor
+# OSM's sweep *does* plot was drawing a second, worse line over a real one: these
+# waypoint lists are schematic by construction -- four points for a 1,200km
+# pipeline -- so where surveyed geometry exists the schematic is not a fallback,
+# it is a competing and less accurate claim.
+#
+# Removed: druzhba, petroline_east_west (the Saudi East-West / Petroline),
+# habshan_fujairah_pipeline, turkstream. Each has waypoints inside one of the
+# eleven swept theatres, so Overpass returns man_made=pipeline geometry for them.
+#
+# Two consequences, stated rather than discovered later. Coverage for three of the
+# four is *partial*: only Habshan-Fujairah lies wholly inside a swept box. Druzhba
+# keeps its Belarus/north-Ukraine middle but loses the Samara head and the
+# Hungarian tail; TurkStream keeps the Russian landfall but loses the Black Sea
+# crossing and the Thrace/Bulgaria legs; Petroline keeps the Abqaiq end and loses
+# the Riyadh-to-Yanbu two thirds -- the part that makes it a Hormuz bypass. Those
+# segments are now drawn by nothing. And if the swept theatres are ever narrowed,
+# the OSM geometry goes with them and nothing here replaces it.
+#
+# What stays: the six routes no swept box touches -- trans_alaska, keystone,
+# btc_pipeline, iraq_turkey_pipeline, power_of_siberia, transmed. For those the
+# schematic is the only line there is.
 PIPELINE_ROUTES: list[dict] = [
     {
         "id": "trans_alaska",
@@ -1174,13 +1198,6 @@ PIPELINE_ROUTES: list[dict] = [
         "coords": [[52.68, -111.3], [49.9, -97.13], [41.6, -93.6], [35.5, -97.5], [29.75, -95.0]],
     },
     {
-        "id": "druzhba",
-        "name": "Druzhba Pipeline",
-        "region_keys": ["russia_ukraine"],
-        "note": "One of the world's longest oil pipelines, Russia to Central/Eastern Europe.",
-        "coords": [[54.9, 52.3], [53.9, 44.0], [52.4, 31.4], [51.7, 26.4], [50.68, 21.27], [48.1, 20.4]],
-    },
-    {
         "id": "btc_pipeline",
         "name": "Baku-Tbilisi-Ceyhan (BTC) Pipeline",
         "region_keys": [],
@@ -1195,32 +1212,11 @@ PIPELINE_ROUTES: list[dict] = [
         "coords": [[35.47, 44.39], [37.22, 42.48], [37.05, 35.68]],
     },
     {
-        "id": "petroline_east_west",
-        "name": "Saudi East-West Pipeline (Petroline)",
-        "region_keys": ["persian_gulf_hormuz"],
-        "note": "Carries crude from the Eastern Province to the Red Sea, bypassing the Strait of Hormuz entirely.",
-        "coords": [[26.0, 49.2], [24.9, 46.0], [23.5, 42.0], [21.0, 39.15]],
-    },
-    {
-        "id": "habshan_fujairah_pipeline",
-        "name": "Habshan-Fujairah Pipeline",
-        "region_keys": ["persian_gulf_hormuz"],
-        "note": "ADNOC strategic pipeline built to bypass the Strait of Hormuz, running from onshore Abu Dhabi to the Gulf of Oman.",
-        "coords": [[23.75, 53.65], [24.15, 54.9], [25.11, 56.34]],
-    },
-    {
         "id": "power_of_siberia",
         "name": "Power of Siberia Pipeline",
         "region_keys": [],
         "note": "Major Russia-to-China gas export pipeline.",
         "coords": [[62.0, 118.0], [56.05, 122.0], [50.35, 127.5], [45.75, 127.15]],
-    },
-    {
-        "id": "turkstream",
-        "name": "TurkStream Pipeline",
-        "region_keys": [],
-        "note": "Russian gas export route under the Black Sea to Turkey and southeastern Europe.",
-        "coords": [[44.4, 37.8], [42.0, 35.5], [41.0, 28.95], [42.7, 25.5]],
     },
     {
         "id": "transmed",
