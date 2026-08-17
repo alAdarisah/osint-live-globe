@@ -938,14 +938,24 @@
      none), which is the worst version of the problem: present, working, and
      unfindable. 46px is #regionBar's own height plus its gap, the same offset
      #squawkAlertStrip already uses to clear it. */
-  top: calc(var(--chrome-top) + 46px);
+  /* Held in a property because the max-height below has to subtract the same
+     number. It did not, and that was an off-by-46 waiting for content: the cap
+     allowed the full height between the two chrome insets while the panel starts
+     46px below the top one, so a legend tall enough to reach its cap ran exactly
+     46px - 30px = 16px into the HUD strip. Latent for as long as the legend was
+     four short sections; visible the moment the status-strip explainers were
+     added, at any viewport under about 700px tall. */
+  --legend-top-offset: 46px;
+  top: calc(var(--chrome-top) + var(--legend-top-offset));
   /* Clear of #eventDetailCard, which is fixed at right: 14px, 340px wide, and at
      --z-selection -- so it does not merely overlap this panel, it contains it. A
      reader who opened a record detail card lost the legend entirely until they
      closed it again. */
   right: 366px;
   width: 250px;
-  max-height: calc(100vh - var(--chrome-top) - var(--chrome-bottom) - 30px);
+  max-height: calc(
+    100vh - var(--chrome-top) - var(--legend-top-offset) - var(--chrome-bottom) - 30px
+  );
   overflow-y: auto;
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
@@ -969,6 +979,19 @@
   color: var(--text-dim);
   font-size: calc(9.5px * var(--ui-text-scale, 1));
   line-height: 1.45;
+}
+
+/* The status-strip explainers, which are the same strings the HUD cells hand to
+   a native `title` (see hudLogic.js) and therefore carry their paragraph breaks
+   as 
+
+. `pre-line` is what makes those survive: it keeps newlines and still
+   collapses the runs of spaces and the source indentation that wrapping a long
+   string across JS lines introduces, which `pre-wrap` would print verbatim.
+   Splitting the string in JSX instead would mean the tooltip and this panel
+   agreeing on the text but not on its shape. */
+.lg-explainer {
+  white-space: pre-line;
 }
 
 #legend .lg-head {

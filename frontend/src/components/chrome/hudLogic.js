@@ -39,21 +39,63 @@ const unknown = (title) => ({ text: UNKNOWN, title, known: false });
  */
 export const ESCALATION_CEILING = 5;
 
+// What the number means, as opposed to what it currently is.
+//
+// Both of these cells used to say only the second. "Kashmir is running 3.1× its
+// own 7-day baseline" is a faithful reading and it assumes the reader already
+// knows what is being counted, what a baseline is, and whether 3.1 is a lot --
+// and "100% of aircraft reporting bad GPS fixes" reads as an emergency when it
+// can be three aircraft out of three in one hex on yesterday's data.
+//
+// So each title now leads with the explanation and ends with the live reading.
+// Exported because the Legend prints the same sentences (see Legend.jsx's
+// "Status strip" section): a native `title` never fires on a touch screen, which
+// is the same reason the attribution disclaimer is repeated there, and two
+// hand-written copies of an explanation are two explanations that can disagree.
+export const ESCALATION_EXPLAINER =
+  "How much busier the worst conflict zone is than it usually is -- not how bad it is. "
+  + "Conflict events in the last 24 hours, against that zone's own average over the "
+  + "previous 7 days. 1× is a normal week; 3× is three times its own usual rate.\n\n"
+  + "Every zone is judged against itself, because absolute counts are not comparable: "
+  + "a zone that always sees 40 events a day is not escalating, and one that normally "
+  + "sees 2 and just saw 9 is. So a quiet region can top this with a handful of events "
+  + "while a heavily contested one sits at 1×. A zone needs at least 3 events in the "
+  + "window to be ranked at all, and the bar next to the number tops out at 5×.";
+
+export const JAMMING_EXPLAINER =
+  "Where GPS is being interfered with, from aircraft that report their own fix "
+  + "quality. Each cell is a hex about 45 km across; the figure is the share of "
+  + "aircraft inside the worst one that reported a bad fix.\n\n"
+  + "The worst single cell, not an average -- averaged across a mostly-quiet world "
+  + "grid the number would be small, true, and useless. Read it with the aircraft "
+  + "count beside it: 100% of 3 aircraft is a thin sample, 60% of 200 is not. "
+  + "Cells below 25% affected are dropped as background noise and only the worst 100 "
+  + "are kept, so an empty reading means no cell cleared that bar, not that GPS is "
+  + "fine everywhere. Updated once a day by the publisher, so this is yesterday's "
+  + "picture rather than a live one.";
+
 export function escalationReadout(zones) {
   if (!Array.isArray(zones) || zones.length === 0) {
-    return { ...unknown("No zone is currently running above its own baseline, or the ranking has not loaded."), needle: null };
+    return {
+      ...unknown(`${ESCALATION_EXPLAINER}\n\nNo zone is currently running above its own baseline, or the ranking has not loaded.`),
+      needle: null,
+    };
   }
   const ratios = zones.map((zone) => Number(zone?.ratio)).filter((n) => Number.isFinite(n) && n > 0);
   if (!ratios.length) {
-    return { ...unknown("The escalation ranking carried no usable ratio."), needle: null };
+    return {
+      ...unknown(`${ESCALATION_EXPLAINER}\n\nThe escalation ranking carried no usable ratio.`),
+      needle: null,
+    };
   }
   const worst = Math.max(...ratios);
   const top = zones.find((zone) => Number(zone?.ratio) === worst);
   return {
     text: `${worst % 1 === 0 ? worst : worst.toFixed(1)}×`,
     title:
-      `${top?.label || "The hottest ranked zone"} is running ${worst}× its own 7-day baseline` +
-      `${top?.current != null && top?.baseline_per_day != null ? ` (${top.current} in 24h vs ${top.baseline_per_day}/day)` : ""}.`,
+      `${ESCALATION_EXPLAINER}\n\nRight now: ` +
+      `${top?.label || "the hottest ranked zone"} is running ${worst}× its own 7-day baseline` +
+      `${top?.current != null && top?.baseline_per_day != null ? ` (${top.current} in the last 24h against ${top.baseline_per_day}/day)` : ""}.`,
     known: true,
     needle: Math.min(1, worst / ESCALATION_CEILING),
   };
@@ -70,16 +112,29 @@ export function escalationReadout(zones) {
  */
 export function jammingReadout(cells) {
   if (!Array.isArray(cells) || cells.length === 0) {
-    return unknown("No GPS interference cells are loaded.");
+    return unknown(`${JAMMING_EXPLAINER}\n\nRight now: no interference cells are loaded.`);
   }
   const ratios = cells.map((cell) => Number(cell?.jam_ratio)).filter((n) => Number.isFinite(n));
-  if (!ratios.length) return unknown("The interference feed carried no usable ratio.");
+  if (!ratios.length) {
+    return unknown(`${JAMMING_EXPLAINER}\n\nRight now: the interference feed carried no usable ratio.`);
+  }
   const worst = Math.max(...ratios);
+  const cell = cells.find((c) => Number(c?.jam_ratio) === worst);
+  // The sample size behind the percentage, which is the fact the old wording left
+  // out and the one that decides how much the number is worth. jamming.py carries
+  // per-cell good/bad aircraft counts and nothing was reading them; a cell can
+  // qualify on two aircraft (MIN_TRAFFIC), so "100%" with no denominator was the
+  // most alarming way to say the least.
+  const bad = Number(cell?.bad);
+  const good = Number(cell?.good);
+  const sample = Number.isFinite(bad) && Number.isFinite(good) && bad + good > 0
+    ? ` -- ${bad} of ${bad + good} aircraft in it`
+    : "";
   return {
     text: `${Math.round(worst * 100)}%`,
     title:
-      `Worst tracked cell: ${Math.round(worst * 100)}% of aircraft in it reporting bad GPS fixes ` +
-      `(GPSJam, ${cells.length} cell${cells.length === 1 ? "" : "s"} loaded).`,
+      `${JAMMING_EXPLAINER}\n\nRight now: the worst tracked cell is ${Math.round(worst * 100)}%`
+      + `${sample}, out of ${cells.length} cell${cells.length === 1 ? "" : "s"} loaded (GPSJam).`,
     known: true,
   };
 }

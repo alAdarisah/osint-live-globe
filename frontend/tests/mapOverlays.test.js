@@ -205,3 +205,63 @@ test("a bar's dropdown escapes the bar instead of trusting it", () => {
     );
   }
 });
+
+// A panel anchored below the top chrome must not size itself as if it were not.
+//
+// #legend is fixed at `top: calc(--chrome-top + --legend-top-offset)` and capped by a
+// max-height that subtracted only the two chrome insets. The offset was missing, so
+// the cap allowed 46px more height than there is room for and a legend tall enough to
+// reach it ran 16px into the HUD strip. It was latent for as long as the panel held
+// four short sections and became visible the moment the status-strip explainers were
+// added -- which is the shape of failure worth a test rather than a fix: nothing
+// errors, nothing logs, and it only appears once unrelated content grows.
+//
+// The rule this enforces: if a fixed panel's `top` adds an offset to a chrome inset,
+// its `max-height` subtracts the same offset. Static, because the arithmetic is in
+// CSS calc() and this suite has no layout engine to ask.
+test("a panel offset from the top chrome subtracts that offset from its own cap", () => {
+  const offenders = [];
+  for (const rule of rules(stylesheets())) {
+    const top = rule.body.match(/(?:^|[;{]|\s)top:\s*calc\(([^;]+)\);/);
+    const cap = rule.body.match(/max-height:\s*calc\(([\s\S]*?)\);/);
+    if (!top || !cap) continue;
+    // Only panels measured from the top inset -- a panel anchored to `bottom` has no
+    // offset to double-count.
+    if (!top[1].includes("--chrome-top")) continue;
+    // Every custom property the `top` adds on top of the inset.
+    const offsets = [...top[1].matchAll(/var\((--[\w-]+)\)/g)]
+      .map((m) => m[1])
+      .filter((name) => name !== "--chrome-top");
+    for (const offset of offsets) {
+      if (!cap[1].includes(`var(${offset})`)) {
+        offenders.push(
+          `${rule.file}:${rule.line} ${rule.selector}: top adds var(${offset}) to --chrome-top, `
+          + `but max-height does not subtract it -- the panel is allowed that many pixels `
+          + `more height than it has room for, and overruns whatever is below it`,
+        );
+      }
+    }
+    // A literal offset cannot be checked this way, and is the reason the one panel
+    // doing this holds its offset in a property: two copies of `46px` in one rule are
+    // two numbers that can disagree.
+    const literal = top[1].match(/\+\s*(\d+)px/);
+    if (literal && !cap[1].includes(`${literal[1]}px`)) {
+      offenders.push(
+        `${rule.file}:${rule.line} ${rule.selector}: top adds a bare ${literal[1]}px to `
+        + "--chrome-top. Put it in a custom property and subtract the same property in "
+        + "max-height, so the two cannot drift",
+      );
+    }
+  }
+  assert.deepEqual(offenders, [], offenders.join("\n"));
+});
+
+test("the panel this was written for is still the shape the scan expects", () => {
+  // A static test that silently matches nothing passes forever.
+  const legend = rules(stylesheets()).find(
+    (r) => r.selector.trim() === "#legend" && r.body.includes("max-height"),
+  );
+  assert.ok(legend, "#legend no longer carries its own max-height");
+  assert.match(legend.body, /--legend-top-offset/, "the offset property is gone");
+  assert.match(legend.body, /overflow-y:\s*auto/, "the cap no longer scrolls what it clips");
+});

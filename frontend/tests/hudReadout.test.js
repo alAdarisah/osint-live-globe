@@ -14,6 +14,8 @@ import {
   ESCALATION_CEILING,
   escalationReadout,
   jammingReadout,
+  ESCALATION_EXPLAINER,
+  JAMMING_EXPLAINER,
   countReadout,
   sumCountReadout,
   layerCountReadout,
@@ -58,7 +60,7 @@ test("escalation reports the hottest zone and where its needle sits", () => {
   const out = escalationReadout(zones);
   assert.equal(out.text, "3×");
   assert.match(out.title, /Red Sea/);
-  assert.match(out.title, /12 in 24h vs 4\/day/);
+  assert.match(out.title, /12 in the last 24h against 4\/day/);
   assert.equal(out.needle, 3 / ESCALATION_CEILING);
 });
 
@@ -230,4 +232,103 @@ test("replay is stated, not implied", () => {
 
   // Replaying with no moment yet resolved still says it is not live.
   assert.equal(liveReadout({ isReplaying: true }).text, "NOT LIVE");
+});
+
+// ---------- what the two measured cells explain ----------
+//
+// Escalation and GPS jam are the only two figures in the strip that are a
+// measurement rather than a count, and they were the two whose tooltips said only
+// what the number currently was. "Kashmir is running 3.1× its own 7-day baseline"
+// is faithful and assumes the reader already knows what is being counted, against
+// what, and whether 3.1 is a lot. "100% of aircraft reporting bad GPS fixes" reads
+// as an emergency when it can be three aircraft out of three, in one hex, on
+// yesterday's data.
+
+test("both measured cells explain the metric before reporting the reading", () => {
+  const escalation = escalationReadout([{ label: "Sahel", ratio: 3, current: 9, baseline_per_day: 3 }]);
+  const jamming = jammingReadout([{ jam_ratio: 0.6, bad: 12, good: 8 }]);
+  for (const [name, out, explainer] of [
+    ["escalation", escalation, ESCALATION_EXPLAINER],
+    ["jamming", jamming, JAMMING_EXPLAINER],
+  ]) {
+    assert.ok(out.title.startsWith(explainer), `${name} does not lead with the explanation`);
+    assert.match(out.title, /Right now:/, `${name} does not report the live reading`);
+    // The explanation first, the reading last. A tooltip that opens with today's
+    // number teaches nothing on the second read.
+    assert.ok(out.title.indexOf("Right now:") > explainer.length - 1, name);
+  }
+});
+
+test("the explanation is there even when the cell has nothing to report", () => {
+  // The empty state is where a reader is most likely to hover: the cell says "—" and
+  // the question is what it would have said. Answering only "no cells are loaded"
+  // explains the silence without explaining the metric.
+  for (const out of [escalationReadout([]), escalationReadout([{ ratio: "x" }])]) {
+    assert.ok(out.title.startsWith(ESCALATION_EXPLAINER));
+    assert.equal(out.known, false);
+  }
+  for (const out of [jammingReadout([]), jammingReadout([{ jam_ratio: "x" }])]) {
+    assert.ok(out.title.startsWith(JAMMING_EXPLAINER));
+    assert.equal(out.known, false);
+  }
+});
+
+test("the escalation explanation says it is not a badness score", () => {
+  // The single most available misreading: the cell is red, it is called Escalation,
+  // and it sits next to a severity-coloured bar. It is a ratio against a zone's own
+  // history, so a quiet region can top it on a handful of events.
+  assert.match(ESCALATION_EXPLAINER, /not how bad it is/);
+  assert.match(ESCALATION_EXPLAINER, /24 hours/);
+  assert.match(ESCALATION_EXPLAINER, /7 days/);
+  assert.match(ESCALATION_EXPLAINER, /1×/, "no anchor for what a normal reading looks like");
+  // The two thresholds a reader would otherwise have to infer from the code.
+  assert.match(ESCALATION_EXPLAINER, /at least 3 events/);
+  assert.match(ESCALATION_EXPLAINER, new RegExp(`${ESCALATION_CEILING}×`));
+});
+
+test("the jamming explanation gives the sample size and the staleness", () => {
+  // Both are things the number cannot say for itself and both change how much it is
+  // worth: it is one cell rather than an average, the cell can qualify on two
+  // aircraft, and the publisher updates once a day.
+  assert.match(JAMMING_EXPLAINER, /worst single cell, not an average/);
+  assert.match(JAMMING_EXPLAINER, /aircraft count beside it/);
+  assert.match(JAMMING_EXPLAINER, /once a day/);
+  // And that an empty reading is not a clean bill of health -- the feed drops
+  // everything under 25% before this ever sees it.
+  assert.match(JAMMING_EXPLAINER, /25%/);
+  assert.match(JAMMING_EXPLAINER, /not that GPS is\s+fine everywhere/);
+});
+
+test("the jamming reading names the aircraft behind the percentage", () => {
+  // The fact the old wording left out, and the one that decides whether 100% is
+  // alarming. jamming.py has carried per-cell good/bad counts all along and nothing
+  // was reading them; a cell qualifies on two aircraft (MIN_TRAFFIC).
+  const thin = jammingReadout([{ jam_ratio: 1, bad: 3, good: 0 }]);
+  assert.equal(thin.text, "100%");
+  assert.match(thin.title, /3 of 3 aircraft/);
+
+  const solid = jammingReadout([{ jam_ratio: 0.6, bad: 120, good: 80 }]);
+  assert.match(solid.title, /120 of 200 aircraft/);
+});
+
+test("a cell with no aircraft counts still reports, without inventing a sample", () => {
+  // Replay snapshots predate the good/bad fields. The percentage is still real; the
+  // denominator is simply absent, and a fabricated one would be worse than none.
+  const out = jammingReadout([{ jam_ratio: 0.42 }]);
+  assert.equal(out.text, "42%");
+  assert.ok(!/aircraft in it/.test(out.title), "invented a sample size");
+  assert.match(out.title, /worst tracked cell is 42%/);
+});
+
+test("the worst cell's own counts are the ones reported", () => {
+  // Not the first cell's, and not a sum across cells. The percentage and the sample
+  // have to describe the same cell or the pair is nonsense.
+  const out = jammingReadout([
+    { jam_ratio: 0.3, bad: 3, good: 7 },
+    { jam_ratio: 0.9, bad: 9, good: 1 },
+    { jam_ratio: 0.5, bad: 5, good: 5 },
+  ]);
+  assert.equal(out.text, "90%");
+  assert.match(out.title, /9 of 10 aircraft/);
+  assert.match(out.title, /out of 3 cells loaded/);
 });
