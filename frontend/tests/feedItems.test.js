@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const {
-  ACTIVITY_CHIPS, ACTIVITY_MAX_ITEMS,
+  ACTIVITY_CHIPS,
   activityCategory, filterByChip, activityTimestamp, selectActivityItems, activityEmptyMessage,
 } = await import("../src/components/feed/feedItemLogic.js");
 
@@ -85,14 +85,18 @@ test("an undateable record sorts last rather than disappearing", () => {
   assert.equal(out.length, 2);
 });
 
-test("the stream is capped, and the cap keeps the newest", () => {
-  const events = Array.from({ length: ACTIVITY_MAX_ITEMS + 50 }, (_, i) => ({
-    id: `e${i}`,
-    published_at: 1000 + i,
-  }));
+test("the stream keeps every record, newest first", () => {
+  // This used to assert a 120-row cap, which had never once applied: the stream
+  // is built from the other tabs' *already selected* lists, and those were capped
+  // at 6-8 each, so its real ceiling was 22 rows. Removing those caps is what
+  // would have made this one bite for the first time, so it went with them. How
+  // much of the stream is rendered is the view's decision now -- see
+  // feed/feedPaging.js and the tests for it.
+  const events = Array.from({ length: 170 }, (_, i) => ({ id: `e${i}`, published_at: 1000 + i }));
   const out = selectActivityItems({ events });
-  assert.equal(out.length, ACTIVITY_MAX_ITEMS);
-  assert.equal(out[0].id, `e${ACTIVITY_MAX_ITEMS + 49}`);
+  assert.equal(out.length, 170, "the merge must not truncate");
+  assert.equal(out[0].id, "e169", "newest first");
+  assert.equal(out.at(-1).id, "e0");
 });
 
 test("an empty stream still says something, scoped or not", () => {

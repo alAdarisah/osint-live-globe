@@ -44,7 +44,7 @@
 // WaterInfoCard, SubdivisionInfoCard, DistrictInfoCard) already keeps map
 // movement and card-opening as two separate, explicit actions, and this
 // keeps that agreement rather than drawing a second rule for one more panel.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LocateIcon from "./icons/LocateIcon";
 import DetailIcon from "./icons/DetailIcon";
 import {
@@ -57,6 +57,7 @@ import { safeUrl, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format"
 import Watchlist from "./feed/Watchlist";
 import FilterChipRow from "./feed/FilterChipRow";
 import { selectActivityItems, filterByChip, activityEmptyMessage } from "./feed/feedItemLogic";
+import { visibleCount, hasMore, feedCountReadout, pagingResetKey } from "./feed/feedPaging";
 import {
   SCOPE_OPTIONS, SCOPE_WORLD, SCOPE_VIEWPORT, SCOPE_COUNTRY, SCOPE_REGION, SCOPE_WATER,
   WINDOW_OPTIONS, DEFAULT_WINDOW_HOURS, windowOptionValue, windowHoursFromValue,
@@ -153,7 +154,7 @@ function EscalationMiniBar({ zone }) {
   );
 }
 
-function EscalationRow({ zone, onLocate }) {
+const EscalationRow = memo(function EscalationRow({ zone, onLocate }) {
   const [south, west, north, east] = zone.bounds;
   return (
     <div className="escalation-item">
@@ -177,7 +178,7 @@ function EscalationRow({ zone, onLocate }) {
       </div>
     </div>
   );
-}
+});
 
 // The row's own headline, as either the "open this record's detail card"
 // button (the same card a map pin opens -- see intelRecordRef's own note on
@@ -198,7 +199,7 @@ function RecordLine({ recordRef, onOpenRecord, children }) {
   );
 }
 
-function EventRow({ event, onLocate, onOpenRecord }) {
+const EventRow = memo(function EventRow({ event, onLocate, onOpenRecord }) {
   const severity = Number.isFinite(event.severity) ? event.severity : 0;
   const band = severityBand(severity);
   // How much to trust the *report*, as distinct from how bad it is -- scored
@@ -273,9 +274,9 @@ function EventRow({ event, onLocate, onOpenRecord }) {
       </div>
     </div>
   );
-}
+});
 
-function NewsRow({ item, onLocate, onOpenRecord }) {
+const NewsRow = memo(function NewsRow({ item, onLocate, onOpenRecord }) {
   const headline = item.real_title.trim();
   const when = timeAgoFromDateAdded(item.date_added);
   const meta = [item.source_name, when, item.corroborated ? "corroborated" : null].filter(Boolean).join(" · ");
@@ -330,9 +331,9 @@ function NewsRow({ item, onLocate, onOpenRecord }) {
       {meta && <div className="news-item-meta">{meta}</div>}
     </div>
   );
-}
+});
 
-function OfficialsRow({ item, onLocate, onOpenRecord }) {
+const OfficialsRow = memo(function OfficialsRow({ item, onLocate, onOpenRecord }) {
   const kindLabel = OFFICIALS_KIND_LABEL[item.kind] || "Diplomatic activity";
   const lead = (item.headline || "").trim() || item.label || kindLabel;
   const where = item.location || item.country || "";
@@ -368,7 +369,7 @@ function OfficialsRow({ item, onLocate, onOpenRecord }) {
       </div>
     </div>
   );
-}
+});
 
 // One shared "grouped or flat" renderer for the three record tabs -- the
 // group headers are cosmetic, and duplicating the map/reduce over three
@@ -385,11 +386,11 @@ function OfficialsRow({ item, onLocate, onOpenRecord }) {
  * would cost exactly the provenance this map exists to show -- and the three
  * row components already say it correctly.
  */
-function ActivityRow({ item, onLocate, onOpenRecord }) {
+const ActivityRow = memo(function ActivityRow({ item, onLocate, onOpenRecord }) {
   if (item.feed === "news") return <NewsRow item={item} onLocate={onLocate} onOpenRecord={onOpenRecord} />;
   if (item.feed === "officials") return <OfficialsRow item={item} onLocate={onLocate} onOpenRecord={onOpenRecord} />;
   return <EventRow event={item} onLocate={onLocate} onOpenRecord={onOpenRecord} />;
-}
+});
 
 function TabList({ items, groupBy, tabKind, Row, rowKey, onLocate, onOpenRecord }) {
   const groups = GROUPABLE_TABS.has(tabKind) ? groupItems(items, groupBy, tabKind) : null;
@@ -567,6 +568,58 @@ export default function IntelPanel({
         : activeTab === "news" ? newsItems
           : officialsItems;
 
+  // ---------- how much of the active tab is in the DOM ----------
+  //
+  // The selectors above no longer truncate (see intelPanelLogic.js on why the
+  // four caps are gone), so the lists here are the real ones -- hundreds of rows,
+  // not six. This is what keeps that affordable: a page at a time, grown when the
+  // reader reaches the end. See feed/feedPaging.js for the reasoning, including
+  // why this is not virtualisation.
+  const [pages, setPages] = useState(1);
+  const listRef = useRef(null);
+  const sentinelRef = useRef(null);
+
+  // Reset on anything that changes what the list is *about* -- and on nothing
+  // else. Emphatically not on new data: the rail refetches every 60 seconds, and
+  // resetting there would drag a reader who had scrolled to row 300 back to the
+  // top, once a minute, for no reason they could see.
+  const resetKey = pagingResetKey({ tab: activeTab, scopeKind, windowHours, chip });
+  useEffect(() => {
+    setPages(1);
+    // The scroll position belongs to the old list; leaving it makes a fresh
+    // 40-row page open halfway down.
+    if (listRef.current) listRef.current.scrollTop = 0;
+  }, [resetKey]);
+
+  const paged = useCallback((list) => list.slice(0, visibleCount(list.length, pages)), [pages]);
+  const moreToReveal = hasMore(activeItems.length, pages);
+
+  // Reveals the next page when the sentinel at the end of the list scrolls into
+  // the rail. Rooted on the list rather than the viewport because the rail is its
+  // own scroll container -- a viewport-rooted observer would see the sentinel as
+  // permanently visible or permanently not, depending on where the rail sits.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const root = listRef.current;
+    if (!sentinel || !root || !moreToReveal) return undefined;
+    if (typeof IntersectionObserver !== "function") {
+      // No observer (a very old browser, or a test environment): reveal
+      // everything rather than stranding the reader at row 40 with no way on.
+      setPages(Number.MAX_SAFE_INTEGER);
+      return undefined;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setPages((prev) => prev + 1);
+      },
+      // A page ahead of the fold, so the next rows are already there by the time
+      // the reader gets to them rather than appearing under the scrollbar.
+      { root, rootMargin: "400px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [moreToReveal, activeTab, activeItems.length]);
+
   // Ticks the "updated Ns ago" label independently of data actually
   // changing, so the panel visibly feels alive between polls -- same
   // treatment NewsBroadcastPanel gave its own ticker. Reset whenever the
@@ -637,12 +690,20 @@ export default function IntelPanel({
         <>
           <div className="intel-tabs" role="tablist">
             {shownTabs.map((t) => {
-              const count = t.key === "escalation" ? escalationZones.length
+              const total = t.key === "escalation" ? escalationZones.length
                 : t.key === "activity" ? activityItems.length
                   : t.key === "events" ? chippedEventItems.length
                     : t.key === "news" ? newsItems.length
                       : t.key === "officials" ? officialsItems.length
                         : null;
+              // `shown / total` on the tab a reader is looking at, the bare total
+              // on the rest. These used to be the length of the array *after* the
+              // selector's slice, so a tab with 334 articles behind it read "8"
+              // and there was nothing to say otherwise -- a count that looks like
+              // a total and is a page size.
+              const count = total == null
+                ? null
+                : feedCountReadout(total, t.key === activeTab ? pages : Number.MAX_SAFE_INTEGER);
               return (
                 <button
                   key={t.key}
@@ -654,7 +715,8 @@ export default function IntelPanel({
                 >
                   {/* A tab whose count this rail does not own says nothing
                       rather than showing a zero it did not compute. */}
-                  {t.label} {count != null && <span className="intel-tab-count">{count}</span>}
+                  {t.label}{" "}
+                  {count && <span className="intel-tab-count" title={count.title}>{count.text}</span>}
                 </button>
               );
             })}
@@ -745,7 +807,7 @@ export default function IntelPanel({
             </label>
           </div>
 
-          <div className="notable-list intel-list">
+          <div className="notable-list intel-list" ref={listRef}>
             {activeTab === "escalation" && (
               escalationZones.length ? (
                 <>
@@ -757,7 +819,7 @@ export default function IntelPanel({
                   <div className="notable-section">
                     Bars: hatched = flat 7-day baseline &middot; solid = last 24h (not a real daily history)
                   </div>
-                  {escalationZones.map((z) => <EscalationRow key={z.region} zone={z} onLocate={onLocate} />)}
+                  {paged(escalationZones).map((z) => <EscalationRow key={z.region} zone={z} onLocate={onLocate} />)}
                 </>
               ) : (
                 <div className="notable-empty">{escalationEmptyMessage(scope)}</div>
@@ -767,7 +829,7 @@ export default function IntelPanel({
             {activeTab === "activity" && (
               activityItems.length ? (
                 <TabList
-                  items={activityItems} groupBy={groupBy} tabKind="events" Row={ActivityRow}
+                  items={paged(activityItems)} groupBy={groupBy} tabKind="events" Row={ActivityRow}
                   rowKey={(i) => `${i.feed}:${i.id || i.source_url || i.event_id || i.published_at}`}
                   onLocate={onLocate} onOpenRecord={onOpenRecord}
                 />
@@ -783,7 +845,7 @@ export default function IntelPanel({
             {activeTab === "events" && (
               chippedEventItems.length ? (
                 <TabList
-                  items={chippedEventItems} groupBy={groupBy} tabKind="events" Row={EventRow}
+                  items={paged(chippedEventItems)} groupBy={groupBy} tabKind="events" Row={EventRow}
                   rowKey={(e) => e.id} onLocate={onLocate} onOpenRecord={onOpenRecord}
                 />
               ) : (
@@ -798,7 +860,7 @@ export default function IntelPanel({
             {activeTab === "news" && (
               newsItems.length ? (
                 <TabList
-                  items={newsItems} groupBy={groupBy} tabKind="news" Row={NewsRow}
+                  items={paged(newsItems)} groupBy={groupBy} tabKind="news" Row={NewsRow}
                   rowKey={(i) => i.source_url || i.event_id} onLocate={onLocate} onOpenRecord={onOpenRecord}
                 />
               ) : (
@@ -809,7 +871,7 @@ export default function IntelPanel({
             {activeTab === "officials" && (
               officialsItems.length ? (
                 <TabList
-                  items={officialsItems} groupBy={groupBy} tabKind="officials" Row={OfficialsRow}
+                  items={paged(officialsItems)} groupBy={groupBy} tabKind="officials" Row={OfficialsRow}
                   rowKey={(i) => i.id || `${i.published_at}|${i.lat}|${i.lon}`} onLocate={onLocate} onOpenRecord={onOpenRecord}
                 />
               ) : (
@@ -823,6 +885,28 @@ export default function IntelPanel({
                 what it covers is the whole live AIS/ADS-B feed, which its own
                 caption says in as many words. */}
             {activeTab === "sanctions" && sanctionsTab}
+
+            {/* The reveal sentinel, and also a button.
+                Rendered only while there is something left, so a fully revealed
+                list is not carrying an observer that fires on every scroll to the
+                bottom. It says how many are left rather than being an invisible
+                1px tripwire: a reader who has reached row 40 of 334 should be
+                able to see that the list continues.
+                A button rather than a bare div because scrolling cannot be the
+                only way through. Keyboard and screen-reader readers never trip an
+                IntersectionObserver, and an observer that does not fire -- for any
+                reason -- would otherwise strand everyone at row 40 with no
+                affordance and nothing to suggest one exists. */}
+            {moreToReveal && (
+              <button
+                type="button"
+                className="intel-more"
+                ref={sentinelRef}
+                onClick={() => setPages((prev) => prev + 1)}
+              >
+                Show more &middot; {activeItems.length - visibleCount(activeItems.length, pages)} left
+              </button>
+            )}
           </div>
         </>
       )}

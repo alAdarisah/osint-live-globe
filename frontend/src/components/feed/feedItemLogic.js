@@ -96,10 +96,16 @@ export function activityTimestamp(item) {
   return null;
 }
 
-/** How many rows the stream shows. The same shape of cap the Events tab
- *  already applies, for the same reason: a rail is read, not scrolled through
- *  for a thousand rows. */
-export const ACTIVITY_MAX_ITEMS = 120;
+// ACTIVITY_MAX_ITEMS = 120 used to live here, and had never once applied. This
+// function is fed the *other tabs' selected lists* (see below), and those were
+// capped at 6-8 each, so the stream's real ceiling was 22 rows and the 120 was
+// unreachable -- which is why the deployed HUD read "Activity 22" while the
+// backend was serving 900-odd records behind it.
+//
+// Removing the other caps is exactly what would have made this one bite for the
+// first time, turning a dead number into the new binding limit on the one tab
+// that merges three feeds. So it goes in the same change. How much of the stream
+// is rendered is the view's business now -- see feedPaging.js.
 
 /**
  * The merged stream: conflict records, official statements and headlines, most
@@ -121,7 +127,6 @@ export function selectActivityItems({ events = [], news = [], officials = [] } =
     // Undateable records sort to the end rather than being dropped, and keep
     // their relative order among themselves.
     .sort((a, b) => (b.at ?? -Infinity) - (a.at ?? -Infinity))
-    .slice(0, ACTIVITY_MAX_ITEMS)
     .map((entry) => entry.item);
 }
 

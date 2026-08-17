@@ -389,10 +389,25 @@ export function rankScore(event) {
   return severity * (1 / (1 + daysOld(event.date) * 0.35));
 }
 
-export const EVENTS_MAX_ITEMS = 6;
-export const EVENTS_MAX_ITEMS_SCOPED = 8;
-export const NEWS_MAX_ITEMS = 8;
-export const OFFICIALS_MAX_ITEMS = 8;
+// The four item caps that used to live here -- 6 events at World scope, 8
+// scoped, 8 news, 8 officials -- are gone.
+//
+// They were written for a floating card about 360px wide and 50vh tall, where a
+// short ranked list was the whole design and anything past the eighth row was
+// off the bottom of the panel. The panel is a full-height rail now, and the
+// numbers had stopped describing a design and started describing a loss: the
+// backend serves up to 1200 news rows and 2500 events, the browser was receiving
+// 334 and 530 of them on an ordinary afternoon, and the rail rendered eight and
+// six. Two orders of magnitude thrown away after the network had already paid
+// for it.
+//
+// The selectors below therefore return everything that passes scope, window and
+// severity, in rank order, and how much of that is *rendered* is IntelPanel's
+// business rather than theirs -- see feedPaging.js. The distinction matters: a
+// selector that truncates makes the tab's count a lie (it reported the length of
+// the array after the slice, so "News 8" meant "at least 8"), while a view that
+// reveals progressively can report the real total and still not build 500 rows
+// on first paint.
 
 /** Escalation zones are regions, not countries, so scope applies via
  *  intersectsBounds (overlap) rather than containment -- a spike straddling
@@ -450,8 +465,7 @@ export function selectEventItems(eventsRaw, { scope, eventFilter }) {
     scored.push({ event: e, score: rankScore(e) });
   }
   scored.sort((a, b) => b.score - a.score || String(a.event.id).localeCompare(String(b.event.id)));
-  const cap = scope?.deliberate ? EVENTS_MAX_ITEMS_SCOPED : EVENTS_MAX_ITEMS;
-  return scored.slice(0, cap).map((s) => ({ ...s.event, weaklyPlaced: confidenceDimmed(s.event, eventFilter) }));
+  return scored.map((s) => ({ ...s.event, weaklyPlaced: confidenceDimmed(s.event, eventFilter) }));
 }
 
 /** The News tab: GDELT rows with a real scraped title, most recent first.
@@ -471,7 +485,7 @@ export function selectNewsItems(gdeltRaw, { scope, windowHours }) {
     filtered.push(d);
   }
   filtered.sort((a, b) => (b.date_added || "").localeCompare(a.date_added || ""));
-  return filtered.slice(0, NEWS_MAX_ITEMS);
+  return filtered;
 }
 
 /** The Officials tab: diplomatic activity, most recent first -- the kind
@@ -485,7 +499,7 @@ export function selectOfficialsItems(officialsRaw, { scope, windowHours }) {
     filtered.push(d);
   }
   filtered.sort((a, b) => (b.published_at || 0) - (a.published_at || 0));
-  return filtered.slice(0, OFFICIALS_MAX_ITEMS);
+  return filtered;
 }
 
 // ---------- opening a row's own record detail card ----------

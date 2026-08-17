@@ -829,3 +829,72 @@ test("a window survives a round trip through a form value", async (t) => {
     assert.ok(WINDOW_OPTIONS.some((o) => o.hours === DEFAULT_WINDOW_HOURS));
   });
 });
+
+// ---------- the selectors hand over everything they find ----------
+//
+// Four constants used to sit in intelPanelLogic.js -- EVENTS_MAX_ITEMS 6,
+// EVENTS_MAX_ITEMS_SCOPED 8, NEWS_MAX_ITEMS 8, OFFICIALS_MAX_ITEMS 8 -- and none
+// of them had a test, which is part of why they outlived the design they were
+// written for. They were right for a 360px floating card where the ninth row was
+// off the bottom; on a full-height rail they were discarding two orders of
+// magnitude of already-fetched data. Measured against the live backend at the
+// time: 334 news rows served, eight rendered.
+//
+// A selector that truncates also makes the tab's badge a lie, because the badge
+// was the length of the array after the slice. How much is *rendered* is the
+// view's decision now (feed/feedPaging.js); a selector's job is to answer "what
+// qualifies", in full.
+
+test("selectEventItems returns every event that qualifies, in rank order", () => {
+  const events = Array.from({ length: 120 }, (_, i) => ({
+    id: `e${i}`,
+    severity: 50 + (i % 40),
+    date: "2020-01-01",
+    lat: 1,
+    lon: 1,
+  }));
+  const scope = makeIntelScope(SCOPE_WORLD, {});
+  const out = selectEventItems(events, { scope, eventFilter: UNWINDOWED });
+
+  assert.equal(out.length, 120, "no cap");
+  // Still ranked -- uncapped is not unsorted, and the ranking is what made a
+  // short list defensible in the first place.
+  const severities = out.map((e) => e.severity);
+  assert.deepEqual(severities, [...severities].sort((a, b) => b - a));
+});
+
+test("a deliberate scope no longer changes how many events come back", () => {
+  // The two caps differed (6 world, 8 scoped), so scoping used to widen the list
+  // by exactly two rows. Scope should change *which* events qualify -- via the
+  // severity floor, which is still scope-dependent -- and not how many survive a
+  // slice afterwards.
+  const events = Array.from({ length: 30 }, (_, i) => ({
+    id: `e${i}`, severity: 60, date: "2020-01-01", lat: 1, lon: 1,
+  }));
+  const countryScope = { active: true, label: "X", contains: () => true, intersectsBounds: () => true };
+  const world = selectEventItems(events, { scope: makeIntelScope(SCOPE_WORLD, {}), eventFilter: UNWINDOWED });
+  const scoped = selectEventItems(events, {
+    scope: makeIntelScope(SCOPE_COUNTRY, { countryScope }),
+    eventFilter: UNWINDOWED,
+  });
+  assert.equal(world.length, 30);
+  assert.equal(scoped.length, 30);
+});
+
+test("selectNewsItems and selectOfficialsItems return every row in the window", () => {
+  const scope = makeIntelScope(SCOPE_WORLD, {});
+  const news = Array.from({ length: 90 }, (_, i) => ({
+    event_id: `n${i}`,
+    source_url: `https://example.test/${i}`,
+    real_title: `Headline ${i}`,
+    date_added: "20260817000000",
+    lat: 1,
+    lon: 1,
+  }));
+  assert.equal(selectNewsItems(news, { scope, windowHours: null }).length, 90);
+
+  const officials = Array.from({ length: 90 }, (_, i) => ({
+    id: `o${i}`, published_at: 1_700_000_000 + i, lat: 1, lon: 1,
+  }));
+  assert.equal(selectOfficialsItems(officials, { scope, windowHours: null }).length, 90);
+});

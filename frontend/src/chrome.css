@@ -637,6 +637,53 @@
   max-height: none;
 }
 
+/* Rows a reader has scrolled past cost nothing to lay out or paint.
+   `content-visibility: auto` is what makes an uncapped tab -- 334 news rows, 530
+   events -- as cheap to hold as the eight this rail used to truncate to, and it
+   is why no virtualisation library is needed for variable-height rows. The
+   intrinsic size is a *hint* for the scrollbar's length while a row is skipped;
+   it is roughly one two-line row, so a list of 500 does not have to be measured
+   to be scrollable, and it self-corrects as rows come into view.
+
+   All four row classes, not just one: EventRow and OfficialsRow render
+   .notable-item, NewsRow renders .news-item and EscalationRow .escalation-item.
+   Listing only the first would have left the longest tab -- News, 334 rows --
+   as the one paying full layout cost. */
+#intelPanel.feed-rail .intel-list > .notable-item,
+#intelPanel.feed-rail .intel-list > .news-item,
+#intelPanel.feed-rail .intel-list > .escalation-item,
+#intelPanel.feed-rail .intel-list .intel-group > .notable-item,
+#intelPanel.feed-rail .intel-list .intel-group > .news-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 58px;
+}
+
+/* The end of what has been rendered so far, and how much is left. Doubles as the
+   IntersectionObserver target that reveals the next page (see
+   components/feed/feedPaging.js), which is why it is a real element with real
+   text rather than an invisible tripwire: a reader at row 40 of 334 can see that
+   the list continues. */
+.intel-more {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-top: 1px solid var(--panel-border);
+  background: none;
+  text-align: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: calc(9px * var(--ui-text-scale, 1));
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color var(--t-ui) var(--e-out), background var(--t-ui) var(--e-out);
+}
+.intel-more:hover {
+  color: var(--text-bright);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
 /* --- watchlist ----------------------------------------------------------- */
 
 /* pointer-events: auto, because #intelPanel's own rule turns them off on the
