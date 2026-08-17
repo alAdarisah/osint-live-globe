@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import CategoryMenu from "./CategoryMenu";
+import MenuPortal from "./MenuPortal";
 import { LayerScopeProvider } from "../controlPanel/HealthContext";
 import { SCOPE_SESSION, SCOPE_DEPLOYMENT } from "../controlPanel/layerCheckTitle";
 import { groupTitle } from "../../settings/layerGroups";
 import { GROUP_PILL, PILL_ORDER } from "../../settings/layerPresentation";
+import { CAT_MENU_MIN_WIDTH } from "./menuPosition";
 import { pillCount, nextOpenCategory, resetTargets, groupHasWishes } from "./categoryPillsLogic";
 
 /**
@@ -33,18 +35,35 @@ export default function CategoryPills({
   adminMode,
 }) {
   const [openCategory, setOpenCategory] = useState(null);
+  // The button the open menu hangs off. Held as state rather than read from a
+  // ref map because the menu is portalled to the body and has to be positioned
+  // against a rect (see MenuPortal), and the click that opens it is the one
+  // moment the right element is in hand.
+  const [anchorEl, setAnchorEl] = useState(null);
   const stripRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const close = useCallback(() => {
+    setOpenCategory(null);
+    setAnchorEl(null);
+  }, []);
 
   // Outside click and Escape both close. Escape because a menu opened by
   // keyboard has to be closeable by keyboard, and outside-click because a menu
   // that only closes via the button that opened it is a menu readers leave open.
+  //
+  // Both containers are checked, not just the strip: the menu is no longer a
+  // descendant of it. Checking the strip alone would make every click *inside
+  // the menu* -- including every layer tick -- close the menu it was aimed at.
   useEffect(() => {
     if (!openCategory) return undefined;
     const onDocClick = (event) => {
-      if (!stripRef.current?.contains(event.target)) setOpenCategory(null);
+      if (stripRef.current?.contains(event.target)) return;
+      if (menuRef.current?.contains(event.target)) return;
+      close();
     };
     const onKey = (event) => {
-      if (event.key === "Escape") setOpenCategory(null);
+      if (event.key === "Escape") close();
     };
     document.addEventListener("mousedown", onDocClick);
     document.addEventListener("keydown", onKey);
@@ -52,15 +71,15 @@ export default function CategoryPills({
       document.removeEventListener("mousedown", onDocClick);
       document.removeEventListener("keydown", onKey);
     };
-  }, [openCategory]);
+  }, [openCategory, close]);
 
   const onReset = useCallback(() => {
     // Hand every overridden layer back to the scene resolver, one call each --
     // the same path the ↺ button uses, so this cannot drift from it. See
     // resetTargets' own note on why this is not "tick everything".
     for (const key of resetTargets(layerWish)) onToggleLayer(key, null);
-    setOpenCategory(null);
-  }, [layerWish, onToggleLayer]);
+    close();
+  }, [layerWish, onToggleLayer, close]);
 
   const anyWishes = resetTargets(layerWish).length > 0;
 
@@ -80,20 +99,39 @@ export default function CategoryPills({
                 aria-expanded={open}
                 aria-label={`${groupTitle(groupId)} layers, ${on} of ${total} on`}
                 title={groupTitle(groupId)}
-                onClick={() => setOpenCategory((prev) => nextOpenCategory(prev, groupId))}
+                // Both pieces of state computed out here rather than one inside
+                // the other's updater: an updater must be pure, and React's
+                // StrictMode calls it twice, so a setState nested in one runs
+                // twice with no guarantee about ordering. Reading the rendered
+                // `openCategory` is safe in a click handler -- one click, one
+                // render's worth of state.
+                onClick={(event) => {
+                  const next = nextOpenCategory(openCategory, groupId);
+                  setOpenCategory(next);
+                  setAnchorEl(next ? event.currentTarget : null);
+                }}
               >
                 <span className="dot" style={{ background: pill.dot }} />
                 <span className="txt">{pill.label}</span>
                 <span className="n">{on}</span>
               </button>
               {open && (
-                <CategoryMenu
-                  groupId={groupId}
-                  layerVisibility={layerVisibility}
-                  layerWish={layerWish}
-                  counts={counts}
-                  onToggleLayer={onToggleLayer}
-                />
+                <MenuPortal
+                  anchorEl={anchorEl}
+                  menuRef={menuRef}
+                  className="cat-menu"
+                  minWidth={CAT_MENU_MIN_WIDTH}
+                  role="group"
+                  aria-label={`${groupTitle(groupId)} layers`}
+                >
+                  <CategoryMenu
+                    groupId={groupId}
+                    layerVisibility={layerVisibility}
+                    layerWish={layerWish}
+                    counts={counts}
+                    onToggleLayer={onToggleLayer}
+                  />
+                </MenuPortal>
               )}
             </span>
           );

@@ -104,6 +104,12 @@ export default function CableOutagePanel({ onLocate, isMobile, docked = false })
     enabled: !isMobile && !docked,
   });
 
+  // Who owns a click on the header -- see ChokepointPanel.jsx, which carries the
+  // full note. The hook handles it while the panel is draggable and returns an
+  // empty handleProps when it is not, so a docked or mobile board needs its own
+  // handler or it cannot be opened at all.
+  const headerToggle = handleProps.onPointerDown ? undefined : toggleCollapsed;
+
   const [doc, setDoc] = useState(null);
   const [hasFetchedOnce, setHasFetchedOnce] = useState(false);
   const [fetchFailed, setFetchFailed] = useState(false);
@@ -157,7 +163,7 @@ export default function CableOutagePanel({ onLocate, isMobile, docked = false })
               toggleCollapsed();
             }
           }}
-          onClick={isMobile ? toggleCollapsed : undefined}
+          onClick={headerToggle}
         >
           <span className="notable-pulse" />
           <span className="notable-title">CABLE / OUTAGE COINCIDENCE</span>
@@ -185,7 +191,7 @@ export default function CableOutagePanel({ onLocate, isMobile, docked = false })
             toggleCollapsed();
           }
         }}
-        onClick={isMobile ? toggleCollapsed : undefined}
+        onClick={headerToggle}
       >
         <span className="notable-pulse" />
         <span className="notable-title">CABLE / OUTAGE COINCIDENCE</span>

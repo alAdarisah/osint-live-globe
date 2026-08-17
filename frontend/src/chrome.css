@@ -188,7 +188,22 @@
 .brand-live.replaying .brand-live-dot { animation: none; }
 
 /* Where the category pills land. Scrolls rather than wraps: the bar's height
-   is load-bearing (see #topBar above), so it cannot grow a second row. */
+   is load-bearing (see #topBar above), so it cannot grow a second row.
+
+   This element clips vertically and there is no way to stop it. Per CSS Overflow
+   3 §3, `visible` beside a non-visible/clip overflow computes to `auto`, so
+   overflow-x: auto makes this a scroll container in *both* axes -- and declaring
+   `overflow-y: visible` does not help, because that is precisely the value the
+   spec promotes. Scrolling horizontally and overflowing vertically is not a
+   combination CSS offers.
+
+   That is why the category menu is portalled to the body rather than nested here
+   (see components/chrome/menuPosition.js). It used to be a child of the pill, and
+   this scrollport is one pill tall: a menu opening 34px below it was cut off
+   whole, with `scrollbar-width: none` below removing the only affordance that
+   would have revealed it. The pill lit up, the menu mounted, and nothing
+   appeared. Anything else that ever needs to hang off a pill has to be portalled
+   for the same reason. */
 #topBar .cat-strip {
   display: flex;
   align-items: center;
@@ -320,14 +335,17 @@
   color: #ffb3b3;
 }
 
+/* Portalled to the body and positioned from the pill's own rect, so `fixed` with
+   left/top/max-height supplied inline -- see components/chrome/menuPosition.js
+   for why it cannot live inside the bar. min-width is mirrored by
+   CAT_MENU_MIN_WIDTH there (the clamp needs it to keep the menu's right edge on
+   screen) and tests/menuPosition.test.js asserts the two agree. */
 .cat-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
+  position: fixed;
   min-width: 300px;
   max-width: 92vw;
-  max-height: 62vh;
   overflow-y: auto;
+  z-index: var(--z-menu);
   display: flex;
   flex-direction: column;
   padding: 6px;
@@ -621,12 +639,20 @@
 
 /* --- watchlist ----------------------------------------------------------- */
 
+/* pointer-events: auto, because #intelPanel's own rule turns them off on the
+   panel and opts them back in one child at a time (style.css does it for
+   .notable-header, .notable-list, .intel-tabs and .intel-controls). The redesign
+   added this surface and the chip row below as two new children and never joined
+   that list, so every watchlist row and all three of its buttons -- open, locate,
+   remove -- were dead to the mouse, with the :hover rules below never firing
+   either, so there was not even a cue that anything was wrong. */
 .watchlist {
   flex: none;
   border-bottom: 1px solid var(--panel-border);
   max-height: 170px;
   display: flex;
   flex-direction: column;
+  pointer-events: auto;
 }
 
 .watchlist-head {
@@ -706,6 +732,9 @@
 
 /* --- chip row ------------------------------------------------------------ */
 
+/* pointer-events: auto -- see .watchlist above. Without it every chip looked
+   interactive (cursor: pointer, a hover rule, an active state) and swallowed the
+   click. */
 .chip-row {
   flex: none;
   display: flex;
@@ -713,6 +742,7 @@
   gap: 4px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--panel-border);
+  pointer-events: auto;
 }
 
 .fchip {
@@ -744,11 +774,17 @@
    7. Board stack, boards menu and legend
    --------------------------------------------------------------------------- */
 
+/* pointer-events off on the column for the same reason as #legend above: it is
+   300px of the map's bottom-right corner, and its own children already carry the
+   rule (style.css gives each board pointer-events: none and opts its controls
+   back in). The column itself, the 8px gaps between boards and whatever height it
+   is not currently using were all live click targets over the map. */
 #boardStack {
   position: fixed;
   right: 12px;
   bottom: calc(var(--chrome-bottom) + 10px);
   width: 300px;
+  pointer-events: none;
   max-height: calc(100vh - var(--chrome-top) - var(--chrome-bottom) - 30px);
   display: flex;
   /* Reversed so a newly opened board grows the stack upward from the HUD
@@ -779,11 +815,16 @@
 
 .boards-wrap { position: relative; display: inline-flex; }
 
+/* Portalled like .cat-menu, and for the same two reasons: #subBar is a stacking
+   context, so the --z-menu below was a number with no effect, and at =<700px
+   #subBar itself becomes a scroll container that clipped this away. Right-aligned
+   to its trigger, which sits at the right end of the bar. min-width mirrored by
+   BOARDS_MENU_MIN_WIDTH in components/chrome/menuPosition.js. */
 .boards-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
+  position: fixed;
   min-width: 280px;
+  max-width: 92vw;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   padding: 6px;
@@ -828,6 +869,12 @@
 
 /* --- legend -------------------------------------------------------------- */
 
+/* pointer-events is off on the panel and opted back in on the parts that are
+   actually interactive -- the same fix #regionBar (style.css) and #intelPanel
+   carry, and for the identical reason: this is a fixed 250px column standing on
+   the map's right edge, and expanded it runs almost the map's full height. Every
+   pixel of it was eating clicks meant for the country underneath, which is one of
+   the three reasons country cards appeared not to work. */
 #legend {
   position: fixed;
   top: calc(var(--chrome-top) + 10px);
@@ -841,6 +888,11 @@
   box-shadow: 0 6px 20px var(--shadow);
   backdrop-filter: blur(8px);
   z-index: var(--z-legend);
+  pointer-events: none;
+}
+#legend .lg-head,
+#legend .lg-body {
+  pointer-events: auto;
 }
 
 #legend .lg-head {
@@ -1103,11 +1155,22 @@
 
   /* Both bars scroll rather than wrap: --chrome-top is the sum of their two
      heights, and a bar that grows a second row silently pushes every panel
-     anchored to that property out of alignment with the map. */
+     anchored to that property out of alignment with the map.
+
+     All three therefore clip vertically as well, for the reason .cat-strip's own
+     note gives -- which is the second place the menus were being cut off, and the
+     second reason they are portalled. The HUD's overflow-y is pinned to `hidden`
+     rather than left to be promoted to `auto`: its 34px is the height
+     --chrome-bottom promises the map, and a bar that can scroll vertically is a
+     bar whose contents can be half-shown. */
   #topBar,
-  #subBar,
+  #subBar {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
   #hud {
     overflow-x: auto;
+    overflow-y: hidden;
     scrollbar-width: none;
   }
   #topBar::-webkit-scrollbar,

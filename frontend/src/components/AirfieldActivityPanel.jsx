@@ -96,6 +96,12 @@ export default function AirfieldActivityPanel({ onLocate, isMobile, docked = fal
     enabled: !isMobile && !docked,
   });
 
+  // Who owns a click on the header -- see ChokepointPanel.jsx, which carries the
+  // full note. The hook handles it while the panel is draggable and returns an
+  // empty handleProps when it is not, so a docked or mobile board needs its own
+  // handler or it cannot be opened at all.
+  const headerToggle = handleProps.onPointerDown ? undefined : toggleCollapsed;
+
   const [sortKey, setSortKey] = useState("aircraft");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -196,7 +202,7 @@ export default function AirfieldActivityPanel({ onLocate, isMobile, docked = fal
               toggleCollapsed();
             }
           }}
-          onClick={isMobile ? toggleCollapsed : undefined}
+          onClick={headerToggle}
         >
           <span className="notable-pulse" />
           <span className="notable-title">AIRFIELDS</span>
@@ -224,7 +230,7 @@ export default function AirfieldActivityPanel({ onLocate, isMobile, docked = fal
             toggleCollapsed();
           }
         }}
-        onClick={isMobile ? toggleCollapsed : undefined}
+        onClick={headerToggle}
       >
         <span className="notable-pulse" />
         <span className="notable-title">AIRFIELDS</span>

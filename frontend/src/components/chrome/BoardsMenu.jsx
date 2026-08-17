@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BOARDS, isBoardOpen } from "./boardRegistry";
+import MenuPortal from "./MenuPortal";
+import { BOARDS_MENU_MIN_WIDTH } from "./menuPosition";
 
 /**
  * Which instrument boards are showing.
@@ -12,15 +14,27 @@ import { BOARDS, isBoardOpen } from "./boardRegistry";
  */
 export default function BoardsMenu({ open, onToggleBoard }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [anchorEl, setAnchorEl] = useState(null);
   const wrapRef = useRef(null);
+  const menuRef = useRef(null);
 
+  const close = useCallback(() => {
+    setMenuOpen(false);
+    setAnchorEl(null);
+  }, []);
+
+  // Both containers, because the menu is portalled to the body and is no longer
+  // a descendant of the wrapper -- see menuPosition.js. Checking the wrapper
+  // alone would close the menu on every board it was opened to tick.
   useEffect(() => {
     if (!menuOpen) return undefined;
     const onDocClick = (event) => {
-      if (!wrapRef.current?.contains(event.target)) setMenuOpen(false);
+      if (wrapRef.current?.contains(event.target)) return;
+      if (menuRef.current?.contains(event.target)) return;
+      close();
     };
     const onKey = (event) => {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key === "Escape") close();
     };
     document.addEventListener("mousedown", onDocClick);
     document.addEventListener("keydown", onKey);
@@ -28,7 +42,7 @@ export default function BoardsMenu({ open, onToggleBoard }) {
       document.removeEventListener("mousedown", onDocClick);
       document.removeEventListener("keydown", onKey);
     };
-  }, [menuOpen]);
+  }, [menuOpen, close]);
 
   const count = (open || []).length;
 
@@ -39,13 +53,26 @@ export default function BoardsMenu({ open, onToggleBoard }) {
         className={`ghost-btn${menuOpen ? " active" : ""}`}
         aria-expanded={menuOpen}
         title="Which instrument boards to show"
-        onClick={() => setMenuOpen((prev) => !prev)}
+        // Computed out here, not inside an updater -- see CategoryPills.jsx.
+        onClick={(event) => {
+          const next = !menuOpen;
+          setMenuOpen(next);
+          setAnchorEl(next ? event.currentTarget : null);
+        }}
       >
         Boards{count ? ` ${count}` : ""} ▾
       </button>
 
       {menuOpen && (
-        <div className="boards-menu" role="group" aria-label="Instrument boards">
+        <MenuPortal
+          anchorEl={anchorEl}
+          menuRef={menuRef}
+          className="boards-menu"
+          minWidth={BOARDS_MENU_MIN_WIDTH}
+          align="right"
+          role="group"
+          aria-label="Instrument boards"
+        >
           {BOARDS.map((board) => {
             const on = isBoardOpen(open, board.id);
             return (
@@ -69,7 +96,7 @@ export default function BoardsMenu({ open, onToggleBoard }) {
               </button>
             );
           })}
-        </div>
+        </MenuPortal>
       )}
     </span>
   );

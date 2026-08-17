@@ -467,18 +467,23 @@ export default function IntelPanel({
   // module doc depends on when it explains why that field is not carried in a
   // link.
 
-  // Clicking a country is a request to read this whole panel for that
-  // country -- opens it (mattering most on mobile, where it starts
-  // collapsed) and switches the Scope control to match, the same automatic
-  // behaviour NotableEventsPanel and NewsBroadcastPanel each gave a country
-  // click on their own. Keyed on the selection itself so it fires once per
-  // pick rather than fighting a reader who then collapses it again.
+  // Clicking a country is a request to read this whole panel for that country,
+  // so the Scope control follows the map -- the same automatic behaviour
+  // NotableEventsPanel and NewsBroadcastPanel each gave a country click on their
+  // own. Keyed on the selection itself so it fires once per pick rather than
+  // fighting a reader who then changes the scope back.
+  //
+  // It used to open the panel as well, which is what the redesign broke: the rail
+  // does not fold any more, `collapsed` and its setter went with the fold, and
+  // this call to setCollapsed did not. An undefined identifier inside an effect
+  // is a ReferenceError, and this effect fires on the *first* country click --
+  // reportCountrySelection always supplies bbox and polygons, which is exactly
+  // what makeCountryScope needs to report active -- so clicking any country took
+  // the whole app down to main.jsx's CrashScreen. Nothing caught it because the
+  // suite has no test that selects a country.
   const countryKeys = countryScope?.active ? countryScope.keys : null;
   useEffect(() => {
-    if (countryKeys) {
-      setCollapsed(false);
-      setScopeKind(SCOPE_COUNTRY);
-    }
+    if (countryKeys) setScopeKind(SCOPE_COUNTRY);
   }, [countryKeys]);
 
   // If the scope a reader picked stops existing -- the country deselected,

@@ -33,8 +33,11 @@ export default function CategoryMenu({ groupId, layerVisibility, layerWish, coun
   const rows = layerRowsFor(groupId);
   const { on, total } = pillCount(groupId, layerVisibility);
 
+  // No wrapper of its own: the .cat-menu element is MenuPortal's, because it is
+  // the thing that has to be on the body and positioned against the pill (see
+  // menuPosition.js). This renders the contents of that box and nothing else.
   return (
-    <div className="cat-menu" role="group" aria-label={`${groupTitle(groupId)} layers`}>
+    <>
       <div className="cat-menu-head">
         <span>{groupTitle(groupId)}</span>
         <span className="cat-menu-count">{on} of {total} on</span>
@@ -65,6 +68,6 @@ export default function CategoryMenu({ groupId, layerVisibility, layerWish, coun
           )}
         </label>
       ))}
-    </div>
+    </>
   );
 }

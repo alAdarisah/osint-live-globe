@@ -122,6 +122,16 @@ export default function ChokepointPanel({ onLocate, isMobile, docked = false }) 
     enabled: !isMobile && !docked,
   });
 
+  // Who owns a click on the header. While the panel is draggable the hook does:
+  // it distinguishes a drag from a tap and calls the onClick above on pointerup.
+  // While it is not -- on a phone, or docked in the board stack -- the hook
+  // returns an empty handleProps and the header needs its own handler, or the
+  // board cannot be opened at all. Derived from handleProps rather than
+  // re-deriving `!isMobile && !docked`, so this cannot disagree with `enabled`
+  // above: it did, and a docked board on a desktop got no click handler from
+  // either side while still rendering a caret and `cursor: pointer`.
+  const headerToggle = handleProps.onPointerDown ? undefined : toggleCollapsed;
+
   const [sortKey, setSortKey] = useState("total");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -193,7 +203,7 @@ export default function ChokepointPanel({ onLocate, isMobile, docked = false }) 
               toggleCollapsed();
             }
           }}
-          onClick={isMobile ? toggleCollapsed : undefined}
+          onClick={headerToggle}
         >
           <span className="notable-pulse" />
           <span className="notable-title">CHOKEPOINTS</span>
@@ -221,7 +231,7 @@ export default function ChokepointPanel({ onLocate, isMobile, docked = false }) 
             toggleCollapsed();
           }
         }}
-        onClick={isMobile ? toggleCollapsed : undefined}
+        onClick={headerToggle}
       >
         <span className="notable-pulse" />
         <span className="notable-title">CHOKEPOINTS</span>

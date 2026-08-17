@@ -102,6 +102,12 @@ export default function SanctionsBoard({ recordsFor, health, onLocate, isMobile,
     enabled: !isMobile && !asTab,
   });
 
+  // See ChokepointPanel.jsx for the full note. Only reachable on the floating
+  // path below (App renders this as a tab, which returns before it), but kept in
+  // step with its four siblings so the floating path is not the one that is
+  // silently broken if it is ever used again.
+  const headerToggle = handleProps.onPointerDown ? undefined : toggleCollapsed;
+
   const [sortKey, setSortKey] = useState("updated");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -199,7 +205,7 @@ export default function SanctionsBoard({ recordsFor, health, onLocate, isMobile,
             toggleCollapsed();
           }
         }}
-        onClick={isMobile ? toggleCollapsed : undefined}
+        onClick={headerToggle}
       >
         <span className="notable-pulse" />
         <span className="notable-title">SANCTIONS WATCHBOARD</span>
