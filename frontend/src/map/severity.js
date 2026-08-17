@@ -118,6 +118,36 @@ export function isImprecise(item) {
   return IMPRECISE_PRECISIONS.has(item?.geo_precision);
 }
 
+/** What each imprecise precision actually means, in a reader's words rather than
+ *  the backend's field values. */
+const PLACEMENT_PHRASE = {
+  country: "country-level location",
+  region: "region-level location",
+  unknown: "location not established",
+};
+
+/**
+ * How loosely a row is placed, for a list that has no room for a circle.
+ *
+ * The map can draw the doubt -- a dashed ring and a disc at geo_radius_km -- and
+ * a row in the feed cannot, so it says it. Both halves matter: the precision
+ * names *what kind* of coordinate it is, and the radius says how much slack that
+ * amounts to, which is the difference between a 15km locality and a 400km
+ * national centroid. "Weakly placed" alone (the confidence axis, which this is
+ * not) never distinguished those.
+ *
+ * @returns {string|null} null for a row placed to a real locality, which needs no
+ *   qualifier -- a caveat on everything is a caveat on nothing.
+ */
+export function placementNote(item) {
+  if (!isImprecise(item)) return null;
+  const phrase = PLACEMENT_PHRASE[item?.geo_precision] || "location uncertain";
+  const metres = uncertaintyRadiusMetres(item);
+  if (!Number.isFinite(metres) || metres <= 0) return phrase;
+  const km = metres / 1000;
+  return `${phrase} (±${km < 10 ? km.toFixed(1) : Math.round(km)} km)`;
+}
+
 // --- placement verdicts ------------------------------------------------
 //
 // backend/sources/geoverify.py reads whatever text a row came with and says
@@ -186,9 +216,11 @@ export const CONFIDENCE_THRESHOLD = 50;
  * reader raising the floor is saying "show me which of these are weakly
  * placed", not "delete them" -- and most of the corpus scores below the
  * "geocoded to a place" mark, so hiding on this would empty the layer and look
- * like a broken feed rather than an answer. That is why this one is on by
- * default while showImprecise is off: fading a majority is a legible statement
- * about the layer, hiding a majority is indistinguishable from a dead feed.
+ * like a broken feed rather than an answer: fading a majority is a legible
+ * statement about the layer, hiding a majority is indistinguishable from a dead
+ * feed. That reasoning is now the reason *both* placement controls behave the
+ * way they do -- showImprecise stopped hiding for the same argument, one axis
+ * over (see DEFAULT_EVENT_FILTER below).
  *
  * A record with no score is never dimmed. /api/replay serves snapshots written
  * before geoverify shipped, and fading those would state a doubt the pipeline
@@ -337,19 +369,35 @@ export function ageHours(item, now = Date.now()) {
 // to agree about it. See confidenceDimmed above for why it dims rather than
 // filters.
 //
-// The two placement defaults below both start from the same position: the map
-// opens showing what it can actually vouch for, and the reader opts back in to
-// the rest. That is only affordable because the imprecise share is small --
-// IMPRECISE_PRECISIONS covers "country", "region" and "unknown", and a row with
-// no geo_precision at all is not in that set, so the default hides the pins the
-// backend explicitly placed at a centroid rather than everything it did not
-// verify. If a future source starts emitting "country" for the bulk of its
-// rows, revisit this: a default that hides most of the layer reads as a broken
-// feed, which is exactly why the confidence control fades instead of filtering.
+// showImprecise ships ON, which reverses the position this note used to take --
+// and the condition it set for reversing it is what came true.
+//
+// The old default hid every event whose coordinate is a national or regional
+// centroid, on the grounds that the map should open showing what it can vouch
+// for, and it wrote its own check: "if a future source starts emitting 'country'
+// for the bulk of its rows, revisit this -- a default that hides most of the
+// layer reads as a broken feed." backend/sources/event_fusion.py measures the
+// share at 31.6% of the rows that pass the violence gate. Not most, but a third
+// of the conflict layer removed from the map and from the Events tab by a default
+// no reader could see, find or ask about: the only two controls that write this
+// field are in Admin Mode.
+//
+// A third of the events silently missing is the worse failure of the two. And the
+// pipeline already knows how to say "this is a centroid, not a location" three
+// separate ways, every one of which was being spent on rows nobody could see: the
+// dashed .imprecise ring on the pin (decorators.js), the uncertainty circle drawn
+// at the row's own geo_radius_km (map/layers.js's createUncertaintyLayer -- a
+// whole layer that existed and had almost nothing left to draw), and the popup's
+// "could be up to 400 km away". Drawing the pin and marking it is a caveat;
+// hiding it is an omission.
+//
+// minConfidence still fades rather than filters, unchanged and for its own
+// separate reason (see confidenceDimmed). The two are different axes: this one is
+// about where the backend placed a row, that one about how much vouches for it.
 export const DEFAULT_EVENT_FILTER = {
   // AGE_WINDOW_DATE_STEPS, not AGE_WINDOW_DAYS: this field counts date
   // boundaries, so three days of history is 2. See the note on the constant.
-  maxAgeDays: AGE_WINDOW_DATE_STEPS, minSeverity: 0, showImprecise: false,
+  maxAgeDays: AGE_WINDOW_DATE_STEPS, minSeverity: 0, showImprecise: true,
   minConfidence: CONFIDENCE_THRESHOLD,
 };
 

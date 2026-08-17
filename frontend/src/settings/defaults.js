@@ -781,7 +781,16 @@ function sanitizeEventFilterPatch(value) {
   return {
     maxAgeDays: Number.isFinite(value.maxAgeDays) ? Math.min(Math.max(value.maxAgeDays, 0), 3650) : null,
     minSeverity: pickNumber(value.minSeverity, 0, 0, 100),
-    showImprecise: value.showImprecise === true,
+    // Falls back to the shipped default rather than to `false`, which is what
+    // `=== true` did. That was invisible while the shipped default *was* false
+    // and became a contradiction the moment it changed: a stored preset with no
+    // opinion on this field would have come back with the opposite of what the
+    // app ships, and the only symptom would have been a third of the conflict
+    // layer missing whenever that preset was applied. Only a real boolean
+    // overrides the default now.
+    showImprecise: typeof value.showImprecise === "boolean"
+      ? value.showImprecise
+      : DEFAULT_EVENT_FILTER.showImprecise,
     minConfidence: pickNumber(value.minConfidence, DEFAULT_EVENT_FILTER.minConfidence, 0, 1),
   };
 }

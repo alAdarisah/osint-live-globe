@@ -83,10 +83,14 @@ test("round-trips the event filter, except maxAgeDays", () => {
   // cannot keep maxAgeDays in sync with it either). It must never round-trip,
   // even though it is present in DEFAULT_EVENT_FILTER and differs from
   // default here.
-  const eventFilter = { maxAgeDays: 3, minSeverity: 40, showImprecise: true, minConfidence: 0.5 };
+  // showImprecise is `false` here rather than `true` because the format carries
+  // only what *differs* from DEFAULT_EVENT_FILTER, and showImprecise now ships on
+  // (see map/severity.js). `true` would be the default, so it would correctly be
+  // omitted and this test would be asserting nothing about it.
+  const eventFilter = { maxAgeDays: 3, minSeverity: 40, showImprecise: false, minConfidence: 0.5 };
   const view = { ...defaultViewState(), filters: { event: eventFilter, vessel: {}, aircraft: {} } };
   const { state } = decodeViewState(encodeViewState(view));
-  assert.deepEqual(state.filters.event, { minSeverity: 40, showImprecise: true, minConfidence: 0.5 });
+  assert.deepEqual(state.filters.event, { minSeverity: 40, showImprecise: false, minConfidence: 0.5 });
   assert.ok(!("maxAgeDays" in state.filters.event));
 });
 
@@ -140,7 +144,10 @@ test("round-trips every field at once (except maxAgeDays, which never round-trip
     camera: { lat: -33.8688, lon: 151.2093, zoom: 9 },
     layers: { railLive: true, deflock: false },
     filters: {
-      event: { minSeverity: 10, showImprecise: true, minConfidence: 30 },
+      // `false`, because the comment above requires every field here to differ
+      // from its own default and showImprecise now ships on -- see the dedicated
+      // event-filter test above.
+      event: { minSeverity: 10, showImprecise: false, minConfidence: 30 },
       vessel: { text: "IMO9", sanctionedOnly: true, watchlistedOnly: true },
       aircraft: { text: "MIL1", militaryOnly: true },
     },

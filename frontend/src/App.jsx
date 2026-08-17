@@ -1314,7 +1314,14 @@ export default function App() {
 
       <EventDetailCard
         detail={recordDetail}
-        onClose={() => setRecordDetail(null)}
+        onClose={() => {
+          setRecordDetail(null);
+          // Also tells the map nothing is being asked about any more, so the
+          // uncertainty circle it drew for this one record outside the layer's
+          // usual legibility window comes back off -- see askedAboutEventId in
+          // createMapController.js. Naming no record is how that is expressed.
+          mapApi.recordDetail(null, null);
+        }}
         getShareUrl={buildShareUrl}
       />
 

@@ -4451,10 +4451,27 @@ export function createMapController(container, initial, callbacks) {
     return Math.abs(b.x - a.x);
   }
 
+  // The one event a reader has explicitly asked about, by opening its detail
+  // card -- from a map pin's popup or from a row in the feed, both of which go
+  // through recordDetail below. Null the rest of the time.
+  //
+  // It exists because the legibility window is a rule about the *layer* and this
+  // is a question about one record. A reader who clicks a pin and asks "where did
+  // this actually happen" has to get the answer whether or not that particular
+  // disc is worth painting for everyone: too small to be worth drawing across a
+  // whole layer is not the same as too small to matter here.
+  let askedAboutEventId = null;
+
   function uncertaintyOnScreen(item) {
     if (!positionUncertain(item)) return false;
     const metres = uncertaintyRadiusMetres(item);
     if (metres === null) return false;
+    // Asked about by name: both ends of the window are waived. The floor,
+    // because a small disc under its own pin is still the answer to the question
+    // that was asked; the ceiling, because a 400km disc filling the viewport when
+    // zoomed in is exactly what "this is a national centroid" looks like, and a
+    // reader who opened the card is owed that rather than a tidy screen.
+    if (askedAboutEventId != null && String(item[ID_FIELD.events]) === String(askedAboutEventId)) return true;
     const px = metresToPixels(item.lat, metres);
     if (px < UNCERTAINTY_MIN_PX) return false;
     const size = map.getSize();
@@ -9010,6 +9027,16 @@ export function createMapController(container, initial, callbacks) {
      * caller says so.
      */
     recordDetail(kind, id) {
+      // Which record the reader is asking about, so its own uncertainty circle is
+      // drawn whether or not the layer-wide legibility window would have bothered
+      // -- see askedAboutEventId. Set before the lookup can bail out, and cleared
+      // by a call naming any other record or none, which is how closing the card
+      // (App.jsx passes nulls) puts it back.
+      const nextAsked = kind === "events" ? id ?? null : null;
+      if (nextAsked !== askedAboutEventId) {
+        askedAboutEventId = nextAsked;
+        if (layerOnMap.events) renderAll();
+      }
       const decorate = DECORATORS[kind];
       const idField = ID_FIELD[kind];
       if (!decorate || !idField) return null;

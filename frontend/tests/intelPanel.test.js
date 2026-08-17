@@ -241,20 +241,37 @@ test("nothing qualifies: a deliberate scope always renders, even with nothing to
   });
 });
 
-// ---------- preserved behaviour: the severity floor ----------
+// ---------- the severity floor is the visible one, and only the visible one ----
 
-test("events severity floor: 40 at world/passive scope, 0 once deliberately scoped", async (t) => {
-  await t.test("world and viewport (both non-deliberate) keep the 40 floor", () => {
-    assert.equal(eventsSeverityFloor(makeIntelScope(SCOPE_WORLD, {})), 40);
+test("no scope applies a severity floor of its own any more", async (t) => {
+  // This used to assert 40 at world/viewport scope and 0 once deliberately
+  // scoped. The 40 was inherited from NotableEventsPanel, where six rows were the
+  // whole panel and a world view could not afford to open on low-grade incidents.
+  //
+  // It also silently contradicted a control the reader can see: "Minimum
+  // severity" defaults to Any, and at world scope the list applied 40 regardless.
+  // On the live feed that was 78 events in the window, 3 of which cleared 40 -- a
+  // reader shown "Any" and given 9 rows, with nothing anywhere naming the number
+  // that removed the rest. See intelPanelLogic.js for the whole argument.
+  await t.test("world and viewport no longer withhold anything", () => {
+    assert.equal(eventsSeverityFloor(makeIntelScope(SCOPE_WORLD, {})), 0);
     assert.equal(
       eventsSeverityFloor(makeIntelScope(SCOPE_VIEWPORT, { mapBounds: { south: 0, west: 0, north: 1, east: 1 } })),
-      40
+      0
     );
   });
 
-  await t.test("a deliberate scope (country here) drops the floor to 0", () => {
+  await t.test("and a deliberate scope still does not", () => {
     const countryScope = { active: true, label: "Sudan", contains: () => true, intersectsBounds: () => true };
     assert.equal(eventsSeverityFloor(makeIntelScope(SCOPE_COUNTRY, { countryScope })), 0);
+  });
+
+  await t.test("a low-severity event survives the world view", () => {
+    // The behavioural half: the constant being 0 is only interesting because it
+    // means the row arrives.
+    const events = [{ id: "minor", severity: 5, date: "2020-01-01", lat: 1, lon: 1 }];
+    const out = selectEventItems(events, { scope: makeIntelScope(SCOPE_WORLD, {}), eventFilter: UNWINDOWED });
+    assert.deepEqual(out.map((e) => e.id), ["minor"]);
   });
 });
 
@@ -270,23 +287,43 @@ test("events severity floor: 40 at world/passive scope, 0 once deliberately scop
 // here and asserted on its own further down.
 const UNWINDOWED = { ...DEFAULT_EVENT_FILTER, maxAgeDays: null };
 
-test("selectEventItems applies the floor end to end", async (t) => {
+test("selectEventItems applies the reader's floor, and no other", async (t) => {
   const events = [
     { id: "a", severity: 45, date: "2020-01-01", lat: 1, lon: 1 },
     { id: "b", severity: 10, date: "2020-01-01", lat: 1, lon: 1 },
   ];
 
-  await t.test("at world scope the sub-40 event is dropped", () => {
+  // Both halves of this test used to turn on the hidden world floor of 40: the
+  // first asserted that it dropped the sub-40 event at world scope, the second
+  // that a deliberate scope lifted it. Scope no longer changes what qualifies --
+  // see eventsSeverityFloor's own note on why a floor no surface mentions,
+  // contradicting a "Minimum severity: Any" control the reader can see, was the
+  // wrong half of that arrangement to keep.
+  await t.test("world scope keeps both, because the reader asked for Any", () => {
     const scope = makeIntelScope(SCOPE_WORLD, {});
     const out = selectEventItems(events, { scope, eventFilter: UNWINDOWED });
-    assert.deepEqual(out.map((e) => e.id), ["a"]);
+    assert.deepEqual(new Set(out.map((e) => e.id)), new Set(["a", "b"]));
   });
 
-  await t.test("a deliberately-scoped country keeps the sub-40 event too", () => {
+  await t.test("a deliberately-scoped country keeps both as well", () => {
     const countryScope = { active: true, label: "X", contains: () => true, intersectsBounds: () => true };
     const scope = makeIntelScope(SCOPE_COUNTRY, { countryScope });
     const out = selectEventItems(events, { scope, eventFilter: UNWINDOWED });
     assert.deepEqual(new Set(out.map((e) => e.id)), new Set(["a", "b"]));
+  });
+
+  await t.test("raising Minimum severity is what drops one, at either scope", () => {
+    // The control the panel actually shows, shared with the map's own layer.
+    const floored = { ...UNWINDOWED, minSeverity: 40 };
+    for (const scope of [
+      makeIntelScope(SCOPE_WORLD, {}),
+      makeIntelScope(SCOPE_COUNTRY, {
+        countryScope: { active: true, label: "X", contains: () => true, intersectsBounds: () => true },
+      }),
+    ]) {
+      const out = selectEventItems(events, { scope, eventFilter: floored });
+      assert.deepEqual(out.map((e) => e.id), ["a"]);
+    }
   });
 });
 

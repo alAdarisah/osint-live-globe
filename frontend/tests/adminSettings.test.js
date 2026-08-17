@@ -23,6 +23,7 @@ const { INFERENCE_PRODUCTS, INFERENCE_STATES, DEFAULT_INFERENCE_STATE } = await 
   "../src/settings/inferenceProducts.js"
 );
 const { CARD_TYPES, CARD_SECTIONS, orderedCardSections } = await import("../src/settings/cardSections.js");
+const { DEFAULT_EVENT_FILTER } = await import("../src/map/severity.js");
 
 // A configuration saved by a build before this task -- SETTINGS_VERSION 2,
 // with ui.tiles (Task 30) but none of water/filters/inference/cards/
@@ -186,7 +187,13 @@ test("filters", async (t) => {
     const merged = mergeSettings(stored).filters.presets[0];
     assert.equal(merged.vesselFilter.text, "");
     assert.equal(merged.vesselFilter.sanctionedOnly, false);
-    assert.equal(merged.eventFilter.showImprecise, false);
+    // Against the shipped default rather than a literal, which is what this
+    // test's own name says it is checking. It had `false` hardcoded, and that was
+    // indistinguishable from correct only for as long as the shipped default
+    // happened to be false -- the sanitizer was really coercing an absent field
+    // to `false`, not to the default, and the two parted company when
+    // showImprecise started shipping on.
+    assert.equal(merged.eventFilter.showImprecise, DEFAULT_EVENT_FILTER.showImprecise);
   });
 
   await t.test("a non-array presets list falls back to empty", () => {

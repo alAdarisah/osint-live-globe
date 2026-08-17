@@ -49,7 +49,7 @@ import LocateIcon from "./icons/LocateIcon";
 import DetailIcon from "./icons/DetailIcon";
 import {
   severityBand, severityColor, reliabilityBand, reliabilityColor,
-  DEFAULT_EVENT_FILTER, CONFIDENCE_THRESHOLD,
+  DEFAULT_EVENT_FILTER, CONFIDENCE_THRESHOLD, placementNote,
 } from "../map/severity";
 import { OFFICIALS_KIND_LABEL } from "../map/decorators";
 import { eventLeadLine } from "../map/eventLead";
@@ -226,6 +226,7 @@ const EventRow = memo(function EventRow({ event, onLocate, onOpenRecord }) {
   // RecordLine, so a row with no usable id (never happens for a fused event,
   // which always carries one, but intelRecordRef is the one place that rule
   // lives) renders as plain text instead of a button that would do nothing.
+  const placement = placementNote(event);
   const recordRef = intelRecordRef(event, "events");
 
   return (
@@ -271,6 +272,14 @@ const EventRow = memo(function EventRow({ event, onLocate, onOpenRecord }) {
             different presentations of one shared computation rather than
             identical treatments. */}
         {event.weaklyPlaced ? " · weakly placed" : ""}
+        {/* A different axis from weaklyPlaced above, and the reason this row is
+            visible at all: events placed to a national or regional centroid used
+            to be filtered out of both the map and this tab by a default no reader
+            could reach. They are shown now, so each one has to say what kind of
+            coordinate it has and how much slack that is -- the map draws that as
+            a dashed ring and a disc at the same radius, and a list has to write
+            it. See placementNote in map/severity.js. */}
+        {placement ? ` · ${placement}` : ""}
       </div>
     </div>
   );
@@ -792,6 +801,26 @@ export default function IntelPanel({
                 disabled={activeTab !== "events"}
               />
               Fade weakly-placed events
+            </label>
+            {/* The reader's half of the showImprecise decision -- see
+                DEFAULT_EVENT_FILTER in map/severity.js for why it now ships on.
+                A third of the conflict layer is placed to a national or regional
+                centroid, and that third used to be hidden by a default whose only
+                two controls were in Admin Mode: a reader could neither see the
+                rows nor discover that anything was missing. Shown and marked is
+                the honest arrangement, and this is the escape hatch for a reader
+                who wants only coordinates the pipeline can stand behind.
+                Worded as what it does rather than as the field name: "imprecise"
+                is the backend's word for it and says nothing about what is being
+                offered. */}
+            <label className="event-filter-check">
+              <input
+                type="checkbox"
+                checked={eventFilter.showImprecise !== false}
+                onChange={(e) => onEventFilterChange?.({ showImprecise: e.target.checked })}
+                disabled={activeTab !== "events" && activeTab !== "activity"}
+              />
+              Include country-level placements
             </label>
             <label>
               Group by

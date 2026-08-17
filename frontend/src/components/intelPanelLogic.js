@@ -124,7 +124,29 @@ export function makeIntelScope(kind, ctx = {}) {
 // what they want to look at -- any deliberate scope now, not only a country
 // -- the floor drops to nothing and the reader's own Minimum severity control
 // is what thins the list from here.
-export const EVENTS_SEVERITY_FLOOR_WORLD = 40;
+// Both floors are 0 now, and the function is kept only so the one caller and its
+// tests still read as "apply the floor" rather than as "no floor exists".
+//
+// The world floor was 40, inherited from NotableEventsPanel, and its argument was
+// sound for what it was written for: a six-row board cannot open on a firehose of
+// low-grade incidents, so the world view kept a floor and a deliberate scope
+// dropped it. Two things have since made it indefensible.
+//
+// It contradicted a control the reader can see. "Minimum severity" sits in this
+// panel with Any / Moderate / High / Critical and defaults to Any, and at world
+// scope the list was applying 40 anyway. Measured on the live feed while removing
+// it: 78 events in the 72h window, of which 3 clear severity 40. So a reader was
+// shown "Any", given 9 rows, and had no way to learn that 88% of what qualified
+// had been withheld by a number no surface mentions. A hidden filter that
+// disagrees with a visible one is worse than either alone.
+//
+// And the firehose it protected against no longer exists. The tab renders a page
+// at a time and grows on demand (see feed/feedPaging.js), so volume is not what it
+// was when six rows were the whole panel.
+//
+// minSeverity -- the visible one, shared with the map's own layer -- is the only
+// severity floor now.
+export const EVENTS_SEVERITY_FLOOR_WORLD = 0;
 export const EVENTS_SEVERITY_FLOOR_SCOPED = 0;
 
 export function eventsSeverityFloor(scope) {
