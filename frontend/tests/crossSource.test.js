@@ -13,7 +13,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  AIRFIELD_MATCH_KM, DAM_MATCH_KM, buildTwinIndex, buildAbsorbedArticles,
+  AIRFIELD_MATCH_KM, DAM_MATCH_KM, MILITARY_TWIN_MAX_KM,
+  buildTwinIndex, buildDeclaredTwinIndex, buildAbsorbedArticles,
   distanceKm, normalizeArticleUrl,
 } from "../src/map/crossSource.js";
 
@@ -141,4 +142,110 @@ test("a record with neither coverage ids nor a URL contributes nothing", () => {
   const { ids, urls } = buildAbsorbedArticles([[{ id: "x" }], null, undefined]);
   assert.equal(ids.size, 0);
   assert.equal(urls.size, 0);
+});
+
+// ---------- curated military bases against OpenStreetMap ----------
+//
+// The pair this module was written for and was never pointed at. A curated base is
+// named in English and rides the `infra` layer; OSM's record of the same
+// installation is named in the local script and rides `osmInfra`; nothing matched
+// them, so a reader in Israel got two pins for one base.
+//
+// Matched by declaration rather than by distance, which is the opposite of the
+// airfield rule ten lines up, so these tests are mostly about why: `military_area`
+// is dense enough that nearest-neighbour is wrong about half the time, and each
+// wrong answer erases a distinct place rather than deduplicating one.
+
+const PALMACHIM = { id: "palmachim_ab", type: "military", lat: 31.89, lon: 34.69,
+  osm_twin: "osm:way/292210998" };
+const PALMACHIM_OSM = { id: "osm:way/292210998", kind: "military_area",
+  name: "בסיס חיל האוויר פלמחים", lat: 31.8996, lon: 34.6825 };
+
+const declared = {
+  declaredId: (d) => d.osm_twin,
+  primaryId: (d) => d.id,
+  secondaryId: (d) => d.id,
+  maxKm: MILITARY_TWIN_MAX_KM,
+};
+
+test("a curated base absorbs the OpenStreetMap record it names", () => {
+  const { twinOf, absorbed } = buildDeclaredTwinIndex([PALMACHIM], [PALMACHIM_OSM], declared);
+  assert.equal(absorbed.size, 1, "the OSM pin should be suppressed");
+  assert.equal(absorbed.get("osm:way/292210998").primaryKey, "palmachim_ab");
+  // The surviving pin carries the absorbed record, which is what lets the popup
+  // print the Hebrew name beside the English one -- one pin, both names.
+  assert.equal(twinOf.get("palmachim_ab").record.id, "osm:way/292210998");
+  assert.match(twinOf.get("palmachim_ab").record.name, /פלמחים/);
+});
+
+test("the nearer OSM record does not win -- only the declared one does", () => {
+  // The measured failure, in miniature. Novorossiysk's nearest `military_area` is a
+  // gatehouse tagged "КПП" at 2.1 km; the base's own polygon is at 4.0 km. Distance
+  // matching absorbs the gate and leaves the base drawn twice, which is both
+  // duplicates kept and a distinct place lost.
+  const base = { id: "novorossiysk_naval", type: "military", lat: 44.71, lon: 37.78,
+    osm_twin: "osm:way/233225970" };
+  const gate = { id: "osm:way/410012782", kind: "military_area", name: "КПП",
+    lat: 44.729, lon: 37.782 };
+  const real = { id: "osm:way/233225970", kind: "military_area",
+    name: "Новороссийская военно-морская база",
+    lat: 44.674, lon: 37.79 };
+  assert.ok(
+    distanceKm(base.lat, base.lon, gate.lat, gate.lon)
+      < distanceKm(base.lat, base.lon, real.lat, real.lon),
+    "the fixture has to have the wrong record nearer, or this proves nothing",
+  );
+  const { twinOf, absorbed } = buildDeclaredTwinIndex([base], [gate, real], declared);
+  assert.equal(twinOf.get("novorossiysk_naval").record.id, "osm:way/233225970");
+  assert.ok(!absorbed.has("osm:way/410012782"), "the gatehouse keeps its own pin");
+});
+
+test("a base that declares nothing absorbs nothing", () => {
+  // Most of the curated list, and correct: OSM has no polygon for them. The
+  // fallback has to be "draw as before", never "guess".
+  const { twinOf, absorbed } = buildDeclaredTwinIndex(
+    [{ id: "al_udeid_ab", type: "military", lat: 25.12, lon: 51.32 }],
+    [{ id: "osm:way/1", kind: "military_barracks", name: "A7", lat: 25.13, lon: 51.33 }],
+    declared,
+  );
+  assert.equal(twinOf.size, 0);
+  assert.equal(absorbed.size, 0);
+});
+
+test("a declared id that is not in this payload is silently no match", () => {
+  // The OSM sweep is per-theatre and viewport-filtered, so an id naming a record
+  // outside the current payload is the common case, not an error.
+  const { twinOf, absorbed } = buildDeclaredTwinIndex([PALMACHIM], [], declared);
+  assert.equal(twinOf.size, 0);
+  assert.equal(absorbed.size, 0);
+});
+
+test("a declared pair further apart than the sanity bound is refused", () => {
+  // A mistyped id would otherwise merge two places on different continents, and
+  // the popup would assert they are one installation. Drawing one pin twice is the
+  // lesser wrong.
+  const far = { ...PALMACHIM_OSM, lat: 52.5, lon: 13.4 };
+  const { twinOf, absorbed } = buildDeclaredTwinIndex([PALMACHIM], [far], declared);
+  assert.equal(twinOf.size, 0);
+  assert.equal(absorbed.size, 0);
+});
+
+test("the bound clears the widest genuine pair with room to spare", () => {
+  // Camp Arifjan's OSM polygon centre is 4.22 km from the curated point, the widest
+  // measured genuine pair; Novorossiysk is 4.04. A bound tuned down to the tail
+  // would start refusing real merges as OSM polygons get redrawn.
+  assert.ok(MILITARY_TWIN_MAX_KM > 4.22, "would refuse Camp Arifjan");
+  assert.ok(MILITARY_TWIN_MAX_KM <= 10, "wide enough to merge genuinely separate bases");
+});
+
+test("two bases naming one OSM record leave it absorbed once", () => {
+  // A curation mistake rather than a data condition, but silently absorbing twice
+  // would let the second claim overwrite the first, and then whichever pin was
+  // suppressed depends on array order.
+  const a = { ...PALMACHIM, id: "base_a" };
+  const b = { ...PALMACHIM, id: "base_b" };
+  const { twinOf, absorbed } = buildDeclaredTwinIndex([a, b], [PALMACHIM_OSM], declared);
+  assert.equal(absorbed.size, 1);
+  assert.equal(absorbed.get("osm:way/292210998").primaryKey, "base_a");
+  assert.equal(twinOf.size, 1);
 });

@@ -4370,7 +4370,7 @@ export const MILITARY_SUBTYPE_STYLE = {
   radar: { svg: SVG.radarBase, color: "#6fe3ff", label: "Radar / early-warning site" },
 };
 
-export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
+export function decorateInfra(d, { hot, nearbyEvents, offset, twin } = {}) {
   const style = themedStyle(infraBaseStyle(d), "infra");
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)}${hot ? " &middot; HOT ZONE" : ""}`;
   const events = nearbyEvents || [];
@@ -4384,6 +4384,7 @@ export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
     <div class="meta">${esc(style.label)}</div>
     ${d.note ? `<p>${esc(d.note)}</p>` : ""}
     ${activitySection}
+    ${osmTwinBlock(twin, { what: style.label.toLowerCase() })}
     <p class="meta">Source: publicly documented location (open-source reference), approximate.</p>`;
   const cls = `infra-marker${hot ? " infra-hot" : ""}`;
   return {

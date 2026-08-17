@@ -49,6 +49,47 @@ export const AIRFIELD_MATCH_KM = 2;
 // and the tail stops at a kilometre.
 export const DAM_MATCH_KM = 1;
 
+// A curated military base against OpenStreetMap's own record of the same
+// installation is the third pair, and it is the one place in this module where
+// distance is NOT the signal. It gets its own mechanism below
+// (buildDeclaredTwinIndex) and this is the measurement that forced it.
+//
+// The case is real: the curated list is English by construction ("Palmachim
+// Airbase"), OSM carries `name`, which in Israel is the Hebrew string, and the
+// collector drops `name:en` -- so one base arrived as two pins in two scripts, on
+// two layers, with nothing matching them. Exactly what the header's note about
+// local-script names describes.
+//
+// What is different is the neighbourhood. Airfields are sparse, so "nearest within
+// 2 km" is the same installation. `military_area` is not sparse: OSM has 5,382 of
+// them, because the tag means "a fenced military parcel", not "a base". Measured
+// against the live sweep, nearest-neighbour picks the wrong record about half the
+// time, and every wrong pick is a distinct place losing its pin:
+//
+//   Air Base 201 (Agadez)   nearest is "2eme Bataillon Génie Travaux" at 2.1 km;
+//                           the actual twin, "Base Aérienne 201", is at 3.4 km
+//   Novorossiysk Naval Base nearest is "КПП" -- a gate -- at 2.1 km; the twin,
+//                           "Новороссийская военно-морская база", is at 4.0 km
+//   Camp Humphreys          nearest is the KATUSA Training Academy at 1.5 km; the
+//                           twin, "캠프 험프리스", is at 1.5 km too
+//   JSDF Base Djibouti      nearest is France's BA 188 at 0.8 km, and the Japanese
+//                           base has no `military_area` record at all -- so any
+//                           radius at all produces a pair of two *different*
+//                           countries' bases
+//   Al Udeid Air Base       nearest is a barracks block named "A7", then A8, A9,
+//                           B7 -- fourteen candidates inside 5 km, none of them
+//                           the base
+//
+// No radius separates those from the eight genuine pairs, because the genuine ones
+// run from 0.4 km to 4.2 km and straddle the impostors. Tightening the radius
+// loses Palmachim (1.16 km), which is the pin this was built for.
+//
+// So the pairing is declared, not inferred: a curated entry names the OSM id it is
+// the same place as (`osm_twin`, see backend/infrastructure.py's MILITARY_BASES).
+// The radius below is only a sanity bound on a declared id -- a way that gets
+// redrawn keeps its id, but a mistyped one should not merge two continents.
+export const MILITARY_TWIN_MAX_KM = 8;
+
 const EARTH_KM_PER_DEGREE = 111.32;
 
 /** Equirectangular, which is exact enough under a few kilometres. */
@@ -144,6 +185,64 @@ export function buildTwinIndex(primary, secondary, { radiusKm, primaryId, second
   for (const [key, entry] of best) {
     twinOf.set(String(key), { record: entry.secondary, distanceKm: entry.distance });
     absorbed.set(String(entry.secondaryId), { primaryKey: String(key), distanceKm: entry.distance });
+  }
+  return { twinOf, absorbed };
+}
+
+/**
+ * Pair up two feeds where one of them names its counterpart outright.
+ *
+ * Same contract as buildTwinIndex -- `{ twinOf, absorbed }`, same shapes, so a
+ * caller can swap one for the other -- and the same promise that nothing is
+ * deleted. The difference is only how a pair is established: here the primary
+ * record carries the secondary's id, so there is no radius to tune and no
+ * nearest-neighbour to be wrong about.
+ *
+ * Used for curated military bases against OpenStreetMap's military areas, where
+ * inference does not work; see MILITARY_TWIN_MAX_KM above for the measurement.
+ *
+ * A declared id that matches no record in `secondary` is not an error and not
+ * logged: the OSM sweep is per-theatre and viewport-filtered, so most of the time
+ * the named record simply is not in this payload. The pin then draws as it always
+ * did, unmerged, which is the honest fallback.
+ *
+ * @param {Array<object>} primary    the feed whose pin survives, and which declares
+ * @param {Array<object>} secondary  the feed whose pin is absorbed
+ * @param {object} options
+ * @param {(record: object) => string|undefined} options.declaredId  the secondary id
+ *   this primary record claims to be the same place as
+ * @param {number} options.maxKm  sanity bound: a declared pair further apart than
+ *   this is treated as a typo and refused, because merging two places that are not
+ *   near each other is worse than drawing one twice
+ */
+export function buildDeclaredTwinIndex(primary, secondary, {
+  declaredId, primaryId, secondaryId, maxKm,
+}) {
+  const bySecondaryId = new Map();
+  for (const record of secondary || []) {
+    const id = secondaryId(record);
+    if (id != null) bySecondaryId.set(String(id), record);
+  }
+  const twinOf = new Map();
+  const absorbed = new Map();
+  for (const record of primary || []) {
+    const key = primaryId(record);
+    const wanted = declaredId(record);
+    if (key == null || !wanted) continue;
+    const match = bySecondaryId.get(String(wanted));
+    if (!match) continue;
+    const here = coordsOf(record);
+    const there = coordsOf(match);
+    if (!here || !there) continue;
+    const distance = distanceKm(here[0], here[1], there[0], there[1]);
+    if (distance > maxKm) continue;
+    // First declaration wins if two curated entries name one OSM record. That is
+    // a curation mistake rather than a data condition, and the alternative --
+    // absorbing it twice -- would let the second claim overwrite the first
+    // silently.
+    if (absorbed.has(String(wanted))) continue;
+    twinOf.set(String(key), { record: match, distanceKm: distance });
+    absorbed.set(String(wanted), { primaryKey: String(key), distanceKm: distance });
   }
   return { twinOf, absorbed };
 }

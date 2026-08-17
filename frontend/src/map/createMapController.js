@@ -162,7 +162,8 @@ import {
 } from "./collapse";
 import { buildCityZoneIndex } from "./cityZones";
 import {
-  AIRFIELD_MATCH_KM, DAM_MATCH_KM, buildTwinIndex, buildAbsorbedArticles,
+  AIRFIELD_MATCH_KM, DAM_MATCH_KM, MILITARY_TWIN_MAX_KM,
+  buildTwinIndex, buildDeclaredTwinIndex, buildAbsorbedArticles,
   normalizeArticleUrl,
 } from "./crossSource";
 import {
@@ -1758,7 +1759,9 @@ export function createMapController(container, initial, callbacks) {
   // Rebuilt when either feed lands rather than per render: it is 25k OSM
   // features against 48k airfields, which is cheap once and absurd sixty times
   // a minute. Keyed by id, so the render loop's lookup is a Map hit.
-  let osmTwins = { absorbed: new Map(), airfieldTwinOf: new Map(), damTwinOf: new Map() };
+  let osmTwins = {
+    absorbed: new Map(), airfieldTwinOf: new Map(), damTwinOf: new Map(), militaryTwinOf: new Map(),
+  };
 
   function rebuildOsmTwins() {
     const osm = raw.osmInfra || [];
@@ -1777,13 +1780,46 @@ export function createMapController(container, initial, callbacks) {
       (raw.powerPlants || []).filter((d) => d.source_tag === "hydro"),
       { radiusKm: DAM_MATCH_KM, primaryId: (d) => d.id, secondaryId: (d) => d.id },
     );
+    // Curated military bases against OSM's own record of the same installation.
+    //
+    // The pair this module was written for and was never pointed at: a curated base
+    // is named in English and rides the `infra` layer, OSM's is named in whatever
+    // the local script is and rides `osmInfra`, and nothing matched them -- so a
+    // reader in Israel got two pins for one base, one saying "Palmachim Airbase"
+    // and one saying the same thing in Hebrew.
+    //
+    // Declared rather than inferred, which is the one place this file departs from
+    // the other two pairings. `military_area` is dense -- 5,382 records, because the
+    // tag means "a fenced military parcel" -- so nearest-neighbour pairs a base with
+    // its own gatehouse, or with another country's base next door, about half the
+    // time. crossSource.js's MILITARY_TWIN_MAX_KM note has the measurements. The
+    // curated entry names the OSM id instead (`osm_twin`).
+    const military = buildDeclaredTwinIndex(
+      (raw.infra || []).filter((d) => d.type === "military"),
+      osm,
+      {
+        declaredId: (d) => d.osm_twin,
+        primaryId: (d) => d.id,
+        secondaryId: (d) => d.id,
+        maxKm: MILITARY_TWIN_MAX_KM,
+      },
+    );
     const absorbed = new Map();
     for (const [id, entry] of airfields.absorbed) absorbed.set(id, { ...entry, by: "airports" });
     for (const [id, entry] of dams.absorbed) absorbed.set(id, { ...entry, by: "dams" });
+    // Last, so an airfield already claimed by `airports` keeps that claim. A
+    // declared twin should never collide with an absorbed airfield -- `osm_twin`
+    // names an area, not an airfield -- but the ordering costs nothing and the
+    // alternative, two layers each believing they draw one record, is a pin that
+    // disappears when either is switched off.
+    for (const [id, entry] of military.absorbed) {
+      if (!absorbed.has(id)) absorbed.set(id, { ...entry, by: "infra" });
+    }
     osmTwins = {
       absorbed,
       airfieldTwinOf: airfields.twinOf,
       damTwinOf: dams.twinOf,
+      militaryTwinOf: military.twinOf,
     };
   }
 
@@ -6927,7 +6963,14 @@ export function createMapController(container, initial, callbacks) {
   // it was being built for all 79 sites on every pan.
   function infraDecoration(site, offset) {
     const nearbyEvents = nearbyEventsFor(site);
-    return decorateInfra(site, { hot: nearbyEvents.length > 0, nearbyEvents, offset });
+    // The OSM record this base absorbed, if any, so the surviving pin names it --
+    // which is what turns two pins in two scripts into one pin carrying both names.
+    return decorateInfra(site, {
+      hot: nearbyEvents.length > 0,
+      nearbyEvents,
+      offset,
+      twin: osmTwins.militaryTwinOf.get(String(site.id)),
+    });
   }
 
   function buildInfraMarker(site, copy = 0) {

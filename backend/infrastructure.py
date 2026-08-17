@@ -1360,6 +1360,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "naval",
         "lat": 26.21, "lon": 50.61,
         "region_keys": ["persian_gulf_hormuz"],
+        "osm_twin": "osm:way/28654027",  # القاعدة البحرية الأمريكية البحرين
         "note": "Homeport of the US Navy's 5th Fleet, responsible for the Persian Gulf/Red Sea/Arabian Sea.",
     },
     {
@@ -1368,6 +1369,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "army",
         "lat": 28.86, "lon": 48.15,
         "region_keys": ["persian_gulf_hormuz"],
+        "osm_twin": "osm:way/1159755811",  # معسكر عريفجان
         "note": "Major US Army logistics and command base in Kuwait.",
     },
     {
@@ -1402,6 +1404,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "naval",
         "lat": 44.71, "lon": 37.78,
         "region_keys": ["russia_ukraine"],
+        "osm_twin": "osm:way/233225970",  # Новороссийская военно-морская база
         "note": "Secondary Black Sea Fleet base, expanded after the fleet's Crimea losses.",
     },
     {
@@ -1420,6 +1423,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "joint",
         "lat": 11.54, "lon": 43.16,
         "region_keys": ["red_sea_yemen"],
+        "osm_twin": "osm:way/193044654",  # Camp Lemonnier معسكر ليمونيه
         "note": "Only permanent US base in Africa; also hosts French, Japanese, and other allied forces nearby.",
     },
     {
@@ -1428,6 +1432,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "naval",
         "lat": 11.6, "lon": 43.05,
         "region_keys": ["red_sea_yemen"],
+        "osm_twin": "osm:way/512417624",  # 中国人民解放军驻吉布提保障基地
         "note": "China's only overseas naval base, at the Bab-el-Mandeb chokepoint.",
     },
 
@@ -1446,6 +1451,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "army",
         "lat": 36.97, "lon": 127.03,
         "region_keys": ["korean_peninsula"],
+        "osm_twin": "osm:way/245548245",  # 캠프 험프리스
         "note": "Largest overseas US military installation, headquarters of US Forces Korea.",
     },
     {
@@ -1514,6 +1520,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "missile",
         "lat": 31.89, "lon": 34.69,
         "region_keys": ["israel_gaza_lebanon"],
+        "osm_twin": "osm:way/292210998",  # בסיס חיל האוויר פלמחים
         "note": "Israeli missile/space launch site and air defense test range.",
     },
 
@@ -1606,6 +1613,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 24.25, "lon": 54.55,
         "region_keys": ["persian_gulf_hormuz"],
+        "osm_twin": "osm:way/218153981",  # قاعدة الظفرة الجوية
         "note": "Key US/French/UAE airbase south of Abu Dhabi, hosts US fighter and reconnaissance squadrons.",
     },
 
@@ -1636,6 +1644,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 16.96, "lon": 7.99,
         "region_keys": ["sahel"],
+        "osm_twin": "osm:way/532904980",  # Base Aérienne 201
         "note": "US drone base in Niger built for Sahel counterterrorism ISR, vacated in 2024.",
     },
 
