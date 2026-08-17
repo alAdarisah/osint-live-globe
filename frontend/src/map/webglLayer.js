@@ -177,24 +177,50 @@ const EntityWebglLayer = L.Layer.extend({
     this._container.addEventListener("click", this._onContainerClick, { capture: true });
     this._container.addEventListener("mousemove", this._onContainerMove);
 
-    this._app = new PIXI.Application({
-      view: this._canvas,
-      width: size.x,
-      height: size.y,
-      backgroundAlpha: 0,
-      antialias: true,
-      resolution: Math.min(window.devicePixelRatio || 1, 2),
-      autoDensity: true,
-    });
-
-    // Draw order is by container.zIndex (set per sprite in updateEntities from
-    // its icon size) rather than by insertion order, so a small sprite is never
-    // stuck permanently behind a large one it happens to overlap.
-    this._app.stage.sortableChildren = true;
-
+    // Everything that cannot fail is assigned *before* the Pixi application,
+    // and that ordering is the fix for a real crash rather than tidiness.
+    //
+    // Leaflet's addLayer registers a layer in map._layers and *then* calls
+    // onAdd, so a throw part-way through leaves a registered, half-built layer.
+    // These four used to be assigned after `new PIXI.Application`, so a failed
+    // renderer left _textureCache undefined -- and the next map.remove() called
+    // onRemove, which did `this._textureCache.destroy()` and threw
+    // "Cannot read properties of undefined (reading 'destroy')".
+    //
+    // That throw is worse than it looks. It aborts map.remove() part-way, so
+    // the WebGL context this layer holds is never released -- which makes the
+    // *next* mount likelier to fail for the same reason, which throws again. A
+    // browser has a hard per-page context limit, so once the loop starts it
+    // does not stop until the tab is closed.
     this._textureCache = new TextureCache();
     this._buckets = new Map(); // bucketKey -> Map(entityId -> entry)
     this._visibleBuckets = new Set();
+
+    try {
+      this._app = new PIXI.Application({
+        view: this._canvas,
+        width: size.x,
+        height: size.y,
+        backgroundAlpha: 0,
+        antialias: true,
+        resolution: Math.min(window.devicePixelRatio || 1, 2),
+        autoDensity: true,
+      });
+
+      // Draw order is by container.zIndex (set per sprite in updateEntities from
+      // its icon size) rather than by insertion order, so a small sprite is never
+      // stuck permanently behind a large one it happens to overlap.
+      this._app.stage.sortableChildren = true;
+    } catch (err) {
+      // No renderer: a browser out of WebGL contexts, a driver refusing one, or
+      // hardware acceleration off. The layer stays registered and inert rather
+      // than half-built -- every method here already guards on `!this._app`
+      // (see _reset, _redraw, updateEntities), so inert is a state the rest of
+      // the file already understands, and the map keeps working without ships
+      // and aircraft instead of failing to load at all.
+      this._app = null;
+      console.error("WebGL entity layer: no renderer, ships and aircraft will not draw:", err);
+    }
     this._topLeft = L.point(0, 0);
     this._redrawScheduled = false;
     // Hover hit-test throttle state -- see _onContainerMove.
@@ -260,10 +286,21 @@ const EntityWebglLayer = L.Layer.extend({
   },
 
   onRemove() {
-    this._map.off("moveend resize", this._reset);
-    this._map.off("zoomanim", this._onAnimZoom);
-    this._container.removeEventListener("click", this._onContainerClick, { capture: true });
-    this._container.removeEventListener("mousemove", this._onContainerMove);
+    // Every step is guarded, and that is a hard rule here rather than defensive
+    // habit: this runs inside Leaflet's removeLayer, which is called in a loop by
+    // map.remove(). A throw anywhere in here abandons the rest of the teardown --
+    // including the `this._app.destroy(true, ...)` below that releases the WebGL
+    // context -- so the failure is not one broken unmount, it is a leaked context
+    // on every unmount from then on, until the tab hits the browser's hard
+    // per-page limit and no map can render at all.
+    //
+    // It has to survive two shapes of partial state: a layer whose onAdd threw
+    // before finishing (see the note there), and a second call on an already
+    // removed layer.
+    this._map?.off("moveend resize", this._reset);
+    this._map?.off("zoomanim", this._onAnimZoom);
+    this._container?.removeEventListener("click", this._onContainerClick, { capture: true });
+    this._container?.removeEventListener("mousemove", this._onContainerMove);
     // A queued hover frame outlives the listener that queued it, and it would
     // run against a destroyed Pixi app.
     if (this._moveFrame != null) {
@@ -271,17 +308,19 @@ const EntityWebglLayer = L.Layer.extend({
       this._moveFrame = null;
     }
     this._pendingMove = null;
-    this._hideTooltip();
-    this._textureCache.destroy();
+    this._hideTooltip?.();
+    this._textureCache?.destroy();
     // `true` tears down the WebGL context along with the view -- without
     // this, React StrictMode's dev-only mount->unmount->remount cycle (see
     // useLeafletMap.js's mount-once effect / createMapController's destroy())
     // leaks one WebGL context per remount until the browser's hard per-page
     // context limit is hit.
-    this._app.destroy(true, { children: true, texture: true, baseTexture: true });
-    L.DomUtil.remove(this._canvas);
+    this._app?.destroy(true, { children: true, texture: true, baseTexture: true });
+    if (this._canvas) L.DomUtil.remove(this._canvas);
     this._app = null;
-    this._buckets.clear();
+    this._canvas = null;
+    this._textureCache = null;
+    this._buckets?.clear();
   },
 
   getEvents() {
