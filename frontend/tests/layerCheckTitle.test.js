@@ -71,8 +71,15 @@ test("withheld explains the disagreement instead of denying it", () => {
   // Pinned on and drawing nothing is a real arrangement, not a broken tick --
   // and it is the one case where intent and reality legitimately differ.
   const title = layerCheckTitle({ pinned: true, withheld: true, wish: true, scope: SCOPE_SESSION });
-  assert.match(title, /zoom gate/);
-  assert.match(title, /zoom in/i);
+  assert.match(title, /holding it back/);
+
+  // Both causes named, not just the common one. A zoom gate is the usual answer,
+  // but a country-only layer (`scoped` in map/scene.js) is held back at every
+  // zoom until a country is picked -- and a reader told only to "zoom in" could
+  // keep zooming forever without ever reaching it.
+  assert.match(title, /zoom/);
+  assert.match(title, /country/);
+
   // Scope is irrelevant here: nothing has taken effect to have a reach.
   assert.equal(title, layerCheckTitle({ pinned: true, withheld: true, wish: true, scope: SCOPE_DEPLOYMENT }));
 });

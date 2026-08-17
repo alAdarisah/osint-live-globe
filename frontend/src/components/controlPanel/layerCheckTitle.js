@@ -23,7 +23,7 @@ export const SCOPE_DEPLOYMENT = "deployment";
 /**
  * @param {object} state
  * @param {boolean} state.pinned    a wish exists (the resolver is overridden)
- * @param {boolean} state.withheld  pinned on, but the zoom gate is holding it back
+ * @param {boolean} state.withheld  pinned on, and the scene is still holding it back
  * @param {boolean|undefined} state.wish  the standing decision itself
  * @param {"session"|"deployment"} state.scope
  */
@@ -32,7 +32,15 @@ export function layerCheckTitle({ pinned, withheld, wish, scope = SCOPE_SESSION 
     return "Chosen by the scene: zoom, what the camera is over, and what you have clicked. Tick to override.";
   }
   if (withheld) {
-    return "Pinned on, but held back by this layer's zoom gate — zoom in, or lower the gate in Admin Mode.";
+    // Named both causes, because there are two and the old wording admitted one.
+    // A zoom gate is the usual answer, but a country-only layer (`scoped` in
+    // map/scene.js -- floods and the rail feeds among them) is held back at any
+    // zoom until a country is actually picked, and a reader told to "zoom in"
+    // could keep zooming forever without ever reaching it.
+    return (
+      "Pinned on, but the scene is still holding it back — either the zoom is below this " +
+      "layer's gate, or the layer only draws for a country you have selected."
+    );
   }
   // Both halves are load-bearing. The first says what the tick did; the second
   // says how far it reaches and how to undo it. A session tick has to say it is

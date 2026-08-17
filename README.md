@@ -647,7 +647,38 @@ article.
 
 ## What's on screen
 
-### Layer groups (control panel)
+The chrome is four fixed regions and everything else floats over the map
+between them: a top bar (brand, live state, the layer pills, counts, clock,
+theme), a sub bar (feed toggle, time window, replay, search, boards, copy link,
+export, admin), a left intel feed rail, and a bottom status strip. The map is
+inset inside them rather than drawn under them, so nothing on screen is ever
+hidden behind a bar it cannot be moved out from under.
+
+### Layer groups (top-bar pills, and Admin Mode's drawer)
+
+One pill per group below, opening a list of that group's layers. The pills are
+the reader's layer control and the first one this app has had — layer switching
+used to exist only inside Admin Mode's drawer, so a reader could see what the
+map had decided to draw and had no way to ask for anything else.
+
+A tick from a pill lasts for the session and is never saved: on the read-only
+listener the write would be refused anyway, and a reader adjusting their own
+view for a minute was not asking to change what the next visitor sees. A tick
+in Admin Mode's drawer still is saved, deployment-wide, and each row's tooltip
+says which of the two it is doing.
+
+Both surfaces render the same three-state control, because a layer is not on or
+off but on or off *for a reason*: nobody has decided (the scene resolver
+chooses, and the box is indeterminate), pinned on, or pinned off — with a fourth
+appearance for "pinned on and still held back by its own zoom gate or country
+scope", which is the one case where what was asked for and what is drawn
+legitimately differ. `↺` on a pinned row hands that layer back to the resolver.
+
+The drawer keeps everything that is not a layer switch: the vessel, aircraft and
+infrastructure text filters, the four filter checkboxes, the sub-tickers with no
+toggle of their own, the cap-thinning banner, the per-layer zoom and age notes,
+the placement tally, the "About this layer" folds, and the whole of Places,
+Weather, Imagery and Source status.
 
 - **Conflict & Events** — Conflict & Violence (fused), news reports as a
   sub-ticker of it, the UCDP verified record, Officials & Diplomacy.
@@ -686,11 +717,14 @@ as a broken feed.
 |---|---|
 | **Region bar** | 11 conflict theatres (Russia/Ukraine, Israel/Gaza/Lebanon, Persian Gulf/Hormuz, Red Sea/Yemen, Korean Peninsula, Taiwan Strait, South China Sea, Sahel, Sudan, Kashmir, Venezuela/Caribbean) plus World. One backend registry drives both the camera and the `?region=` payload filter, so the two can never drift. Zones are ranked hottest-first from live data. |
 | **Conflict briefing card** | Opens on picking a zone: event/fatality tally, dominant activity type, top events, latest headlines — filtered exactly as the map is. |
-| **Notable events panel** | "What matters right now", ranked by server-computed severity (floor 40), so significance does not depend on spotting the biggest pin among hundreds. |
-| **News broadcast panel** | Viewport-filtered headline ticker, reusing the already-fetched GDELT payload. Starts collapsed. |
+| **Intel feed** | The left rail, toggled from the sub bar; the map slides to make room rather than being covered. Six tabs — Escalation, Activity, Events, News, Officials, Sanctions — where Activity is the merged stream of the other feeds in one chronological reading. Ranked by server-computed severity (floor 40) on Events, so significance does not depend on spotting the biggest pin among hundreds. Keeps its own Scope, Window, minimum-severity, fade-weakly-placed and group-by controls, plus a category chip row. Each tab can be hidden from readers in Admin Mode. |
+| **Watchlist** | Pinned records, at the top of the feed rail. Added from any popup's `✓ Watch` button; a row flies the map to the record and opens the same detail card a pin does. Kept in this browser only — there is no server-side watchlist, and it deliberately survives "reset panel layout". |
+| **Boards** | Chokepoints, airfield activity, infrastructure risk and cable/outage coincidence, docked bottom-right and chosen from the sub bar's Boards menu. Each still owns its own fetch and its own loading/error/missing states. Sanctions moved into the feed as a tab. |
+| **Status strip** | Along the bottom: escalation against baseline, worst tracked GPS-jamming cell, event count, layers drawn, staleness of the stalest source, per-source dots, replay state when not live, the attribution, and the pointer's coordinates. Every figure derives from a real payload and shows an explicit dash rather than a zero when the feed behind it has not answered — a confident `0` over a dead source is the one thing a status strip must not do. |
 | **Country card** | Click any country: population, density, HDI, recent matched events, district-level ACLED counts, displacement and food security, internet-outage status. Folded into collapsible sections, anchored to the clicked country until dragged, then detached. |
 | **Country selection bar** | Chips for every highlighted country — the only place a selection is cleared, so scoping state is never invisible. |
-| **Timeline scrubber** | Replays the last 3 days: one slider, play/pause, "Go live". Conflict events replay out of Postgres so the scrubber shows the *fused* records, falling back to time-filtering the live feed on a cold database. Satellite imagery date and event-age calculations both follow the scrubber, so the whole map agrees on what "now" means. |
+| **Timeline scrubber** | Replays the last 3 days: one slider, play/pause, "Go live". Conflict events replay out of Postgres so the scrubber shows the *fused* records, falling back to time-filtering the live feed on a cold database. Satellite imagery date and event-age calculations both follow the scrubber, so the whole map agrees on what "now" means. Readers reach it too, from the sub bar's Play button — it used to be Admin Mode's alone, on the reasoning that someone who found it by accident would be looking at a map that had quietly stopped being live. That reasoning was right and the answer to it is to say so loudly rather than to hide the control: while replaying, the strip shows the moment being replayed with a Go-live button beside it, the top bar's LIVE badge goes dark, and the status strip carries a NOT LIVE cell. Live polling is suspended exactly as before. |
+| **Time window** | `1H 6H 24H 72H 7D 30D ALL` in the sub bar, and the feed's own Window select — two views of one value, so they cannot disagree about how far back the conflict layer looks. Opens at 72H, the window every other layer is gated on. |
 | **Admin Mode** | Everything that used to require editing source: icon colours and sizes, per-layer size/opacity/zoom gates, per-record data edits, panel opacity/accent/text size/motion, export/import/reset. Rendered only while Admin Mode is on — there is no editable control anywhere else, so a reader cannot change anything by any sequence of clicks. Saved server-side to `data/admin_config.json` and fetched by every client at startup, so a configuration made on one machine applies everywhere this backend serves. |
 | **Theme** | Light and dark, with the basemap swapped to match. |
 
