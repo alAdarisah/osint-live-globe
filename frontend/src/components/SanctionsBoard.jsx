@@ -83,15 +83,23 @@ function SanctionsRow({ row, onLocate }) {
   );
 }
 
-export default function SanctionsBoard({ recordsFor, health, onLocate, isMobile }) {
+/**
+ * @param {boolean} [asTab]  render only the body, for the intel feed's own
+ *   Sanctions tab. Everything above the body -- the floating card, its header,
+ *   its collapse -- belongs to the panel this used to be; the tab supplies its
+ *   own. The body, the caption, the status handling and every caveat string are
+ *   the same in both.
+ */
+export default function SanctionsBoard({ recordsFor, health, onLocate, isMobile, asTab = false }) {
   // Starts collapsed -- a niche instrument a reader opts into, the same
   // footing every other self-contained panel in this corner takes
   // (AirfieldActivityPanel, ChokepointPanel, InfraRiskPanel, CableOutagePanel).
+  // Irrelevant as a tab, where the tab bar is the collapse.
   const [collapsed, setCollapsed] = useState(true);
   const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
   const { panelRef, style, handleProps } = useDraggablePanel("sanctionsBoard", {
     onClick: toggleCollapsed,
-    enabled: !isMobile,
+    enabled: !isMobile && !asTab,
   });
 
   const [sortKey, setSortKey] = useState("updated");
@@ -128,6 +136,55 @@ export default function SanctionsBoard({ recordsFor, health, onLocate, isMobile 
 
   const empty = emptyStateText(health, rows.length);
 
+  // The body, shared by the floating panel and the feed's Sanctions tab. Pulled
+  // out rather than duplicated: the caption below carries this board's whole
+  // provenance argument -- matched by identifier and never by name, the whole
+  // live feed rather than what is on screen, one row per source rather than one
+  // merged row -- and two copies of that is two places for it to drift.
+  const body = (
+    <>
+      <p className="meta" style={{ padding: "4px 10px" }}>
+        Every vessel and aircraft in this map&rsquo;s current AIS/ADS-B feed that OFAC&rsquo;s Specially
+        Designated Nationals list or the OpenSanctions maritime collection matches by identifier &mdash;
+        never by name, since a name is the easiest field in either feed to change. Covers the whole live
+        feed, not only what is drawn on screen: the camera position and layer toggles do not change what
+        is checked here. A vessel can carry a hit from both sources at once; each is its own row below,
+        never combined into one.
+      </p>
+      {empty ? (
+        <p className="meta" style={{ padding: "0 10px 8px" }}>{empty}</p>
+      ) : (
+        <>
+          <p className="meta" style={{ padding: "0 10px 4px" }}>{coverageLine(health)}</p>
+          <div className="intel-controls">
+            <label>
+              Sort by
+              <select value={sortKey} onChange={(e) => setSortKey(e.target.value)}>
+                {SANCTIONS_BOARD_SORT_KEYS.map((key) => (
+                  <option key={key} value={key}>{SORT_LABEL[key] || key}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Order
+              <select value={sortDir} onChange={(e) => setSortDir(e.target.value)}>
+                <option value="desc">{sortKey === "name" ? "Z to A" : "Most recent first"}</option>
+                <option value="asc">{sortKey === "name" ? "A to Z" : "Oldest first"}</option>
+              </select>
+            </label>
+          </div>
+          <div className="notable-list">
+            {rows.map((row) => (
+              <SanctionsRow key={row.id} row={row} onLocate={onLocate} />
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+
+  if (asTab) return body;
+
   return (
     <aside id="sanctionsBoard" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
       <div
@@ -150,47 +207,7 @@ export default function SanctionsBoard({ recordsFor, health, onLocate, isMobile 
         <span className="notable-caret" aria-hidden="true">&#9662;</span>
       </div>
 
-      {!collapsed && (
-        <>
-          <p className="meta" style={{ padding: "4px 10px" }}>
-            Every vessel and aircraft in this map&rsquo;s current AIS/ADS-B feed that OFAC&rsquo;s Specially
-            Designated Nationals list or the OpenSanctions maritime collection matches by identifier &mdash;
-            never by name, since a name is the easiest field in either feed to change. Covers the whole live
-            feed, not only what is drawn on screen: the camera position and layer toggles do not change what
-            is checked here. A vessel can carry a hit from both sources at once; each is its own row below,
-            never combined into one.
-          </p>
-          {empty ? (
-            <p className="meta" style={{ padding: "0 10px 8px" }}>{empty}</p>
-          ) : (
-            <>
-              <p className="meta" style={{ padding: "0 10px 4px" }}>{coverageLine(health)}</p>
-              <div className="intel-controls">
-                <label>
-                  Sort by
-                  <select value={sortKey} onChange={(e) => setSortKey(e.target.value)}>
-                    {SANCTIONS_BOARD_SORT_KEYS.map((key) => (
-                      <option key={key} value={key}>{SORT_LABEL[key] || key}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Order
-                  <select value={sortDir} onChange={(e) => setSortDir(e.target.value)}>
-                    <option value="desc">{sortKey === "name" ? "Z to A" : "Most recent first"}</option>
-                    <option value="asc">{sortKey === "name" ? "A to Z" : "Oldest first"}</option>
-                  </select>
-                </label>
-              </div>
-              <div className="notable-list">
-                {rows.map((row) => (
-                  <SanctionsRow key={row.id} row={row} onLocate={onLocate} />
-                ))}
-              </div>
-            </>
-          )}
-        </>
-      )}
+      {!collapsed && body}
     </aside>
   );
 }

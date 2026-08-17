@@ -133,19 +133,49 @@ export function eventsSeverityFloor(scope) {
 
 // ---------- window ----------
 
+// One table, two controls: the sub bar's pills and this panel's own Window
+// select are two renderings of the same choice, not two choices -- see
+// App.jsx's `windowHours`, which owns the value both of them read and write.
+//
+// `pill` is the short form the bar shows; `label` is the sentence the select
+// shows. Neither is derived from the other, because "72H" and "72h" happen to
+// look alike and "ALL"/"All available" do not.
+//
+// Three entries are new, and each earns its place rather than padding the row
+// to seven:
+//
+//   1h, 6h  Both floor to maxAgeDays 0 for the conflict layers, because every
+//           conflict source behind Events dates to the day and nothing finer
+//           (see windowMaxAgeDays below). They are not redundant: News and
+//           Officials carry real timestamps and go through withinWindowHours,
+//           where one hour and six hours differ genuinely.
+//   30d     A month, for reading a slow-moving picture rather than a day's.
+//   all     The "All available" entry windowMaxAgeDays' own note (below) says
+//           an unbounded option has to have, rather than being smuggled into
+//           what "7d" means. hours: null gives no cap on either path -- both
+//           windowMaxAgeDays and withinWindowHours treat a non-finite window as
+//           unbounded -- so the one label means one thing on every tab.
+//
+// The design handoff asked for 48H where this has 72H. 72 is kept and the
+// substitution is deliberate: see DEFAULT_WINDOW_HOURS immediately below, where
+// dropping it would either leave no pill matching the state the map opens in,
+// or silently narrow the shipped conflict window from three days to two.
 export const WINDOW_OPTIONS = [
-  { hours: 6, label: "6h" },
-  { hours: 24, label: "24h" },
-  { hours: 72, label: "72h" },
-  { hours: 168, label: "7d" },
+  { hours: 1, pill: "1H", label: "1h" },
+  { hours: 6, pill: "6H", label: "6h" },
+  { hours: 24, pill: "24H", label: "24h" },
+  { hours: 72, pill: "72H", label: "72h" },
+  { hours: 168, pill: "7D", label: "7d" },
+  { hours: 720, pill: "30D", label: "30d" },
+  { hours: null, pill: "ALL", label: "All available" },
 ];
 // 72 rather than 168, because this constant is what actually decides the
 // shipped age window -- not DEFAULT_EVENT_FILTER.maxAgeDays, which reads like
-// it does. IntelPanel's mount effect pushes windowMaxAgeDays(windowHours) into
-// that field unconditionally, so whatever severity.js defaults it to survives
-// only until this panel mounts, which is every load. Leaving this at 168 while
-// severity.js defaulted to AGE_WINDOW_DATE_STEPS gave a map that argued for
-// three days in two comments and a legend and then served seven.
+// it does. App.jsx pushes windowMaxAgeDays(windowHours) into that field
+// unconditionally, so whatever severity.js defaults it to survives only until
+// the app mounts, which is every load. Leaving this at 168 while severity.js
+// defaulted to AGE_WINDOW_DATE_STEPS gave a map that argued for three days in
+// two comments and a legend and then served seven.
 //
 // 72h is windowMaxAgeDays' exact inverse of AGE_WINDOW_DATE_STEPS (ceil(72/24)
 // - 1 = 2), so the panel now writes the same window map/scene.js gates every
@@ -154,14 +184,39 @@ export const WINDOW_OPTIONS = [
 export const DEFAULT_WINDOW_HOURS = 72;
 
 /**
- * The panel's hour-based window, translated into ageDays' whole-day units --
- * the same unit `eventFilter.maxAgeDays` already uses, because this is what
- * IntelPanel.jsx writes into that field. Task 12's review (Important 3)
- * caught two independent Window controls -- this one and ControlPanel's own
+ * A window's identity as a form value.
+ *
+ * `hours` is the honest representation of the choice and one of them is `null`
+ * ("no cap"), which a <select> cannot carry: an option with `value={null}`
+ * renders as the empty string and comes back through `Number("")` as 0 -- an
+ * "All available" that silently means "today only". The pill string is already
+ * unique, already non-empty and already in the table, so it is what the two
+ * controls exchange; these convert at the edges.
+ */
+export function windowOptionValue(hours) {
+  const option = WINDOW_OPTIONS.find((opt) => opt.hours === hours);
+  return option ? option.pill : "";
+}
+
+export function windowHoursFromValue(value) {
+  const option = WINDOW_OPTIONS.find((opt) => opt.pill === value);
+  return option ? option.hours : DEFAULT_WINDOW_HOURS;
+}
+
+/**
+ * The hour-based window, translated into ageDays' whole-day units -- the same
+ * unit `eventFilter.maxAgeDays` already uses, because this is what App.jsx
+ * writes into that field. Task 12's review (Important 3) caught two
+ * independent Window controls -- the panel's and ControlPanel's own
  * day-granular admin-only select -- that could silently disagree, both
- * claiming to gate the same Conflict & Violence layer. There is one Window
- * control now: this one, in the panel's header. ControlPanel no longer has
- * its own; see LayersSection.jsx's note where that select used to sit.
+ * claiming to gate the same Conflict & Violence layer.
+ *
+ * There are two controls on screen again -- the sub bar's time pills and the
+ * feed panel's Window select -- and the fix that made that safe is that they
+ * are not two controls over two values. Both read and write one `windowHours`
+ * in App.jsx, which owns the single push into eventFilter below it, so the two
+ * cannot disagree for the same reason there was only ever one before: there is
+ * still only one number.
  *
  * Every conflict source behind the Events tab dates to the day and nothing
  * finer (see map/severity.js's own note on ageDays), so an hours-based
@@ -187,6 +242,13 @@ export const DEFAULT_WINDOW_HOURS = 72;
  * place. If a genuinely unbounded option is wanted later, it needs its own
  * entry in WINDOW_OPTIONS (an "All available" alongside 6h/24h/72h/7d) rather
  * than being smuggled into what "7d" means.
+ *
+ * That entry now exists -- `{ hours: null, pill: "ALL" }` above -- and it is
+ * unbounded on both paths rather than only this one: `withinWindowHours` reads
+ * a non-finite window as "keep everything" too, so News and Officials mean by
+ * "All available" exactly what Events does. That was the condition the
+ * paragraph above set, and it is why the option could be added without
+ * reopening the argument it settled.
  */
 export function windowMaxAgeDays(hours) {
   if (!Number.isFinite(hours)) return null;

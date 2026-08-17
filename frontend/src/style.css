@@ -1,6 +1,9 @@
 /* Must be first: @import is only legal before any other rule, and every
-   duration below is one of these tokens. */
+   duration below is one of these tokens -- and every z-index below is one of
+   the bands in zindex.css. Both files are variables only, so their position
+   in the cascade is irrelevant; they are up here because @import has to be. */
 @import "./motion.css";
+@import "./zindex.css";
 
 * { box-sizing: border-box; }
 
@@ -42,6 +45,19 @@
   --cluster-bg: rgba(10, 20, 28, 0.78);
   --control-bg: rgba(6, 14, 22, 0.85);
   --shadow-color: rgba(0, 0, 0, 0.95);
+  /* The fixed bars (top bar, sub bar, HUD). Alpha-driven like --panel-bg above,
+     and for the same reason: Admin Mode's "panel opacity" slider writes
+     --panel-alpha onto <html>, and a bar with a hard-coded alpha is a bar that
+     slider silently stops reaching. */
+  --bar-bg: rgba(3, 9, 15, var(--panel-alpha, 0.92));
+  /* What text sits on an --accent fill. Not a shade of the accent: it is the
+     ink colour that stays legible when the accent becomes the background. */
+  --accent-ink: #001018;
+  /* An alias, not a second value. The design handoff calls this --shadow and
+     the codebase has always called it --shadow-color; aliasing means the
+     light-theme override below keeps working through both names and no
+     existing rule has to be swept. */
+  --shadow: var(--shadow-color);
   --country-fill: rgba(111, 227, 255, 0.03);
   --country-hover-fill: rgba(111, 227, 255, 0.18);
   /* Fallbacks only -- hooks/useAppSettings.js overwrites these from the
@@ -54,6 +70,16 @@
   --water-outline: #8be9ff;
   --water-selected-fill: #0ea5e9;
   --basemap-tiles: "dark_all";
+
+  /* Status colours, and the one font stack that is not the body's.
+     Deliberately outside the theme split below: these say what a thing *is*
+     -- failing, degraded, healthy -- the same way the severity bands in
+     map/iconTheme.js do, and a status that changed hue with the theme would
+     be a status a reader has to re-learn twice. */
+  --danger: #ff3d3d;
+  --warn: #ff8c3a;
+  --ok: #34c759;
+  --mono: Consolas, "SF Mono", "Cascadia Mono", monospace;
 }
 
 :root[data-theme="light"] {
@@ -75,6 +101,8 @@
   --cluster-bg: rgba(255, 255, 255, 0.85);
   --control-bg: rgba(255, 255, 255, 0.9);
   --shadow-color: rgba(20, 30, 40, 0.35);
+  --bar-bg: rgba(255, 255, 255, var(--panel-alpha, 0.94));
+  --accent-ink: #ffffff;
   --country-fill: rgba(0, 137, 173, 0.04);
   --country-hover-fill: rgba(0, 137, 173, 0.18);
   --basemap-tiles: "light_all";
@@ -93,19 +121,21 @@ html, body {
 
 #map {
   position: absolute;
-  top: 0;
+  top: var(--chrome-top);
   right: 0;
-  bottom: 0;
-  left: 0;
+  bottom: var(--chrome-bottom);
+  left: var(--chrome-left);
   background: var(--bg-map);
   transition: left var(--t-panel) var(--e-out);
 }
 
-/* The control panel is opaque and fixed above the map (z-index 1000) -- without
-   this, everything under its 320px width is silently unclickable whenever the
-   panel is open (which is the default state). Shifting the map's own left edge
-   means nothing ever renders underneath the panel in the first place. */
-#map.panel-open { left: 320px; }
+/* `#map.panel-open { left: 320px }` used to live here. Both rails that can
+   claim the left edge -- Admin Mode's drawer and the intel feed -- are opaque
+   and fixed above the map, so everything under them would be silently
+   unclickable; shifting the map's own edge means nothing ever renders
+   underneath one in the first place. That is still exactly what happens, but
+   the width now arrives as --chrome-left (hooks/chromeLayout.js) instead of as
+   a literal repeated in every surface that has to clear the same rail. */
 
 .leaflet-container {
   background: var(--bg-map);
@@ -253,7 +283,7 @@ html, body {
   position: fixed;
   left: 0;
   top: 0;
-  z-index: 1200; /* over Leaflet's panes and controls, under the app's own panels */
+  z-index: var(--z-cursor); /* over Leaflet's panes and controls, under the app's own panels */
   pointer-events: none; /* it must never be what elementFromPoint finds */
   opacity: 0;
   /* Follows the accent by default, so the admin accent picker already themes it.
@@ -374,9 +404,12 @@ html, body {
   font-size: 10.5px;
 }
 
-/* Push Leaflet's built-in top-left controls (zoom buttons) below the fixed
-   title bar + region bar so they don't visually collide with the new bar. */
-.leaflet-top { top: 80px; }
+/* The zoom control moved to bottom-left (createMapController's own note says
+   why: every other corner is claimed). It sits inside #map, which is already
+   inset below the bars, so it needs no offset of its own -- but the region
+   strip floats over the map's top-left, so anything Leaflet still puts up there
+   is pushed clear of it. */
+.leaflet-top { top: 46px; }
 
 .aircraft-marker { cursor: pointer; }
 .aircraft-marker.selected .entity-icon-wrap {
@@ -557,44 +590,19 @@ html, body {
   pointer-events: none;
 }
 
-#titleBar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  padding: 10px 16px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  background: var(--header-fade);
-  pointer-events: none;
-  z-index: 900;
-}
+/* #titleBar's own rules used to sit here. It was a translucent header floating
+   over the map; it is now two opaque fixed bars the map is inset below, and
+   their layout lives in chrome.css. What survives below is everything that was
+   *inside* it and still exists -- the place search, and the clock. */
 
-#titleBar .title {
-  font-weight: 700;
-  letter-spacing: 3px;
-  font-size: 14px;
-  color: var(--accent);
-}
-
-#titleBar .titleBar-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  pointer-events: auto;
-}
-
-/* Task 34: place search. A flex item of its own between the title and the
-   admin/theme controls (see TitleBar.jsx) -- it needs pointer-events back on
-   since #titleBar itself is none, same reason .titleBar-right needs it. */
+/* Task 34: place search. Now a flex item of the sub bar (see SubBar.jsx). It no
+   longer needs `pointer-events: auto` to undo a translucent parent, because the
+   bar it sits in is a real surface rather than an overlay. */
 .place-search {
   position: relative;
-  flex: 1 1 auto;
-  max-width: 320px;
+  flex: 1 1 340px;
+  max-width: 340px;
   min-width: 120px;
-  pointer-events: auto;
 }
 
 .place-search-input {
@@ -631,7 +639,7 @@ html, body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 1001;
+  z-index: var(--z-dropdown);
   animation: popup-in var(--t-ui) var(--e-out);
 }
 
@@ -664,6 +672,8 @@ html, body {
   font-style: italic;
 }
 
+/* Restyled in chrome.css, where the top bar it now lives in is laid out. Kept
+   here as the shared base so the id means one thing in one place. */
 #clock {
   font-size: 12px;
   color: var(--text-dim);
@@ -671,22 +681,24 @@ html, body {
 
 #regionBar {
   position: absolute;
-  top: 46px;
-  left: 0;
-  right: 0;
+  top: calc(var(--chrome-top) + 8px);
+  left: calc(var(--chrome-left) + 12px);
+  right: 12px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 6px 16px;
   background: var(--header-fade);
-  /* Above #controlPanel's 1000 -- the panel is open by default and sits at
-     top:80px/left:0, which used to bury the conflict-zone button/dropdown
-     (they start at top:46px but the dropdown extends well past 80px) behind
-     the opaque panel with no way to see or click it. */
-  z-index: 1001;
-  /* Gaps between/below wrapped buttons would otherwise silently swallow
-     clicks meant for map markers underneath -- same fix as #titleBar. */
+  /* Above --z-admin. The drawer is open by default in Admin Mode and runs the
+     full height of the left rail, which used to bury the conflict-zone button
+     and its dropdown behind an opaque panel with no way to see or click them.
+     The bar now also starts past --chrome-left, so it clears the rail
+     horizontally as well -- but the band stays above it, because the dropdown
+     opens downwards across whatever is beside it. */
+  z-index: var(--z-regionbar);
+  /* Gaps between and below wrapped buttons would otherwise silently swallow
+     clicks meant for map markers underneath. */
   pointer-events: none;
 }
 
@@ -741,7 +753,7 @@ html, body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 1001;
+  z-index: var(--z-dropdown);
 }
 .region-zone-menu-item {
   border: none;
@@ -782,9 +794,9 @@ html, body {
 
 #panelToggle {
   position: fixed;
-  top: 98px;
+  top: calc(var(--chrome-top) + 20px);
   left: 0;
-  z-index: 1001;
+  z-index: var(--z-admin-toggle);
   width: 26px;
   height: 46px;
   border: 1px solid rgba(var(--accent-rgb), 0.4);
@@ -800,15 +812,15 @@ html, body {
 
 #controlPanel {
   position: fixed;
-  top: 80px;
+  top: var(--chrome-top);
   left: 0;
-  bottom: 0;
+  bottom: var(--chrome-bottom);
   width: 320px;
   overflow-y: auto;
   background: var(--panel-bg);
   border-right: 1px solid var(--panel-border);
   padding: 14px 16px 18px;
-  z-index: 1000;
+  z-index: var(--z-admin);
   backdrop-filter: blur(6px);
   transform: translateX(-100%);
   transition: transform var(--t-panel) var(--e-out);
@@ -1425,9 +1437,9 @@ details[open] > .layer-details-body {
 #borderEditBar {
   position: fixed;
   left: 50%;
-  bottom: 74px;
+  bottom: calc(var(--chrome-bottom) + 40px);
   transform: translateX(-50%);
-  z-index: 1200;
+  z-index: var(--z-overlay);
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1536,10 +1548,10 @@ details[open] > .layer-details-body {
    accent colour every other informational surface in this app already uses. */
 #urlStateNotice {
   position: fixed;
-  top: 54px;
+  top: calc(var(--chrome-top) + 10px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 1200;
+  z-index: var(--z-notice);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1810,20 +1822,19 @@ details[open] > .layer-details-body {
 }
 .map-tooltip::before { display: none; }
 
+/* Now a cell of the bottom status strip rather than its own band across the
+   map -- see Hud.jsx. It keeps saying exactly what it always said (who the data
+   belongs to, and that this is not authoritative military intelligence); it
+   just no longer costs a second permanent stripe of screen to say it. The
+   positioning is gone because the HUD's flex row places it; chrome.css handles
+   how it truncates in the space available. */
 #attribution {
-  position: absolute;
-  bottom: 46px;
-  left: 0;
-  right: 0;
-  padding: 6px 14px;
+  padding: 0;
+  margin: 0;
   font-size: 10px;
   color: var(--text-dim);
-  background: var(--footer-fade);
-  text-align: center;
-  z-index: 900;
-  pointer-events: none;
 }
-#attribution a { pointer-events: auto; color: var(--text-secondary); }
+#attribution a { color: var(--text-secondary); }
 
 /* ---------- replay timeline ----------
    Fixed bar along the very bottom (below the attribution strip, which was
@@ -1833,8 +1844,8 @@ details[open] > .layer-details-body {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 0;
-  z-index: 960;
+  bottom: var(--chrome-bottom);
+  z-index: var(--z-timeline);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1906,8 +1917,8 @@ details[open] > .layer-details-body {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 46px;
-  z-index: 959;
+  bottom: calc(var(--chrome-bottom) + 46px);
+  z-index: var(--z-timeline-sub);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1962,7 +1973,7 @@ details[open] > .layer-details-body {
 #intelPanel {
   position: fixed;
   right: 14px;
-  bottom: 78px;
+  bottom: calc(var(--chrome-bottom) + 10px);
   width: 360px;
   max-width: calc(100vw - 28px);
   max-height: 50vh;
@@ -1973,7 +1984,7 @@ details[open] > .layer-details-body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
+  z-index: var(--z-cards);
   overflow: hidden;
   pointer-events: none;
 }
@@ -1991,8 +2002,8 @@ details[open] > .layer-details-body {
    tabs, just one list instead of four. */
 #airfieldPanel {
   position: fixed;
-  left: 14px;
-  bottom: 78px;
+  left: calc(var(--chrome-left) + 14px);
+  bottom: calc(var(--chrome-bottom) + 10px);
   width: 340px;
   max-width: calc(100vw - 28px);
   max-height: 46vh;
@@ -2003,7 +2014,7 @@ details[open] > .layer-details-body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
+  z-index: var(--z-cards);
   overflow: hidden;
   pointer-events: none;
 }
@@ -2020,8 +2031,8 @@ details[open] > .layer-details-body {
    .notable-header/.notable-list/.notable-item styling as both panels above. */
 #chokepointPanel {
   position: fixed;
-  left: 14px;
-  bottom: 130px;
+  left: calc(var(--chrome-left) + 14px);
+  bottom: calc(var(--chrome-bottom) + 62px);
   width: 340px;
   max-width: calc(100vw - 28px);
   max-height: 46vh;
@@ -2032,7 +2043,7 @@ details[open] > .layer-details-body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
+  z-index: var(--z-cards);
   overflow: hidden;
   pointer-events: none;
 }
@@ -2046,8 +2057,8 @@ details[open] > .layer-details-body {
    .notable-header/.notable-list/.notable-item styling as the other two. */
 #infraRiskPanel {
   position: fixed;
-  left: 14px;
-  bottom: 182px;
+  left: calc(var(--chrome-left) + 14px);
+  bottom: calc(var(--chrome-bottom) + 114px);
   width: 340px;
   max-width: calc(100vw - 28px);
   max-height: 46vh;
@@ -2058,7 +2069,7 @@ details[open] > .layer-details-body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
+  z-index: var(--z-cards);
   overflow: hidden;
   pointer-events: none;
 }
@@ -2072,8 +2083,8 @@ details[open] > .layer-details-body {
    .notable-header/.notable-list/.notable-item styling as the other three. */
 #cableOutagePanel {
   position: fixed;
-  left: 14px;
-  bottom: 234px;
+  left: calc(var(--chrome-left) + 14px);
+  bottom: calc(var(--chrome-bottom) + 166px);
   width: 340px;
   max-width: calc(100vw - 28px);
   max-height: 46vh;
@@ -2084,7 +2095,7 @@ details[open] > .layer-details-body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
+  z-index: var(--z-cards);
   overflow: hidden;
   pointer-events: none;
 }
@@ -2098,8 +2109,8 @@ details[open] > .layer-details-body {
    .notable-header/.notable-list/.notable-item styling as the other four. */
 #sanctionsBoard {
   position: fixed;
-  left: 14px;
-  bottom: 286px;
+  left: calc(var(--chrome-left) + 14px);
+  bottom: calc(var(--chrome-bottom) + 218px);
   width: 340px;
   max-width: calc(100vw - 28px);
   max-height: 46vh;
@@ -2110,7 +2121,7 @@ details[open] > .layer-details-body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
+  z-index: var(--z-cards);
   overflow: hidden;
   pointer-events: none;
 }
@@ -2151,7 +2162,7 @@ details[open] > .layer-details-body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
+  z-index: var(--z-cards);
 }
 /* A country, a water body, a state and a district can all be selected at
    once (none of the four clears another's selection -- see
@@ -2165,9 +2176,9 @@ details[open] > .layer-details-body {
    state too -- so each step in that chain is at least as fresh as the one
    before it. The reverse (an outer card genuinely fresher than a standing
    inner one) is the case this ordering gets wrong, and is rarer in practice. */
-#waterInfoCard { z-index: 951; }
-#subdivisionInfoCard { z-index: 952; }
-#districtInfoCard { z-index: 953; }
+#waterInfoCard { z-index: var(--z-card-water); }
+#subdivisionInfoCard { z-index: var(--z-card-subdiv); }
+#districtInfoCard { z-index: var(--z-card-district); }
 .country-info-body {
   overflow-y: auto;
   padding: 8px 16px 14px;
@@ -2309,7 +2320,7 @@ details[open] > .layer-details-body {
    duplicating that styling. */
 #conflictBriefing {
   position: fixed;
-  top: 80px;
+  top: calc(var(--chrome-top) + 10px);
   right: 364px;
   width: 340px;
   max-width: calc(100vw - 28px);
@@ -2321,7 +2332,7 @@ details[open] > .layer-details-body {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 950;
+  z-index: var(--z-cards);
   overflow: hidden;
 }
 
@@ -2854,28 +2865,27 @@ button.notable-line:hover, button.notable-line:focus-visible {
    aircraft is squawking, so an ordinary session never sees this band. */
 #squawkAlertStrip {
   position: fixed;
-  top: 80px;
-  left: 0;
-  right: 0;
-  z-index: 970; /* under #regionBar (1001)/#controlPanel, over the map and its own panes */
+  top: calc(var(--chrome-top) + 46px);
+  left: calc(var(--chrome-left) + 12px);
+  right: 12px;
+  z-index: var(--z-strips); /* under #regionBar/#controlPanel, over the map and its own panes */
   pointer-events: none;
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 6px 16px;
   background: linear-gradient(rgba(20, 4, 4, 0.55), rgba(20, 4, 4, 0));
-  transition: left var(--t-panel) var(--e-out); /* matches #map.panel-open's own transition */
+  transition: left var(--t-panel) var(--e-out); /* matches #map's own transition */
 }
 
-/* #controlPanel (Admin Mode's drawer) is 320px wide, opaque, and z-index
-   1000 -- above this strip's own 970 -- and open by default on desktop
-   (App.jsx's panelOpenPref). Without this, the strip's header, caveat and
-   leftmost cards render underneath the drawer for exactly the reader most
-   likely to have it open. Same fixed 320px shift #map.panel-open already
-   uses, for the same reason: it holds regardless of what the drawer's own
-   content happens to be doing. No mobile override needed beyond the one
-   below -- see #map.panel-open's own mobile rule, which this mirrors. */
-#squawkAlertStrip.panel-open { left: 320px; }
+/* `#squawkAlertStrip.panel-open { left: 320px }` used to live here, carrying a
+   second copy of the drawer's width. Whatever owns the left rail -- Admin
+   Mode's drawer, or the intel feed -- is opaque and sits above this strip's own
+   band, so without an offset the strip's header, caveat and leftmost cards
+   render underneath it. The offset is now in --chrome-left above, which is the
+   same property #map is inset by, so the two cannot disagree about where the
+   rail ends, and the phones block needs no override because that property is
+   already zero there. */
 
 .squawk-alert-header {
   display: flex;
@@ -2963,8 +2973,8 @@ button.notable-line:hover, button.notable-line:focus-visible {
 #alertToastStack {
   position: fixed;
   right: 16px;
-  bottom: 16px;
-  z-index: 970; /* same band as #squawkAlertStrip, for the same reason */
+  bottom: calc(var(--chrome-bottom) + 10px);
+  z-index: var(--z-strips); /* same band as #squawkAlertStrip, for the same reason */
   display: flex;
   flex-direction: column-reverse; /* newest toast lowest, growing upward */
   gap: 8px;
@@ -3397,33 +3407,30 @@ button.notable-line:hover, button.notable-line:focus-visible {
    wrapping to several rows, the news panel spans the width instead of
    sitting in a narrow top-right column, and tap targets grow a bit. */
 @media (max-width: 700px) {
-  #map.panel-open { left: 0; }
-  #squawkAlertStrip.panel-open { left: 0; } /* same reasoning as #map.panel-open above */
+  /* The two `.panel-open { left: 0 }` overrides that used to open this block
+     are gone: chromeInsets() already returns a zero left inset on a phone (see
+     hooks/chromeLayout.js), so both rails are overlays here without the
+     stylesheet having to say so a second time. */
 
   #controlPanel {
-    top: 88px;
     width: 85vw;
     max-width: 360px;
     -webkit-overflow-scrolling: touch;
   }
 
   #panelToggle, #panelToggle.open {
-    top: 106px;
+    top: calc(var(--chrome-top) + 28px);
     left: 0;
     width: 30px;
     height: 52px;
   }
 
-  #titleBar { padding: 8px 10px; }
-  #titleBar .title { font-size: 11px; letter-spacing: 1.5px; }
   #clock { font-size: 9.5px; }
-  #themeToggle { width: 30px; height: 30px; }
-  /* The title's letters and the admin/theme controls need to keep their
-     room on a narrow screen -- the search box is what gives, not them. */
+  /* The bar's own labels and controls need to keep their room on a narrow
+     screen -- the search box is what gives, not them. */
   .place-search { min-width: 60px; max-width: 120px; }
 
   #regionBar {
-    top: 46px;
     flex-wrap: nowrap;
     overflow-x: auto;
     overflow-y: hidden;
@@ -3438,12 +3445,12 @@ button.notable-line:hover, button.notable-line:focus-visible {
     font-size: 11.5px;
   }
 
-  /* Same 88px band .leaflet-top's own mobile override sits at, just below the
-     single-row #regionBar above. */
-  #squawkAlertStrip { top: 88px; padding: 6px 10px; }
+  /* Just below the single-row #regionBar above, which is shorter here than
+     the wrapping desktop version. */
+  #squawkAlertStrip { top: calc(var(--chrome-top) + 40px); padding: 6px 10px; }
   .squawk-alert-item { width: 210px; }
 
-  .leaflet-top { top: 88px; }
+  .leaflet-top { top: 40px; }
 
   .layer-row {
     padding: 10px 2px;
@@ -3457,8 +3464,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
   #timelineBar { gap: 6px; padding: 0 8px; height: 50px; }
   .timeline-label { min-width: 0; font-size: 10px; }
   .timeline-live-btn { padding: 5px 8px; }
-  .timeline-kinds-row { bottom: 50px; }
-  #attribution { bottom: 50px; }
+  .timeline-kinds-row { bottom: calc(var(--chrome-bottom) + 50px); }
 
   /* Full width and clear of the taller mobile timeline. Starts collapsed
      (see IntelPanel.jsx), so this is a single header bar until tapped, and
@@ -3466,7 +3472,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
   #intelPanel {
     left: 10px;
     right: 10px;
-    bottom: 84px;
+    bottom: calc(var(--chrome-bottom) + 16px);
     width: auto;
     max-width: none;
     max-height: 46vh;
@@ -3479,7 +3485,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
   #airfieldPanel {
     left: 10px;
     right: 10px;
-    bottom: 130px;
+    bottom: calc(var(--chrome-bottom) + 62px);
     width: auto;
     max-width: none;
     max-height: 40vh;
@@ -3498,7 +3504,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
 #loadingScreen {
   position: fixed;
   inset: 0;
-  z-index: 2000;
+  z-index: var(--z-boot);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3539,20 +3545,26 @@ button.notable-line:hover, button.notable-line:focus-visible {
   stroke-width: 1;
 }
 
+/* Fixed colours rather than the accent token, and mono rather than the body
+   face: this screen is theme-independent (always dark -- see #loadingScreen's
+   own note), and a custom accent set in Admin Mode would otherwise repaint a
+   splash that is meant to look the same on every load. */
 .loading-title {
+  font-family: var(--mono);
   font-weight: 700;
-  letter-spacing: 4px;
-  font-size: 18px;
-  color: var(--accent);
+  letter-spacing: 6px;
+  font-size: 19px;
+  color: #6fe3ff;
   text-align: center;
 }
 
 .loading-subtitle {
-  font-size: 10.5px;
-  letter-spacing: 1px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 2.5px;
   text-transform: uppercase;
-  color: var(--text-dim);
-  margin-top: -10px;
+  color: #7f96a6;
+  margin-top: -12px;
   text-align: center;
 }
 
@@ -3561,7 +3573,9 @@ button.notable-line:hover, button.notable-line:focus-visible {
   margin: 0;
   padding: 0;
   width: 100%;
-  font-size: 11.5px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .loading-log-line {
@@ -3622,8 +3636,8 @@ button.notable-line:hover, button.notable-line:focus-visible {
 
 .loading-bar {
   width: 100%;
-  height: 3px;
-  border-radius: 2px;
+  height: 2px;
+  border-radius: 1px;
   background: rgba(111, 227, 255, 0.14);
   overflow: hidden;
 }
@@ -3665,6 +3679,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
    stillness -- the "updated 4s ago" beside the dot says the same thing in
    words, which is why the information is not lost by switching this off. */
 :root.reduce-motion .live-dot,
+:root.reduce-motion .brand-live-dot,
 :root.reduce-motion .notable-pulse,
 :root.reduce-motion .jamming-ping-ring,
 :root.reduce-motion .infra-hot .entity-icon-wrap,
@@ -3690,6 +3705,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
    set it there should not have to find it here as well. */
 @media (prefers-reduced-motion: reduce) {
   .live-dot,
+  .brand-live-dot,
   .notable-pulse,
   .jamming-ping-ring,
   .infra-hot .entity-icon-wrap,
@@ -3745,7 +3761,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
   right: 0;
   height: 2px;
   background: #ff8c3a;
-  z-index: 2000;
+  z-index: var(--z-admin-rule);
   pointer-events: none;
 }
 
@@ -3775,7 +3791,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
 /* --- the admin panel --- */
 #adminPanel {
   position: fixed;
-  top: 92px;
+  top: calc(var(--chrome-top) + 14px);
   left: 336px;
   width: 340px;
   max-width: calc(100vw - 28px);
@@ -3787,7 +3803,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 22px var(--shadow-color);
-  z-index: 1200;
+  z-index: var(--z-overlay);
   font-size: calc(11.5px * var(--ui-text-scale));
 }
 
@@ -4434,8 +4450,8 @@ button.notable-line:hover, button.notable-line:focus-visible {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: 52px;
-  z-index: 1100;
+  bottom: calc(var(--chrome-bottom) + 10px);
+  z-index: var(--z-selection);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4583,7 +4599,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
    here, so its title bar stays put while the body scrolls. */
 #eventDetailCard {
   position: fixed;
-  top: 96px;
+  top: calc(var(--chrome-top) + 12px);
   right: 14px;
   width: 340px;
   max-width: calc(100vw - 28px);
@@ -4596,7 +4612,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
   border-radius: 8px;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 22px var(--shadow-color);
-  z-index: 1100;
+  z-index: var(--z-selection);
 }
 .event-detail-header {
   display: flex;
@@ -4879,7 +4895,7 @@ button.notable-line:hover, button.notable-line:focus-visible {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.45);
-  z-index: 1300;
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5074,7 +5090,7 @@ tr.compare-row-differs th { background: rgba(var(--accent-rgb), 0.05); }
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.45);
-  z-index: 1300;
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;

@@ -83,14 +83,17 @@ function AirfieldRow({ entry, airport, onLocate }) {
 // would be a lot of shared-hook surface for one panel's own data.
 const REFRESH_INTERVAL_MS = 30 * 60000;
 
-export default function AirfieldActivityPanel({ onLocate, isMobile }) {
+export default function AirfieldActivityPanel({ onLocate, isMobile, docked = false }) {
   // Starts collapsed -- unlike IntelPanel, this is a niche instrument a
   // reader opts into, not the panel that answers "what should I look at".
   const [collapsed, setCollapsed] = useState(true);
   const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
+  // `docked` is the board stack: a card inside a flex column has nowhere to
+  // drag to, and a stored position from when it floated would fight the column
+  // for where it sits. Everything else about this panel is unchanged.
   const { panelRef, style, handleProps } = useDraggablePanel("airfieldPanel", {
     onClick: toggleCollapsed,
-    enabled: !isMobile,
+    enabled: !isMobile && !docked,
   });
 
   const [sortKey, setSortKey] = useState("aircraft");
@@ -180,7 +183,7 @@ export default function AirfieldActivityPanel({ onLocate, isMobile }) {
   // list, since there is nothing fetched to sort.
   if (status === REFINE_PANEL_STATUS.ERROR) {
     return (
-      <aside id="airfieldPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+      <aside id="airfieldPanel" ref={panelRef} className={`${collapsed ? "collapsed" : ""}${docked ? " docked" : ""}`} style={style}>
         <div
           {...handleProps}
           className={`notable-header ${handleProps.className || ""}`}
@@ -208,7 +211,7 @@ export default function AirfieldActivityPanel({ onLocate, isMobile }) {
   }
 
   return (
-    <aside id="airfieldPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+    <aside id="airfieldPanel" ref={panelRef} className={`${collapsed ? "collapsed" : ""}${docked ? " docked" : ""}`} style={style}>
       <div
         {...handleProps}
         className={`notable-header ${handleProps.className || ""}`}

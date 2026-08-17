@@ -16,9 +16,11 @@ import { CheckField } from "../fields";
 export const SEARCH_TERMS = [
   "Reader panels",
   "Intel panel: Escalation",
+  "Intel panel: Activity",
   "Intel panel: Events",
   "Intel panel: News",
   "Intel panel: Officials",
+  "Intel panel: Sanctions",
   "Conflict briefing card",
 ];
 
@@ -30,6 +32,11 @@ const TAB_ROWS = [
     key: "escalation",
     label: "Intel panel: Escalation",
     note: "Which theatres are spiking, ranked. The one tab that is about regions rather than records.",
+  },
+  {
+    key: "activity",
+    label: "Intel panel: Activity",
+    note: "Conflict records, statements and headlines on one timeline, newest first. The stream — as against Events, which is the same records ranked by significance.",
   },
   {
     key: "events",
@@ -44,7 +51,12 @@ const TAB_ROWS = [
   {
     key: "officials",
     label: "Intel panel: Officials",
-    note: "Statements and diplomatic movements. The slowest of the four feeds, and the one a quiet day empties.",
+    note: "Statements and diplomatic movements. The slowest of the feeds, and the one a quiet day empties.",
+  },
+  {
+    key: "sanctions",
+    label: "Intel panel: Sanctions",
+    note: "Every OFAC- or OpenSanctions-matched hull and airframe in the live feed. Covers the whole feed, not only what is on screen.",
   },
 ];
 

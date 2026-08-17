@@ -268,7 +268,7 @@ export const COUNTRY_ONLY_LAYERS = new Set(
  * key, and the panel takes the list it is given (see its `tabs` prop) rather
  * than reading a settings object, so there is one direction to the dependency.
  */
-export const INTEL_TAB_KEYS = ["escalation", "events", "news", "officials"];
+export const INTEL_TAB_KEYS = ["escalation", "activity", "events", "news", "officials", "sanctions"];
 
 /**
  * Every key a checkbox in the control drawer can address.
@@ -583,7 +583,7 @@ export function defaultSettings() {
     // Mode is the reader's map plus instruments, not a different app, and the
     // checkbox that hid it is the way back.
     publicPanels: {
-      escalation: true, events: true, news: true, officials: true,
+      escalation: true, activity: true, events: true, news: true, officials: true, sanctions: true,
       briefingCard: true,
     },
     ui: {

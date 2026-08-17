@@ -109,14 +109,17 @@ function ChokepointRow({ box, onLocate }) {
 // reasoning AirfieldActivityPanel's own REFRESH_INTERVAL_MS comment gives.
 const REFRESH_INTERVAL_MS = 20 * 60000;
 
-export default function ChokepointPanel({ onLocate, isMobile }) {
+export default function ChokepointPanel({ onLocate, isMobile, docked = false }) {
   // Starts collapsed -- a niche instrument a reader opts into, the same
   // footing AirfieldActivityPanel takes rather than IntelPanel's.
   const [collapsed, setCollapsed] = useState(true);
   const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
+  // `docked` is the board stack: a card inside a flex column has nowhere to
+  // drag to, and a stored position from when it floated would fight the column
+  // for where it sits. Everything else about this panel is unchanged.
   const { panelRef, style, handleProps } = useDraggablePanel("chokepointPanel", {
     onClick: toggleCollapsed,
-    enabled: !isMobile,
+    enabled: !isMobile && !docked,
   });
 
   const [sortKey, setSortKey] = useState("total");
@@ -177,7 +180,7 @@ export default function ChokepointPanel({ onLocate, isMobile }) {
   // identical handling -- worded consistently between the two on purpose.
   if (status === REFINE_PANEL_STATUS.ERROR || status === REFINE_PANEL_STATUS.MISSING) {
     return (
-      <aside id="chokepointPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+      <aside id="chokepointPanel" ref={panelRef} className={`${collapsed ? "collapsed" : ""}${docked ? " docked" : ""}`} style={style}>
         <div
           {...handleProps}
           className={`notable-header ${handleProps.className || ""}`}
@@ -205,7 +208,7 @@ export default function ChokepointPanel({ onLocate, isMobile }) {
   }
 
   return (
-    <aside id="chokepointPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+    <aside id="chokepointPanel" ref={panelRef} className={`${collapsed ? "collapsed" : ""}${docked ? " docked" : ""}`} style={style}>
       <div
         {...handleProps}
         className={`notable-header ${handleProps.className || ""}`}

@@ -8,15 +8,21 @@
 //
 // settings/defaults.js cannot be imported under `node --test` -- it reaches
 // map/iconTheme and map/scene through extensionless specifiers only Vite
-// resolves -- so the tables are read out of the source text instead. Cruder than
-// an import and it still catches the drift, which is the point.
+// resolves -- so its two tables are read out of the source text instead. Cruder
+// than an import and it still catches the drift, which is the point.
+//
+// The map's own identity table is a real import now. It used to be scraped from
+// createMapController.js the same way, which broke the moment the table moved
+// house; it lives in map/recordIds.js, which imports nothing precisely so that
+// readers like this one can load it.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+import { ID_FIELD } from "../src/map/recordIds.js";
+
 const defaults = readFileSync(new URL("../src/settings/defaults.js", import.meta.url), "utf8");
-const controller = readFileSync(new URL("../src/map/createMapController.js", import.meta.url), "utf8");
 
 /** `{ key: "x", label: "…", idField: "y", titleField: "z" }` rows. */
 function editableSources() {
@@ -39,7 +45,6 @@ function editableFieldKeys() {
 }
 
 const SOURCES = editableSources();
-const ID_FIELD = mapIdFields();
 
 test("the editable-source table", async (t) => {
   await t.test("was parsed at all", () => {

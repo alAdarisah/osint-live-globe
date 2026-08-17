@@ -386,36 +386,7 @@ const BASE_MIN_ZOOM = 2;
 // sense once the viewport is wider than the world.
 const WORLD_COPY_LON_PAD_MAX_DEG = 15;
 
-const ID_FIELD = {
-  events: "id", gdelt: "event_id", ais: "mmsi", aisDigitraffic: "mmsi", adsb: "icao24", conflictHistory: "id",
-  officials: "id", hazards: "id", airports: "id", darkVessels: "id", cableLandings: "id",
-  launches: "id", osmInfra: "id",
-  gfwGaps: "id", gfwDetections: "id", czib: "id", floods: "id", ports: "id", dams: "id",
-  deflock: "id",
-  // Task 27: railwayPoints reuses osm_infra's own prefixed "osm:type/id" ids
-  // (it reads the same raw items, just split into their own array -- see
-  // applyData's own note on where that split happens). railLive's id is
-  // digitraffic_rail's synthetic "departureDate:trainNumber" composite (see
-  // backend/sources/digitraffic_rail.py's own note on why trainNumber alone
-  // is not a stable identity). railStations' id is the station's own short
-  // code (see digitraffic_rail.parse_station).
-  railwayPoints: "id", railLive: "id", railStations: "id",
-  // Task 28: powerPlants reuses osm_infra's own prefixed "osm:type/id" ids,
-  // the same reason railwayPoints does just above -- it reads the same raw
-  // items, split into their own array (see applyData's own note).
-  powerPlants: "id",
-  // Task 29: same reasoning again -- airDefense reads the same osm_infra
-  // sweep, split into its own array.
-  airDefense: "id",
-  // One pin per country, so the country code *is* the identity -- a country
-  // whose score changes between polls has to update its existing marker rather
-  // than be torn down and rebuilt under a new key.
-  outagePoints: "country_code",
-  // "country:key" (see rebuildOutageRegionPoints), because a bare region_code
-  // is not unique across the whole feed the way a country code is -- IODA's
-  // own entity code, the fallback for an unmatched region, isn't either.
-  outageRegionPoints: "id",
-};
+import { ID_FIELD } from "./recordIds";
 const DECORATORS = {
   events: decorateEvent, ais: decorateAis, gdelt: decorateGdelt, adsb: decorateAdsb,
   conflictHistory: decorateHistoricalEvent, officials: decorateOfficials,
@@ -627,9 +598,15 @@ export function createMapController(container, initial, callbacks) {
     // the pane, not before.
     maxBoundsViscosity: 1.0,
     minZoom: BASE_MIN_ZOOM,
-    zoomControl: true,
+    // Added below rather than here, so it can be placed. The default corner is
+    // top-left, which the top bar and the region strip now occupy, and the
+    // obvious alternative -- top-right -- is where the legend hangs. Bottom-left
+    // is the one corner nothing else claims: the board stack owns bottom-right
+    // and the HUD is a full-width strip the map is already inset above.
+    zoomControl: false,
     doubleClickZoom: false,
   }).setView([20, 15], 3);
+  L.control.zoom({ position: "bottomleft" }).addTo(map);
   /**
    * Raise the zoom floor until the world fills the pane.
    *

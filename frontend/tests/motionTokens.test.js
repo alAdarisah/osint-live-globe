@@ -14,6 +14,28 @@ import { COUNT_DURATION_MS } from "../src/hooks/useCountUp.js";
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
 const resolvePath = (rel) => fileURLToPath(new URL(rel, import.meta.url));
 
+// Every stylesheet under src/, as [name, text] -- not style.css alone.
+//
+// This used to read "../src/style.css" and nothing else, which was true when
+// style.css was the only stylesheet and quietly stopped being a guarantee the
+// moment a second one appeared: a raw duration, an undocumented exemption or an
+// unswitchable loop in chrome.css would have passed every test below green. The
+// vocabulary is the app's, not one file's, so the scan is the app's too.
+function stylesheets() {
+  const root = resolvePath("../src");
+  const out = [];
+  for (const entry of readdirSync(root, { recursive: true })) {
+    const rel = entry.toString().replace(/\\/g, "/");
+    if (!rel.endsWith(".css")) continue;
+    out.push([rel, readFileSync(path.join(root, rel), "utf8")]);
+  }
+  return out.sort(([a], [b]) => a.localeCompare(b));
+}
+
+// The stylesheets that are allowed to *state* a duration, rather than spend
+// one: motion.css is the vocabulary itself.
+const TOKEN_FILES = new Set(["motion.css"]);
+
 // A duration literal: 0.15s, .2s, 90ms, 1.1s. Not a percentage, not a colour.
 // Deliberately not /g: a global regex carries lastIndex between .test() calls
 // and would report every other line as clean.
@@ -178,10 +200,14 @@ test("motion.css defines every token the stylesheet is allowed to use", () => {
   }
 });
 
-test("style.css states no duration of its own", () => {
-  const offenders = timingDeclarations(read("../src/style.css"))
-    .filter(([, text]) => DURATION.test(stripTokenVars(text)))
-    .map(([number, text]) => `style.css:${number}: ${text.trim()}`);
+test("no stylesheet states a duration of its own", () => {
+  const offenders = [];
+  for (const [name, css] of stylesheets()) {
+    if (TOKEN_FILES.has(name)) continue;
+    for (const [number, text] of timingDeclarations(css)) {
+      if (DURATION.test(stripTokenVars(text))) offenders.push(`${name}:${number}: ${text.trim()}`);
+    }
+  }
   assert.deepEqual(offenders, [], `raw durations outside motion.css:\n${offenders.join("\n")}`);
 });
 
@@ -196,18 +222,27 @@ test("the counting hook's duration matches --t-settle", () => {
 });
 
 test("the exempt animations say why they are exempt", () => {
-  const css = read("../src/style.css");
   for (const name of EXEMPT) {
-    const at = css.indexOf(`animation: ${name}`);
-    assert.notEqual(at, -1, `${name} no longer exists; drop it from EXEMPT`);
+    // Searched across every stylesheet, so moving an exempt rule into another
+    // file does not quietly orphan the explanation that justifies it.
+    const found = stylesheets()
+      .map(([file, css]) => [file, css, css.indexOf(`animation: ${name}`)])
+      .find(([, , at]) => at !== -1);
+    assert.ok(found, `${name} no longer exists in any stylesheet; drop it from EXEMPT`);
+    const [file, css, at] = found;
     // The 400 characters before it must explain the exemption, so that deleting
     // the explanation fails the test rather than quietly orphaning the rule.
     assert.match(css.slice(Math.max(0, at - 400), at), /mechanism/i,
-      `${name} is exempt from the tempo scale and must say why`);
+      `${name} in ${file} is exempt from the tempo scale and must say why`);
   }
 });
 
 test("every looping animation can be switched off", () => {
+  // The two kill-lists stay in style.css deliberately, even though the loops
+  // they cover no longer all live there: one list is the whole answer to "what
+  // does reduce motion turn off", and splitting it across files is how half an
+  // answer starts looking like a whole one. The loops themselves are collected
+  // from every stylesheet below.
   const css = read("../src/style.css");
   // Anchored on the block's comment, not on ":root.reduce-motion" -- that
   // selector also opens the unrelated map-reticle rule further up the file
@@ -259,9 +294,11 @@ test("every looping animation can be switched off", () => {
   // reduce to the same leaf, ".entity-icon-wrap" -- the same collision ".dot"
   // and ".dot.breathing" have. Two different rules are not the same rule just
   // because they share their rightmost compound.
-  const uncovered = loopingSelectors(css).filter(
-    (selector) => !reduceMotionSelectors.includes(selector),
-  );
+  const uncovered = stylesheets()
+    .filter(([name]) => !TOKEN_FILES.has(name))
+    .flatMap(([name, text]) => loopingSelectors(text).map((selector) => [name, selector]))
+    .filter(([, selector]) => !reduceMotionSelectors.includes(selector))
+    .map(([name, selector]) => `${name}: ${selector}`);
   assert.deepEqual(uncovered, [], `looping rules missing from :root.reduce-motion:\n${uncovered.join("\n")}`);
 });
 

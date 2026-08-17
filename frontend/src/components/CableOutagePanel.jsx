@@ -91,14 +91,17 @@ function CoincidenceCard({ entry, onLocate }) {
 // bytes, the same reasoning InfraRiskPanel's own REFRESH_INTERVAL_MS gives.
 const REFRESH_INTERVAL_MS = 15 * 60000;
 
-export default function CableOutagePanel({ onLocate, isMobile }) {
+export default function CableOutagePanel({ onLocate, isMobile, docked = false }) {
   // Starts collapsed -- a niche instrument a reader opts into, the same
   // footing InfraRiskPanel and ChokepointPanel both take.
   const [collapsed, setCollapsed] = useState(true);
   const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
+  // `docked` is the board stack: a card inside a flex column has nowhere to
+  // drag to, and a stored position from when it floated would fight the column
+  // for where it sits. Everything else about this panel is unchanged.
   const { panelRef, style, handleProps } = useDraggablePanel("cableOutagePanel", {
     onClick: toggleCollapsed,
-    enabled: !isMobile,
+    enabled: !isMobile && !docked,
   });
 
   const [doc, setDoc] = useState(null);
@@ -141,7 +144,7 @@ export default function CableOutagePanel({ onLocate, isMobile }) {
 
   if (status === REFINE_PANEL_STATUS.ERROR || status === REFINE_PANEL_STATUS.MISSING) {
     return (
-      <aside id="cableOutagePanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+      <aside id="cableOutagePanel" ref={panelRef} className={`${collapsed ? "collapsed" : ""}${docked ? " docked" : ""}`} style={style}>
         <div
           {...handleProps}
           className={`notable-header ${handleProps.className || ""}`}
@@ -169,7 +172,7 @@ export default function CableOutagePanel({ onLocate, isMobile }) {
   }
 
   return (
-    <aside id="cableOutagePanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+    <aside id="cableOutagePanel" ref={panelRef} className={`${collapsed ? "collapsed" : ""}${docked ? " docked" : ""}`} style={style}>
       <div
         {...handleProps}
         className={`notable-header ${handleProps.className || ""}`}

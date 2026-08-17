@@ -26,7 +26,8 @@
 //   real arrangement (see applyScene) and used to look like a broken tick.
 
 import { useEffect, useRef } from "react";
-import { useLayerHealth } from "./HealthContext";
+import { useLayerHealth, useLayerScope } from "./HealthContext";
+import { layerCheckTitle } from "./layerCheckTitle";
 import { LAYER_HEALTH_KEY } from "./layerHealthKeys";
 import { timeAgoFromUnix } from "../../utils/format";
 
@@ -57,6 +58,9 @@ export default function LayerCheck({ layerKey, on, wish, onToggle, ariaLabel, di
   const ref = useRef(null);
   const pinned = wish !== undefined;
   const health = useLayerHealth();
+  // Where a tick from *this* surface lands -- the drawer edits the deployment,
+  // the top bar's pills edit only this session. See layerCheckTitle.js.
+  const scope = useLayerScope();
 
   // `indeterminate` is a DOM property, not an attribute -- React cannot set it
   // from JSX, so it has to be written after every render that could change it.
@@ -65,14 +69,7 @@ export default function LayerCheck({ layerKey, on, wish, onToggle, ariaLabel, di
   }, [pinned, on]);
 
   const withheld = wish === true && !on;
-  const title = (!pinned
-    ? "Chosen by the scene: zoom, what the camera is over, and what you have clicked. Tick to override."
-    : withheld
-      ? "Pinned on, but held back by this layer's zoom gate — zoom in, or lower the gate in Admin Mode."
-      : wish
-        ? "Pinned on. Overrides the scene for every reader of this deployment."
-        : "Pinned off. Overrides the scene for every reader of this deployment.")
-    + freshnessTitle(layerKey, health);
+  const title = layerCheckTitle({ pinned, withheld, wish, scope }) + freshnessTitle(layerKey, health);
 
   return (
     <>

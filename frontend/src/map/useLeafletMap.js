@@ -5,6 +5,8 @@
 // components like RegionBar and IntelPanel to call.
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createMapController } from "./createMapController";
+import { reportCursor } from "./cursorReadout";
+import { attachWatchlistActions } from "./watchlistActions";
 
 const COUNT_KEYS = [
   "events", "firms", "gdelt", "officials", "countries", "cities", "infra", "jamming", "satellites",
@@ -43,8 +45,14 @@ const EMPTY_ZOOM_NOTES = {
 
 const NO_BORDER_EDIT = { active: false, countryKey: null, linkMode: true, canUndo: false };
 
-export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorderRingCommit, initialLayerVisibility }) {
+export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorderRingCommit, initialLayerVisibility, watchlist }) {
   const controllerRef = useRef(null);
+  // The watchlist, for the popup button's own state. Held in a ref for the same
+  // reason onRegionAutoReset is: the controller and its listeners are created
+  // exactly once, and a value that changes every render cannot be closed over
+  // by a mount-once binding without recreating the map.
+  const watchlistRef = useRef(watchlist);
+  watchlistRef.current = watchlist;
   const [counts, setCounts] = useState(EMPTY_COUNTS);
   const [zoomNotes, setZoomNotes] = useState(EMPTY_ZOOM_NOTES);
   const [mapBounds, setMapBounds] = useState(null);
@@ -153,8 +161,28 @@ export function useLeafletMap(containerRef, { theme, onRegionAutoReset, onBorder
     const onResize = () => controller.invalidateSize();
     window.addEventListener("resize", onResize);
 
+    // The status strip's coordinate cell. Bound here rather than in the
+    // controller because it is the one thing on the map that exists purely for
+    // a piece of chrome, and reported through a module-level sink rather than
+    // React state because a setState per pointer pixel is the one interaction
+    // guaranteed to feel broken on a map this size -- see map/cursorReadout.js.
+    const onPointerMove = (event) => reportCursor(event.latlng.lat, event.latlng.lng);
+    const onPointerOut = () => reportCursor(null, null);
+    controller.map.on("mousemove", onPointerMove);
+    controller.map.on("mouseout", onPointerOut);
+
+    // The ✓ Watch button every popup gets. Attached here rather than built into
+    // the popup HTML for the reason map/watchlistActions.js gives at length:
+    // there are forty popup builders and every one of them carries provenance
+    // wording that must not be disturbed to add a button. Reads the list
+    // through a ref so this stays a mount-once binding.
+    const detachWatchlist = attachWatchlistActions(controller.map, () => watchlistRef.current);
+
     return () => {
       window.removeEventListener("resize", onResize);
+      controller.map.off("mousemove", onPointerMove);
+      controller.map.off("mouseout", onPointerOut);
+      detachWatchlist();
       controller.destroy();
       controllerRef.current = null;
     };

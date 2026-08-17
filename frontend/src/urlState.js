@@ -66,12 +66,13 @@
 //     "No longer listed" card already exists to state honestly for a stale
 //     in-session click. Doing the same for a fresh page load needs a
 //     poll-and-retry story this pass does not build.
-//   - IntelPanel's window and tab, and eventFilter.maxAgeDays with them.
-//     IntelPanel.jsx owns maxAgeDays outright: it pushes
+//   - The reading window and IntelPanel's tab, and eventFilter.maxAgeDays with
+//     them. App.jsx owns maxAgeDays outright: it pushes
 //     windowMaxAgeDays(windowHours) into it unconditionally on mount and on
-//     every Window change (see that file's own comment on why there is only
-//     one Window control left), so a value this format restored into
-//     eventFilter would be silently overwritten within the same render --
+//     every change to the window -- from either of the two controls that now
+//     offer it, the sub bar's time pills or the feed panel's Window select,
+//     which are two views of that one value -- so a value this format restored
+//     into eventFilter would be silently overwritten within the same render --
 //     carrying maxAgeDays without also carrying windowHours would ship a
 //     field guaranteed not to stick. Rather than carry windowHours too (a
 //     second reading-panel display preference, not a fact about the world

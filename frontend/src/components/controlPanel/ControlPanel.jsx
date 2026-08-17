@@ -4,7 +4,8 @@ import WeatherSection from "./WeatherSection";
 import ImagerySection from "./ImagerySection";
 import SourceStatusSection from "./SourceStatusSection";
 import { useAccordion } from "../../hooks/useAccordion";
-import { HealthProvider } from "./HealthContext";
+import { LayerScopeProvider } from "./HealthContext";
+import { SCOPE_DEPLOYMENT } from "./layerCheckTitle";
 
 // What is expanded the first time someone opens the panel.
 //
@@ -25,11 +26,17 @@ export default function ControlPanel({
   const { isOpen, setOpen } = useAccordion(DEFAULT_OPEN);
 
   return (
-    // Task 32 item 1: every LayerCheck row underneath reads source_health
-    // through this one provider rather than a prop threaded down through
-    // LayersSection and its ~40 individual rows -- see HealthContext.js's
-    // own note on why a context is the deliberate exception here.
-    <HealthProvider value={health}>
+    // This panel is the deployment's own. It exists only in Admin Mode, and
+    // every tick in it is written to the shared data/admin_config.json, so each
+    // LayerCheck row below says so -- unlike the same rows in the top bar's
+    // category pills, whose ticks never leave the session. See
+    // layerCheckTitle.js.
+    //
+    // The health provider that used to wrap this moved up to App.jsx when those
+    // pills appeared; see HealthContext.js. Every row underneath still reads
+    // source_health through it rather than through a prop threaded down through
+    // LayersSection and its ~40 individual rows.
+    <LayerScopeProvider value={SCOPE_DEPLOYMENT}>
     <aside id="controlPanel" className={open ? "open" : ""}>
       {/* Top of the panel, above everything, because it changes what every
           row below it means.
@@ -90,6 +97,6 @@ export default function ControlPanel({
       <WeatherSection layerVisibility={layerVisibility} layerWish={layerWish} onToggleLayer={onToggleLayer} owmConfigured={owmConfigured} windStatus={windStatus} />
       <SourceStatusSection health={health} />
     </aside>
-    </HealthProvider>
+    </LayerScopeProvider>
   );
 }

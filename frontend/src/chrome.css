@@ -1,0 +1,1154 @@
+/* The fixed chrome: top bar, sub bar, feed rail, legend, board stack, replay
+ * scrub strip and the bottom HUD.
+ *
+ * Kept out of style.css for the same reason motion.css is: that file is 5300
+ * lines of surfaces this one sits on top of, and a new bar's layout would
+ * otherwise land in the same merge-hot region as the panels it has to clear.
+ * Here, "why is the feed 332px" has an address.
+ *
+ * Loaded from main.jsx *after* style.css, not @import-ed from the top of it --
+ * see main.jsx's own note. Everything here obeys the same two tables the rest
+ * of the app does: durations come from motion.css, stacking levels from
+ * zindex.css, and tests/motionTokens.test.js + tests/zIndexBands.test.js scan
+ * this file exactly as they scan style.css.
+ *
+ * Sections, in the order a reader meets them:
+ *   1. chrome insets      the three custom properties everything anchors to
+ *   2. shared idioms      the bar surface, ghost/icon buttons, mono labels
+ *   3. top bar            brand, live badge, category pills, stats, clock
+ *   4. sub bar            search and the row of actions
+ *   5. bottom HUD         escalation, freshness, counts, attribution, cursor
+ *   6. feed rail          the watchlist, the tabs and the chip row
+ */
+
+/* ---------------------------------------------------------------------------
+   1. Chrome insets
+
+   The one mechanism that keeps every other surface out from under the bars.
+   hooks/useChromeLayout.js writes these three onto <html>; every fixed panel
+   in style.css anchors against them rather than against a hard-coded 46px that
+   silently stops being true the moment a bar changes height.
+
+   The values here are the fallbacks -- what the layout is before the hook has
+   mounted, and what it is in a static build where it never does. They are
+   deliberately today's geometry (no chrome at all), so a first paint is never
+   laid out for bars that are not on screen yet.
+   --------------------------------------------------------------------------- */
+:root {
+  --chrome-top: 78px;
+  --chrome-left: 0px;
+  --chrome-bottom: 34px;
+}
+
+/* ---------------------------------------------------------------------------
+   2. Shared idioms
+
+   Three of them, and they are shared because the bars would otherwise each
+   grow their own nearly-identical version -- which is how "the buttons look
+   slightly different up there" starts.
+   --------------------------------------------------------------------------- */
+
+/* The surface every fixed bar is made of. */
+#topBar,
+#subBar,
+#hud {
+  position: fixed;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  background: var(--bar-bg);
+  backdrop-filter: blur(8px);
+}
+
+/* Mono, uppercase, tracked. Every label in this file is one of these; sizes
+   are in em so Admin Mode's text-size slider moves the new chrome by the same
+   proportion it moves everything else. Reaching for px here is how the slider
+   silently stops applying to half the screen. */
+.chrome-label {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+}
+
+/* An outlined action. */
+.ghost-btn {
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--ui-text-scale, 1));
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out),
+    background var(--t-ui) var(--e-out);
+}
+.ghost-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-bright);
+}
+.ghost-btn:active { transform: scale(0.96); }
+
+/* Admin Mode's own button, on. The one warm colour in the chrome, because the
+   mode it reports is the one state in which a click changes what every other
+   reader of this deployment sees. */
+.ghost-btn.active {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #1b1205;
+}
+
+/* A square icon-only control. */
+.icon-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out);
+}
+.icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-bright);
+}
+.icon-btn:active { transform: scale(0.93); }
+
+/* ---------------------------------------------------------------------------
+   3. Top bar
+
+   What this is, whether it is live, what is on the map, and what time it is
+   there. Height is fixed at 44px because --chrome-top is the sum of these two
+   bars and a bar that grows silently pushes the map out of alignment with
+   every panel anchored to the same property.
+   --------------------------------------------------------------------------- */
+#topBar {
+  top: 0;
+  height: 44px;
+  padding: 0 12px;
+  gap: 8px;
+  border-bottom: 1px solid var(--panel-border);
+  z-index: var(--z-topbar);
+}
+
+#topBar .brand {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: calc(13px * var(--ui-text-scale, 1));
+  letter-spacing: 0.2em;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* Live, and the fact that it can stop being true. */
+.brand-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid rgba(52, 199, 89, 0.45);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: calc(9px * var(--ui-text-scale, 1));
+  letter-spacing: 0.16em;
+  color: var(--ok);
+  white-space: nowrap;
+}
+.brand-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: brand-live-pulse var(--tempo-live) var(--e-inout) infinite;
+}
+/* A standing condition, still true -- motion.css's own words for --tempo-live.
+   The map being live is exactly that, so it breathes rather than flashing. */
+@keyframes brand-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Replaying. The dot stops entirely rather than changing colour: a moving dot
+   is this bar's word for "now", and the whole point of this state is that now
+   is not what is on screen. */
+.brand-live.replaying {
+  border-color: rgba(255, 61, 61, 0.5);
+  color: var(--danger);
+}
+.brand-live.replaying .brand-live-dot { animation: none; }
+
+/* Where the category pills land. Scrolls rather than wraps: the bar's height
+   is load-bearing (see #topBar above), so it cannot grow a second row. */
+#topBar .cat-strip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#topBar .cat-strip::-webkit-scrollbar { display: none; }
+
+#topBar .top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+
+.top-stat {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+.top-stat-value {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: calc(13px * var(--ui-text-scale, 1));
+  font-variant-numeric: tabular-nums;
+  color: var(--text-bright);
+}
+.top-stat-value.accent { color: var(--accent); }
+.top-stat-value.danger { color: var(--danger); }
+.top-stat-label {
+  font-family: var(--mono);
+  font-size: calc(8px * var(--ui-text-scale, 1));
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* A figure the app does not have yet. Dimmed as well as dashed, so it reads as
+   "not known" rather than as a value that happens to be short. */
+.top-stat.unknown .top-stat-value { color: var(--text-dim); }
+
+.top-clock {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+#topBar #clock {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: calc(13px * var(--ui-text-scale, 1));
+  font-variant-numeric: tabular-nums;
+  color: var(--text-bright);
+}
+.top-clock-zone {
+  font-family: var(--mono);
+  font-size: calc(8px * var(--ui-text-scale, 1));
+  letter-spacing: 0.15em;
+  color: var(--text-dim);
+}
+
+/* --- category pills ------------------------------------------------------ */
+
+.cat-pills {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cat { position: relative; }
+
+.cat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--ui-text-scale, 1));
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out),
+    background var(--t-ui) var(--e-out);
+}
+.cat-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-bright);
+}
+.cat.open .cat-btn {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--text-bright);
+}
+
+.cat-btn .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.cat-btn .n {
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+  font-size: calc(9px * var(--ui-text-scale, 1));
+  font-variant-numeric: tabular-nums;
+}
+
+/* This group holds a decision somebody made, rather than only what the scene
+   resolver chose. Worth seeing without opening the dropdown -- it is the same
+   fact the pinned marker carries one row down. */
+.cat-btn.touched .dot { box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45); }
+
+.cat-btn.reset {
+  color: #ff8080;
+  border-color: rgba(255, 61, 61, 0.45);
+}
+.cat-btn.reset:hover {
+  border-color: var(--danger);
+  color: #ffb3b3;
+}
+
+.cat-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 300px;
+  max-width: 92vw;
+  max-height: 62vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 26px var(--shadow);
+  backdrop-filter: blur(8px);
+  animation: cat-menu-drop var(--t-ui) var(--e-out);
+}
+@keyframes cat-menu-drop {
+  from { opacity: 0; transform: translateY(-5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.cat-menu-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 6px 7px;
+  border-bottom: 1px solid var(--panel-border);
+  margin-bottom: 4px;
+  font-family: var(--mono);
+  font-size: calc(9px * var(--ui-text-scale, 1));
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.cat-menu-count { color: var(--accent); }
+
+/* Deliberately thin. The rows themselves are .layer-row/.layer-check from
+   style.css -- the drawer's own -- so that "pinned", "held back by its zoom
+   gate" and the ↺ hand-back button look identical on both surfaces. Anything
+   more than spacing here is the beginning of a second checkbox style. */
+.cat-menu .layer-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  font-size: calc(11.5px * var(--ui-text-scale, 1));
+  cursor: pointer;
+}
+.cat-menu .layer-row:hover { background: rgba(var(--accent-rgb), 0.07); }
+.cat-menu .layer-row.sub-row { padding-left: 22px; }
+.cat-menu .cat-row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cat-menu .count {
+  flex: none;
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--ui-text-scale, 1));
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   4. Sub bar
+
+   The row of things a reader does.
+   --------------------------------------------------------------------------- */
+#subBar {
+  top: 44px;
+  height: 34px;
+  padding: 0 12px;
+  gap: 8px;
+  border-bottom: 1px solid var(--panel-border);
+  z-index: var(--z-subbar);
+}
+
+/* The reading window. One border around the whole group with the segments
+   sharing it, so it reads as one control with a current value rather than as
+   seven buttons that happen to sit together. */
+.time-pills {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  overflow: hidden;
+  flex: none;
+}
+.time-pills .tp {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 5px 9px;
+  font-family: var(--mono);
+  font-size: calc(10px * var(--ui-text-scale, 1));
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: color var(--t-ui) var(--e-out), background var(--t-ui) var(--e-out);
+}
+.time-pills .tp:hover { color: var(--text-bright); background: rgba(var(--accent-rgb), 0.08); }
+.time-pills .tp.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+}
+
+#subBar .sub-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* The search box is the one thing in this bar that is a field rather than a
+   button, so it gets the bar's own control surface instead of a bare outline. */
+#subBar .place-search-input {
+  border-radius: 4px;
+  padding: 4px 10px;
+  background: var(--control-bg);
+}
+
+/* Copy link keeps its own component and its own copied/partial states; only
+   its shell is restyled to sit in the row. */
+#subBar .copy-link-button {
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--ui-text-scale, 1));
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#subBar .copy-link-button:hover {
+  border-color: var(--accent);
+  color: var(--text-bright);
+}
+
+/* ---------------------------------------------------------------------------
+   5. Bottom HUD
+
+   One row of figures, each of which says where it came from on hover and says
+   "—" rather than a number it does not have. See components/chrome/hudLogic.js.
+   --------------------------------------------------------------------------- */
+#hud {
+  bottom: 0;
+  height: 34px;
+  align-items: stretch;
+  overflow: hidden;
+  border-top: 1px solid var(--panel-border);
+  font-family: var(--mono);
+  z-index: var(--z-hud);
+}
+
+.hud-cell {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px;
+  border-right: 1px solid rgba(var(--accent-rgb), 0.14);
+  white-space: nowrap;
+  flex: none;
+}
+
+.hud-label {
+  font-size: calc(8px * var(--ui-text-scale, 1));
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.hud-value {
+  font-size: calc(12px * var(--ui-text-scale, 1));
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-bright);
+}
+.hud-value.accent { color: var(--accent); }
+.hud-value.danger { color: var(--danger); }
+.hud-value.warn { color: var(--warn); }
+.hud-cell.unknown .hud-value { color: var(--text-dim); font-weight: 400; }
+
+/* The escalation strip: calm to critical, with a needle where the hottest
+   ranked zone currently sits. No needle at all when nothing is ranked -- see
+   escalationReadout's own note on why parking it at the calm end would read as
+   "measured, and fine". */
+.esc-bar {
+  position: relative;
+  width: 110px;
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--ok), #e0a52c, #ff5c2a, #ff1a1a);
+}
+.esc-bar i {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 11px;
+  border-radius: 1px;
+  background: var(--text-bright);
+  transform: translateX(-1px);
+  transition: left var(--t-settle) var(--e-out);
+}
+
+.hud-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+.hud-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.hud-dot.ok { background: var(--ok); }
+.hud-dot.warn { background: var(--warn); }
+.hud-dot.err { background: var(--danger); }
+
+/* Attribution. The one cell allowed to shrink, because it is prose rather than
+   a figure and it is the only thing here that can be re-read at leisure --
+   everything else is a number that is useless truncated. It keeps its full
+   text as a tooltip so the disclaimer is never actually lost. */
+.hud-attribution {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.hud-attribution #attribution {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pushed to the far edge, and the only cell with no divider after it. */
+.hud-coords {
+  margin-left: auto;
+  border-right: none;
+  border-left: 1px solid rgba(var(--accent-rgb), 0.14);
+}
+
+.hud-cell.not-live .hud-value { letter-spacing: 0.1em; }
+
+/* ---------------------------------------------------------------------------
+   6. Feed rail
+
+   #intelPanel, which used to be a draggable card floating over the map's
+   bottom-right and is now the left column the map is inset for. The id is
+   unchanged deliberately: it is what style.css's several hundred lines of tab,
+   row and control styling key off, and none of that changed -- only where the
+   panel sits and how it is opened.
+   --------------------------------------------------------------------------- */
+#intelPanel.feed-rail {
+  position: fixed;
+  top: var(--chrome-top);
+  bottom: var(--chrome-bottom);
+  left: 0;
+  width: 332px;
+  /* Overrides the floating card's own geometry in style.css, which sized itself
+     to its content and capped its height at half the viewport. A rail is a
+     column: it is as tall as the space between the bars, and it scrolls. */
+  right: auto;
+  max-width: none;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0;
+  border: none;
+  border-right: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  backdrop-filter: blur(8px);
+  transform: translateX(0);
+  transition: transform var(--t-panel) var(--e-out);
+  z-index: var(--z-feed);
+}
+
+/* The header is no longer a drag handle and no longer folds the panel, so it
+   loses the affordances that said it was both. */
+#intelPanel .feed-head { cursor: default; }
+#intelPanel .feed-head .notable-caret { display: none; }
+
+/* The list is the only part that scrolls: the header, the watchlist, the tabs,
+   the chips and the controls all stay put while it does. A rail whose tab bar
+   scrolls out of view is a rail you cannot navigate. */
+#intelPanel.feed-rail .intel-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  max-height: none;
+}
+
+/* --- watchlist ----------------------------------------------------------- */
+
+.watchlist {
+  flex: none;
+  border-bottom: 1px solid var(--panel-border);
+  max-height: 170px;
+  display: flex;
+  flex-direction: column;
+}
+
+.watchlist-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px 7px;
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--ui-text-scale, 1));
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.watchlist-count {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist-empty {
+  margin: 0;
+  padding: 0 12px 10px;
+  font-size: calc(10.5px * var(--ui-text-scale, 1));
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.watchlist-pin-hint {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.watchlist-items {
+  margin: 0;
+  padding: 0 0 6px;
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+.watchlist-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+}
+.watchlist-item:hover { background: rgba(var(--accent-rgb), 0.06); }
+
+.watchlist-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: calc(11px * var(--ui-text-scale, 1));
+  cursor: pointer;
+}
+.watchlist-name:hover { color: var(--text-bright); text-decoration: underline; }
+
+.watchlist-locate,
+.watchlist-remove {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 2px;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: calc(10px * var(--ui-text-scale, 1));
+  line-height: 1;
+  cursor: pointer;
+}
+.watchlist-locate:hover { color: var(--accent); }
+.watchlist-remove:hover { color: var(--danger); }
+
+/* --- chip row ------------------------------------------------------------ */
+
+.chip-row {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.fchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: calc(8.5px * var(--ui-text-scale, 1));
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out),
+    background var(--t-ui) var(--e-out);
+}
+.fchip:hover { color: var(--text-bright); border-color: var(--accent); }
+.fchip.active {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--text-bright);
+}
+.fchip-glyph { flex: none; }
+
+/* ---------------------------------------------------------------------------
+   7. Board stack, boards menu and legend
+   --------------------------------------------------------------------------- */
+
+#boardStack {
+  position: fixed;
+  right: 12px;
+  bottom: calc(var(--chrome-bottom) + 10px);
+  width: 300px;
+  max-height: calc(100vh - var(--chrome-top) - var(--chrome-bottom) - 30px);
+  display: flex;
+  /* Reversed so a newly opened board grows the stack upward from the HUD
+     rather than pushing the others off the bottom of the screen: the bottom
+     of this column is the anchored edge. */
+  flex-direction: column-reverse;
+  gap: 8px;
+  overflow-y: auto;
+  z-index: var(--z-boards);
+}
+
+/* A docked board is a child of the column, not a floating card: the stack owns
+   where it sits and how wide it is, and it is as tall as its own content. */
+#boardStack > aside.docked {
+  position: static;
+  left: auto;
+  right: auto;
+  top: auto;
+  bottom: auto;
+  width: auto;
+  max-width: none;
+  transform: none;
+  flex: none;
+}
+#boardStack > aside.docked .notable-header { cursor: pointer; }
+
+/* --- boards menu --------------------------------------------------------- */
+
+.boards-wrap { position: relative; display: inline-flex; }
+
+.boards-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 26px var(--shadow);
+  backdrop-filter: blur(8px);
+  animation: cat-menu-drop var(--t-ui) var(--e-out);
+  z-index: var(--z-menu);
+}
+
+.boards-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 7px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.boards-item:hover { background: rgba(var(--accent-rgb), 0.08); }
+.boards-tick {
+  flex: none;
+  width: 12px;
+  color: var(--accent);
+  font-size: calc(11px * var(--ui-text-scale, 1));
+  line-height: 1.4;
+}
+.boards-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.boards-label { font-size: calc(11.5px * var(--ui-text-scale, 1)); }
+.boards-item.on .boards-label { color: var(--text-bright); }
+.boards-note {
+  font-size: calc(10px * var(--ui-text-scale, 1));
+  line-height: 1.35;
+  color: var(--text-dim);
+}
+
+/* --- legend -------------------------------------------------------------- */
+
+#legend {
+  position: fixed;
+  top: calc(var(--chrome-top) + 10px);
+  right: 12px;
+  width: 250px;
+  max-height: calc(100vh - var(--chrome-top) - var(--chrome-bottom) - 30px);
+  overflow-y: auto;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px var(--shadow);
+  backdrop-filter: blur(8px);
+  z-index: var(--z-legend);
+}
+
+#legend .lg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--ui-text-scale, 1));
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+/* The accent tick that marks a panel heading throughout the new chrome. */
+#legend .lg-title::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: 12px;
+  margin-right: 7px;
+  border-radius: 1px;
+  background: var(--accent);
+  vertical-align: -2px;
+}
+#legend .lg-caret { margin-left: auto; transition: transform var(--t-ui) var(--e-out); }
+#legend.collapsed .lg-caret { transform: rotate(-90deg); }
+
+#legend .lg-body { padding: 0 10px 10px; }
+#legend .lg-section {
+  padding: 6px 0 4px;
+  font-family: var(--mono);
+  font-size: calc(8.5px * var(--ui-text-scale, 1));
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+#legend .lg-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 8px;
+}
+#legend .lg-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+#legend .lg-label {
+  font-size: calc(10px * var(--ui-text-scale, 1));
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#legend .lg-glyph { flex: none; }
+#legend .lg-swatch {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+
+/* The two qualifiers, drawn the way the map draws them rather than described
+   in words: a dashed ring for an approximate position, a faded mark for a
+   weakly sourced one. */
+#legend .lg-qualifier {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+#legend .lg-qualifier-ring { border: 1px dashed var(--text-secondary); }
+#legend .lg-qualifier-dim { background: var(--text-secondary); opacity: 0.35; }
+
+/* ---------------------------------------------------------------------------
+   8. Replay
+
+   The map is not live, and three parts of the chrome say so: the top bar's
+   badge goes red and stops breathing, the HUD gains a NOT LIVE cell, and this
+   strip appears carrying the moment being shown. See ScrubStrip.jsx on why all
+   three, rather than one.
+   --------------------------------------------------------------------------- */
+#scrubStrip {
+  position: fixed;
+  left: 0;
+  right: 0;
+  /* Directly above the HUD, whose own height this is. Not expressed against
+     --chrome-bottom: that property already includes this strip while it is up,
+     so anchoring to it would be circular. */
+  bottom: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  background: var(--bar-bg);
+  border-top: 1px solid var(--panel-border);
+  backdrop-filter: blur(8px);
+  z-index: var(--z-scrub);
+}
+
+.scrub-play,
+.scrub-live {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(52, 199, 89, 0.5);
+  background: transparent;
+  color: var(--ok);
+  border-radius: 4px;
+  padding: 4px 9px;
+  font-family: var(--mono);
+  font-size: calc(10px * var(--ui-text-scale, 1));
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.scrub-play:hover,
+.scrub-live:hover { background: rgba(52, 199, 89, 0.16); }
+
+/* The timestamp, in the accent rather than in the body colour: it is the one
+   fact on this strip, and a fixed width stops the whole row shuffling sideways
+   every time the minute changes. */
+.scrub-at {
+  flex: none;
+  min-width: 150px;
+  font-family: var(--mono);
+  font-size: calc(10px * var(--ui-text-scale, 1));
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.scrub-range {
+  flex: 1 1 auto;
+  accent-color: var(--accent);
+}
+
+/* The Play button in the sub bar. Green, like the strip it summons, because it
+   is the one control in that row that changes what the map *is* rather than
+   what it shows. */
+.replay-btn {
+  border-color: rgba(52, 199, 89, 0.5);
+  color: var(--ok);
+}
+.replay-btn:hover { border-color: var(--ok); background: rgba(52, 199, 89, 0.12); }
+.replay-btn.playing { background: rgba(52, 199, 89, 0.16); color: var(--ok); }
+
+/* Admin Mode's own timeline needs no rule here: style.css already anchors it to
+   --chrome-bottom, which grows by this strip's height while the strip is up, so
+   the operator's bar lands above the reader's rather than on top of it. */
+
+/* ---------------------------------------------------------------------------
+   9. Popups
+
+   The shell only. Every popup's *contents* are built by the forty-odd
+   `decorate*` functions in map/decorators.js and carry this project's
+   provenance wording verbatim -- none of that is touched here, and the ✓ Watch
+   button is appended to the DOM afterwards rather than added to those strings
+   (see map/watchlistActions.js).
+   --------------------------------------------------------------------------- */
+.leaflet-popup-content-wrapper {
+  background: var(--popup-bg);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 6px;
+  box-shadow: 0 8px 26px var(--shadow);
+  color: var(--text-primary);
+}
+.leaflet-popup-tip {
+  background: var(--popup-bg);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  box-shadow: none;
+}
+.leaflet-popup-close-button {
+  top: 6px;
+  right: 8px;
+  color: var(--text-secondary);
+}
+.leaflet-popup-close-button:hover { color: var(--text-bright); }
+
+/* The action row appended after the popup's own content. Separated by a rule
+   rather than by spacing alone: it is this app's chrome sitting under a body of
+   sourced facts, and the two should not read as one continuous statement. */
+.pp-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.pp-btn {
+  flex: 1 1 auto;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 5px 6px;
+  font-family: var(--mono);
+  font-size: calc(8.5px * var(--ui-text-scale, 1));
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color var(--t-ui) var(--e-out), border-color var(--t-ui) var(--e-out),
+    background var(--t-ui) var(--e-out);
+}
+.pp-btn:hover { border-color: var(--accent); color: var(--text-bright); }
+.pp-btn.on {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------
+   10. Narrower screens
+
+   The design handoff stops at 1080px and says nothing at all about a phone.
+   These are that story. The order things are given up in is the argument: the
+   counts go before the labels, the labels before the controls, and the map's
+   own inset last -- because a reader on a small screen still came here to look
+   at the map.
+   --------------------------------------------------------------------------- */
+
+/* The pill count badges. The dot already carries the subject and the dropdown
+   still reports "n of m on", so this loses a convenience, not a fact. */
+@media (max-width: 1330px) {
+  .cat-btn .n { display: none; }
+}
+
+/* The two traffic counters. Events stays: it is the one that mirrors what the
+   feed rail and the HUD are both reporting. */
+@media (max-width: 1150px) {
+  #topBar .top-stat:not(:has(#statEvents)) { display: none; }
+}
+
+/* Pills become dots. Their aria-label still names the group, and their title
+   still shows it on hover, so nothing is lost to a screen reader or to a
+   pointer -- only to a glance. */
+@media (max-width: 1080px) {
+  .cat-btn .txt { display: none; }
+  .place-search { flex-basis: 180px; }
+}
+
+@media (max-width: 900px) {
+  #boardStack { width: 240px; }
+  #legend { width: 210px; }
+}
+
+/* Phones. useIsMobileViewport watches this same 700px, and chromeLayout.js
+   exports it as MOBILE_MAX_WIDTH, so the JS and the CSS cannot disagree about
+   what a phone is. */
+@media (max-width: 700px) {
+  /* The rail becomes an overlay rather than a column. --chrome-left is already
+     0 here (see chromeInsets), so the map does not shift and needs no
+     invalidateSize when this opens. 332px of a 375px screen is not a smaller
+     version of the desktop layout; it is no map at all. */
+  #intelPanel.feed-rail {
+    width: 100vw;
+    border-right: none;
+  }
+
+  /* Both bars scroll rather than wrap: --chrome-top is the sum of their two
+     heights, and a bar that grows a second row silently pushes every panel
+     anchored to that property out of alignment with the map. */
+  #topBar,
+  #subBar,
+  #hud {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  #topBar::-webkit-scrollbar,
+  #subBar::-webkit-scrollbar,
+  #hud::-webkit-scrollbar { display: none; }
+
+  #topBar { gap: 6px; padding: 0 8px; }
+  #topBar .brand { font-size: calc(11px * var(--ui-text-scale, 1)); letter-spacing: 0.14em; }
+  #topBar .top-stat { display: none; }
+  #subBar { gap: 6px; padding: 0 8px; }
+
+  /* No pointer, so no cursor to report. */
+  .hud-coords { display: none; }
+  /* The attribution needs a line of its own to be readable at all; on a strip
+     this narrow it would be three words and an ellipsis. It stays reachable
+     through its own cell's title. */
+  .hud-attribution { min-width: 120px; }
+  .hud-cell { padding: 0 9px; }
+
+  /* The stack becomes a sheet across the bottom: a 300px column beside a 375px
+     map leaves neither usable. */
+  #boardStack {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-height: 40vh;
+  }
+
+  #legend {
+    right: 8px;
+    left: 8px;
+    width: auto;
+  }
+  #legend .lg-grid { grid-template-columns: 1fr; }
+
+  /* The scrubber's label and its track will not both fit on one line. The
+     height is pinned rather than left to the content, and matches
+     chromeLayout.js's SCRUB_STRIP_HEIGHT_MOBILE: this strip grows upward from
+     the HUD, so a height the inset does not know about is a strip that covers
+     the map. */
+  #scrubStrip { flex-wrap: wrap; height: 64px; padding: 5px 10px; gap: 6px; }
+  .scrub-at { min-width: 0; }
+  .scrub-range { flex-basis: 100%; }
+}

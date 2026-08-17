@@ -410,30 +410,75 @@ test("cross-tab consistency: every Window option bounds every tab the same way",
       `${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}${p2(d.getUTCSeconds())}`;
   }
 
-  for (const { hours, label } of WINDOW_OPTIONS) {
-    await t.test(`"${label}" excludes a ten-day-old record in every tab -- none of the four means unbounded`, () => {
+  // Every bounded option. "All available" is the one entry that deliberately
+  // means unbounded, and it gets the mirror-image assertion below rather than
+  // being skipped -- the rule this test protects is that a label means the same
+  // span on every tab, and that is as much a claim about the unbounded one as
+  // about the others.
+  //
+  // Ten days is inside 30d's span, so that option is checked against a record
+  // older than its own window instead of against the shared fixture.
+  const BOUNDED = WINDOW_OPTIONS.filter((o) => Number.isFinite(o.hours));
+  assert.equal(BOUNDED.length, WINDOW_OPTIONS.length - 1, "exactly one option may be unbounded");
+
+  for (const { hours, label } of BOUNDED) {
+    await t.test(`"${label}" excludes a record older than its own span in every tab`, () => {
       const maxAgeDays = windowMaxAgeDays(hours);
-      // The regression this test exists to catch, made explicit: a
+      // The regression this test exists to catch, made explicit: a bounded
       // WINDOW_OPTIONS entry is never allowed to translate to "no day cap at
-      // all" for the Events tab, because none of them means that for the
-      // other two.
+      // all" for the Events tab, because it does not mean that for the other
+      // two.
       assert.ok(Number.isFinite(maxAgeDays), `"${label}" must be a real, finite day cap`);
 
-      const events = [{ id: "old", severity: 90, date: tenDaysAgoDate, lat: 1, lon: 1 }];
+      // Comfortably outside this option's span, whatever the span is.
+      const staleMs = Date.now() - (hours + 48) * 3600000;
+      const staleDate = new Date(staleMs).toISOString().slice(0, 10);
+
+      const events = [{ id: "old", severity: 90, date: staleDate, lat: 1, lon: 1 }];
       const eventsOut = selectEventItems(events, {
         scope, eventFilter: { ...DEFAULT_EVENT_FILTER, maxAgeDays },
       });
-      assert.equal(eventsOut.length, 0, `Events must drop a 10-day-old record under "${label}"`);
+      assert.equal(eventsOut.length, 0, `Events must drop a stale record under "${label}"`);
 
-      const news = [{ real_title: "x", date_added: gdeltDateAdded(tenDaysAgoMs), source_url: "u", lat: 1, lon: 1 }];
+      const news = [{ real_title: "x", date_added: gdeltDateAdded(staleMs), source_url: "u", lat: 1, lon: 1 }];
       const newsOut = selectNewsItems(news, { scope, windowHours: hours });
-      assert.equal(newsOut.length, 0, `News must drop a 10-day-old record under "${label}"`);
+      assert.equal(newsOut.length, 0, `News must drop a stale record under "${label}"`);
 
-      const officials = [{ id: "o", kind: "meeting", published_at: Math.floor(tenDaysAgoMs / 1000), lat: 1, lon: 1 }];
+      const officials = [{ id: "o", kind: "meeting", published_at: Math.floor(staleMs / 1000), lat: 1, lon: 1 }];
       const officialsOut = selectOfficialsItems(officials, { scope, windowHours: hours });
-      assert.equal(officialsOut.length, 0, `Officials must drop a 10-day-old record under "${label}"`);
+      assert.equal(officialsOut.length, 0, `Officials must drop a stale record under "${label}"`);
     });
   }
+
+  await t.test("'All available' is unbounded in every tab, not just in Events", () => {
+    // The condition windowMaxAgeDays' own note attached to ever adding an
+    // unbounded option: it may exist, but only if it means the same thing
+    // everywhere. Round 2's bug was precisely an option that was unbounded for
+    // Events and a hard cutoff for News and Officials, and the fix was to
+    // remove it rather than to let one label mean two spans. This is that fix
+    // held in place while the option comes back deliberately.
+    const all = WINDOW_OPTIONS.find((o) => !Number.isFinite(o.hours));
+    assert.ok(all, "WINDOW_OPTIONS has lost its 'All available' entry");
+    assert.equal(windowMaxAgeDays(all.hours), null, "'All available' must mean no day cap for Events");
+
+    const events = [{ id: "old", severity: 90, date: tenDaysAgoDate, lat: 1, lon: 1 }];
+    assert.equal(
+      selectEventItems(events, { scope, eventFilter: { ...DEFAULT_EVENT_FILTER, maxAgeDays: null } }).length,
+      1, "Events must keep a 10-day-old record under 'All available'",
+    );
+
+    const news = [{ real_title: "x", date_added: gdeltDateAdded(tenDaysAgoMs), source_url: "u", lat: 1, lon: 1 }];
+    assert.equal(
+      selectNewsItems(news, { scope, windowHours: all.hours }).length,
+      1, "News must keep a 10-day-old record under 'All available'",
+    );
+
+    const officials = [{ id: "o", kind: "meeting", published_at: Math.floor(tenDaysAgoMs / 1000), lat: 1, lon: 1 }];
+    assert.equal(
+      selectOfficialsItems(officials, { scope, windowHours: all.hours }).length,
+      1, "Officials must keep a 10-day-old record under 'All available'",
+    );
+  });
 });
 
 // Review round 3: the test above only asserts a floor (a ten-day-old record
@@ -446,8 +491,8 @@ test("cross-tab consistency: every Window option bounds every tab the same way",
 // same span rather than merely agreeing that ten days is "too old" either
 // way.
 //
-// Scoped to 72h and 168h, matching windowMaxAgeDays' own comment: those are
-// the two options that divide evenly by 24, so ceil(hours/24)-1 reproduces
+// Scoped to the options that divide evenly by 24, matching windowMaxAgeDays'
+// own comment: those are the ones where, so ceil(hours/24)-1 reproduces
 // the real hour count exactly. 6h and 24h both collapse to "today" in
 // day-granular terms and cannot be made to agree with an hour-granular
 // cutoff -- ageDays is a calendar-day difference (map/severity.js), so
@@ -455,16 +500,22 @@ test("cross-tab consistency: every Window option bounds every tab the same way",
 // and Officials would at either of those two options. That gap is inherent
 // to day-granular event data and predates this control entirely; it is
 // excluded here rather than asserted away.
-test("boundary consistency: at the two day-aligned Window options, every tab agrees on the edge", async (t) => {
+test("boundary consistency: at every day-aligned Window option, every tab agrees on the edge", async (t) => {
   const scope = makeIntelScope(SCOPE_WORLD, {});
-  // 24h divides evenly by 24 too, but it is one of the two options this test
+  // 24h divides evenly by 24 too, but it is one of the options this test
   // deliberately excludes (see the block comment above) -- "day-aligned" here
   // means "a whole number of days greater than one", not merely divisible.
-  const DAY_ALIGNED_OPTIONS = WINDOW_OPTIONS.filter((o) => o.hours % 24 === 0 && o.hours > 24);
+  //
+  // Number.isFinite first, and not only for tidiness: `null % 24` is 0 in
+  // JavaScript, so the unbounded option would slip through a divisibility check
+  // and then be asked where its edge falls.
+  const DAY_ALIGNED_OPTIONS = WINDOW_OPTIONS.filter(
+    (o) => Number.isFinite(o.hours) && o.hours % 24 === 0 && o.hours > 24,
+  );
   // A guard on the fixture itself: if WINDOW_OPTIONS ever changes shape,
   // this test should fail loudly rather than silently stop covering
   // anything.
-  assert.deepEqual(DAY_ALIGNED_OPTIONS.map((o) => o.hours), [72, 168]);
+  assert.deepEqual(DAY_ALIGNED_OPTIONS.map((o) => o.hours), [72, 168, 720]);
 
   function daysAgoDateString(days) {
     const now = new Date();
@@ -726,4 +777,55 @@ test("officialsEmptyMessage names the place for a deliberate scope, and speaks g
     officialsEmptyMessage({ deliberate: false, label: "World" }),
     "No diplomatic activity in the current window."
   );
+});
+
+// ---------- the window as a form value ----------
+//
+// The window is now offered by two controls -- the sub bar's pills and this
+// panel's select -- over one value held in App.jsx. One of the seven options is
+// `null` ("no cap"), which a <select> cannot carry: `value={null}` renders as
+// the empty string and returns through `Number("")` as 0, which would make
+// "All available" silently mean "today only". These two functions are the
+// conversion that avoids it, and this is the test that pins it.
+
+test("a window survives a round trip through a form value", async (t) => {
+  const { windowOptionValue, windowHoursFromValue, DEFAULT_WINDOW_HOURS } =
+    await import("../src/components/intelPanelLogic.js");
+
+  await t.test("every option round-trips, the unbounded one included", () => {
+    for (const opt of WINDOW_OPTIONS) {
+      assert.equal(windowHoursFromValue(windowOptionValue(opt.hours)), opt.hours, opt.pill);
+    }
+  });
+
+  await t.test("'All available' does not collapse to zero", () => {
+    // The specific bug: null -> "" -> Number("") -> 0 -> "today only".
+    const value = windowOptionValue(null);
+    assert.notEqual(value, "");
+    assert.equal(windowHoursFromValue(value), null);
+  });
+
+  await t.test("an unrecognised value falls back to the shipped window", () => {
+    // A stale form value must not produce `undefined`, which windowMaxAgeDays
+    // would read as "no cap" -- the widest possible window from the narrowest
+    // possible cause.
+    assert.equal(windowHoursFromValue("nonsense"), DEFAULT_WINDOW_HOURS);
+    assert.equal(windowHoursFromValue(""), DEFAULT_WINDOW_HOURS);
+    assert.equal(windowHoursFromValue(undefined), DEFAULT_WINDOW_HOURS);
+  });
+
+  await t.test("every option has a pill and a label, and no two pills collide", () => {
+    // The pill string is the identity these functions exchange, so a duplicate
+    // would make two windows indistinguishable.
+    const pills = WINDOW_OPTIONS.map((o) => o.pill);
+    assert.equal(new Set(pills).size, pills.length);
+    for (const opt of WINDOW_OPTIONS) {
+      assert.ok(opt.pill && opt.label, `option ${opt.hours} is missing a pill or a label`);
+    }
+  });
+
+  await t.test("the shipped default is one of the options", () => {
+    // Otherwise no pill is active on load and the select shows blank.
+    assert.ok(WINDOW_OPTIONS.some((o) => o.hours === DEFAULT_WINDOW_HOURS));
+  });
 });

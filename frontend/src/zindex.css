@@ -1,0 +1,107 @@
+/* Every stacking decision this interface makes, in one table.
+ *
+ * The stylesheet had thirty raw z-index integers and no rule for choosing
+ * between them, which is how a panel ends up unclickable without any single
+ * declaration being wrong -- the same failure mode motion.css was written for,
+ * one axis over. These are that rule, and tests/zIndexBands.test.js is what
+ * stops them eroding back into literals.
+ *
+ * ---------------------------------------------------------------------------
+ * THE FLOOR IS NOT ZERO
+ *
+ * Leaflet's own stack is *global* here. `#map` sets position and no z-index,
+ * so it is not a stacking context, and every number in vendor/leaflet/leaflet.css
+ * competes directly with every number below:
+ *
+ *   tile pane 200 · overlay pane 400 · shadow pane 500 · marker pane 600
+ *   tooltip pane 650 · popup pane 700 · .leaflet-control 800
+ *   .leaflet-top / .leaflet-bottom (the four control corners) 1000
+ *
+ * So nothing in this file may sit under 900 -- a panel at 700 is a panel a
+ * marker popup draws over -- and anything that has to beat a zoom control has
+ * to clear 1000. That is why the bands here start high and are spaced in tens
+ * rather than starting at 1 and counting up.
+ * ---------------------------------------------------------------------------
+ *
+ * Ordering, low to high. A band's *value* is arbitrary; its *place in this
+ * list* is the decision.
+ */
+
+:root {
+  /* Chrome that deliberately sits under Leaflet's control corners: it is map
+     furniture, not a panel. Both of its occupants (#titleBar, #attribution)
+     are folded into the new top bar and HUD; the band outlives them because
+     the next thing to sit at map level will want it. */
+  --z-map-chrome: 900;
+
+  /* Reference surfaces: read, not interacted with while something else is. */
+  --z-legend: 1005;
+  --z-boards: 1010;
+
+  /* Reading surfaces. One band on purpose -- #countryInfoCard, #conflictBriefing,
+     #intelPanel and the five refine panels have always tied here and resolved
+     by document order, and separating them now would silently re-order six
+     panels a reader has learned the arrangement of. The three drill-downs step
+     up because a district card is opened *from* a country card and has to
+     land on top of the thing that opened it. */
+  --z-cards: 1020;
+  --z-card-water: 1021;
+  --z-card-subdiv: 1022;
+  --z-card-district: 1023;
+
+  /* The feed rail. Above the cards: it is fixed chrome the map is inset for,
+     so nothing should ever be able to hide it. */
+  --z-feed: 1030;
+
+  /* Strips and drawers. The order inside this block is load-bearing and each
+     step is argued where it is used:
+       - #timelineBar under #controlPanel, because the drawer's full height
+         crosses the bar's left end;
+       - #regionBar over #controlPanel, because the drawer used to bury the
+         conflict-zone button outright (see #regionBar's own note in style.css). */
+  --z-timeline-sub: 1040;
+  --z-timeline: 1041;
+  --z-strips: 1045;
+  --z-admin: 1050;
+  --z-admin-toggle: 1051;
+  --z-regionbar: 1060;
+  --z-dropdown: 1061;
+
+  /* Selection state and the record it opened. Above every panel: these are how
+     a reader sees and clears what they picked, so they may never be the thing
+     that is covered. */
+  --z-selection: 1100;
+
+  --z-scrub: 1120;
+
+  /* The custom cursor. Over the map and its panels, under the fixed bars --
+     a reticle drawn on top of a toolbar reads as a rendering fault. */
+  --z-cursor: 1150;
+
+  /* The fixed chrome. Relative order is the design's: the category dropdowns
+     hang off the top bar and have to cover the sub bar under it. */
+  --z-subbar: 1190;
+  --z-topbar: 1200;
+  --z-hud: 1210;
+
+  /* backdrop-filter on both bars makes each one a stacking context, so a
+     dropdown's z-index is resolved *inside its own bar*. A menu that ever has
+     to escape one must be portalled to the body -- and this is the band it
+     lands in when it is. */
+  --z-menu: 1250;
+
+  /* One-off messages and the operator's own overlays. */
+  --z-notice: 1260;
+  --z-overlay: 1280;
+
+  /* Full-screen modals: they exist to take the whole screen, so they clear
+     every bar above. */
+  --z-modal: 1400;
+
+  /* The boot overlay, and Admin Mode's edge rule. Deliberately the same value:
+     the rule is a 2px line drawn by `body::before`, which precedes #root in
+     document order, so the tie leaves the boot overlay on top exactly as it
+     has always been. */
+  --z-boot: 3000;
+  --z-admin-rule: 3000;
+}

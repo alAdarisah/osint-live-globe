@@ -25,39 +25,28 @@ import { REPLAY_KINDS } from "../replay/availability";
 
 const RANGE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days, matches backend/history.py's retention
 
-/**
- * Whether leaving Admin Mode should snap replay back to live -- true only on
- * a genuine "was on, now off" transition, never merely because Admin Mode
- * happens to be off right now.
- *
- * Task 35 review (Critical 2): App.jsx seeds a restored deep link's replay
- * moment straight into useReplay's initial state, so `isReplaying` can be
- * true on the very first render while `adminMode` is (as it is for most
- * visitors, by default) false. A predicate that only checked "not admin mode
- * and replaying" could not tell that apart from an admin who had just
- * switched Admin Mode off mid-replay -- and fired `goLive()` on mount for
- * the first case as readily as the second, silently discarding the very
- * moment a share link exists to hand a non-admin reader. The two need
- * different answers: the first should keep showing the restored moment
- * (nothing to exit -- the transition never happened), the second should go
- * live.
- *
- * `prevAdminMode` is the *previous* render's value, not the current one --
- * the caller (App.jsx) tracks it in a ref mutated inside the same effect
- * that calls this, since only the caller knows what "previous" means across
- * renders. A pure predicate rather than inline in that effect so the one
- * seam this bug actually lived in has a headless test, even though the
- * effect wiring around it does not.
- *
- * Task 44 note: play/pause state has the identical exposure -- a restored
- * deep link never carries `isPlaying` (see urlState.js's own module doc for
- * why playback state is not serialized at all), so this predicate's
- * "replaying" check alone is enough to cover it too. Nothing here needed to
- * change; recorded so the next reader doesn't have to re-derive it.
- */
-export function shouldExitReplayOnAdminModeChange(prevAdminMode, adminMode, isReplaying) {
-  return !!prevAdminMode && !adminMode && !!isReplaying;
-}
+// shouldExitReplayOnAdminModeChange used to live here: a predicate for "Admin
+// Mode was just switched off while the map was scrubbed back, so go live". It
+// is deleted along with its caller and its test.
+//
+// Worth recording why, because the bug it was written for was subtle and a
+// future reader may be tempted to reintroduce it. Replay was Admin Mode's only,
+// so leaving the mode took the sole control off screen while every live feed
+// stayed suppressed -- the reader was stranded on a frozen map with nothing to
+// press. The predicate had to distinguish a genuine true-to-false transition
+// from merely "adminMode is false right now", because a share link that seeded
+// an initial replayAt made isReplaying true on the first render of a session
+// that was never in Admin Mode, and the naive version read that as an exit and
+// snapped the link straight back to live before the reader saw the moment it
+// pointed to.
+//
+// None of that applies now. The scrub strip renders whenever the map is not
+// live, for every reader, so leaving Admin Mode strands nobody -- and forcing
+// the map back to live would be discarding a position the reader chose. What
+// has *not* changed is the live-poll gating below: a scrubbed-back map still
+// refuses every live write, which is the half of this that was always about
+// correctness rather than about who could reach the control.
+
 
 export function useReplay({
   applyData,

@@ -7,16 +7,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useLeafletMap } from "./map/useLeafletMap";
 import { useOsintData } from "./hooks/useOsintData";
-import { useReplay, shouldExitReplayOnAdminModeChange } from "./hooks/useReplay";
+import { useReplay } from "./hooks/useReplay";
 import { useTheme } from "./hooks/useTheme";
 import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
+import { useChromeLayout } from "./hooks/useChromeLayout";
+import { useWatchlist } from "./hooks/useWatchlist";
+import { toggleBoard, loadOpenBoards, saveOpenBoards } from "./components/chrome/boardRegistry";
 import { useAppSettings } from "./hooks/useAppSettings";
 import { applyOverrides } from "./settings/applyOverrides";
 import { EDITABLE_SOURCES, INTEL_TAB_KEYS } from "./settings/defaults";
 import { applyBorderOverrides, staleBorderKeys } from "./settings/borderOverrides";
 import { DEFAULT_EVENT_FILTER } from "./map/severity";
 import { DEFAULT_VESSEL_FILTER, DEFAULT_AIRCRAFT_FILTER } from "./utils/entityFilter";
+import { DEFAULT_WINDOW_HOURS, windowMaxAgeDays } from "./components/intelPanelLogic";
 import { makeCountryScope } from "./map/countryScope";
 import { boundsContainsPoint } from "./utils/geo";
 import {
@@ -25,21 +29,25 @@ import {
 
 import LoadingScreen from "./components/LoadingScreen";
 import MapView from "./components/MapView";
-import TitleBar from "./components/TitleBar";
+import TopBar from "./components/chrome/TopBar";
+import SubBar from "./components/chrome/SubBar";
+import CategoryPills from "./components/chrome/CategoryPills";
+import TimePills from "./components/chrome/TimePills";
+import BoardsMenu from "./components/chrome/BoardsMenu";
+import BoardStack from "./components/chrome/BoardStack";
+import Legend from "./components/chrome/Legend";
+import ScrubStrip from "./components/chrome/ScrubStrip";
+import Hud from "./components/chrome/Hud";
+import { HealthProvider } from "./components/controlPanel/HealthContext";
 import RegionBar from "./components/RegionBar";
 import SquawkAlertStrip from "./components/SquawkAlertStrip";
 import AlertToast from "./components/AlertToast";
 import IntelPanel from "./components/IntelPanel";
-import AirfieldActivityPanel from "./components/AirfieldActivityPanel";
-import CableOutagePanel from "./components/CableOutagePanel";
-import ChokepointPanel from "./components/ChokepointPanel";
-import InfraRiskPanel from "./components/InfraRiskPanel";
 import SanctionsBoard from "./components/SanctionsBoard";
 import ConflictBriefingCard from "./components/ConflictBriefingCard";
 import PanelToggle from "./components/PanelToggle";
 import ControlPanel from "./components/controlPanel/ControlPanel";
 import TimelineBar from "./components/TimelineBar";
-import Attribution from "./components/Attribution";
 import CountryInfoCard from "./components/CountryInfoCard";
 import WaterInfoCard from "./components/WaterInfoCard";
 import SubdivisionInfoCard from "./components/SubdivisionInfoCard";
@@ -143,6 +151,14 @@ export default function App() {
   // the map's flyToRegion/applyData) -- broken via one ref-indirection
   // instead of merging the two hooks into one, so each still reads as a
   // single, focused concern to `git blame`/skim.
+  // What the reader has pinned to come back to. Its own storage, deliberately
+  // not the panel-layout record -- see utils/watchlist.js, which also explains
+  // why this is unrelated to vesselFilter.watchlistedOnly despite the name.
+  //
+  // Declared before the map because the map's popups carry the ✓ Watch button
+  // and need to know what is already on the list.
+  const watchlist = useWatchlist();
+
   const regionAutoResetRef = useRef(() => {});
   // The two shipped sub-ticker defaults with Admin Mode's saved layer states on
   // top. One object for both consumers below -- the map's construction and the
@@ -178,6 +194,7 @@ export default function App() {
     // is what covers the rest -- the backend's copy landing after the cache, an
     // imported file, a reset.
     initialLayerVisibility: layerWishes,
+    watchlist: watchlist.items,
   });
 
   // While the replay timeline is scrubbed back, live poller ticks must not
@@ -291,15 +308,35 @@ export default function App() {
   // otherwise -- see useHealth's own note.
   const { health, owmConfigured } = useHealth(adminMode);
 
-  // Entering or leaving Admin Mode moves the map's left edge by 320px, and
-  // Leaflet caches the container size. Without this the projection stays keyed
-  // to the old width until something else triggers a resize, which shows up as
-  // clicks landing a third of a screen away from where they were aimed. Same
-  // 230ms the panel's own CSS transition takes -- see togglePanel below.
-  useEffect(() => {
-    const timer = setTimeout(() => mapApi.invalidateSize(), 230);
-    return () => clearTimeout(timer);
-  }, [adminMode, mapApi.invalidateSize]);
+  // How much of the screen the fixed chrome is taking, as three custom
+  // properties every fixed surface anchors against -- see hooks/chromeLayout.js.
+  //
+  // This also owns the invalidateSize that used to be a bare 230ms timer keyed
+  // on `adminMode` here: the left edge now moves for two reasons (the drawer and
+  // the feed rail) rather than one, and a timer per reason is how the two
+  // eventually disagree about how long the slide takes.
+  const chrome = useChromeLayout({
+    invalidateSize: mapApi.invalidateSize,
+    isMobileViewport,
+    drawerOpen: panelOpen,
+    scrubVisible: replayApi.isReplaying,
+  });
+
+
+  // Which instrument boards the stack is showing. Its own storage key rather
+  // than the panel-positions record, for the same reason the watchlist has one:
+  // "Reset panel layout" is about where things sit, not about which of them a
+  // reader had opened.
+  const [openBoardIds, setOpenBoardIds] = useState(() => loadOpenBoards(
+    typeof localStorage === "undefined" ? null : localStorage
+  ));
+  const onToggleBoard = useCallback((id) => {
+    setOpenBoardIds((prev) => {
+      const next = toggleBoard(prev, id);
+      saveOpenBoards(next, typeof localStorage === "undefined" ? null : localStorage);
+      return next;
+    });
+  }, []);
 
   // --- NASA GIBS satellite imagery ---------------------------------------
   //
@@ -452,16 +489,35 @@ export default function App() {
     }
   }, [layerVisibility, ensureOneShot]);
 
-  // Saved, not just applied. The control drawer exists only in Admin Mode (see
-  // panelOpen above), so a checkbox here is an operator deciding what this
-  // deployment shows rather than a reader adjusting their own view for a
-  // minute -- and a decision like that surviving a reload is the whole reason
-  // the drawer is behind Admin Mode in the first place.
+  // Saved only when an operator is the one deciding.
   //
-  // Both calls, and in this order: the map is imperative and answers now, while
+  // This used to write settings.layerWish unconditionally, which was correct
+  // when the only layer control on the page was the drawer: that exists only in
+  // Admin Mode (see panelOpen above), so a tick there is an operator deciding
+  // what this deployment shows rather than a reader adjusting their own view for
+  // a minute -- and a decision like that surviving a reload is the whole reason
+  // the drawer is behind Admin Mode.
+  //
+  // The top bar's category pills changed that: the same control is now on the
+  // page for every reader. Two things break if their ticks take the same route.
+  // On the public listener the PUT to /api/admin-config is refused outright
+  // (403 -- see useAppSettings.js and frontend/nginx.conf), so every click would
+  // drop the session's sync state to "error" over a write nobody asked for. And
+  // where it did succeed, one reader idly switching on dark vessels would be
+  // republishing that choice to everyone who opens the map afterwards.
+  //
+  // So the deployment-wide write is gated on Admin Mode, and `readOnly` is
+  // checked too rather than being assumed to follow from it: admin mode is a
+  // flag in this browser's own localStorage, so an operator who has been in
+  // Admin Mode on the tunnel and then opens the public URL still has it set.
+  // The other two calls are unchanged, and the session override below is what
+  // makes a reader's tick work at all -- it is the same table a followed link's
+  // layer state lands in, which has always been session-only.
+  //
+  // Order matters and is unchanged: the map is imperative and answers now, while
   // the settings write is debounced on its way to data/admin_config.json. Going
-  // through the settings alone would make every click wait on a React round
-  // trip to reach the map.
+  // through the settings alone would make every click wait on a React round trip
+  // to reach the map.
   const onToggleLayer = useCallback(
     (key, visible) => {
       // Before the calls below, so the document is already in flight while the
@@ -470,7 +526,7 @@ export default function App() {
       // useOsintData.js.
       if (visible) ensureOneShot(key);
       mapApi.setLayerVisible(key, visible);
-      actions.setLayerWish(key, visible);
+      if (adminMode && !readOnly) actions.setLayerWish(key, visible);
       // Review fix: this is the reader's own explicit choice for this key,
       // now -- it wins over whatever a followed link asked for, for the rest
       // of this tab, and it is what a later "Copy link" click should carry
@@ -478,7 +534,7 @@ export default function App() {
       // own note in urlState.js.
       setLayerOverride((prev) => applyLayerOverrideChange(prev, key, visible));
     },
-    [mapApi.setLayerVisible, actions, ensureOneShot]
+    [mapApi.setLayerVisible, actions, ensureOneShot, adminMode, readOnly]
   );
 
   // One record, opened from a row in the country card. Held as resolved HTML
@@ -589,6 +645,25 @@ export default function App() {
     mapApi.setEventFilter(eventFilter);
   }, [eventFilter, mapApi.setEventFilter]);
 
+  // How far back the map is looking, and the only writer of
+  // eventFilter.maxAgeDays.
+  //
+  // Two controls offer this choice -- the sub bar's time pills and the feed
+  // panel's Window select -- and they are two renderings of this one number
+  // rather than two numbers. That is the whole reason it is here: the effect
+  // below used to live in IntelPanel.jsx, which was fine while the panel was
+  // the only control, and would have become the exact "two Window selects
+  // silently disagreeing about how far back the conflict layer looks" failure
+  // that Task 12's review removed once already.
+  //
+  // urlState.js deliberately does not carry maxAgeDays in a link, and its
+  // module doc explains why in terms of this being unconditionally overwritten
+  // on mount. That is still true; the writer has just moved up a level.
+  const [windowHours, setWindowHours] = useState(DEFAULT_WINDOW_HOURS);
+  useEffect(() => {
+    onEventFilterChange({ maxAgeDays: windowMaxAgeDays(windowHours) });
+  }, [windowHours, onEventFilterChange]);
+
   // The vessel and aircraft filter bars (Task 18, LayersSection.jsx). Same
   // shape as eventFilter just above, and for the same reason: the map
   // controller is the only thing that can actually decide which ships/
@@ -628,13 +703,34 @@ export default function App() {
     [mapApi.setInfraFilter]
   );
 
+  // No invalidateSize here any more: the drawer moves the map's left edge by
+  // moving --chrome-left, and useChromeLayout fires the one repaint that
+  // follows -- see its own note on why a timer per caller is how two callers
+  // end up disagreeing about how long the slide takes.
   const togglePanel = useCallback(() => {
-    setPanelOpenPref((prev) => {
-      const next = !prev;
-      setTimeout(() => mapApi.invalidateSize(), 230); // after the CSS transition finishes
-      return next;
-    });
-  }, [mapApi.invalidateSize]);
+    setPanelOpenPref((prev) => !prev);
+  }, []);
+
+  // A watchlist row, opened. Two things a reader can want from a pinned
+  // record -- see it on the map, or read it -- and the row offers both, so this
+  // takes which one was asked for rather than guessing.
+  //
+  // Both routes already exist and are the same ones a map pin uses:
+  // openRecordDetail resolves the record's own detail card (and says "no longer
+  // listed" rather than inventing one if the feed has moved on), and flyTo is
+  // the camera. A pin with no coordinates is legitimate -- a country, an
+  // aggregate -- and its row simply does not offer the locate half.
+  const onOpenWatchedSubject = useCallback(
+    (item, { locate = false } = {}) => {
+      if (!item) return;
+      if (locate) {
+        if (Number.isFinite(item.lat) && Number.isFinite(item.lon)) mapApi.flyTo(item.lat, item.lon, 7);
+        return;
+      }
+      openRecordDetail(item.kind, item.id);
+    },
+    [mapApi.flyTo, openRecordDetail]
+  );
 
   const onLocateNewsItem = useCallback(
     (lat, lon) => mapApi.flyTo(lat, lon, 7),
@@ -731,30 +827,17 @@ export default function App() {
     if (!adminMode && mapApi.borderEdit.active) mapApi.endBorderEdit();
   }, [adminMode, mapApi.borderEdit.active, mapApi.endBorderEdit]);
 
-  // Same reasoning, and it became necessary the moment the timeline went behind
-  // the gate: leaving Admin Mode mid-replay would take the scrubber off screen
-  // while the map stayed frozen on a snapshot from hours ago, with every live
-  // feed still suppressed and nothing left to press to get back. The map goes
-  // live with the control that drives it.
+  // An effect here used to force the map back to live when Admin Mode was
+  // switched off mid-replay. Deleted, with the predicate it called and that
+  // predicate's own test, because its premise no longer holds.
   //
-  // Review fix (Critical 2): guarded on a genuine true-to-false transition
-  // now, not merely "adminMode is currently false" -- see
-  // shouldExitReplayOnAdminModeChange's own note in useReplay.js. Without the
-  // guard, a deep link that seeds useReplay's initial replayAt made
-  // isReplaying true on the very first render while adminMode was (its
-  // default, for the great majority of visitors this share button exists
-  // for) already false, and this effect read that as "Admin Mode was just
-  // switched off mid-replay" on mount and called goLive() -- silently
-  // snapping a freshly-restored replay link straight back to live before the
-  // reader who opened it ever saw the moment it pointed to.
-  const prevAdminModeRef = useRef(adminMode);
-  useEffect(() => {
-    const prevAdminMode = prevAdminModeRef.current;
-    prevAdminModeRef.current = adminMode;
-    if (shouldExitReplayOnAdminModeChange(prevAdminMode, adminMode, replayApi.isReplaying)) {
-      replayApi.goLive();
-    }
-  }, [adminMode, replayApi.isReplaying, replayApi.goLive]);
+  // The premise was that the scrubber was Admin Mode's: leaving the mode took
+  // the only control off screen while the map stayed frozen on a snapshot from
+  // hours ago, with every live feed still suppressed and nothing left to press
+  // to get back. The scrub strip is now the reader's -- it renders whenever the
+  // map is not live, in or out of Admin Mode -- so leaving the mode no longer
+  // strands anybody, and snapping their view back to live would be the map
+  // discarding a position they deliberately chose.
 
   // --- Task 35: deep-linkable views --------------------------------------
   //
@@ -887,10 +970,17 @@ export default function App() {
   const [exportOpen, setExportOpen] = useState(false);
 
   return (
-    <>
+    // The one context in this codebase, hoisted here from ControlPanel.jsx now
+    // that layer rows appear on two surfaces rather than one -- see
+    // HealthContext.js's own note on why a provider on the drawer alone would
+    // have left the pills' freshness tooltips silently empty.
+    <HealthProvider value={health}>
       <LoadingScreen sources={dataApi.bootSources} />
 
-      <MapView containerRef={mapContainerRef} panelOpen={panelOpen} />
+      {/* No panelOpen prop any more: the map's edges are the chrome insets, and
+          those are custom properties on <html> rather than a class on this
+          element -- see hooks/chromeLayout.js. */}
+      <MapView containerRef={mapContainerRef} />
 
       {/* Task 35: says so, once, if the link this page loaded with could not
           be read -- see decodeViewState's own contract for why that needs a
@@ -902,15 +992,62 @@ export default function App() {
         onDismiss={() => setUrlNoticeDismissed(true)}
       />
 
-      <TitleBar
+      {/* The two fixed bars that replaced TitleBar. The split is facts above,
+          actions below -- see TopBar.jsx's own note. */}
+      <TopBar
         theme={theme}
         onToggleTheme={toggleTheme}
-        adminMode={adminMode}
-        onToggleAdminMode={toggleAdminMode}
+        counts={mapApi.counts}
+        isReplaying={replayApi.isReplaying}
+        replayAt={replayApi.replayAt}
+      >
+        {/* The layer controls, for every reader rather than only for Admin
+            Mode. See CategoryPills.jsx on what had to be settled first. */}
+        <CategoryPills
+          layerVisibility={layerVisibility}
+          layerWish={mapApi.layerState.wish}
+          counts={mapApi.counts}
+          onToggleLayer={onToggleLayer}
+          adminMode={adminMode}
+        />
+      </TopBar>
+
+      <SubBar
         onLocatePlace={onLocatePlace}
         getShareUrl={buildShareUrl}
-        readOnly={readOnly}
         onOpenExport={() => setExportOpen(true)}
+        adminMode={adminMode}
+        onToggleAdminMode={toggleAdminMode}
+        readOnly={readOnly}
+        feedSlot={
+          <button
+            type="button"
+            className={`ghost-btn feed-toggle${chrome.feedOpen ? " active" : ""}`}
+            aria-pressed={chrome.feedOpen}
+            aria-controls="intelPanel"
+            title={chrome.feedOpen ? "Hide the intel feed" : "Show the intel feed"}
+            onClick={chrome.toggleFeed}
+          >
+            ☰ Feed
+          </button>
+        }
+        windowSlot={<TimePills windowHours={windowHours} onChange={setWindowHours} />}
+        replaySlot={
+          <button
+            type="button"
+            className={`ghost-btn replay-btn${replayApi.isPlaying ? " playing" : ""}`}
+            aria-pressed={replayApi.isPlaying}
+            title={
+              replayApi.isPlaying
+                ? "Pause the replay"
+                : "Replay the recorded window. The map stops being live until you go back."
+            }
+            onClick={replayApi.togglePlay}
+          >
+            {replayApi.isPlaying ? "❚❚ Pause" : "▶ Play"}
+          </button>
+        }
+        boardsSlot={<BoardsMenu open={openBoardIds} onToggleBoard={onToggleBoard} />}
       />
 
       {/* The reader's way in. Picking a theatre is not an operator's adjustment
@@ -932,10 +1069,12 @@ export default function App() {
           Clicking an entry reuses the same selection path a marker click
           already uses (mapApi.selectAircraftByIcao -> createMapController's
           selectAircraft), so the popup/highlight/trail behave identically. */}
+      {/* No panelOpen prop: the strip clears the left rail through
+          --chrome-left, the same property the map itself is inset by, so it
+          cannot disagree with the map about where the rail ends. */}
       <SquawkAlertStrip
         aircraft={mapApi.emergencySquawks}
         onSelect={mapApi.selectAircraftByIcao}
-        panelOpen={panelOpen}
       />
 
       {/* Task 42: the toast half of "tell me when X happens here" -- see
@@ -980,6 +1119,8 @@ export default function App() {
           escalation={dataApi.escalation}
           eventFilter={eventFilter}
           onEventFilterChange={onEventFilterChange}
+          windowHours={windowHours}
+          onWindowHoursChange={setWindowHours}
           mapBounds={mapApi.mapBounds}
           regions={dataApi.regions}
           currentRegionKey={dataApi.currentRegionKey}
@@ -988,55 +1129,52 @@ export default function App() {
           onLocate={onLocateNewsItem}
           onOpenRecord={openRecordDetail}
           isMobile={isMobileViewport}
+          open={chrome.feedOpen}
+          watchlist={watchlist}
+          onOpenSubject={onOpenWatchedSubject}
+          sanctionsTab={
+            <SanctionsBoard
+              recordsFor={mapApi.recordsFor}
+              health={health}
+              onLocate={onLocateNewsItem}
+              isMobile={isMobileViewport}
+              asTab
+            />
+          }
         />
       )}
 
-      {/* Task 29: /api/airfield-activity has existed since before this plan
-          and nothing in the frontend called it -- see AirfieldActivityPanel.jsx's
-          own module note. Self-contained (fetches its own two documents rather
-          than riding useOsintData's poller table), so mounting it is this one
-          line. */}
-      <AirfieldActivityPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+      {/* Tasks 29, 36, 37 and 38: four self-contained instrument boards, each
+          reading an endpoint nothing else in the frontend calls
+          (/api/airfield-activity, /api/chokepoints, /api/infra-risk,
+          /api/cable-outage-risk) and each owning its own fetch, cadence and
+          LOADING / ERROR / MISSING states -- see their own module notes.
 
-      {/* Task 36: GET /api/chokepoints has a document (backend/refine/
-          lane_density.py's chokepoint accounting) and nothing in the
-          frontend called it until this panel -- see ChokepointPanel.jsx's
-          own module note. Self-contained (its own fetch/interval, like
-          AirfieldActivityPanel just above), so mounting it is this one
-          line too. */}
-      <ChokepointPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+          They used to be four separately-mounted cards pinned at 52px
+          intervals up the bottom-left corner, which worked while each was
+          collapsed to a header bar and stopped working the moment two were
+          open at once. The stack owns the geometry now, and which of them are
+          showing is the reader's choice through the sub bar's Boards menu.
+          Nothing about the panels themselves changed. */}
+      <BoardStack open={openBoardIds} onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
 
-      {/* Task 37: GET /api/infra-risk has a document (backend/refine/
-          infra_risk.py -- which dams, power plants, cable landings,
-          airfields and ports have the most conflict events inside their own
-          uncertainty radius) and nothing in the frontend called it until
-          this panel -- see InfraRiskPanel.jsx's own module note. Stacked
-          above ChokepointPanel in the same left-hand corner (see
-          style.css's #infraRiskPanel rule); self-contained, so mounting it
-          is this one line too. */}
-      <InfraRiskPanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+      {/* What the marks mean. Collapsed by default and remembered -- see
+          Legend.jsx on why reference material folds away rather than costing
+          the map's corner permanently. */}
+      <Legend />
 
-      {/* Task 38: GET /api/cable-outage-risk has a document (backend/refine/
-          cable_outage.py -- whether a country's IODA outage score spikes at
-          the same time as a fused conflict event lands near one of its
-          submarine-cable landings) and nothing in the frontend called it
-          until this panel -- see CableOutagePanel.jsx's own module note.
-          Stacked above InfraRiskPanel in the same left-hand corner (see
-          style.css's #cableOutagePanel rule); self-contained, so mounting
-          it is this one line too. */}
-      <CableOutagePanel onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
-
-      {/* Task 41: every OFAC- and OpenSanctions-matched vessel and aircraft
-          this map's live AIS/ADS-B feed currently carries, aggregated into
-          one scannable board -- see SanctionsBoard.jsx's own module note.
-          Stacked above CableOutagePanel in the same left-hand corner; unlike
-          the four panels above it, this one reads live entity records via
-          mapApi.recordsFor (the same accessor AdminPanel's DataEditor uses)
-          rather than fetching its own document, and needs `health` to tell
-          "checked and found nothing" apart from "the reference lists or the
-          entity feed have not loaded" -- see that component's own note on
-          why an empty board is not always the same empty board. */}
-      <SanctionsBoard recordsFor={mapApi.recordsFor} health={health} onLocate={onLocateNewsItem} isMobile={isMobileViewport} />
+      {/* Where in the past the map is, for every reader rather than only for
+          Admin Mode. Renders nothing while live -- see ScrubStrip.jsx on what
+          had to ship alongside the control before it could be handed over. */}
+      <ScrubStrip
+        isReplaying={replayApi.isReplaying}
+        isPlaying={replayApi.isPlaying}
+        replayAt={replayApi.replayAt}
+        bounds={replayApi.bounds}
+        onScrub={replayApi.scrubTo}
+        onTogglePlay={replayApi.togglePlay}
+        onGoLive={replayApi.goLive}
+      />
 
       {/* Opened by picking a theatre in the RegionBar above, which is a public
           control -- so gating this behind Admin Mode meant a reader could make
@@ -1128,7 +1266,17 @@ export default function App() {
         />
       )}
 
-      <Attribution />
+      {/* The bottom status strip. Attribution is folded into it as a cell
+          rather than keeping its own band across the map -- see Hud.jsx. */}
+      <Hud
+        counts={mapApi.counts}
+        layerVisibility={layerVisibility}
+        health={health}
+        escalation={dataApi.escalation}
+        recordsFor={mapApi.recordsFor}
+        isReplaying={replayApi.isReplaying}
+        replayAt={replayApi.replayAt}
+      />
 
       <CountryInfoCard
         country={mapApi.selectedCountry}
@@ -1239,6 +1387,6 @@ export default function App() {
           selectedWater={mapApi.selectedWater}
         />
       )}
-    </>
+    </HealthProvider>
   );
 }

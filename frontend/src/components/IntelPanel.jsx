@@ -53,36 +53,51 @@ import {
 } from "../map/severity";
 import { OFFICIALS_KIND_LABEL } from "../map/decorators";
 import { safeUrl, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
-import { useDraggablePanel, migratePanelPosition } from "../hooks/useDraggablePanel";
+import Watchlist from "./feed/Watchlist";
+import FilterChipRow from "./feed/FilterChipRow";
+import { selectActivityItems, filterByChip, activityEmptyMessage } from "./feed/feedItemLogic";
 import {
   SCOPE_OPTIONS, SCOPE_WORLD, SCOPE_VIEWPORT, SCOPE_COUNTRY, SCOPE_REGION, SCOPE_WATER,
-  WINDOW_OPTIONS, DEFAULT_WINDOW_HOURS, GROUP_BY_OPTIONS, UNKNOWN_GROUP,
-  makeIntelScope, groupItems, intelPanelIsEmpty, windowMaxAgeDays,
+  WINDOW_OPTIONS, DEFAULT_WINDOW_HOURS, windowOptionValue, windowHoursFromValue,
+  GROUP_BY_OPTIONS, UNKNOWN_GROUP,
+  makeIntelScope, groupItems, intelPanelIsEmpty,
   selectEscalationZones, selectEventItems, selectNewsItems, selectOfficialsItems,
   escalationMiniBarTitle, eventReliabilityTooltip, intelRecordRef,
   escalationEmptyMessage, eventsEmptyMessage, newsEmptyMessage, officialsEmptyMessage,
 } from "./intelPanelLogic";
 
-// Run once, at module scope rather than inside the component -- see
-// migratePanelPosition's own docstring for why an effect would be one render
-// too late to beat useDraggablePanel's own lazy-read of storage below.
-migratePanelPosition("intelPanel", ["notableEvents", "newsBroadcast"]);
+// The migratePanelPosition call that used to sit here is gone with the drag:
+// this panel is a fixed rail now and has no stored position to migrate. The
+// records themselves are left in storage rather than deleted -- see
+// useDraggablePanel.js, which still clears them on an explicit layout reset.
 
 const SOURCE_BADGE = { acled: "ACLED", ucdp: "UCDP", gdelt: "GDELT" };
 
 const TABS = [
   { key: "escalation", label: "Escalation" },
+  // The stream, as against Events' ranking -- see feedItemLogic.js on why both
+  // exist. Placed second because "what has just happened" is the question a
+  // reader arrives with; "what matters most" is the one they stay for.
+  { key: "activity", label: "Activity" },
   { key: "events", label: "Events" },
   { key: "news", label: "News" },
   { key: "officials", label: "Officials" },
+  // Not a feed of its own -- SanctionsBoard renders its own body here, keeping
+  // its own polling, sort and every caveat string. It is a tab rather than a
+  // board because what it lists is records, which is what this rail is for.
+  { key: "sanctions", label: "Sanctions" },
 ];
+
+/** The two tabs the chip row can filter. The other three are either already
+ *  grouped (Escalation is per region) or carry no event type to filter on. */
+const CHIPPABLE_TABS = new Set(["activity", "events"]);
 
 // Group by is a per-record axis (country/event-type/actor/outlet), and an
 // escalation zone is a region-level aggregate with none of those fields --
 // it is already grouped, by region. Offering the control there would either
 // no-op silently or need a fifth, zone-shaped set of axes for one tab; doing
 // neither is the honest answer for a first pass.
-const GROUPABLE_TABS = new Set(["events", "news", "officials"]);
+const GROUPABLE_TABS = new Set(["activity", "events", "news", "officials"]);
 
 function groupLabel(key, groupBy, tabKind) {
   if (key === UNKNOWN_GROUP) return "Unknown";
@@ -353,6 +368,22 @@ function OfficialsRow({ item, onLocate, onOpenRecord }) {
 // near-identical tab bodies would be exactly the kind of drift this project's
 // "one definition" rule (see map/severity.js's own note on SEVERITY_BANDS)
 // exists to prevent.
+/**
+ * One row of the merged stream, drawn in the idiom of whichever feed it came
+ * from.
+ *
+ * A dispatcher rather than a fourth row layout: a conflict record still shows
+ * its severity and reliability chips, a headline still links out to its outlet,
+ * a statement still shows its kind. Flattening the three into one generic row
+ * would cost exactly the provenance this map exists to show -- and the three
+ * row components already say it correctly.
+ */
+function ActivityRow({ item, onLocate, onOpenRecord }) {
+  if (item.feed === "news") return <NewsRow item={item} onLocate={onLocate} onOpenRecord={onOpenRecord} />;
+  if (item.feed === "officials") return <OfficialsRow item={item} onLocate={onLocate} onOpenRecord={onOpenRecord} />;
+  return <EventRow event={item} onLocate={onLocate} onOpenRecord={onOpenRecord} />;
+}
+
 function TabList({ items, groupBy, tabKind, Row, rowKey, onLocate, onOpenRecord }) {
   const groups = GROUPABLE_TABS.has(tabKind) ? groupItems(items, groupBy, tabKind) : null;
   if (!groups) {
@@ -376,19 +407,22 @@ export default function IntelPanel({
   tabs,
   eventsRaw, gdeltRaw, officialsRaw, escalation,
   eventFilter = DEFAULT_EVENT_FILTER, onEventFilterChange,
+  // Owned by App.jsx and shared with the sub bar's time pills -- see the note
+  // where this panel's own `windowHours` state used to be.
+  windowHours = DEFAULT_WINDOW_HOURS, onWindowHoursChange,
   mapBounds, regions, currentRegionKey,
   countryScope, water, onLocate, onOpenRecord, isMobile,
+  open = true, watchlist, onOpenSubject, sanctionsTab,
 }) {
-  // Expanded by default on desktop -- this is the panel that answers "what
-  // should I look at", so hiding it defeats the point; same reasoning
-  // NotableEventsPanel gave. Collapsed on mobile, where it would otherwise
-  // cover most of the map.
-  const [collapsed, setCollapsed] = useState(() => !!isMobile);
-  const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
-  const { panelRef, style, handleProps } = useDraggablePanel("intelPanel", {
-    onClick: toggleCollapsed,
-    enabled: !isMobile,
-  });
+  // No collapse and no drag any more.
+  //
+  // This was a floating card that a reader placed and folded away; it is now a
+  // fixed rail the map is inset for, opened and closed from the sub bar's ☰ FEED
+  // button. Both of the old affordances have an answer in the new arrangement:
+  // "get it out of the way" is the toggle, and "put it somewhere else" is moot
+  // for a rail with one place to be. `open` is the toggle's state, held in
+  // useChromeLayout beside the inset it drives, so the panel and the map cannot
+  // disagree about whether there is a rail.
 
   // Which tabs this deployment carries, in this panel's own order. An absent
   // prop means all of them, so nothing that renders this panel without an
@@ -414,22 +448,24 @@ export default function IntelPanel({
     if (!shownTabs.some((t) => t.key === activeTab)) setActiveTab(shownTabs[0].key);
   }, [shownTabs, activeTab]);
   const [scopeKind, setScopeKind] = useState(SCOPE_WORLD);
-  const [windowHours, setWindowHours] = useState(DEFAULT_WINDOW_HOURS);
   const [groupBy, setGroupBy] = useState("none");
+  const [chip, setChip] = useState("all");
 
-  // This is the one Window control now (Task 12 review, Important 3): it
-  // used to sit next to a second, independent Window select in ControlPanel
-  // that set `eventFilter.maxAgeDays` directly, and the two could silently
-  // disagree about how far back the Conflict & Violence layer should look.
-  // Pushing this control's own value into that same field -- rather than
-  // keeping a separate day-granular re-check inside selectEventItems, which
-  // is what this replaced -- makes ControlPanel's old select and this one
-  // structurally incapable of disagreeing, because there is only one of them
-  // left. Runs on mount too, so `eventFilter.maxAgeDays` starts in sync with
-  // this control's own default rather than waiting for the first change.
-  useEffect(() => {
-    onEventFilterChange?.({ maxAgeDays: windowMaxAgeDays(windowHours) });
-  }, [windowHours, onEventFilterChange]);
+  // `windowHours` is no longer this panel's state, and the effect that pushed
+  // it into eventFilter.maxAgeDays is no longer here.
+  //
+  // It moved to App.jsx, unchanged in what it does, because the same choice is
+  // now offered twice: here as a select, and in the sub bar as a row of pills.
+  // Two controls each owning their own copy of the number is precisely the
+  // arrangement Task 12's review (Important 3) removed when ControlPanel had a
+  // second Window select -- two controls that could silently disagree about how
+  // far back the Conflict & Violence layer looks. One value, held above both,
+  // keeps that fixed: these are two views of one number, not two numbers.
+  //
+  // The single push into eventFilter lives beside it in App.jsx, so there is
+  // still exactly one writer of maxAgeDays -- which is what urlState.js's own
+  // module doc depends on when it explains why that field is not carried in a
+  // link.
 
   // Clicking a country is a request to read this whole panel for that
   // country -- opens it (mattering most on mobile, where it starts
@@ -497,10 +533,27 @@ export default function IntelPanel({
     [officialsRaw, scope, windowHours]
   );
 
+  // The merged stream. Built from the three lists above rather than from the
+  // raw feeds, so scope, window and every filter have been applied exactly once
+  // and the stream cannot disagree with the tab a record also appears in.
+  const activityStream = useMemo(
+    () => selectActivityItems({ events: eventItems, news: newsItems, officials: officialsItems }),
+    [eventItems, newsItems, officialsItems]
+  );
+  const activityItems = useMemo(
+    () => filterByChip(activityStream, chip),
+    [activityStream, chip]
+  );
+  const chippedEventItems = useMemo(
+    () => filterByChip(eventItems, chip),
+    [eventItems, chip]
+  );
+
   const activeItems = activeTab === "escalation" ? escalationZones
-    : activeTab === "events" ? eventItems
-      : activeTab === "news" ? newsItems
-        : officialsItems;
+    : activeTab === "activity" ? activityItems
+      : activeTab === "events" ? chippedEventItems
+        : activeTab === "news" ? newsItems
+          : officialsItems;
 
   // Ticks the "updated Ns ago" label independently of data actually
   // changing, so the panel visibly feels alive between polls -- same
@@ -519,14 +572,30 @@ export default function IntelPanel({
   const updatedSec = Math.max(0, Math.floor((Date.now() - lastUpdateTs) / 1000));
   const updatedText = updatedSec < 5 ? "updated just now" : `updated ${updatedSec}s ago`;
 
-  // Nothing worth showing anywhere -- render nothing at all rather than an
-  // empty widget claiming to be a threat board. See intelPanelIsEmpty's own
-  // docstring: a deliberate scope is the one case this never fires for,
-  // because there "nothing here" is itself the answer to a direct question.
-  if (intelPanelIsEmpty(
-    { escalation: escalationZones.length, events: eventItems.length, news: newsItems.length, officials: officialsItems.length },
+  // This panel used to return null when nothing anywhere was worth showing --
+  // "render nothing rather than an empty widget claiming to be a threat board".
+  // That rule was right for a floating card, which could simply not be there.
+  //
+  // It cannot survive the panel becoming a fixed rail the map is inset for: a
+  // 332px column that renders nothing leaves a 332px hole with the map shifted
+  // off it, which is a worse lie than an honest empty tab. So the discipline
+  // moves down a level rather than being dropped -- the rail always draws its
+  // own chrome when open, and each tab body says, in its own words, whether it
+  // looked and found nothing (escalationEmptyMessage and its four siblings,
+  // which already existed for exactly this and already distinguish "nothing
+  // qualifies" from "nothing here"). intelPanelIsEmpty is still what decides
+  // whether the *header* claims to be reporting anything.
+  const nothingAnywhere = intelPanelIsEmpty(
+    {
+      escalation: escalationZones.length,
+      events: eventItems.length,
+      news: newsItems.length,
+      officials: officialsItems.length,
+    },
     scope.deliberate
-  )) return null;
+  );
+
+  if (!open) return null;
 
   const scopeAvailable = {
     [SCOPE_WORLD]: true,
@@ -537,38 +606,31 @@ export default function IntelPanel({
   };
 
   return (
-    <aside id="intelPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
-      <div
-        {...handleProps}
-        className={`notable-header ${handleProps.className || ""}`}
-        role="button"
-        tabIndex={0}
-        aria-expanded={!collapsed}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            toggleCollapsed();
-          }
-        }}
-        onClick={isMobile ? toggleCollapsed : undefined}
-      >
+    <aside id="intelPanel" className="feed-rail" aria-label="Intel feed">
+      <div className="notable-header feed-head">
         <span className="notable-pulse" />
         <span className="notable-title">INTEL</span>
         {scope.deliberate && (
           <span className="notable-scope" title={scope.label}>{scope.label}</span>
         )}
-        <span className="news-updated">{updatedText}</span>
-        <span className="notable-caret" aria-hidden="true">&#9662;</span>
+        {/* Only claims freshness when there is something to be fresh about. A
+            rail that says "updated 3s ago" over five empty tabs is reporting on
+            its own timer rather than on the world. */}
+        {!nothingAnywhere && <span className="news-updated">{updatedText}</span>}
       </div>
 
-      {!collapsed && (
+      <Watchlist items={watchlist?.items} onRemove={watchlist?.remove} onOpen={onOpenSubject} />
+
+      {(
         <>
           <div className="intel-tabs" role="tablist">
             {shownTabs.map((t) => {
               const count = t.key === "escalation" ? escalationZones.length
-                : t.key === "events" ? eventItems.length
-                  : t.key === "news" ? newsItems.length
-                    : officialsItems.length;
+                : t.key === "activity" ? activityItems.length
+                  : t.key === "events" ? chippedEventItems.length
+                    : t.key === "news" ? newsItems.length
+                      : t.key === "officials" ? officialsItems.length
+                        : null;
               return (
                 <button
                   key={t.key}
@@ -578,11 +640,17 @@ export default function IntelPanel({
                   className={`intel-tab${activeTab === t.key ? " active" : ""}`}
                   onClick={() => setActiveTab(t.key)}
                 >
-                  {t.label} <span className="intel-tab-count">{count}</span>
+                  {/* A tab whose count this rail does not own says nothing
+                      rather than showing a zero it did not compute. */}
+                  {t.label} {count != null && <span className="intel-tab-count">{count}</span>}
                 </button>
               );
             })}
           </div>
+
+          {CHIPPABLE_TABS.has(activeTab) && (
+            <FilterChipRow value={chip} onChange={setChip} />
+          )}
 
           <div className="intel-controls">
             <label>
@@ -607,13 +675,16 @@ export default function IntelPanel({
                 non-Events tab. */}
             <label>
               Window
+              {/* Exchanged as the pill string rather than the hour count: one
+                  option is `null` ("no cap"), which a <select> cannot carry --
+                  see windowOptionValue's own note. */}
               <select
-                value={windowHours}
-                onChange={(e) => setWindowHours(Number(e.target.value))}
+                value={windowOptionValue(windowHours)}
+                onChange={(e) => onWindowHoursChange?.(windowHoursFromValue(e.target.value))}
                 disabled={activeTab === "escalation"}
               >
                 {WINDOW_OPTIONS.map((opt) => (
-                  <option key={opt.hours} value={opt.hours}>{opt.label}</option>
+                  <option key={opt.pill} value={opt.pill}>{opt.label}</option>
                 ))}
               </select>
             </label>
@@ -681,14 +752,34 @@ export default function IntelPanel({
               )
             )}
 
-            {activeTab === "events" && (
-              eventItems.length ? (
+            {activeTab === "activity" && (
+              activityItems.length ? (
                 <TabList
-                  items={eventItems} groupBy={groupBy} tabKind="events" Row={EventRow}
+                  items={activityItems} groupBy={groupBy} tabKind="events" Row={ActivityRow}
+                  rowKey={(i) => `${i.feed}:${i.id || i.source_url || i.event_id || i.published_at}`}
+                  onLocate={onLocate} onOpenRecord={onOpenRecord}
+                />
+              ) : (
+                <div className="notable-empty">
+                  {chip === "all"
+                    ? activityEmptyMessage(scope)
+                    : `Nothing in the ${chip} category in the current window. Clear the filter to see the rest.`}
+                </div>
+              )
+            )}
+
+            {activeTab === "events" && (
+              chippedEventItems.length ? (
+                <TabList
+                  items={chippedEventItems} groupBy={groupBy} tabKind="events" Row={EventRow}
                   rowKey={(e) => e.id} onLocate={onLocate} onOpenRecord={onOpenRecord}
                 />
               ) : (
-                <div className="notable-empty">{eventsEmptyMessage(scope)}</div>
+                <div className="notable-empty">
+                  {chip === "all"
+                    ? eventsEmptyMessage(scope)
+                    : `Nothing in the ${chip} category clears the significance bar right now. Clear the filter to see the rest.`}
+                </div>
               )
             )}
 
@@ -713,6 +804,13 @@ export default function IntelPanel({
                 <div className="notable-empty">{officialsEmptyMessage(scope)}</div>
               )
             )}
+
+            {/* The board's own body, unchanged -- see its `asTab` prop. It
+                brings its own polling and its own empty/loading states, and it
+                is deliberately not scoped or windowed by this rail's controls:
+                what it covers is the whole live AIS/ADS-B feed, which its own
+                caption says in as many words. */}
+            {activeTab === "sanctions" && sanctionsTab}
           </div>
         </>
       )}

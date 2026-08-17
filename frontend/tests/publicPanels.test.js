@@ -34,7 +34,8 @@ const { defaultSettings, mergeSettings, COUNTRY_ONLY_LAYERS, INTEL_TAB_KEYS } =
   await import("../src/settings/defaults.js");
 
 const ALL_ON = {
-  escalation: true, events: true, news: true, officials: true, briefingCard: true,
+  escalation: true, activity: true, events: true, news: true, officials: true, sanctions: true,
+  briefingCard: true,
 };
 
 test("the reader panels", async (t) => {
@@ -66,6 +67,24 @@ test("the reader panels", async (t) => {
     const stored = defaultSettings();
     delete stored.publicPanels;
     assert.deepEqual(mergeSettings(stored).publicPanels, ALL_ON);
+  });
+
+  await t.test("a tab added after a deployment's config was written arrives on", () => {
+    // The same rule one key at a time, and the case that actually happens: a
+    // deployment saved its publicPanels before the Activity tab existed, so its
+    // stored object has every other key and not that one. mergeSettings is
+    // default-permissive (`stored[key] !== false`), which is what makes an
+    // upgrade add the tab rather than silently ship it hidden -- an operator
+    // has to have said false, not merely never have been asked.
+    const stored = defaultSettings();
+    delete stored.publicPanels.activity;
+    assert.equal(mergeSettings(stored).publicPanels.activity, true);
+
+    // ...and an operator who *did* say no keeps their answer through the
+    // upgrade of any other key.
+    const hidden = defaultSettings();
+    hidden.publicPanels.activity = false;
+    assert.equal(mergeSettings(hidden).publicPanels.activity, false);
   });
 
   await t.test("only an explicit false hides a panel", () => {

@@ -2,6 +2,11 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./style.css";
+// After style.css, not @import-ed from the top of it. chrome.css restyles
+// surfaces style.css already has same-specificity rules for (#map, #clock, the
+// Leaflet popup shell), and an @import would place it *first* in the cascade,
+// where every one of those rules would lose to the thing it is replacing.
+import "./chrome.css";
 
 // A render crash used to leave a silent blank page with nothing on screen
 // to tell you what happened -- this surfaces the error/stack instead so a

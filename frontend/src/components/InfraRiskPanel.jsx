@@ -61,14 +61,17 @@ function InfraRiskRow({ site, onLocate }) {
 // REFRESH_INTERVAL_MS comment gives.
 const REFRESH_INTERVAL_MS = 20 * 60000;
 
-export default function InfraRiskPanel({ onLocate, isMobile }) {
+export default function InfraRiskPanel({ onLocate, isMobile, docked = false }) {
   // Starts collapsed -- a niche instrument a reader opts into, the same
   // footing ChokepointPanel and AirfieldActivityPanel both take.
   const [collapsed, setCollapsed] = useState(true);
   const toggleCollapsed = useCallback(() => setCollapsed((c) => !c), []);
+  // `docked` is the board stack: a card inside a flex column has nowhere to
+  // drag to, and a stored position from when it floated would fight the column
+  // for where it sits. Everything else about this panel is unchanged.
   const { panelRef, style, handleProps } = useDraggablePanel("infraRiskPanel", {
     onClick: toggleCollapsed,
-    enabled: !isMobile,
+    enabled: !isMobile && !docked,
   });
 
   const [sortKey, setSortKey] = useState("event_count");
@@ -122,7 +125,7 @@ export default function InfraRiskPanel({ onLocate, isMobile }) {
   // on purpose (refinePanelStatus.js is the shared source for both).
   if (status === REFINE_PANEL_STATUS.ERROR || status === REFINE_PANEL_STATUS.MISSING) {
     return (
-      <aside id="infraRiskPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+      <aside id="infraRiskPanel" ref={panelRef} className={`${collapsed ? "collapsed" : ""}${docked ? " docked" : ""}`} style={style}>
         <div
           {...handleProps}
           className={`notable-header ${handleProps.className || ""}`}
@@ -150,7 +153,7 @@ export default function InfraRiskPanel({ onLocate, isMobile }) {
   }
 
   return (
-    <aside id="infraRiskPanel" ref={panelRef} className={collapsed ? "collapsed" : ""} style={style}>
+    <aside id="infraRiskPanel" ref={panelRef} className={`${collapsed ? "collapsed" : ""}${docked ? " docked" : ""}`} style={style}>
       <div
         {...handleProps}
         className={`notable-header ${handleProps.className || ""}`}

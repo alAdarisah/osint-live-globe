@@ -116,7 +116,7 @@ function AlertRow({ entry, nowMs, onSelect, onDismiss }) {
   );
 }
 
-export default function SquawkAlertStrip({ aircraft, onSelect, panelOpen }) {
+export default function SquawkAlertStrip({ aircraft, onSelect }) {
   const [tracked, setTracked] = useState({});
   const [dismissed, setDismissed] = useState({});
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -189,17 +189,17 @@ export default function SquawkAlertStrip({ aircraft, onSelect, panelOpen }) {
           that is always present, empty or not, would train a reader to stop
           looking at it. */}
       {alerts.length > 0 && (
-        // Offsets clear of #controlPanel (Admin Mode's own drawer, open by
-        // default on desktop, 320px wide, z-index 1000 -- above this strip's
-        // own 970) the same way #map itself does: see #map.panel-open in
-        // style.css, whose comment explains why the fixed 320px shift holds
-        // regardless of the drawer's own content. Without this the strip's
-        // header, caveat and leftmost cards render underneath the drawer for
-        // exactly the reader -- an operator in Admin Mode -- most likely to
-        // have it open.
+        // Offsets clear of whatever currently owns the left rail -- Admin
+        // Mode's drawer, or the intel feed -- the same way #map itself does,
+        // by reading --chrome-left. It used to take a `panelOpen` prop and
+        // mirror it onto a `.panel-open` class carrying a hard-coded 320px;
+        // that was a second copy of the drawer's width, and the strip and the
+        // map now read the one property instead so they cannot disagree about
+        // where the rail ends. Without the offset the strip's header, caveat
+        // and leftmost cards render underneath the rail for exactly the reader
+        // most likely to have it open.
         <div
           id="squawkAlertStrip"
-          className={panelOpen ? "panel-open" : ""}
           role="region"
           aria-label="Emergency squawk alerts"
         >
