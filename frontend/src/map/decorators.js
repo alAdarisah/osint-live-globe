@@ -1965,6 +1965,28 @@ function osmTwinBlock(twin, { what }) {
       }${osm.operator ? ` Operator, per OSM: ${esc(osm.operator)}.` : ""}</p>`;
 }
 
+/**
+ * The OurAirports or NGA World Port Index record a curated site absorbed.
+ *
+ * A sibling of osmTwinBlock above rather than a parameter on it, because the sentence
+ * is a different claim about a different kind of source. OSM is crowd-sourced and the
+ * interesting fact is that two independent efforts agree; OurAirports and the NGA
+ * register are catalogues, and the interesting fact is the identifier they carry --
+ * an ICAO code is what a reader takes to a flight tracker or a NOTAM, so it is the
+ * one thing the absorbed record must not lose by being merged.
+ */
+function registryTwinBlock(twin, { register, what }) {
+  if (!twin?.record) return "";
+  const record = twin.record;
+  const metres = Math.round((twin.distanceKm || 0) * 1000);
+  const ident = record.icao || record.iata || (/^[A-Z]{4}$/.test(String(record.id)) ? record.id : "");
+  return `
+    <p class="meta"><b>${esc(register)} lists this ${esc(what)}</b> as &ldquo;${esc(record.name)}&rdquo;${
+      ident ? ` (<b>${esc(ident)}</b>)` : ""
+    }, ${metres < 50 ? "at the same point" : `${esc(metres)} m from this one`}. One pin, both
+      records: the catalogue entry is not drawn separately.</p>`;
+}
+
 export function decorateOsmInfra(d, { offset, layerKey = "osmInfra" } = {}) {
   const style = osmInfraStyle(d.kind, layerKey);
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)} &middot; OpenStreetMap`;
@@ -4370,7 +4392,9 @@ export const MILITARY_SUBTYPE_STYLE = {
   radar: { svg: SVG.radarBase, color: "#6fe3ff", label: "Radar / early-warning site" },
 };
 
-export function decorateInfra(d, { hot, nearbyEvents, offset, twin } = {}) {
+export function decorateInfra(d, {
+  hot, nearbyEvents, offset, twin, airportTwin, portTwin,
+} = {}) {
   const style = themedStyle(infraBaseStyle(d), "infra");
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)}${hot ? " &middot; HOT ZONE" : ""}`;
   const events = nearbyEvents || [];
@@ -4385,6 +4409,8 @@ export function decorateInfra(d, { hot, nearbyEvents, offset, twin } = {}) {
     ${d.note ? `<p>${esc(d.note)}</p>` : ""}
     ${activitySection}
     ${osmTwinBlock(twin, { what: style.label.toLowerCase() })}
+    ${registryTwinBlock(airportTwin, { register: "OurAirports", what: "airfield" })}
+    ${registryTwinBlock(portTwin, { register: "The NGA World Port Index", what: "harbour" })}
     <p class="meta">Source: publicly documented location (open-source reference), approximate.</p>`;
   const cls = `infra-marker${hot ? " infra-hot" : ""}`;
   return {

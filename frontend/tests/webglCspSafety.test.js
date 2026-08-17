@@ -17,10 +17,10 @@
 // lives behind `if (!this._app) return`. Nothing in the suite could see any of it,
 // because the suite has no browser and therefore no CSP.
 //
-// So the rule this enforces is static and narrow: the shim is a dependency, it is
-// installed into Pixi before anything can construct a renderer, and the CSP it
-// exists for still says what it said. Any of the three drifting brings the whole
-// symptom back.
+// So the rule this enforces is static and narrow: the shim is a dependency, it has
+// finished loading before anything can construct a renderer, and the CSP it exists
+// for still says what it said. Any of the three drifting brings the whole symptom
+// back.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -36,7 +36,7 @@ const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)),
  *
  * Required rather than tidy: this module discusses `new PIXI.Application` in prose
  * twice, both times *above* the constructor, so an ordering check run against the
- * raw text finds a comment and concludes the install happens too late.
+ * raw text finds a comment and concludes the shim arrives too late.
  */
 function stripComments(code) {
   return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
@@ -46,16 +46,26 @@ const LAYER = stripComments(read("../src/map/webglLayer.js"));
 const PACKAGE = JSON.parse(read("../package.json"));
 const HEADERS = read("../security-headers.conf");
 
-test("the CSP shim is installed into Pixi before any renderer is constructed", () => {
-  const install = LAYER.indexOf(".install(");
-  assert.ok(install > 0, "@pixi/unsafe-eval is never installed");
+test("the CSP shim is loaded before any renderer is constructed", () => {
+  // Loaded, not called. The shim has self-installed on import since 7.1.0 and its
+  // `install()` is deprecated -- calling it printed a deprecation group into the
+  // console of every reader, which was the first thing the fixed deployment did.
+  // So what has to hold is that the import resolves first, and it is awaited in the
+  // same Promise.all as Pixi itself for exactly that reason.
+  const shim = LAYER.indexOf('import("@pixi/unsafe-eval")');
+  assert.ok(shim > 0, "@pixi/unsafe-eval is never imported");
   const application = LAYER.indexOf("new PIXI.Application");
   assert.ok(application > 0, "the Pixi application is not constructed where this test expects");
   assert.ok(
-    install < application,
-    "install() runs after new PIXI.Application. Pixi does its systemCheck in the "
-    + "constructor, so installing afterwards is installing into a renderer that already "
-    + "threw -- which is indistinguishable from not installing at all",
+    shim < application,
+    "the shim is imported after new PIXI.Application. Pixi runs its systemCheck in the "
+    + "constructor, so a shim that arrives later arrives at a renderer that already "
+    + "threw -- indistinguishable from no shim at all",
+  );
+  assert.ok(
+    !/\.install\(/.test(LAYER),
+    "install() is called. It is deprecated since 7.1.0 and prints a deprecation warning "
+    + "to every reader's console; importing the module is the whole contract",
   );
 });
 

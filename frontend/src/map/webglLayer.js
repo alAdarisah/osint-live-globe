@@ -60,9 +60,13 @@ function loadPixi() {
     // This module is the only thing on the page that wanted it, and buying one
     // layer's shaders with a page-wide licence to run generated code is the
     // wrong trade for a map that loads third-party basemap tiles.
+    // Imported for its side effect and not called: since 7.1.0 the shim installs
+    // itself on import, and its `install()` is deprecated -- calling it prints a
+    // deprecation group to the console of every reader who loads the map. What
+    // matters is only that this module has finished evaluating before anything
+    // constructs a renderer, which is what awaiting the pair together buys.
     pixiPromise = Promise.all([import("pixi.js"), import("@pixi/unsafe-eval")])
-      .then(([mod, unsafeEval]) => {
-        unsafeEval.install(mod);
+      .then(([mod]) => {
         PIXI = mod;
         return mod;
       });

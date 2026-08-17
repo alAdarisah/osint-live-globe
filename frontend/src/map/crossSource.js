@@ -90,6 +90,51 @@ export const DAM_MATCH_KM = 1;
 // redrawn keeps its id, but a mistyped one should not merge two continents.
 export const MILITARY_TWIN_MAX_KM = 8;
 
+// A curated base against the OurAirports record for the same field, and a curated
+// port against the NGA World Port Index record for the same harbour. Declared, for
+// the same reason the military pairing is -- and here the reason is sharper, because
+// the near misses are the *majority* of what distance finds.
+//
+// Measured against the live feeds, 28 curated sites have a name-corroborated
+// OurAirports record within 3km. Six of them are not the same place at all: an LNG
+// plant beside the town's airstrip (Angola LNG and Soyo Airport, 230m), an oil
+// terminal beside an international airport (Fujairah, 1.2km), a refinery beside the
+// regional field (Zinder, 2.4km), and the Japanese base in Djibouti, whose nearest
+// airfield is the civil airport it sits next to. Sharing a place-name at 200m is
+// exactly what a plant and the airstrip built to serve it look like.
+//
+// The ports side is worse. Two different curated entries -- Novorossiysk Naval Base
+// and Novorossiysk Oil Terminal -- corroborate the *same* NGA record, so an inferred
+// merge picks whichever is iterated first and the naval base ends up claiming the
+// commercial port. And a refinery beside a harbour (Tuapse, Mina Al Ahmadi) shares
+// its town's name with the harbour while being a different facility.
+//
+// So both are declared: `airport_twin` carries an OurAirports ident, `port_twin` an
+// NGA World Port Index id. See backend/infrastructure.py for the entries and for the
+// line drawn between "this entry is that airfield" and "this entry is near it".
+export const AIRPORT_TWIN_MAX_KM = 4;
+export const PORT_TWIN_MAX_KM = 4;
+
+// OurAirports records that say, in their own `name`, that they are a duplicate:
+// "[Duplicate] Jauá Airport", "(Duplicate) Utai Airstrip", "Sayma (duplicate)".
+// Twenty of them in the current feed, and they are the one class of duplicate that
+// needs no curation and no distance guesswork about *whether* it is one -- the
+// publisher has already said so.
+//
+// Distance is still needed for *which* record it duplicates, and it is what keeps
+// this safe: six of the twenty have no unmarked neighbour nearby at all, and
+// suppressing those would take a field off the map rather than deduplicate it.
+const SELF_DECLARED_DUPLICATE = /[[(]\s*(?:misplaced\s+)?duplicate\s*\??\s*[)\]]|\(\s*duplicate\s*\)/i;
+
+// 500m. These are the same field entered twice, not two fields: measured, 12 of the
+// 14 pairs are under 300m and the widest is 390m.
+export const SELF_DUPLICATE_MAX_KM = 0.5;
+
+/** Does a record's own name say it is a duplicate of another record? */
+export function saysItIsADuplicate(name) {
+  return SELF_DECLARED_DUPLICATE.test(String(name || ""));
+}
+
 const EARTH_KM_PER_DEGREE = 111.32;
 
 /** Equirectangular, which is exact enough under a few kilometres. */
@@ -245,6 +290,59 @@ export function buildDeclaredTwinIndex(primary, secondary, {
     absorbed.set(String(wanted), { primaryKey: String(key), distanceKm: distance });
   }
   return { twinOf, absorbed };
+}
+
+/**
+ * Records a feed has itself labelled as duplicates of another record in the feed.
+ *
+ * Returns the same `absorbed` shape as the two index builders, so a caller folds it
+ * into the same map and the same "is the absorbing layer actually drawing" check --
+ * except that here the absorbing layer is the same layer, so `primaryKey` is the
+ * sibling record's id and the entry is unconditional.
+ *
+ * A marked record with no unmarked neighbour inside `radiusKm` is left alone. That
+ * is not defensiveness: six of the twenty marked records in the current OurAirports
+ * feed are in that state, and suppressing them would remove a field from the map on
+ * the strength of a label whose counterpart is not there.
+ *
+ * @param {Array<object>} records
+ * @param {object} options
+ * @param {number} options.radiusKm
+ * @param {(record: object) => string|number|undefined} options.id
+ * @param {(record: object) => string|undefined} options.name
+ */
+export function selfDeclaredDuplicates(records, { radiusKm, id, name }) {
+  const absorbed = new Map();
+  const marked = [];
+  const clean = [];
+  for (const record of records || []) {
+    if (!coordsOf(record)) continue;
+    (saysItIsADuplicate(name(record)) ? marked : clean).push(record);
+  }
+  if (!marked.length) return { absorbed };
+  const bandDegrees = radiusKm / EARTH_KM_PER_DEGREE;
+  const bands = bandIndex(clean, bandDegrees);
+  for (const record of marked) {
+    const key = id(record);
+    if (key == null) continue;
+    const [lat, lon] = coordsOf(record);
+    const band = Math.floor(lat / bandDegrees);
+    let nearest = null;
+    for (let b = band - 1; b <= band + 1; b++) {
+      for (const [otherCoords, other] of bands.get(b) || []) {
+        const distance = distanceKm(lat, lon, otherCoords[0], otherCoords[1]);
+        if (distance > radiusKm) continue;
+        if (!nearest || distance < nearest.distance) nearest = { distance, other };
+      }
+    }
+    if (!nearest) continue;
+    const primaryKey = id(nearest.other);
+    if (primaryKey == null) continue;
+    absorbed.set(String(key), {
+      primaryKey: String(primaryKey), distanceKm: nearest.distance, selfDeclared: true,
+    });
+  }
+  return { absorbed };
 }
 
 // Query parameters that identify a referrer rather than an article. Stripped

@@ -14,8 +14,9 @@ import assert from "node:assert/strict";
 
 import {
   AIRFIELD_MATCH_KM, DAM_MATCH_KM, MILITARY_TWIN_MAX_KM,
-  buildTwinIndex, buildDeclaredTwinIndex, buildAbsorbedArticles,
-  distanceKm, normalizeArticleUrl,
+  AIRPORT_TWIN_MAX_KM, PORT_TWIN_MAX_KM, SELF_DUPLICATE_MAX_KM,
+  buildTwinIndex, buildDeclaredTwinIndex, selfDeclaredDuplicates, saysItIsADuplicate,
+  buildAbsorbedArticles, distanceKm, normalizeArticleUrl,
 } from "../src/map/crossSource.js";
 
 const byId = (r) => r.id;
@@ -248,4 +249,126 @@ test("two bases naming one OSM record leave it absorbed once", () => {
   assert.equal(absorbed.size, 1);
   assert.equal(absorbed.get("osm:way/292210998").primaryKey, "base_a");
   assert.equal(twinOf.size, 1);
+});
+
+// ---------- curated sites against the two catalogues ----------
+//
+// OurAirports and the NGA World Port Index describe some of the same places the
+// curated list does, and the same "declared, not measured" rule applies -- for a
+// blunter reason than the OSM case. There, distance was wrong about half the time.
+// Here the near misses are systematic: an industrial plant and the airstrip built to
+// serve it share a place-name and sit 200 m apart, which is indistinguishable by
+// distance and by name from an air base and its own runway.
+
+const catalogue = (field, maxKm) => ({
+  declaredId: (d) => d[field],
+  primaryId: (d) => d.id,
+  secondaryId: (d) => d.id,
+  maxKm,
+});
+
+test("an air base absorbs the OurAirports record for its own runway", () => {
+  const base = { id: "ramstein_ab", type: "military", lat: 49.44, lon: 7.6, airport_twin: "ETAR" };
+  const field = { id: "ETAR", icao: "ETAR", name: "Ramstein Air Base", lat: 49.4369, lon: 7.6003 };
+  const { twinOf, absorbed } = buildDeclaredTwinIndex([base], [field],
+    catalogue("airport_twin", AIRPORT_TWIN_MAX_KM));
+  assert.equal(absorbed.get("ETAR").primaryKey, "ramstein_ab");
+  // The ICAO has to survive the merge: it is what a reader takes to a flight tracker.
+  assert.equal(twinOf.get("ramstein_ab").record.icao, "ETAR");
+});
+
+test("a plant does not absorb the airstrip that serves it", () => {
+  // Angola LNG and Soyo Airport, 230 m apart, sharing "Soyo". The closest and most
+  // name-corroborated pair in the live data, and two different things -- so it has to
+  // be the declaration doing the work, not the geometry.
+  const plant = { id: "soyo_lng", type: "lng_terminal", lat: 6.13, lon: 12.37 };
+  const strip = { id: "FNSO", name: "Soyo Airport", lat: 6.1409, lon: 12.3718 };
+  const { twinOf, absorbed } = buildDeclaredTwinIndex([plant], [strip],
+    catalogue("airport_twin", AIRPORT_TWIN_MAX_KM));
+  assert.equal(twinOf.size, 0);
+  assert.equal(absorbed.size, 0);
+});
+
+test("only the oil terminal claims Novorossiysk's port, not the naval base", () => {
+  // The case that settles the whole design. Two curated entries corroborate the same
+  // NGA record by name and by distance; an inferred merge picks whichever it iterated
+  // first, and half the time the Black Sea Fleet HQ swallows the commercial port.
+  const NGA = "{4874A958-D54D-4E79-B16B-D7EF809F2AC8}";
+  const navalBase = { id: "novorossiysk_naval", type: "military", lat: 44.71, lon: 37.78 };
+  const terminal = { id: "novorossiysk_terminal", type: "port", lat: 44.72, lon: 37.79, port_twin: NGA };
+  const port = { id: NGA, name: "Novorossiysk", lat: 44.7167, lon: 37.7833 };
+  const { twinOf, absorbed } = buildDeclaredTwinIndex([navalBase, terminal], [port],
+    catalogue("port_twin", PORT_TWIN_MAX_KM));
+  assert.equal(absorbed.get(NGA).primaryKey, "novorossiysk_terminal");
+  assert.ok(!twinOf.has("novorossiysk_naval"), "the fleet HQ must not swallow the port");
+});
+
+// ---------- a feed's own duplicates ----------
+
+test("a record that says it is a duplicate is absorbed by its sibling", () => {
+  const records = [
+    { id: "AYUA", name: "Utai Airstrip", lat: -3.39, lon: 141.58 },
+    { id: "ATUA", name: "(Duplicate) Utai Airstrip", lat: -3.39, lon: 141.58 },
+  ];
+  const { absorbed } = selfDeclaredDuplicates(records, {
+    radiusKm: SELF_DUPLICATE_MAX_KM, id: (d) => d.id, name: (d) => d.name,
+  });
+  assert.deepEqual([...absorbed.keys()], ["ATUA"]);
+  assert.equal(absorbed.get("ATUA").primaryKey, "AYUA");
+  assert.equal(absorbed.get("ATUA").selfDeclared, true);
+});
+
+test("every spelling OurAirports actually uses is recognised", () => {
+  // Taken from the live feed rather than invented. Three bracket styles, one with the
+  // word trailing, one hedged with a question mark.
+  for (const name of [
+    "[Duplicate] Jau\u00e1 Airport",
+    "(Duplicate) Utai Airstrip",
+    "(Duplicate)East Kirkby Airfield",
+    "Sayma (duplicate)",
+    "(Misplaced duplicate?)Aeropuerto internacional Sim\u00f3n bolivar",
+  ]) {
+    assert.ok(saysItIsADuplicate(name), name);
+  }
+  // And nothing that merely contains the word in ordinary use.
+  for (const name of ["Duplicate Springs Airport", "Duplicity Field", "Utai Airstrip"]) {
+    assert.ok(!saysItIsADuplicate(name), name);
+  }
+});
+
+test("a marked record with no sibling nearby keeps its pin", () => {
+  // Six of the twenty marked records in the live feed are in this state. Suppressing
+  // them on the strength of the label alone would take a field off the map instead of
+  // deduplicating one -- the failure this whole module exists to avoid.
+  const records = [
+    { id: "AR-0768", name: "[Duplicate] Aeropuerto Pergamino", lat: -33.9, lon: -60.6 },
+    { id: "SAAR", name: "Rosario Airport", lat: -32.9, lon: -60.78 },
+  ];
+  const { absorbed } = selfDeclaredDuplicates(records, {
+    radiusKm: SELF_DUPLICATE_MAX_KM, id: (d) => d.id, name: (d) => d.name,
+  });
+  assert.equal(absorbed.size, 0);
+});
+
+test("two marked records do not absorb each other", () => {
+  // Without the marked/unmarked split this pairs them up and suppresses one on the
+  // authority of the other, leaving a pin the publisher has labelled as a duplicate
+  // as the only record of the place.
+  const records = [
+    { id: "A", name: "[Duplicate] Foo Field", lat: 10, lon: 20 },
+    { id: "B", name: "[Duplicate] Foo Field", lat: 10.001, lon: 20 },
+  ];
+  const { absorbed } = selfDeclaredDuplicates(records, {
+    radiusKm: SELF_DUPLICATE_MAX_KM, id: (d) => d.id, name: (d) => d.name,
+  });
+  assert.equal(absorbed.size, 0);
+});
+
+test("a feed with nothing marked costs nothing", () => {
+  // 47,975 airfields land on every boot. The early return matters.
+  const { absorbed } = selfDeclaredDuplicates(
+    [{ id: "a", name: "Real Airport", lat: 1, lon: 2 }],
+    { radiusKm: SELF_DUPLICATE_MAX_KM, id: (d) => d.id, name: (d) => d.name },
+  );
+  assert.equal(absorbed.size, 0);
 });

@@ -38,6 +38,7 @@ INFRA_SITES: list[dict] = [
         "type": "refinery",
         "lat": 29.23, "lon": 50.32,
         "region_keys": ["persian_gulf_hormuz"],
+        "port_twin": "{F49ADB9F-237F-4566-91CE-3A170672E867}",  # Kharg Island Oil Terminal
         "note": "Iran's primary crude oil export terminal.",
     },
     {
@@ -102,6 +103,7 @@ INFRA_SITES: list[dict] = [
         "type": "lng_terminal",
         "lat": 25.9, "lon": 51.58,
         "region_keys": ["persian_gulf_hormuz"],
+        "port_twin": "{3C5850FC-7544-4C0A-B6D5-ACDA2589D438}",  # Ras Laffan
         "note": "Qatar's primary LNG export hub -- world's largest LNG facility.",
     },
 
@@ -120,6 +122,7 @@ INFRA_SITES: list[dict] = [
         "type": "port",
         "lat": 44.72, "lon": 37.77,
         "region_keys": ["russia_ukraine"],
+        "port_twin": "{4874A958-D54D-4E79-B16B-D7EF809F2AC8}",  # Novorossiysk
         "note": "Major Russian Black Sea crude oil export terminal.",
     },
     {
@@ -136,6 +139,7 @@ INFRA_SITES: list[dict] = [
         "type": "port",
         "lat": 46.49, "lon": 30.74,
         "region_keys": ["russia_ukraine"],
+        "port_twin": "{C4B191F3-22A8-48F1-90C7-1833CB8C7AE6}",  # Odesa
         "note": "Ukraine's largest Black Sea port, key grain export chokepoint.",
     },
     {
@@ -230,6 +234,7 @@ INFRA_SITES: list[dict] = [
         "type": "port",
         "lat": 35.1, "lon": 129.04,
         "region_keys": ["korean_peninsula"],
+        "port_twin": "{0DCCE984-DD0D-4CA1-B475-A97EC167A28C}",  # Busan
         "note": "South Korea's largest port, one of the world's busiest container hubs.",
     },
 
@@ -328,6 +333,7 @@ INFRA_SITES: list[dict] = [
         "type": "refinery",
         "lat": 32.82, "lon": 35.0,
         "region_keys": ["israel_gaza_lebanon"],
+        "port_twin": "{E1ED9395-BEF7-4476-ACF7-1E455433B7F7}",  # Haifa
         "note": "Israel's largest refinery and a major Mediterranean port.",
     },
     {
@@ -676,6 +682,7 @@ INFRA_SITES: list[dict] = [
         "name": "Port of Manila",
         "type": "port", "lat": 14.58, "lon": 120.95,
         "region_keys": ["south_china_sea"],
+        "port_twin": "{DAB1CA19-2B6C-4F94-A56D-572A96D59469}",  # Manila
         "note": "The Philippines' main international shipping gateway.",
     },
     {
@@ -1344,6 +1351,46 @@ SHIPPING_LANES: list[dict] = [
 # uses to pick an icon: air/naval/army/missile/joint/logistics/radar). Same
 # curation standard as INFRA_SITES: only well-documented, unambiguous
 # installations from public reference material, approximate coordinates.
+#
+# Twin fields: one place, two publishers, one pin
+# -----------------------------------------------
+# Three optional fields say "this entry and that record are the same place, so draw
+# one pin and name both". Each carries the other feed's own id, and the trailing
+# comment carries the other feed's own name for it, because an id nobody can look at
+# is a claim nobody can review:
+#
+#   osm_twin      an OpenStreetMap id from osm_infra.py's sweep, `osm:way/<id>`
+#   airport_twin  an OurAirports ident (ICAO where there is one, else their own code)
+#   port_twin     an NGA World Port Index id
+#
+# Declared here rather than inferred from distance, and that is a measurement rather
+# than a preference. For OSM: `military_area` is the tag for any fenced military
+# parcel, 5,382 of them, so the nearest one to a curated base is very often its own
+# gatehouse ("KPP", 2.1km from Novorossiysk), a barracks block ("A7", 1.9km from Al
+# Udeid), or a different country's base entirely (France's BA 188 is 0.8km from the
+# Japanese base in Djibouti). The genuine pairs run 0.4-4.2km, straddling the
+# impostors, so no radius separates them. See crossSource.js's own notes.
+#
+# The line a twin draws is "this entry IS that airfield/harbour", never "this entry is
+# next to it". An air base and its runway are one installation. A plant and the
+# airstrip built to serve it are two things at one place, which is why Angola LNG does
+# not claim Soyo Airport (230m away), Fujairah Oil Terminal does not claim Fujairah
+# International (1.2km), the Zinder refinery does not claim Zinder Airport, and the
+# Japanese base in Djibouti claims no airfield at all. The same line excludes the
+# Tuapse and Mina Al Ahmadi refineries, which share their harbour's name without being
+# it, and Sevastopol Naval Base, which is not the commercial port. Haifa is in because
+# its curated name says "& Port" outright.
+#
+# Novorossiysk is the case that settles why declaring beats measuring: the naval base
+# and the oil terminal are two curated entries whose names both corroborate the *same*
+# NGA record, so an inferred merge picks whichever it iterated first and lets the fleet
+# HQ swallow the commercial port. Only the terminal declares it.
+#
+# Adding one: find the record in /api/osm-infrastructure, /api/airports or /api/ports,
+# satisfy yourself it is the same place and not a neighbour, then paste its id and its
+# name. Leaving a field off is not a bug -- it means the site draws as it always did,
+# which for most of this list is right, because most of these places appear in only
+# one of the four feeds.
 MILITARY_BASES: list[dict] = [
     # ---- Persian Gulf / Strait of Hormuz ----
     {
@@ -1352,6 +1399,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 25.12, "lon": 51.32,
         "region_keys": ["persian_gulf_hormuz"],
+        "airport_twin": "OTBH",  # Al Udeid Air Base
         "note": "Largest US military installation in the Middle East; forward HQ for US CENTCOM air operations.",
     },
     {
@@ -1443,6 +1491,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 37.09, "lon": 127.03,
         "region_keys": ["korean_peninsula"],
+        "airport_twin": "RKSO",  # Osan Air Base
         "note": "Headquarters of US 7th Air Force in South Korea.",
     },
     {
@@ -1451,6 +1500,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "army",
         "lat": 36.97, "lon": 127.03,
         "region_keys": ["korean_peninsula"],
+        "airport_twin": "RKSG",  # Camp Humphreys (A-511) Desiderio Army Airfield
         "osm_twin": "osm:way/245548245",  # 캠프 험프리스
         "note": "Largest overseas US military installation, headquarters of US Forces Korea.",
     },
@@ -1470,6 +1520,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 26.36, "lon": 127.77,
         "region_keys": ["taiwan_strait", "south_china_sea"],
+        "airport_twin": "RODN",  # Kadena Air Base
         "note": "Largest US Air Force base in the Pacific, on Okinawa.",
     },
     {
@@ -1478,6 +1529,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 13.58, "lon": 144.93,
         "region_keys": ["south_china_sea"],
+        "airport_twin": "PGUA",  # Andersen Air Force Base
         "note": "Key US Pacific bomber/tanker staging base on Guam.",
     },
     {
@@ -1502,6 +1554,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 9.55, "lon": 112.89,
         "region_keys": ["south_china_sea"],
+        "airport_twin": "CN-0029",  # Yongshu Jiao (Fiery Cross Reef) Air Base
         "note": "Chinese artificial island with a military airstrip in the contested Spratly Islands.",
     },
 
@@ -1512,6 +1565,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 31.21, "lon": 34.99,
         "region_keys": ["israel_gaza_lebanon"],
+        "airport_twin": "LLNV",  # Nevatim Air Base
         "note": "Main Israeli Air Force fighter base, home to Israel's F-35 squadron.",
     },
     {
@@ -1531,6 +1585,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 49.44, "lon": 7.6,
         "region_keys": [],
+        "airport_twin": "ETAR",  # Ramstein Air Base
         "note": "Headquarters of US Air Forces in Europe and NATO Allied Air Command.",
     },
     {
@@ -1539,6 +1594,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "naval",
         "lat": 36.62, "lon": -6.35,
         "region_keys": [],
+        "airport_twin": "LERT",  # Rota Naval Station Airport
         "note": "Key US/Spanish naval base controlling the Strait of Gibraltar approach.",
     },
     {
@@ -1555,6 +1611,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "joint",
         "lat": -7.31, "lon": 72.41,
         "region_keys": [],
+        "airport_twin": "FJDG",  # Naval Support Facility Diego Garcia
         "note": "Joint US/UK air and naval base in the Indian Ocean, key long-range bomber staging point.",
     },
     {
@@ -1579,6 +1636,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "radar",
         "lat": 76.53, "lon": -68.7,
         "region_keys": [],
+        "airport_twin": "BGTL",  # Pituffik Space Base
         "note": "Northernmost US installation; ballistic missile early-warning radar and satellite tracking.",
     },
     {
@@ -1595,6 +1653,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "missile",
         "lat": 34.74, "lon": -120.57,
         "region_keys": [],
+        "airport_twin": "KVBG",  # Vandenberg Space Force Base
         "note": "Primary US West Coast space launch and ballistic missile test site.",
     },
 
@@ -1605,6 +1664,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 33.78, "lon": 42.44,
         "region_keys": ["persian_gulf_hormuz"],
+        "airport_twin": "ORAA",  # Al Asad Air Base
         "note": "Major US-Iraqi airbase in Anbar province, repeatedly targeted by Iran-aligned militias.",
     },
     {
@@ -1613,6 +1673,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 24.25, "lon": 54.55,
         "region_keys": ["persian_gulf_hormuz"],
+        "airport_twin": "OMAM",  # Al Dhafra Air Base
         "osm_twin": "osm:way/218153981",  # قاعدة الظفرة الجوية
         "note": "Key US/French/UAE airbase south of Abu Dhabi, hosts US fighter and reconnaissance squadrons.",
     },
@@ -1663,6 +1724,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 34.59, "lon": 32.99,
         "region_keys": [],
+        "airport_twin": "LCRA",  # RAF Akrotiri
         "note": "UK Sovereign Base Area on Cyprus, primary staging point for British Middle East air operations.",
     },
     {
@@ -1679,6 +1741,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 46.03, "lon": 12.6,
         "region_keys": [],
+        "airport_twin": "LIPA",  # Aviano Air Base
         "note": "Forward-deployed US Air Force fighter wing in northeastern Italy.",
     },
     {
@@ -1687,6 +1750,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 52.41, "lon": 0.56,
         "region_keys": [],
+        "airport_twin": "EGUL",  # RAF Lakenheath
         "note": "US Air Force base in the UK, hosting F-35s reportedly certified for nuclear weapons storage.",
     },
     {
@@ -1695,6 +1759,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 50.17, "lon": 7.06,
         "region_keys": [],
+        "airport_twin": "ETSB",  # Buechel Air Base
         "note": "German air base storing US nuclear weapons under NATO nuclear-sharing arrangements.",
     },
 
@@ -1749,6 +1814,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": 38.73, "lon": -93.55,
         "region_keys": [],
+        "airport_twin": "KSZL",  # Whiteman Air Force Base
         "note": "Sole home of the B-2 stealth bomber fleet.",
     },
     {
@@ -1757,6 +1823,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "missile",
         "lat": 48.42, "lon": -101.35,
         "region_keys": [],
+        "airport_twin": "KMIB",  # Minot Air Force Base
         "note": "One of two US bases operating both nuclear ICBMs and bombers.",
     },
     {
@@ -1773,6 +1840,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "missile",
         "lat": -2.37, "lon": -44.4,
         "region_keys": [],
+        "airport_twin": "SNCW",  # Alcantara Space Center Airport
         "note": "Brazilian military space launch site near the equator, prized for its low-latitude launch efficiency.",
     },
 
@@ -1827,6 +1895,7 @@ MILITARY_BASES: list[dict] = [
         "type": "military", "subtype": "air",
         "lat": -14.52, "lon": 132.38,
         "region_keys": [],
+        "airport_twin": "YPTN",  # Tindal Airport
         "note": "Australian air base in the Northern Territory, hosting rotational US bomber deployments.",
     },
     {

@@ -163,7 +163,8 @@ import {
 import { buildCityZoneIndex } from "./cityZones";
 import {
   AIRFIELD_MATCH_KM, DAM_MATCH_KM, MILITARY_TWIN_MAX_KM,
-  buildTwinIndex, buildDeclaredTwinIndex, buildAbsorbedArticles,
+  AIRPORT_TWIN_MAX_KM, PORT_TWIN_MAX_KM, SELF_DUPLICATE_MAX_KM,
+  buildTwinIndex, buildDeclaredTwinIndex, selfDeclaredDuplicates, buildAbsorbedArticles,
   normalizeArticleUrl,
 } from "./crossSource";
 import {
@@ -1760,7 +1761,12 @@ export function createMapController(container, initial, callbacks) {
   // features against 48k airfields, which is cheap once and absurd sixty times
   // a minute. Keyed by id, so the render loop's lookup is a Map hit.
   let osmTwins = {
-    absorbed: new Map(), airfieldTwinOf: new Map(), damTwinOf: new Map(), militaryTwinOf: new Map(),
+    absorbed: new Map(),
+    airfieldTwinOf: new Map(),
+    damTwinOf: new Map(),
+    militaryTwinOf: new Map(),
+    airportTwinOf: new Map(),
+    portTwinOf: new Map(),
   };
 
   function rebuildOsmTwins() {
@@ -1804,6 +1810,28 @@ export function createMapController(container, initial, callbacks) {
         maxKm: MILITARY_TWIN_MAX_KM,
       },
     );
+    // A curated site against the OurAirports record for the same field, and against
+    // the NGA World Port Index record for the same harbour. Declared like the OSM
+    // pairing above, and for a sharper version of the same reason: of the 28 curated
+    // sites with a name-corroborated airfield inside 3km, six are a plant beside the
+    // airstrip that serves it rather than the airfield itself, and on the ports side
+    // two curated entries corroborate one NGA record. See the note above
+    // MILITARY_BASES in backend/infrastructure.py for the line each declaration draws.
+    const declaredAgainst = (feed, field, maxKm) => buildDeclaredTwinIndex(
+      raw.infra || [],
+      feed || [],
+      { declaredId: (d) => d[field], primaryId: (d) => d.id, secondaryId: (d) => d.id, maxKm },
+    );
+    const airportTwins = declaredAgainst(raw.airports, "airport_twin", AIRPORT_TWIN_MAX_KM);
+    const portTwins = declaredAgainst(raw.ports, "port_twin", PORT_TWIN_MAX_KM);
+    // OurAirports' own duplicates -- records whose `name` says so ("[Duplicate] Jaua
+    // Airport"). No curation and no judgement about whether it is a duplicate: the
+    // publisher has said it is. The distance check only settles which record it
+    // duplicates, and it is what stops the six marked records with no neighbour from
+    // being dropped off the map altogether.
+    const airportSelfDupes = selfDeclaredDuplicates(raw.airports || [], {
+      radiusKm: SELF_DUPLICATE_MAX_KM, id: (d) => d.id, name: (d) => d.name,
+    });
     const absorbed = new Map();
     for (const [id, entry] of airfields.absorbed) absorbed.set(id, { ...entry, by: "airports" });
     for (const [id, entry] of dams.absorbed) absorbed.set(id, { ...entry, by: "dams" });
@@ -1815,16 +1843,30 @@ export function createMapController(container, initial, callbacks) {
     for (const [id, entry] of military.absorbed) {
       if (!absorbed.has(id)) absorbed.set(id, { ...entry, by: "infra" });
     }
+    // Both declared pairings absorb into `infra`. Order-independent against the
+    // airfield and dam passes above, because those absorb OpenStreetMap ids
+    // (`osm:way/...`) and these absorb OurAirports idents and NGA port ids -- three
+    // id namespaces that cannot collide with each other.
+    for (const [id, entry] of airportTwins.absorbed) absorbed.set(id, { ...entry, by: "infra" });
+    for (const [id, entry] of portTwins.absorbed) absorbed.set(id, { ...entry, by: "infra" });
+    // Self-declared duplicates absorb into their *own* layer, which is why `by` is
+    // "airports": the surviving pin is the sibling record on the same layer, so the
+    // suppression is correct exactly when that layer is the one being drawn.
+    for (const [id, entry] of airportSelfDupes.absorbed) {
+      if (!absorbed.has(id)) absorbed.set(id, { ...entry, by: "airports" });
+    }
     osmTwins = {
       absorbed,
       airfieldTwinOf: airfields.twinOf,
       damTwinOf: dams.twinOf,
       militaryTwinOf: military.twinOf,
+      airportTwinOf: airportTwins.twinOf,
+      portTwinOf: portTwins.twinOf,
     };
   }
 
   /**
-   * Is this OSM feature already drawn by the layer that absorbed it?
+   * Is this feature already drawn by the layer that absorbed it?
    *
    * The question is not "was it matched" but "is its match on screen right
    * now". A reader who switches the airfields layer off, or who has given it a
@@ -1832,8 +1874,14 @@ export function createMapController(container, initial, callbacks) {
    * hole where two sources agreed there was an airbase -- suppressing a pin in
    * favour of one that is not being drawn removes the place from the map
    * entirely, which is the one outcome worse than drawing it twice.
+   *
+   * Named for the question rather than for the layer, because it now answers it for
+   * four: OSM infrastructure, power plants, airfields and ports. The check is the
+   * same in all four cases and so is the reason -- what differs is only which layer
+   * `entry.by` names, and for OurAirports' self-declared duplicates that layer is
+   * the record's own, which is still exactly the right test.
    */
-  function passesOsmInfraFilter(item) {
+  function passesAbsorbedFilter(item) {
     const entry = osmTwins.absorbed.get(String(item.id));
     if (!entry) return true;
     if (layerOnMap[entry.by] === false) return true;
@@ -1878,13 +1926,19 @@ export function createMapController(container, initial, callbacks) {
     events: (item) => passesEventFilter(item, eventFilter, ageNow()),
     gdelt: passesNewsFilter,
     officials: passesOfficialsFilter,
-    osmInfra: passesOsmInfraFilter,
+    osmInfra: passesAbsorbedFilter,
     // Task 28: a hydro plant absorbed into a dam's own pin (see
     // rebuildOsmTwins' dams twin index, now built from raw.powerPlants) must
     // be suppressed on *this* layer too, or the exact duplicate pin the twin
     // mechanism exists to prevent reappears the moment power plants got a
     // layer of their own.
-    powerPlants: passesOsmInfraFilter,
+    powerPlants: passesAbsorbedFilter,
+    // A curated base's own runway, and a curated port's own harbour entry -- both
+    // absorbed into the `infra` pin that names them (see rebuildOsmTwins' declared
+    // pairings). Plus OurAirports' own duplicate records, whose survivor is a sibling
+    // on this same layer.
+    airports: passesAbsorbedFilter,
+    ports: passesAbsorbedFilter,
   };
 
   /**
@@ -3173,7 +3227,7 @@ export function createMapController(container, initial, callbacks) {
     }
 
     // Both directions, unlike everything above. These two layers suppress OSM
-    // features that duplicate them (see passesOsmInfraFilter), so switching one
+    // features that duplicate them (see passesAbsorbedFilter), so switching one
     // off has to give those pins back and switching it on has to take them
     // again -- otherwise the airbase both feeds know about is missing from the
     // map until the reader happens to pan.
@@ -6965,11 +7019,14 @@ export function createMapController(container, initial, callbacks) {
     const nearbyEvents = nearbyEventsFor(site);
     // The OSM record this base absorbed, if any, so the surviving pin names it --
     // which is what turns two pins in two scripts into one pin carrying both names.
+    const id = String(site.id);
     return decorateInfra(site, {
       hot: nearbyEvents.length > 0,
       nearbyEvents,
       offset,
-      twin: osmTwins.militaryTwinOf.get(String(site.id)),
+      twin: osmTwins.militaryTwinOf.get(id),
+      airportTwin: osmTwins.airportTwinOf.get(id),
+      portTwin: osmTwins.portTwinOf.get(id),
     });
   }
 
@@ -8618,7 +8675,7 @@ export function createMapController(container, initial, callbacks) {
       // OSM every thirty minutes), so whichever lands has to re-pair against
       // the two already held. osmInfra is redrawn because its suppressions have
       // just changed; the other two because their popups name what they
-      // absorbed. See passesOsmInfraFilter.
+      // absorbed. See passesAbsorbedFilter.
       if (key === "osmInfra" || key === "airports" || key === "dams") {
         rebuildOsmTwins();
         for (const layer of ["osmInfra", "airports", "dams"]) {
