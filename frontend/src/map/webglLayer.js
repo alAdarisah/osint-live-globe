@@ -35,10 +35,37 @@ let pixiPromise = null;
 
 function loadPixi() {
   if (!pixiPromise) {
-    pixiPromise = import("pixi.js").then((mod) => {
-      PIXI = mod;
-      return mod;
-    });
+    // @pixi/unsafe-eval is imported alongside Pixi itself and installed into it
+    // before anything constructs a renderer. It is not optional here and it is
+    // not a workaround for a browser quirk -- it is the difference between this
+    // layer working on the deployment and not working at all.
+    //
+    // Pixi 7 builds its uniform-group upload functions and its shader
+    // sync code at runtime with `new Function`, which every Content-Security-
+    // Policy without `unsafe-eval` refuses. This deployment serves
+    // `script-src 'self'`, so `new PIXI.Application` threw
+    //
+    //   Current environment does not allow unsafe-eval, please use
+    //   @pixi/unsafe-eval module to enable support.
+    //
+    // ...and every ship, aircraft and satellite silently stopped drawing while
+    // the rest of the map -- all DOM markers -- kept working perfectly. The
+    // symptom is the worst kind: the feeds land, the counts beside every layer
+    // read correctly, the sprites are created and positioned, and none of it is
+    // ever rasterized. Zooming does not help, ticking the layer does not help,
+    // and lowering the zoom gate does not help, because none of those is the
+    // problem.
+    //
+    // The alternative fix -- adding `'unsafe-eval'` to the CSP -- was not taken.
+    // This module is the only thing on the page that wanted it, and buying one
+    // layer's shaders with a page-wide licence to run generated code is the
+    // wrong trade for a map that loads third-party basemap tiles.
+    pixiPromise = Promise.all([import("pixi.js"), import("@pixi/unsafe-eval")])
+      .then(([mod, unsafeEval]) => {
+        unsafeEval.install(mod);
+        PIXI = mod;
+        return mod;
+      });
   }
   return pixiPromise;
 }

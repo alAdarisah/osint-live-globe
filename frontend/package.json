@@ -11,6 +11,7 @@
     "test:watch": "node --test --watch"
   },
   "dependencies": {
+    "@pixi/unsafe-eval": "^7.4.3",
     "pixi.js": "^7.4.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
