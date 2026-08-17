@@ -19,14 +19,14 @@ export const ATTRIBUTION_DISCLAIMER =
 /** Everything the footer says, as plain text: the tooltip, and the string the
  *  Legend repeats for readers on a touch screen, where a tooltip never fires. */
 export const ATTRIBUTION_TEXT =
-  "Data: ACLED · NASA FIRMS · aisstream.io · GDELT Project · OpenSky Network · World Bank · "
+  "Data: ACLED · NASA FIRMS · aisstream.io · Marinesia · GDELT Project · OpenSky Network · World Bank · "
   + "GeoNames · Natural Earth. Weather data by RainViewer · OpenWeatherMap · Open-Meteo.com. "
   + `Map: © OpenStreetMap contributors © CARTO. ${ATTRIBUTION_DISCLAIMER}`;
 
 export default function Attribution() {
   return (
     <footer id="attribution">
-      Data: ACLED &middot; NASA FIRMS &middot; aisstream.io &middot; GDELT Project &middot; OpenSky Network &middot; World Bank &middot; GeoNames &middot; Natural Earth.
+      Data: ACLED &middot; NASA FIRMS &middot; aisstream.io &middot; Marinesia &middot; GDELT Project &middot; OpenSky Network &middot; World Bank &middot; GeoNames &middot; Natural Earth.
       Weather data by{" "}
       <a href="https://www.rainviewer.com" target="_blank" rel="noopener noreferrer">
         RainViewer

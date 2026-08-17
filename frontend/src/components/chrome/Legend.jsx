@@ -2,6 +2,7 @@ import { useAccordion } from "../../hooks/useAccordion";
 import { paletteColor } from "../../map/iconTheme";
 import { glyphLegend, severityLegend, QUALIFIER_ROWS } from "./legendRows";
 import { ATTRIBUTION_DISCLAIMER } from "../Attribution";
+import { shipSupplierReadout } from "../../map/shipSupplier";
 
 const FOLD_KEY = "osint-chrome-folds";
 
@@ -13,9 +14,10 @@ const FOLD_KEY = "osint-chrome-folds";
  * top-right corner permanently spent on something a returning reader already
  * knows. Its fold is remembered, so "once" really is once.
  */
-export default function Legend() {
+export default function Legend({ health }) {
   const { isOpen, setOpen } = useAccordion({ legend: false }, FOLD_KEY);
   const open = isOpen("legend");
+  const supplier = shipSupplierReadout(health);
 
   return (
     <div id="legend" className={open ? "" : "collapsed"}>
@@ -85,6 +87,12 @@ export default function Legend() {
               surface a reader can always open. Repeated rather than moved: the
               credits belong beside the data they credit. */}
           <div className="lg-section">This map</div>
+          {/* Which AIS supplier the hulls on screen came from. A thinner feed that
+              does not say it is thinner is the dishonest case: a reader looking at
+              an empty sea has to be able to tell "there are no ships here" from
+              "we are on the backup feed today". Only shown when there is something
+              to say -- see shipSupplierReadout. */}
+          {supplier.note && <p className="lg-note">{supplier.note}</p>}
           <p className="lg-note">{ATTRIBUTION_DISCLAIMER}</p>
         </div>
       )}

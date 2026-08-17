@@ -85,6 +85,10 @@ export const LAYER_ROW = {
   aisTanker: { svg: SVG.tanker, color: "#ffb347", token: "ship.tanker", label: "Oil Tankers", count: "aisTanker" },
   aisCivilian: { svg: SVG.ship, color: "#35c2ff", token: "ship.other", label: "Civilian Ships (AIS)", count: "aisCivilian" },
   aisDigitraffic: { svg: SVG.ship, color: "#35c2ff", token: "ship.other", label: "Ships — Baltic (Fintraffic)", count: "aisDigitraffic" },
+  // Named by supplier, like the Fintraffic row above, because that is the fact a
+  // reader needs: it is a thinner picture of the same water, and which supplier
+  // drew a hull is what says how much to read into its absence.
+  marinesia: { svg: SVG.ship, color: "#35c2ff", token: "ship.other", label: "Ships (Marinesia)", count: "marinesia" },
   darkVessels: { svg: SVG.darkShip, color: DARK_VESSEL_STYLE.ais_gap.color, token: DARK_VESSEL_STYLE.ais_gap.token, label: "Dark Vessels & Transfers", count: "darkVessels", inferred: true },
   gfwGaps: { svg: GFW_GAP_STYLE.svg, color: GFW_GAP_STYLE.color, token: GFW_GAP_STYLE.token, label: "AIS Disabling (Global Fishing Watch)", count: "gfwGaps" },
   gfwDetections: { svg: SVG.hullDetection, color: GFW_DETECTION_STYLE.unmatched.color, token: GFW_DETECTION_STYLE.unmatched.token, label: "Satellite Vessel Detections (GFW)", count: "gfwDetections" },

@@ -1581,6 +1581,28 @@ async def ships(request: Request, region: str | None = None, callsign: str | Non
     return _cached_source_response(request, "ais", region, regions.filter_points)
 
 
+@app.get("/api/marinesia")
+async def marinesia(request: Request, region: str | None = None):
+    """The ships layer's second supplier (backend/sources/marinesia.py).
+
+    It has been collected, mirrored and given a health row since it was written,
+    and never served: `grep -rn marinesia backend/app.py frontend/src` found
+    nothing. So the fallback built for an aisstream outage could not draw a single
+    hull during one -- and there has been one running since 2026-08-05, with
+    /api/ships returning an empty list for it.
+
+    Its own endpoint and its own kind, not folded into /api/ships. marinesia.py's
+    header is explicit about why: the two feeds differ in density by more than an
+    order of magnitude (~100k messages a day worldwide against ~140k a day from the
+    eight watched chokepoints alone), so merging them would make "the ships layer"
+    mean something different depending on which supplier was up -- including to
+    dark_vessels.py, which reads that movement history to decide whether a hull went
+    quiet. Two endpoints keep both statements honest, and let the frontend say which
+    one it is drawing.
+    """
+    return _cached_source_response(request, "marinesia", region, regions.filter_points)
+
+
 @app.get("/api/ais-digitraffic")
 async def ais_digitraffic(request: Request, region: str | None = None):
     # Live AIS from Fintraffic/Digitraffic, Finnish and Baltic waters (see

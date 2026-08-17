@@ -68,7 +68,7 @@ export const LAYER_GROUPS = [
     // Fintraffic feed sits with the aisstream ones for exactly the same
     // reason -- it is the case this whole table was moved here to fix.
     keys: [
-      "aisNavy", "aisTanker", "aisCivilian", "aisDigitraffic",
+      "aisNavy", "aisTanker", "aisCivilian", "aisDigitraffic", "marinesia",
       "darkVessels", "gfwGaps", "gfwDetections",
       "adsbMilitary", "adsbCivilian", "adsbFlagged",
     ],

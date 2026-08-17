@@ -10,6 +10,7 @@ import { useOsintData } from "./hooks/useOsintData";
 import { useReplay } from "./hooks/useReplay";
 import { useTheme } from "./hooks/useTheme";
 import { useHealth } from "./hooks/useHealth";
+import { shipFallbackWish } from "./map/shipSupplier";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
 import { useChromeLayout } from "./hooks/useChromeLayout";
 import { migratePanelPositionsIntoChrome } from "./hooks/useDraggablePanel";
@@ -191,9 +192,33 @@ export default function App() {
   // directly) is what rides last, so a checkbox click updates the very key
   // this memo re-spreads instead of being permanently overruled by a frozen
   // link value -- see applyLayerOverrideChange's own note in urlState.js.
+  // Task 32 item 1: polls unconditionally now -- every layer row's freshness
+  // badge (LayerCheck.jsx, via HealthContext below) reads this, not only the
+  // Source status fold, which stays Admin Mode-only. `adminMode` still controls
+  // the cadence: 15s while that fold is actually on screen wanting to feel live,
+  // 60s ("cheaply", per that task's own brief) otherwise -- see useHealth's note.
+  //
+  // Declared here, above the layer wishes, rather than beside the other map state
+  // further down: the ships layer's supplier fallback just below is a function of
+  // source health, and a `const` read before its declaration is a temporal dead
+  // zone error rather than an undefined.
+  const { health, owmConfigured } = useHealth(adminMode);
+
+  // The ships layer's supplier fallback rides between the deployment's saved wishes
+  // and the reader's own overrides, which is exactly where a fallback belongs: it
+  // outranks a shipped default (so the backup feed appears without anyone asking
+  // during an aisstream outage) and is outranked by the reader (so switching
+  // Marinesia off, or on, stays switched). Expressed as a wish rather than pushed
+  // imperatively at the map, so the scene resolver stays the one thing that decides
+  // what is drawn -- and so recovery needs no second code path: when aisstream
+  // starts delivering again the wish simply stops being contributed, and the
+  // resolver puts the layer back to its own default of off.
+  //
+  // `health` is read below, so this is declared after it and folded in here.
+  const shipFallback = useMemo(() => shipFallbackWish(health), [health]);
   const layerWishes = useMemo(
-    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish, ...layerOverride }),
-    [settings.layerWish, layerOverride]
+    () => ({ ...DEFAULT_LAYER_VISIBILITY, ...settings.layerWish, ...shipFallback, ...layerOverride }),
+    [settings.layerWish, shipFallback, layerOverride]
   );
   const mapApi = useLeafletMap(mapContainerRef, {
     theme,
@@ -314,13 +339,6 @@ export default function App() {
   });
   replayActiveRef.current = replayApi.isReplaying;
 
-  // Task 32 item 1: polls unconditionally now -- every layer row's freshness
-  // badge (LayerCheck.jsx, via HealthContext just below) reads this, not
-  // only the Source status fold, which stays Admin Mode-only. `adminMode`
-  // still controls the cadence: 15s while that fold is actually on screen
-  // wanting to feel live, 60s ("cheaply", per this task's own brief)
-  // otherwise -- see useHealth's own note.
-  const { health, owmConfigured } = useHealth(adminMode);
 
   // How much of the screen the fixed chrome is taking, as three custom
   // properties every fixed surface anchors against -- see hooks/chromeLayout.js.
@@ -1175,7 +1193,7 @@ export default function App() {
       {/* What the marks mean. Collapsed by default and remembered -- see
           Legend.jsx on why reference material folds away rather than costing
           the map's corner permanently. */}
-      <Legend />
+      <Legend health={health} />
 
       {/* Where in the past the map is, for every reader rather than only for
           Admin Mode. Renders nothing while live -- see ScrubStrip.jsx on what

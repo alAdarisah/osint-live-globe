@@ -38,6 +38,7 @@ export const LAYER_HEALTH_KEY = {
   ports: "ports",
   dams: "dams",
   deflock: "deflock",
+  marinesia: "marinesia",
   railways: "railways",
   // These two were both "digitraffic_rail", which is the *module* name, not a
   // registered source name -- backend/sources/digitraffic_rail.py registers

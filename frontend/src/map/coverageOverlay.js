@@ -68,6 +68,7 @@ export const COVERAGE_OVERLAY_SOURCES = [
   // Found by frontend/tests/coverageOverlay.test.js's own pairing check on the
   // first merge after that test was written, which is exactly what it is for.
   { key: "aisDigitraffic", label: "AIS vessel tracking, Finnish/Baltic coastal (Fintraffic Digitraffic)" },
+  { key: "marinesia", label: "AIS vessel tracking, worldwide sample (Marinesia)" },
   { key: "adsb", label: "ADS-B aircraft tracking" },
   { key: "jamming", label: "GPS jamming cells (GPSJam)" },
   { key: "laneDensity", label: "AIS traffic density (this map's own coverage)" },

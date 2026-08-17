@@ -111,6 +111,7 @@ export const SETTINGS_LAYERS = [
   { key: "aisTanker", label: "Oil tankers" },
   { key: "aisCivilian", label: "Civilian ships" },
   { key: "aisDigitraffic", label: "Ships — Baltic (Fintraffic)" },
+  { key: "marinesia", label: "Ships (Marinesia)" },
   { key: "adsbMilitary", label: "Military aircraft" },
   { key: "adsbCivilian", label: "Civilian aircraft" },
   { key: "adsbFlagged", label: "Emergency & hidden aircraft" },

@@ -79,7 +79,12 @@ test("countedKeysFor leaves a group with no exceptions untouched", () => {
 // update this fixture to match what the reader now actually draws.
 test("the reader's six group denominators", () => {
   assert.equal(countedKeysFor("conflict").length, 3);
-  assert.equal(countedKeysFor("traffic").length, 10);
+  // 11 since the ships layer gained its fallback supplier: marinesia is its own
+  // layer rather than a fourth bucket inside aisstream's, for the reason
+  // marinesia.py's header gives -- merging feeds of very different density would
+  // make "the ships layer" mean something different depending on which supplier
+  // was up.
+  assert.equal(countedKeysFor("traffic").length, 11);
   assert.equal(countedKeysFor("ground").length, 19);
   assert.equal(countedKeysFor("airspace").length, 1);
   assert.equal(countedKeysFor("hazards").length, 2);

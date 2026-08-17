@@ -118,7 +118,27 @@ services:
         # replaces the entrypoint, so it has to do it itself. Unconditional and
         # idempotent -- the same 0755 comes back on any later fresh volume.
         chmod 0700 "$$PGDATA"
-        exec postgres -c hot_standby=on
+        # hot_standby_feedback tells the primary which rows this standby's queries
+        # still need, so autovacuum stops removing them out from under a read in
+        # progress; max_standby_streaming_delay lets a query finish rather than being
+        # cancelled the moment replay wants a conflicting lock.
+        #
+        # Both are here because of one recurring failure. backend/sources/
+        # airfield_activity.py was logging "connection was closed in the middle of
+        # operation" several times an hour, and this container's own log carried the
+        # other half at byte-identical timestamps: "canceling statement due to
+        # conflict with recovery", then "terminating connection due to conflict with
+        # recovery". Its aggregate holds one connection across three sequential scans
+        # over ~5M ADS-B rows -- ten seconds or so, by its own docstring -- against a
+        # 30s default delay and feedback off, which is close enough to lose the race
+        # whenever the primary vacuums mid-query.
+        #
+        # The cost of feedback is bloat on the primary while a long read runs here,
+        # which is the right trade for a replica whose whole job is long reads. 300s
+        # is chosen against the slowest query rather than the average: the failure it
+        # replaces is silent apart from a warning, and the panel it starves simply
+        # shows stale numbers.
+        exec postgres -c hot_standby=on           -c hot_standby_feedback=on           -c max_standby_streaming_delay=300s
     ports:
       # Host access for backups/psql, mirroring the primary's 5432. Bound to
       # localhost only, like everything else in this stack.

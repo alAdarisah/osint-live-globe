@@ -326,6 +326,27 @@ export const LAYER_MANIFEST = {
     cap: { THEATRE: 600 },
     disposition: AUTO,
   },
+  marinesia: {
+    // The ships layer's fallback supplier (backend/sources/marinesia.py), and the
+    // only thing that draws a hull at all while aisstream is silent -- as it has
+    // been since 2026-08-05, with five independent reports on their own tracker of
+    // a socket that connects, accepts a subscription and sends nothing.
+    //
+    // `draw: null`, so the resolver never switches it on by itself. That is not
+    // shyness: it is a thinner picture of the same water (~100k messages a day
+    // worldwide against ~140k a day from the eight watched chokepoints alone on
+    // aisstream), so it must not quietly stand in for the real thing while the real
+    // thing is working. App.jsx turns it on only while the `ais` source is
+    // unhealthy or empty, and off again when it recovers -- see the fallback effect
+    // there. A reader can also switch it on themselves at any time.
+    //
+    // Same THEATRE band and cap as aisDigitraffic: one layer, one supplier, and the
+    // same "a thousand hulls at world zoom is a smear" reasoning.
+    draw: null,
+    fetch: FETCH_ALWAYS,
+    cap: { THEATRE: 600 },
+    disposition: CORROBORATING,
+  },
   darkVessels: {
     // No zoom gate, and that is deliberate: there are only ever a handful
     // worldwide, and "somewhere a designated tanker went dark" is exactly the
@@ -1280,7 +1301,7 @@ export function withinAgeWindow(key, item, nowMs = Date.now()) {
 // ground layers are not, and demoting them is nearly free but takes them out of
 // the render pass entirely.
 const MARITIME_PROMOTE = [
-  "aisCivilian", "aisTanker", "aisDigitraffic", "ports", "cables", "cableLandings",
+  "aisCivilian", "aisTanker", "aisDigitraffic", "marinesia", "ports", "cables", "cableLandings",
   "gfwDetections", "gfwGaps", "darkVessels",
 ];
 const MARITIME_DEMOTE = ["cities", "infra", "osmInfra", "airports", "dams"];

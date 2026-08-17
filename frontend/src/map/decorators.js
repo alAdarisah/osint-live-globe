@@ -4819,6 +4819,7 @@ export const TOKEN_FOR = {
   // toggle -- but a hull inside it is still drawn as a warship, a tanker or a
   // merchantman, so it is gated by whichever pin type it is actually drawn as.
   aisDigitraffic: (d) => SHIP_STYLE[classifyShip(d)].token,
+  marinesia: (d) => SHIP_STYLE[classifyShip(d)].token,
   adsbMilitary: aircraftToken,
   adsbCivilian: aircraftToken,
   adsbFlagged: aircraftToken,
