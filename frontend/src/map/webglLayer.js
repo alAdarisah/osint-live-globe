@@ -223,6 +223,7 @@ const EntityWebglLayer = L.Layer.extend({
     }
     this._topLeft = L.point(0, 0);
     this._redrawScheduled = false;
+    this._redrawFrame = null;
     // Hover hit-test throttle state -- see _onContainerMove.
     this._moveFrame = null;
     this._pendingMove = null;
@@ -241,6 +242,8 @@ const EntityWebglLayer = L.Layer.extend({
 
     this._reset = this._reset.bind(this);
     this._onAnimZoom = this._onAnimZoom.bind(this);
+    this._onVisible = this._onVisible.bind(this);
+    document.addEventListener("visibilitychange", this._onVisible);
     map.on("moveend resize", this._reset);
     // Without this, the canvas stays static (unscaled) for the whole
     // duration of a pinch/scroll-wheel zoom animation while the basemap
@@ -301,6 +304,13 @@ const EntityWebglLayer = L.Layer.extend({
     this._map?.off("zoomanim", this._onAnimZoom);
     this._container?.removeEventListener("click", this._onContainerClick, { capture: true });
     this._container?.removeEventListener("mousemove", this._onContainerMove);
+    document.removeEventListener("visibilitychange", this._onVisible);
+    // The redraw frame is cancelled for the same reason the hover frame below is:
+    // it would run against a destroyed Pixi app.
+    if (this._redrawFrame != null) {
+      cancelAnimationFrame(this._redrawFrame);
+      this._redrawFrame = null;
+    }
     // A queued hover frame outlives the listener that queued it, and it would
     // run against a destroyed Pixi app.
     if (this._moveFrame != null) {
@@ -553,10 +563,44 @@ const EntityWebglLayer = L.Layer.extend({
   _scheduleRender() {
     if (this._redrawScheduled) return;
     this._redrawScheduled = true;
-    requestAnimationFrame(() => {
+    // The handle is kept so a pending frame can be cancelled -- see onRemove, and
+    // _onVisible below.
+    this._redrawFrame = requestAnimationFrame(() => {
+      this._redrawFrame = null;
       this._redrawScheduled = false;
       if (this._app) this._app.renderer.render(this._app.stage);
     });
+  },
+
+  /**
+   * Repaint when the page becomes visible again, and clear the latch.
+   *
+   * The latch above is a correct throttle and a wedge waiting to happen: it is
+   * set before the frame is requested and cleared only *inside* the callback, so
+   * if that callback never runs the flag stays true for the life of the page and
+   * every later _scheduleRender() returns immediately. Nothing paints again, ever.
+   *
+   * A requestAnimationFrame callback not running is not exotic -- a document that
+   * is hidden or not being composited does not get frames. So a map opened in a
+   * background tab, or in a window that is minimised or occluded while it boots,
+   * can come to the foreground with the latch already stuck. What a reader sees
+   * then is very specific: the basemap is there, and so is every DOM marker,
+   * because Leaflet's tiles and icons are ordinary elements. Only this layer is
+   * missing -- which is to say the planes, the ships and the satellites -- and only
+   * a reload brings them back.
+   *
+   * Cheap to make impossible: on becoming visible, drop any frame that was
+   * requested while hidden, clear the latch, and paint once directly rather than
+   * asking for another frame that may not come either.
+   */
+  _onVisible() {
+    if (document.visibilityState !== "visible") return;
+    if (this._redrawFrame != null) {
+      cancelAnimationFrame(this._redrawFrame);
+      this._redrawFrame = null;
+    }
+    this._redrawScheduled = false;
+    if (this._app) this._app.renderer.render(this._app.stage);
   },
 
   setVisible(bucketKey, visible) {
