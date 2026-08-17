@@ -26,6 +26,7 @@ import { SVG } from "../map/svgIcons";
 import {
   DARK_VESSEL_STYLE, GFW_GAP_STYLE, GFW_DETECTION_STYLE, OSM_INFRA_STYLE,
   POWER_PLANT_FUEL_STYLE, PORT_STYLE, DAM_STYLE, DEFLOCK_STYLE, RAILWAY_STYLE,
+  CITY_COLOR,
   RAILWAY_LIVE_STYLE, SHIPPING_LANE_STYLE, WATER_STYLE, CABLE_LANDING_STYLE,
   LANE_DENSITY_STYLE, TERMINATOR_STYLE, CZIB_STYLE, FLOOD_STYLE, LAUNCH_STYLE,
   SAT_ELEMENT_LAYERS,
@@ -51,7 +52,14 @@ export const GROUP_PILL = {
   ground: { label: "Infra", dot: "#ff9500" },
   airspace: { label: "Airspace", dot: "#ff8c00" },
   hazards: { label: "Hazards", dot: "#ffb347" },
+  // The raindrop blue the precipitation radar itself draws in, so the pill and
+  // the overlay it switches on read as the same subject.
+  weather: { label: "Weather", dot: "#3ba0ff" },
   space: { label: "Space", dot: "#6fe3ff" },
+  // Deliberately the dimmest dot on the strip. Reference is the furniture the
+  // rest of the map is read against, and a bright dot beside it would advertise
+  // it as one more thing competing for attention.
+  reference: { label: "Reference", dot: "#7f93a8" },
 };
 
 /** The order the pills are drawn in -- the taxonomy's own order, not a second
@@ -124,6 +132,25 @@ export const LAYER_ROW = {
   hazards: { svg: SVG.earthquake, color: "#ffb347", label: "Earthquakes & Volcanoes", count: "hazards" },
   floods: { svg: FLOOD_STYLE.svg, color: "#35c2ff", label: "Floods (GDACS)", count: "floods" },
 
+  // --- weather ---
+  // `count: null` throughout, and for a stronger reason than the geometry layers
+  // above: six of these seven are raster tile overlays, so there is not merely
+  // nothing counted, there is nothing countable. windArrows is a particle field
+  // computed from a wind grid, same story.
+  //
+  // Five of the seven need an OpenWeatherMap key to serve anything at all, and the
+  // pill dropdown greys those five out exactly as the drawer does -- both ask
+  // map/weatherLayers.js's isOwmLayerDisabled rather than either carrying a list,
+  // which is that module's own stated reason for existing. Without it a reader
+  // would tick Cloud Cover on an unkeyed deployment and get a silent nothing.
+  precip: { svg: SVG.raindrop, color: "#3ba0ff", label: "Precipitation Radar (RainViewer)", count: null },
+  clouds: { svg: SVG.cloud, color: "#c9d6dd", label: "Cloud Cover (OpenWeatherMap)", count: null },
+  wind: { svg: SVG.wind, color: "#b39ddb", label: "Wind Speed (OpenWeatherMap)", count: null },
+  precipitation: { svg: SVG.raindrop, color: "#6a89ff", label: "Precipitation Intensity (OpenWeatherMap)", count: null },
+  temp: { svg: SVG.thermometer, color: "#ff8a65", label: "Temperature (OpenWeatherMap)", count: null },
+  pressure: { svg: SVG.pressureGauge, color: "#ffd54f", label: "Pressure (OpenWeatherMap)", count: null },
+  windArrows: { svg: SVG.wind, color: "#7ee0c9", label: "Wind particles (Open-Meteo)", count: null },
+
   // --- space ---
   satellites: { svg: SVG.satellite, color: "#6fe3ff", token: "satellite.stations", label: "Satellites (stations + military)", count: "satellites" },
   satNavigation: { ...sat("satNavigation"), label: "Navigation (GPS, Galileo, GLONASS, Beidou)", count: "satNavigation", sub: true },
@@ -134,6 +161,13 @@ export const LAYER_ROW = {
   satStarlink: { ...sat("satStarlink"), label: "Starlink", count: "satStarlink", sub: true },
   satOneweb: { ...sat("satOneweb"), label: "OneWeb", count: "satOneweb", sub: true },
   launches: { svg: SVG.launchPad, color: LAUNCH_STYLE.upcoming.color, token: LAUNCH_STYLE.upcoming.token, label: "Orbital Launches", count: "launches" },
+
+  // --- reference ---
+  // Both count, and both report a `visible (total)` pair -- which for these two is
+  // the whole point: a map showing 40 of 6,319 cities is scoped, not broken, and
+  // the second number is what says so.
+  countries: { svg: SVG.globe, color: "#6fe3ff", label: "Country outlines & names", count: "countries" },
+  cities: { svg: SVG.city, color: CITY_COLOR, token: "city.mega", label: "Cities (100k+)", count: "cities" },
 };
 
 /**

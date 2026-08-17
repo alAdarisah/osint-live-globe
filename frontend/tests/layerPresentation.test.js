@@ -71,13 +71,19 @@ test("pill labels are short enough to be pills", () => {
 });
 
 test("nothing is offered that the reader draws no checkbox for", () => {
-  // gdelt is a sub-ticker of events and cities lives in the Places section;
-  // both are in the taxonomy for Admin Mode's dial list only. A pill row for
-  // either would be a control the drawer does not have.
+  // gdelt is the one remaining case: it is a sub-ticker of the events layer, drawn
+  // as part of Conflict & Violence rather than as a switch of its own, and it is in
+  // the taxonomy for Admin Mode's dial list alone. A pill row for it would be a
+  // control the drawer does not have.
+  //
+  // cities used to be asserted here alongside it and deliberately is not any more.
+  // Its checkbox does exist -- in the Places section rather than in Layers -- and
+  // it now rides the Reference pill, which is where a reader hunting for city
+  // labels looks. The old exclusion was protecting Infrastructure & Environment's
+  // denominator while cities was filed there, not withholding a control.
   for (const group of LAYER_GROUPS) {
     const keys = layerRowsFor(group.id).map((row) => row.key);
     assert.ok(!keys.includes("gdelt"), `${group.id} offers gdelt`);
-    assert.ok(!keys.includes("cities"), `${group.id} offers cities`);
   }
 });
 

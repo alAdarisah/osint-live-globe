@@ -33,6 +33,11 @@ export default function CategoryPills({
   counts,
   onToggleLayer,
   adminMode,
+  // Only the Weather pill reads this, and only to grey five of its seven rows
+  // out; see CategoryMenu. Threaded rather than fetched here because App.jsx
+  // already holds it (useHealth) and a second reader of the same health payload
+  // could disagree with the drawer about whether a key is configured.
+  owmConfigured,
 }) {
   const [openCategory, setOpenCategory] = useState(null);
   // The button the open menu hangs off. Held as state rather than read from a
@@ -130,6 +135,7 @@ export default function CategoryPills({
                     layerWish={layerWish}
                     counts={counts}
                     onToggleLayer={onToggleLayer}
+                    owmConfigured={owmConfigured}
                   />
                 </MenuPortal>
               )}

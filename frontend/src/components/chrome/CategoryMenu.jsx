@@ -3,6 +3,7 @@ import LayerIcon from "../controlPanel/LayerIcon";
 import CountUp from "../CountUp";
 import { groupTitle } from "../../settings/layerGroups";
 import { layerRowsFor } from "../../settings/layerPresentation";
+import { isOwmLayerDisabled } from "../../map/weatherLayers";
 import { pillCount } from "./categoryPillsLogic";
 
 /**
@@ -29,7 +30,9 @@ import { pillCount } from "./categoryPillsLogic";
  * None of those are layer switches, and a 270px dropdown is the wrong home for
  * a text input with a live match count.
  */
-export default function CategoryMenu({ groupId, layerVisibility, layerWish, counts, onToggleLayer }) {
+export default function CategoryMenu({
+  groupId, layerVisibility, layerWish, counts, onToggleLayer, owmConfigured,
+}) {
   const rows = layerRowsFor(groupId);
   const { on, total } = pillCount(groupId, layerVisibility);
 
@@ -43,12 +46,25 @@ export default function CategoryMenu({ groupId, layerVisibility, layerWish, coun
         <span className="cat-menu-count">{on} of {total} on</span>
       </div>
 
-      {rows.map((row) => (
-        <label key={row.key} className={`layer-row${row.sub ? " sub-row" : ""}`} data-layer={row.key}>
+      {rows.map((row) => {
+        // The five OpenWeatherMap tile layers with no key configured. Asked of
+        // map/weatherLayers.js, the same way WeatherSection.jsx asks -- a row that
+        // can be ticked and then draws nothing is worse than a row visibly
+        // unavailable, and worse still on this surface, where there is no room for
+        // the drawer's "needs key" note to explain the greying.
+        const disabled = isOwmLayerDisabled(row.key, owmConfigured);
+        return (
+        <label
+          key={row.key}
+          className={`layer-row${row.sub ? " sub-row" : ""}${disabled ? " disabled" : ""}`}
+          data-layer={row.key}
+          title={disabled ? "Needs an OpenWeatherMap key on this deployment" : undefined}
+        >
           <LayerCheck
             layerKey={row.key}
             on={layerVisibility[row.key]}
             wish={layerWish?.[row.key]}
+            disabled={disabled}
             onToggle={onToggleLayer}
             ariaLabel={row.label}
           />
@@ -74,7 +90,8 @@ export default function CategoryMenu({ groupId, layerVisibility, layerWish, coun
             </span>
           )}
         </label>
-      ))}
+        );
+      })}
     </>
   );
 }

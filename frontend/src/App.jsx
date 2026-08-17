@@ -1041,6 +1041,7 @@ export default function App() {
           counts={mapApi.counts}
           onToggleLayer={onToggleLayer}
           adminMode={adminMode}
+          owmConfigured={owmConfigured}
         />
       </TopBar>
 

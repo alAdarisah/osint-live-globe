@@ -25,6 +25,12 @@
 // elements happen to sit -- only each group's *title* and *membership* are
 // read from here, via groupTitle() and countedKeysFor() below.
 //
+// Two of the eight groups have no reader-side PanelGroup at all -- weather's
+// checkboxes are in WeatherSection.jsx and reference's are in PlacesSection.jsx.
+// They are still groups: the pill strip and Admin Mode's dial list both walk
+// this table, and a subject with no entry here is a subject those two screens
+// cannot show. See each group's own note.
+//
 // Adding a layer is therefore a two-step job, not a one-step one: file the key
 // in a group below, and -- if the reader draws no top-level checkbox for it,
 // the way it does not for gdelt or cities -- also add it to
@@ -40,9 +46,9 @@
 // browser-shaped cannot be tested there. See map/scene.js for the same rule.
 
 /**
- * The six groups, in the order Admin Mode shows them (see the header comment
+ * The eight groups, in the order Admin Mode shows them (see the header comment
  * above for why the reader's own group order is authored separately), with
- * the titles the reader's control panel has always used. Two screens that
+ * the titles the reader's control panel has always used. Three screens that
  * group the same things should name the groups the same way: an operator who
  * has just read "Air & Sea Traffic" in the drawer should not have to work out
  * that some other wording in Admin Mode means the same set.
@@ -78,15 +84,15 @@ export const LAYER_GROUPS = [
     title: "Infrastructure & Environment",
     // Airfields sit with infrastructure rather than with the aircraft layers:
     // it is a place layer, and the aircraft that need it already get their
-    // nearest field named inside their own popup. cities joins them for the
-    // same reason -- it is new to this table, since the reader keeps its
-    // checkbox in the Places section rather than in Layers.
+    // nearest field named inside their own popup. cities used to sit here for
+    // the same reason and has moved to `reference` below, which is where a
+    // reader looking for place labels actually looks.
     //
     // coverage is last, deliberately: it is a diagnostic instrument for
     // reading every other row above it, not one more subject alongside them.
     keys: [
       "infra", "osmInfra", "powerPlants", "airDefense",
-      "cities", "airports", "ports", "dams", "deflock",
+      "airports", "ports", "dams", "deflock",
       "railways", "railLive", "powerLines", "shippingLanes",
       "water", "cables", "firms", "jamming", "laneDensity", "terminator",
       "coverage",
@@ -106,12 +112,44 @@ export const LAYER_GROUPS = [
     keys: ["hazards", "floods"],
   },
   {
+    id: "weather",
+    // Between hazards and space, which is where the reader asked for it, and it
+    // happens to be the right place on the merits too: an earthquake and a storm
+    // front are both "the physical world doing something", and the pill order is
+    // read left to right as roughly conflict -> traffic -> ground -> sky.
+    //
+    // Weather is the one group whose layers have no Admin Mode dial rows, because
+    // six of the seven are raster tile overlays (OpenWeatherMap) and the seventh
+    // is a particle field -- none has a pin size, a pin colour or a zoom gate to
+    // dial. They are in this table anyway: the taxonomy's job is "which subject
+    // is this layer", and weather has been a subject in the reader's drawer since
+    // long before it was one here. LayerDialsSection.jsx skips a group with no
+    // dial rows rather than drawing an empty heading.
+    title: "Weather",
+    keys: ["precip", "clouds", "wind", "precipitation", "temp", "pressure", "windArrows"],
+  },
+  {
     id: "space",
     title: "Space",
     keys: [
       "satellites", "satNavigation", "satWeather", "satImaging",
       "satScience", "satGeo", "satStarlink", "satOneweb", "launches",
     ],
+  },
+  {
+    id: "reference",
+    // The base map's own furniture: what a place is called and where the lines
+    // around it are. Last, because it is the layer everything else is read
+    // against rather than a subject of its own -- the same reasoning that puts
+    // `coverage` last inside its group.
+    //
+    // Both keys were already in the app; neither had a home a reader could find.
+    // countries was in no group at all, so Admin Mode's grouped dial list had no
+    // heading to draw it under, and cities was filed under Infrastructure &
+    // Environment -- which is where its *data* fits and not where anybody would
+    // look for city labels.
+    title: "Reference",
+    keys: ["countries", "cities"],
   },
 ];
 
@@ -120,17 +158,23 @@ export const LAYER_GROUPS = [
  * drawn as a top-level row in the reader's own Layers section -- so not part
  * of its "n of m" group counts.
  *
- * Two different reasons, both the reader's: gdelt draws as a sub-ticker of
- * Conflict & Violence rather than as a layer in its own right, and cities has
- * its checkbox in the Places section entirely. Counting either would put a
- * denominator on a heading that is larger than the number of checkboxes
- * underneath it, which reads as a missing control.
+ * One entry: gdelt draws as a sub-ticker of Conflict & Violence rather than as a
+ * layer in its own right. Counting it would put a denominator on that heading
+ * larger than the number of checkboxes underneath it, which reads as a missing
+ * control.
+ *
+ * cities was the second entry and is not one any more. It was excluded because it
+ * has no checkbox in the reader's *Layers* section -- its row is in Places -- and
+ * the exclusion existed to protect Infrastructure & Environment's denominator
+ * while cities was filed there. It now sits in `reference`, which has no
+ * reader-side heading to protect at all, so excluding it would only zero out the
+ * Reference pill's count and hide a control the reader does have.
  *
  * Named here rather than kept as a second array of counted keys: two lists
  * that look alike are two lists that can disagree, which is the failure this
  * whole module exists to stop.
  */
-export const NOT_COUNTED_IN_READER = ["gdelt", "cities"];
+export const NOT_COUNTED_IN_READER = ["gdelt"];
 
 /** The title to show for a group id -- the one string both screens' headings
  *  now read, instead of each hand-typing "Conflict & Events" et al. and

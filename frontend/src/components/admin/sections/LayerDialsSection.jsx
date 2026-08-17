@@ -54,7 +54,14 @@ export default function LayerDialsSection({ settings, actions, isOpen, onToggle 
         aircraft squawking an emergency or a rescinded airspace warning is worth seeing from the
         world board.
       </div>
-      {LAYER_GROUPS.map((group) => (
+      {/* Groups with no dial rows are skipped rather than drawn as an empty
+          heading. Two of the eight are in that state by construction: weather is
+          seven raster/particle overlays with no pin size, pin colour or zoom gate
+          to dial, and reference's `countries` has no SETTINGS_LAYERS row either.
+          They are still in the taxonomy because the pill strip walks the same
+          table -- see layerGroups.js. A heading with nothing under it reads as a
+          section that failed to load, which is worse than no section. */}
+      {LAYER_GROUPS.filter((group) => group.keys.some((key) => LAYER_BY_KEY[key])).map((group) => (
         <div key={group.id} className="admin-layer-group" role="group" aria-labelledby={`grp-${group.id}`}>
           {/* Prefixed "grp-", not the bare group id, on purpose: a group id
               and a layer key can be the same string on the page below (see
