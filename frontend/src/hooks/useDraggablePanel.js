@@ -20,6 +20,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { currentChromeInsets } from "./useChromeLayout";
+
 const STORAGE_KEY = "osint-panel-positions";
 // Keeps a panel's own edge from landing exactly on the viewport's, and leaves
 // enough of it on screen to grab again after a window resize.
@@ -67,12 +69,27 @@ function storedSize(rec) {
   return rec && typeof rec.w === "number" && typeof rec.h === "number" ? { w: rec.w, h: rec.h } : null;
 }
 
+// Inside the map, not inside the window.
+//
+// This used to clamp against the viewport alone, which was right when the map
+// filled it. There are now 78px of opaque bars at the top, a status strip at the
+// bottom, and a rail down one side, and a panel clamped to EDGE_MARGIN sits
+// underneath the bars -- in the DOM, rendered, and unreachable, because every
+// surface up there is drawn above --z-cards. The only escape was Admin Mode's
+// "Reset panel layout" or clearing localStorage.
+//
+// The insets are read live rather than passed in: they change when the feed rail
+// opens, and a panel dragged while it was open must not become unreachable when it
+// closes.
 function clampToViewport(x, y, width, height) {
-  const maxX = Math.max(window.innerWidth - width - EDGE_MARGIN, EDGE_MARGIN);
-  const maxY = Math.max(window.innerHeight - height - EDGE_MARGIN, EDGE_MARGIN);
+  const insets = currentChromeInsets();
+  const minX = insets.left + EDGE_MARGIN;
+  const minY = insets.top + EDGE_MARGIN;
+  const maxX = Math.max(window.innerWidth - width - EDGE_MARGIN, minX);
+  const maxY = Math.max(window.innerHeight - insets.bottom - height - EDGE_MARGIN, minY);
   return {
-    x: Math.min(Math.max(x, EDGE_MARGIN), maxX),
-    y: Math.min(Math.max(y, EDGE_MARGIN), maxY),
+    x: Math.min(Math.max(x, minX), maxX),
+    y: Math.min(Math.max(y, minY), maxY),
   };
 }
 
@@ -317,6 +334,67 @@ export function migratePanelPosition(newId, oldIds) {
     }
   } catch {
     // Storage full or disabled -- the panel opens at its shipped default,
+    // same fallback saveOne already takes.
+  }
+}
+
+// Set once the stored positions have been re-clamped for the chrome. Its own key
+// rather than a field in the positions record, so it survives "Reset panel layout"
+// clearing that record -- a reset produces no stored positions at all, which needs
+// no migration, and re-running this on the next drag would be wasted work.
+const CHROME_MIGRATION_KEY = "osint-panel-positions-chrome-v2";
+
+/**
+ * Move every stored panel position back inside the map, once.
+ *
+ * No panel id changed, so migratePanelPosition above is not the tool. The problem
+ * is geometry: these positions were saved against a layout with no top chrome, and
+ * a panel stored at y=20 now sits behind 78px of opaque bar. It renders, it is in
+ * the DOM, and it cannot be seen or grabbed, because everything up there is drawn
+ * above --z-cards. Nothing recovers it except Admin Mode's layout reset -- and a
+ * reader whose card has vanished has no reason to look for a control called "reset
+ * panel layout".
+ *
+ * The positions are re-clamped rather than discarded. A reader who arranged their
+ * HUD around the region they watch should keep that arrangement, moved as little as
+ * it takes to be reachable; throwing the record away would be the easier fix and a
+ * worse one.
+ *
+ * Called once at module scope from App.jsx, before any panel's own
+ * useDraggablePanel reads storage -- the same timing migratePanelPosition needs and
+ * for the same reason. Sizes are left alone: a too-large panel is clipped by its
+ * own max-width, which is visible and recoverable.
+ */
+export function migratePanelPositionsIntoChrome() {
+  try {
+    if (localStorage.getItem(CHROME_MIGRATION_KEY)) return;
+    const all = loadAll();
+    const ids = Object.keys(all);
+    // Flag it either way. With nothing stored there is nothing to migrate, and
+    // this must not re-run on every load for the rest of the session.
+    localStorage.setItem(CHROME_MIGRATION_KEY, "1");
+    if (!ids.length) return;
+
+    const insets = currentChromeInsets();
+    let changed = false;
+    for (const id of ids) {
+      const rec = all[id];
+      const pos = storedPos(rec);
+      if (!pos) continue;
+      // The panel is not mounted yet, so its real size is unknown. A stored size
+      // if there is one, else a conservative box: too small an estimate only
+      // under-corrects, and the resize clamp will finish the job the first time
+      // the window changes.
+      const size = storedSize(rec) || { w: MIN_PANEL_WIDTH, h: MIN_PANEL_HEIGHT };
+      const next = clampToViewport(pos.x, pos.y, size.w, size.h);
+      if (next.x !== pos.x || next.y !== pos.y) {
+        all[id] = { ...rec, ...next };
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    // Storage disabled or full. Every panel opens where CSS puts it, which is the
     // same fallback saveOne already takes.
   }
 }

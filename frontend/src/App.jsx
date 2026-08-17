@@ -12,6 +12,7 @@ import { useTheme } from "./hooks/useTheme";
 import { useHealth } from "./hooks/useHealth";
 import { useIsMobileViewport } from "./hooks/useIsMobileViewport";
 import { useChromeLayout } from "./hooks/useChromeLayout";
+import { migratePanelPositionsIntoChrome } from "./hooks/useDraggablePanel";
 import { useWatchlist } from "./hooks/useWatchlist";
 import { toggleBoard, loadOpenBoards, saveOpenBoards } from "./components/chrome/boardRegistry";
 import { useAppSettings } from "./hooks/useAppSettings";
@@ -86,6 +87,17 @@ const DEFAULT_LAYER_VISIBILITY = {
 // source has since dropped) should stop trying rather than poll forever.
 const SELECTION_RESTORE_ATTEMPTS = 8;
 const SELECTION_RESTORE_INTERVAL_MS = 500;
+
+// At module scope, before any panel's own useDraggablePanel reads storage on its
+// first render -- an effect would run one render too late, which is the same timing
+// migratePanelPosition documents for itself.
+//
+// Positions saved before the chrome existed were stored against a layout with no
+// top bars. A card at y=20 now renders behind 78px of opaque bar, in the DOM and
+// unreachable, and the only thing that recovers it is a control called "Reset panel
+// layout" that a reader with a vanished card has no reason to look for. This moves
+// each one as little as it takes to be inside the map again, once.
+migratePanelPositionsIntoChrome();
 
 export default function App() {
   const mapContainerRef = useRef(null);

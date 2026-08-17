@@ -27,6 +27,7 @@
 import { useAccordion } from "../hooks/useAccordion";
 import { useDraggablePanel } from "../hooks/useDraggablePanel";
 import { computeAnchorLayout } from "./placeInfoCardLayout";
+import { currentChromeInsets } from "../hooks/useChromeLayout";
 import { groupSections, applyCardSettings, reorderGroups } from "./placeInfoCardGrouping";
 
 // The accordion-id namespace a super-fold's own open/closed state is stored
@@ -174,7 +175,17 @@ export default function PlaceInfoCard({
   // place. `point` can also be briefly absent (e.g. a country whose shape has
   // not been re-added after a boundary refresh), in which case the card falls
   // back to sitting where CSS puts it rather than vanishing.
-  const layout = !moved ? computeAnchorLayout(place.point, { width: window.innerWidth, height: window.innerHeight }) : null;
+  // The chrome insets go in as well as the viewport: the card is drawn below the
+  // top bars in the stacking order, so a position computed from the window alone
+  // put its header -- the name, Copy link, and the × -- behind them. See
+  // placeInfoCardLayout.js.
+  const layout = !moved
+    ? computeAnchorLayout(
+      place.point,
+      { width: window.innerWidth, height: window.innerHeight },
+      currentChromeInsets(),
+    )
+    : null;
   const anchorStyle = layout?.anchorStyle;
   const flip = !!layout?.flip;
   const tailLeft = layout ? layout.tailLeft : null;

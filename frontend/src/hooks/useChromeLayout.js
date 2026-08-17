@@ -15,6 +15,33 @@ import { chromeInsets, chromeInsetProperties, feedRailOpen } from "./chromeLayou
 const FEED_OPEN_KEY = "osint-feed-open";
 
 /**
+ * The insets as they are right now, read back off <html>.
+ *
+ * The writer's own module owns reading them, so there is one place that knows
+ * these are custom properties rather than props. Everything that has to *avoid*
+ * the chrome rather than sit in it needs them at a moment it has no access to
+ * this hook's state -- a card being positioned against a map click, a stored panel
+ * position being clamped -- and both of those were computing their geometry from
+ * `window.innerHeight` alone, which is why a card could open with its header
+ * behind the top bar.
+ *
+ * Falls back to the CSS fallbacks' own values, so a caller that runs before the
+ * first write still clears the bars.
+ */
+export function currentChromeInsets() {
+  const styles = getComputedStyle(document.documentElement);
+  const read = (name, fallback) => {
+    const value = parseFloat(styles.getPropertyValue(name));
+    return Number.isFinite(value) ? value : fallback;
+  };
+  return {
+    top: read("--chrome-top", 78),
+    left: read("--chrome-left", 0),
+    bottom: read("--chrome-bottom", 34),
+  };
+}
+
+/**
  * The reader's stored preference, or `null` for "never expressed one".
  *
  * Three states rather than two, and the third is what makes the default follow
