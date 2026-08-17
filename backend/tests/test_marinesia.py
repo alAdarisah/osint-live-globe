@@ -13,6 +13,7 @@ that runs through AIS: an IMO of 0, a draught of 0.0 and an ETA of 00-00 are all
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -264,6 +265,22 @@ def _sweep(monkeypatch, answers, boxes=None, key="a-key"):
     monkeypatch.setattr(config, "MARINESIA_BBOXES", boxes or [(24.0, 48.0, 30.0, 57.0)])
     monkeypatch.setattr(marinesia.storage, "record_source_health", health.record)
     monkeypatch.setattr(marinesia.storage, "record_snapshot", record_snapshot)
+
+    # The rotation reads stored positions to decide which box to spend its one
+    # hourly request on, and reads back how many hulls the layer holds across every
+    # box still inside the staleness window. Both are empty here, which makes the
+    # box choice deterministic (the first, since none has ever been seen).
+    async def no_stored(kind, prefer_replica=False):
+        return []
+
+    async def nothing_held(kind, order_by_recency=False):
+        return []
+
+    monkeypatch.setattr(marinesia.storage, "entity_latest_with_times", no_stored)
+    monkeypatch.setattr(marinesia.storage, "entity_latest", nothing_held)
+    # A sweep is one request now, so no sweep in these tests can be rate limited by
+    # a previous one leaving the module-level wall set.
+    monkeypatch.setattr(marinesia, "_rate_limited_until", 0.0)
     monkeypatch.setattr(marinesia, "REQUEST_SPACING", 0)  # no real waiting in tests
     client = _Client(answers)
     monkeypatch.setattr(marinesia.httpx, "AsyncClient", lambda **kw: client)
@@ -310,11 +327,22 @@ def test_a_hull_in_two_overlapping_boxes_is_one_pin(monkeypatch):
 
 
 def test_the_newer_fix_wins_when_a_hull_appears_twice(monkeypatch):
-    older = [{**AREA_RESPONSE[0], "lat": 1.0, "ts": "2026-08-09T08:00:00"}]
-    newer = [{**AREA_RESPONSE[0], "lat": 2.0, "ts": "2026-08-09T09:59:00"}]
-    boxes = [(24.0, 48.0, 30.0, 57.0), (25.0, 49.0, 29.0, 56.0)]
-    _health, snapshots, _client = _sweep(monkeypatch, [older, newer], boxes)
-    assert snapshots[0][1][0]["lat"] == 2.0
+    """Within one response, since a sweep is now one box.
+
+    This used to send the same hull from two overlapping boxes in a single sweep. A
+    sweep spends the whole hourly budget on one request now, so cross-box dedup
+    happens in Postgres between sweeps -- entity_latest is keyed on (kind, mmsi) --
+    rather than in this function. What is still this function's job is a response
+    that lists the same hull twice, which their API does when a box overlaps their
+    own tiling."""
+    twice = [
+        {**AREA_RESPONSE[0], "lat": 1.0, "ts": "2026-08-09T08:00:00"},
+        {**AREA_RESPONSE[0], "lat": 2.0, "ts": "2026-08-09T09:59:00"},
+    ]
+    _health, snapshots, _client = _sweep(monkeypatch, [twice])
+    stored = snapshots[0][1]
+    assert len(stored) == 1
+    assert stored[0]["lat"] == 2.0
 
 
 def test_one_failing_box_does_not_cost_the_other_seven(monkeypatch):
@@ -327,23 +355,46 @@ def test_one_failing_box_does_not_cost_the_other_seven(monkeypatch):
     assert len(snapshots[0][1]) == 3
 
 
-def test_a_partial_sweep_says_so_on_the_status_panel(monkeypatch):
-    boxes = [(24.0, 48.0, 30.0, 57.0), (12.0, 32.0, 30.0, 43.0)]
-    health, _snap, _client = _sweep(
-        monkeypatch, [AREA_RESPONSE, RuntimeError("HTTP 500")], boxes
-    )
-    source, count, ok, error = health.rows[0]
-    assert (source, count, ok) == ("marinesia", 3, True)
-    assert "partial sweep" in error
+def test_a_failed_request_is_a_failed_poll_not_an_empty_ocean(monkeypatch):
+    """The distinction the whole health table exists for.
 
-
-def test_every_box_failing_is_a_failed_poll_not_an_empty_ocean(monkeypatch):
-    """The distinction the whole health table exists for."""
+    "partial sweep" is gone with the batch: one request either lands or does not, so
+    there is no half-success left to describe. What has to survive is that a failure
+    writes a failed row rather than an empty successful one -- an empty layer and a
+    dead collector look identical on a map.
+    """
     health, snapshots, _client = _sweep(monkeypatch, [RuntimeError("HTTP 503")])
     assert snapshots == []
     source, count, ok, error = health.rows[0]
     assert (source, count, ok) == ("marinesia", None, False)
-    assert "every box failed" in error
+    assert "HTTP 503" in error
+
+
+def test_a_spent_quota_is_not_a_failure(monkeypatch):
+    """One request an hour is the budget, so being out of it is the ordinary state
+    for most of every hour.
+
+    Recording it as a failure would have this source red roughly 59 minutes in 60,
+    which is both wrong and exactly the kind of permanent-red light that teaches an
+    operator to ignore the panel.
+    """
+    limited = marinesia.RateLimited(reset_at=9e18)
+    health, snapshots, _client = _sweep(monkeypatch, [limited])
+    assert snapshots == [], "nothing was fetched, so nothing is stored"
+    assert health.rows == [], "and nothing is reported as broken"
+
+
+def test_a_spent_quota_stops_the_next_sweep_asking(monkeypatch):
+    """The reset instant is remembered, so later sweeps wait rather than each
+    rediscovering the wall -- which is what turned one 429 into eleven an hour."""
+    limited = marinesia.RateLimited(reset_at=time.time() + 1800)
+    _health, _snap, client = _sweep(monkeypatch, [limited])
+    assert len(client.calls) == 1
+
+    # A second sweep in the same window must not spend a request. The harness resets
+    # the wall, so this asserts the state the first sweep left rather than re-running
+    # through it.
+    assert marinesia._rate_limited_until > time.time()
 
 
 def test_a_data_wrapped_response_is_read_too(monkeypatch):

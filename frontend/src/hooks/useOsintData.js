@@ -113,11 +113,13 @@ export const POLL_CONFIG = [
   // faster client poll can only arrive at the same document sooner, and every
   // poll between two refreshes 304s at zero bytes anyway.
   { key: "aisDigitraffic", url: "/api/ais-digitraffic", intervalMs: 30000 },
-  // The ships layer's fallback supplier. Thirty seconds, matching Digitraffic
-  // rather than aisstream's ten: the backend re-polls Marinesia every 300s
-  // (MARINESIA_POLL_INTERVAL), so anything faster is asking the same snapshot
-  // for itself repeatedly.
-  { key: "marinesia", url: "/api/marinesia", intervalMs: 30000 },
+  // The ships layer's fallback supplier. Five minutes, which is slower than every
+  // other vessel feed here and matches what is behind it: the provider's budget for
+  // this key is one request an hour (see backend/sources/marinesia.py), so the
+  // backend has genuinely new positions for one box per hour and nothing this poll
+  // does can make them arrive sooner. Anything faster asks for the same snapshot
+  // repeatedly and, worse, implies a freshness the layer does not have.
+  { key: "marinesia", url: "/api/marinesia", intervalMs: 300000 },
   // Aircraft, and the biggest single payload the frontend takes: ~6.6 MB of
   // roughly seventeen thousand airframes.
   //

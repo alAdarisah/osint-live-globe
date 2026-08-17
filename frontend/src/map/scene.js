@@ -332,20 +332,31 @@ export const LAYER_MANIFEST = {
     // been since 2026-08-05, with five independent reports on their own tracker of
     // a socket that connects, accepts a subscription and sends nothing.
     //
-    // `draw: null`, so the resolver never switches it on by itself. That is not
-    // shyness: it is a thinner picture of the same water (~100k messages a day
-    // worldwide against ~140k a day from the eight watched chokepoints alone on
-    // aisstream), so it must not quietly stand in for the real thing while the real
-    // thing is working. App.jsx turns it on only while the `ais` source is
-    // unhealthy or empty, and off again when it recovers -- see the fallback effect
-    // there. A reader can also switch it on themselves at any time.
+    // MANUAL, so the resolver never switches it on for any reason of its own. That
+    // is the whole of what makes it a fallback rather than a fourth vessel layer:
+    // it is a thinner picture of the same water (~100k messages a day worldwide
+    // against ~140k a day from the eight watched chokepoints alone on aisstream),
+    // so it must never quietly stand in for the real thing while the real thing is
+    // working. On means somebody asked -- either App.jsx's supplier fallback while
+    // `ais` is delivering nothing, or the reader's own tick.
     //
-    // Same THEATRE band and cap as aisDigitraffic: one layer, one supplier, and the
-    // same "a thousand hulls at world zoom is a smear" reasoning.
+    // CORROBORATING would have been wrong, and was: isCorroborationOpen opens every
+    // corroborating layer as soon as a country is focused, so after aisstream
+    // recovered the first click on a country would have drawn the backup feed
+    // alongside the live one. MANUAL is refused by isActive outright, and a wish
+    // still beats it in applyScene -- which is exactly the asymmetry a fallback
+    // needs.
+    //
+    // Fetched regardless of whether it is drawn (FETCH_ALWAYS), so the moment the
+    // fallback switches it on there is something to draw rather than a blank layer
+    // waiting on the next poll.
+    //
+    // Same THEATRE cap as aisDigitraffic: one layer, one supplier, and the same
+    // "a thousand hulls at world zoom is a smear" reasoning.
     draw: null,
     fetch: FETCH_ALWAYS,
     cap: { THEATRE: 600 },
-    disposition: CORROBORATING,
+    disposition: MANUAL,
   },
   darkVessels: {
     // No zoom gate, and that is deliberate: there are only ever a handful

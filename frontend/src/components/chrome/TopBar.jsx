@@ -66,12 +66,16 @@ export default function TopBar({ theme, onToggleTheme, counts, isReplaying, repl
             outage while the map was drawing several hundred Finnish ships. That
             outage is not hypothetical: aisstream has been silent for days at a
             time, which is the entire reason a second supplier exists, and this
-            cell is one of the places a reader would look to find out. */}
+            cell is one of the places a reader would look to find out. marinesia is
+            in the sum for the same reason: during an outage it is the layer actually
+            drawing hulls, and a Vessels count that excluded it would read low
+            against a map the reader can see. It contributes zero whenever it is off,
+            which is whenever aisstream is working. */}
         <TopStat
           id="statVessels"
           label="Vessels"
           tone="accent"
-          readout={sumCountReadout(counts, ["aisCivilian", "aisNavy", "aisTanker", "aisDigitraffic"], "vessels")}
+          readout={sumCountReadout(counts, ["aisCivilian", "aisNavy", "aisTanker", "aisDigitraffic", "marinesia"], "vessels")}
         />
         <TopStat
           id="statEvents"

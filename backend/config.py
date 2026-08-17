@@ -120,10 +120,17 @@ ADSB_STALE_AFTER = int(os.getenv("ADSB_STALE_AFTER", "1800"))
 # back to ENTITY_STALE_AFTER_DEFAULT.
 ENTITY_STALE_AFTER = {
     "ais": AIS_STALE_AFTER,
-    # Polled every 5 minutes rather than streamed, so a hull legitimately goes
-    # several sweeps without a fresh fix. Wider than "ais" for that reason, and
-    # still short enough that nothing on the layer is an hour old.
-    "marinesia": int(os.getenv("MARINESIA_STALE_AFTER", "3600")),
+    # Wider than a full rotation of MARINESIA_BBOXES, and that is a requirement
+    # rather than a margin: the collector spends its one hourly request on a single
+    # box, so what the layer holds is the union of every box still inside this
+    # window. Set this below boxes x MARINESIA_POLL_INTERVAL and each box expires
+    # before the rotation returns to it -- leaving one box's worth on screen however
+    # long the process runs, which is precisely the ten-vessel layer this replaced.
+    #
+    # Three boxes an hour apart is a three-hour rotation; four hours leaves an
+    # hour's slack for a 429 or a failed request. Widen MARINESIA_BBOXES and this
+    # has to widen with it.
+    "marinesia": int(os.getenv("MARINESIA_STALE_AFTER", str(4 * 3600))),
     "adsb": ADSB_STALE_AFTER,
     "satellites": 3600,
     "gdelt": 86400,
@@ -709,15 +716,34 @@ WATCHED_WATERS_LABELS = [
 _DEFAULT_AIS_BBOXES = "-90,-180,90,180"
 AIS_BBOXES = _parse_bboxes(os.getenv("AIS_BBOXES", _DEFAULT_AIS_BBOXES))
 
-# Which boxes the Marinesia sweep asks for. The watched theatres rather than
-# AIS_BBOXES' whole planet, and this one is not a free choice: that API is a
-# request per box against a 5-per-minute budget, so the box list is the request
-# count. Eight is a sweep of roughly 100 seconds; the planet as one box is
-# untested and their response is undocumented in size.
-MARINESIA_BBOXES = _parse_bboxes(os.getenv("MARINESIA_BBOXES", "")) or WATCHED_WATERS
-# Minutes, not seconds: a sweep already takes ~100s of paced requests, and the
-# free tier's budget is the binding constraint rather than the data's freshness.
-MARINESIA_POLL_INTERVAL = int(os.getenv("MARINESIA_POLL_INTERVAL", "300"))
+# Which boxes the Marinesia rotation covers, and how often it comes back to one.
+#
+# The budget is one request an hour. Measured, not documented: every response
+# carries `x-ratelimit-limit: 1` with a reset about 3600s out, against a published
+# "up to 5 requests per minute" that this collector was originally built for. So
+# the box list is not a batch, it is a rotation of one request per hour, and three
+# numbers below are one decision:
+#
+#   boxes x interval = how old a box's positions can be, and
+#   MARINESIA_STALE_AFTER must exceed that, or a box expires before the rotation
+#   returns to it and the layer holds exactly one box no matter how long it runs.
+#
+# Three boxes rather than all eight WATCHED_WATERS, and that is the honest trade
+# for a fallback: eight boxes at one an hour means eight-hour-old ship positions,
+# and a hull moves 150 nautical miles in eight hours. Three keeps the worst case
+# at three hours. They are the three where "is anything moving through here" is
+# the question this map exists to answer -- and any of it is overridable, so a paid
+# tier can simply widen the list and shorten the interval.
+_DEFAULT_MARINESIA_BBOXES = (
+    "40,27,47,42;"    # Black Sea
+    "24,48,30,57;"    # Strait of Hormuz / Persian Gulf
+    "10,43,15,52"     # Gulf of Aden / Bab-el-Mandeb approach
+)
+MARINESIA_BBOXES = _parse_bboxes(os.getenv("MARINESIA_BBOXES", _DEFAULT_MARINESIA_BBOXES))
+# An hour, because that is the whole budget. A shorter interval does not buy more
+# data, it buys 429s -- which is what a 300-second interval was doing: spending the
+# hour's one request in the first minute and then failing eleven times an hour.
+MARINESIA_POLL_INTERVAL = int(os.getenv("MARINESIA_POLL_INTERVAL", "3600"))
 
 # airplanes.live has no world/bbox endpoint, only point+radius (max 250nm) --
 # these regional centers stand in for global coverage. As "lat,lon,radius_nm"

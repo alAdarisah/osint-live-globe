@@ -104,3 +104,113 @@ test("neither supplier delivering says so, rather than implying an empty ocean",
   assert.equal(none.key, "none");
   assert.match(none.note, /not evidence/);
 });
+
+// ---------- the recovery path, end to end ----------
+//
+// "Make sure that when AIS comes back everything works as it should" is the half of
+// a fallback that is easy to leave untested, because the failure is silent in the
+// good direction: the backup feed simply stays on, quietly drawing a thin picture
+// over a working one, and nothing errors.
+//
+// So this drives the real scene resolver rather than asserting the wish alone. The
+// wish is only half the mechanism -- the other half is that withdrawing a key from
+// the wish table actually turns the layer off, which depends on `marinesia` being in
+// SCENE_APPLY_KEYS (createMapController's applyLayerWishes leaves those to the
+// resolver and sets every other key explicitly).
+
+const { resolveScene, SCENE_APPLY_KEYS, LAYER_MANIFEST, MANUAL } = await import("../src/map/scene.js");
+
+/**
+ * Whether the layer ends up drawn, by the rule createMapController's applyScene
+ * actually applies:
+ *
+ *   const wish = userLayerWish[key];
+ *   let want = wish === undefined ? scene.active.has(key) : wish;
+ *
+ * Restated here because applyScene lives in a 9,000-line module that needs Leaflet
+ * and a DOM, and because the rule is the whole mechanism: the resolver decides only
+ * when nobody has wished, and a wish -- from the fallback or from the reader --
+ * beats it either way. Asserting resolveScene alone would test the wrong half, and
+ * did on the first pass: it reports what the *camera* wants, not what is drawn.
+ */
+function wouldDraw(wishes, sceneContext = { zoom: 6 }) {
+  const wish = wishes.marinesia;
+  return wish === undefined ? resolveScene(sceneContext).active.has("marinesia") : wish;
+}
+
+test("the resolver, not the fallback, is what owns the layer when nobody wishes", () => {
+  // If marinesia were outside SCENE_APPLY_KEYS, applyLayerWishes would set it from
+  // whatever keys are *present* in the table -- and a withdrawn key is not present,
+  // so nothing would ever turn it back off. It would stay on for the rest of the
+  // session after aisstream recovered.
+  assert.ok(
+    SCENE_APPLY_KEYS.includes("marinesia"),
+    "marinesia must be resolver-owned, or a withdrawn fallback never switches off",
+  );
+});
+
+test("nothing but an explicit wish can switch the fallback on", () => {
+  // MANUAL, and this is the test that changed it. It was CORROBORATING first, and
+  // isCorroborationOpen opens every corroborating layer the moment a country is
+  // focused -- so after aisstream recovered, the first click on a country would have
+  // drawn the backup feed alongside the live one. A country focus is the single most
+  // ordinary thing a reader does on this map.
+  assert.equal(LAYER_MANIFEST.marinesia.disposition, MANUAL);
+  assert.equal(LAYER_MANIFEST.marinesia.draw, null);
+
+  const focus = { kind: "country", key: "UKR", bounds: [40, 20, 55, 45] };
+  for (const ctx of [
+    { zoom: 2 }, { zoom: 6 }, { zoom: 9 }, { zoom: 14 },
+    { zoom: 6, focus }, { zoom: 12, focus },
+  ]) {
+    assert.ok(
+      !resolveScene(ctx).active.has("marinesia"),
+      `switched itself on at ${JSON.stringify(ctx)}`,
+    );
+  }
+});
+
+test("the outage draws it, and recovery stops drawing it", () => {
+  // The whole transition, through the rule that decides.
+  assert.equal(wouldDraw(shipFallbackWish({ ...AIS_DOWN, ...MARINESIA_LIVE })), true,
+    "the fallback did not reach the map");
+  assert.equal(wouldDraw(shipFallbackWish({ ...AIS_WORKING, ...MARINESIA_LIVE })), false,
+    "the fallback outlived the outage");
+});
+
+test("recovery holds with a country focused, which is where it would have failed", () => {
+  const focus = { kind: "country", key: "UKR", bounds: [40, 20, 55, 45] };
+  const recovered = shipFallbackWish({ ...AIS_WORKING, ...MARINESIA_LIVE });
+  assert.equal(wouldDraw(recovered, { zoom: 6, focus }), false);
+  assert.equal(wouldDraw(recovered, { zoom: 12, focus }), false);
+});
+
+test("a reader who asked for it keeps it after aisstream returns", () => {
+  // App.jsx applies layerOverride *after* the fallback's contribution, so a reader's
+  // own tick is what is left rather than being overruled by recovery.
+  const wishes = { ...shipFallbackWish({ ...AIS_WORKING, ...MARINESIA_LIVE }), marinesia: true };
+  assert.equal(wouldDraw(wishes), true);
+
+  // And a reader who switched it off during the outage stays off.
+  const refused = { ...shipFallbackWish({ ...AIS_DOWN, ...MARINESIA_LIVE }), marinesia: false };
+  assert.equal(wouldDraw(refused), false);
+});
+
+test("the primary layers are untouched by any of this", () => {
+  // aisstream's own buckets have to come back on their own, with no fallback
+  // involvement: they are AUTO layers with real draw bands, and nothing here should
+  // have changed that.
+  // AUTO is the property that matters: they come back by themselves when frames
+  // resume, with nothing to switch and nobody to ask. Deliberately not asserting a
+  // draw band -- aisNavy has none on purpose, because a warship broadcasting AIS at
+  // all is the rare thing on the layer and is worth seeing before you have zoomed in
+  // looking for it.
+  for (const key of ["aisCivilian", "aisTanker", "aisNavy"]) {
+    assert.ok(LAYER_MANIFEST[key], `${key} left the manifest`);
+    assert.notEqual(LAYER_MANIFEST[key].disposition, MANUAL, `${key} must not need a tick`);
+  }
+
+  // And the fallback is the only vessel layer that does need one, so recovery cannot
+  // leave a second supplier drawing beside the first.
+  assert.equal(LAYER_MANIFEST.marinesia.disposition, MANUAL);
+});
