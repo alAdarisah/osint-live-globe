@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   chromeInsets,
   chromeInsetProperties,
+  feedRailOpen,
   TOP_BAR_HEIGHT,
   SUB_BAR_HEIGHT,
   HUD_HEIGHT,
@@ -71,6 +72,35 @@ test("the breakpoint matches the one the stylesheet and the hook use", () => {
   // layout the JS thinks is mobile and the CSS thinks is not is a layout nobody
   // can reason about, so the number has exactly one home.
   assert.equal(MOBILE_MAX_WIDTH, 700);
+});
+
+test("a defaulted rail follows the viewport, and a chosen one does not", () => {
+  // The bug this pins, found on the deployed build: the default was resolved
+  // inside a useState initializer, so whichever viewport the *first* render saw
+  // was frozen for the session. A window that started narrow and was then
+  // widened kept a rail that could never reopen on its own, because the default
+  // had already been spent -- and the symptom is a missing panel, which reads as
+  // a layout that was never built rather than as a default gone stale.
+  assert.equal(feedRailOpen(null, false, false), true, "desktop default is open");
+  assert.equal(feedRailOpen(null, true, false), false, "phone default is closed");
+
+  // Still a default, so widening re-derives rather than staying shut.
+  assert.equal(feedRailOpen(null, false, false), true);
+
+  // A stored choice outranks the viewport in both directions. `??` and not `||`:
+  // a stored `false` is a decision, and `||` would throw it away every render.
+  assert.equal(feedRailOpen(false, false, false), false, "closed on a desktop by choice");
+  assert.equal(feedRailOpen(true, true, false), true, "opened on a phone by choice");
+});
+
+test("the drawer takes the rail from the feed without erasing the choice", () => {
+  // Both want the left edge and only one can have it. The feed yields while the
+  // drawer is up and must come back when it closes -- so the drawer is applied
+  // on top of the preference rather than written into it.
+  assert.equal(feedRailOpen(true, false, true), false, "drawer wins while open");
+  assert.equal(feedRailOpen(true, false, false), true, "and the feed returns after");
+  assert.equal(feedRailOpen(null, false, true), false);
+  assert.equal(feedRailOpen(null, false, false), true);
 });
 
 test("the properties carry their units", () => {

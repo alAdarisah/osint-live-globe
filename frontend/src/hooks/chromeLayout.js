@@ -64,6 +64,25 @@ export function chromeInsets({ feedOpen = false, drawerOpen = false, scrubVisibl
 }
 
 /**
+ * Whether the feed rail should be showing.
+ *
+ * Extracted from useChromeLayout so the one rule with three inputs can be
+ * tested without a DOM, because getting it wrong is invisible: the rail simply
+ * is not there, which looks like a layout that was never built rather than a
+ * default that was consumed too early.
+ *
+ * @param {boolean|null} pref  the reader's stored choice, or null for "never chose"
+ * @param {boolean} mobile
+ * @param {boolean} drawerOpen  Admin Mode's layer drawer has the rail
+ */
+export function feedRailOpen(pref, mobile, drawerOpen) {
+  // `??`, not `||`: a stored `false` is a decision and must survive, where `||`
+  // would discard it and fall back to the viewport every time.
+  const wanted = pref ?? !mobile;
+  return wanted && !drawerOpen;
+}
+
+/**
  * The insets as the CSS custom properties every anchor reads. Split out from
  * the writer so a test can assert the exact strings that reach the stylesheet,
  * rather than asserting numbers and hoping the units are appended.
