@@ -17,7 +17,7 @@
 import { STALE_AFTER_SECONDS } from "../../utils/tempo.js";
 import {
   sourceState, sourceStateLabel, sourceLatenessNote,
-  SOURCE_OK, SOURCE_STATE_ORDER,
+  SOURCE_OK, SOURCE_STATE_ORDER, STALE_MULTIPLIER,
 } from "../../utils/sourceState.js";
 
 /** The value every cell shows when it does not know. */
@@ -39,19 +39,28 @@ const unknown = (title) => ({ text: UNKNOWN, title, known: false });
  */
 export const ESCALATION_CEILING = 5;
 
-// What the number means, as opposed to what it currently is.
+// What each number means, as opposed to what it currently is.
 //
-// Both of these cells used to say only the second. "Kashmir is running 3.1× its
-// own 7-day baseline" is a faithful reading and it assumes the reader already
-// knows what is being counted, what a baseline is, and whether 3.1 is a lot --
-// and "100% of aircraft reporting bad GPS fixes" reads as an emergency when it
-// can be three aircraft out of three in one hex on yesterday's data.
+// Every cell in the strip used to say only the second, and every one of them was
+// legible only to someone who already knew the metric. "Kashmir is running 3.1×
+// its own 7-day baseline" assumes the reader knows what is being counted and
+// whether 3.1 is a lot; "100% of aircraft reporting bad GPS fixes" reads as an
+// emergency when it can be two aircraft in one hex on yesterday's data; "150
+// events" reads as how many exist rather than how many are on screen; and
+// Freshness and Sources answer two genuinely different questions in numbers that
+// look like the same question asked twice.
 //
-// So each title now leads with the explanation and ends with the live reading.
-// Exported because the Legend prints the same sentences (see Legend.jsx's
-// "Status strip" section): a native `title` never fires on a touch screen, which
-// is the same reason the attribution disclaimer is repeated there, and two
-// hand-written copies of an explanation are two explanations that can disagree.
+// So every title leads with the explanation and ends with the live reading, under
+// "Right now:". The order matters: a tooltip that opens with today's number
+// teaches nothing on the second read, and this text is read once and then relied
+// on for the rest of a session.
+//
+// Exported, and collected into STATUS_STRIP_EXPLAINERS below, because the Legend
+// prints the same sentences (see its "Status strip" section): a native `title`
+// never fires on a touch screen, which is the same reason the attribution
+// disclaimer is repeated there. Two hand-written copies of an explanation are two
+// explanations that can disagree, and the drift that actually happens is a new
+// cell whose explainer the reference panel never learns about.
 export const ESCALATION_EXPLAINER =
   "How much busier the worst conflict zone is than it usually is -- not how bad it is. "
   + "Conflict events in the last 24 hours, against that zone's own average over the "
@@ -77,14 +86,14 @@ export const JAMMING_EXPLAINER =
 export function escalationReadout(zones) {
   if (!Array.isArray(zones) || zones.length === 0) {
     return {
-      ...unknown(`${ESCALATION_EXPLAINER}\n\nNo zone is currently running above its own baseline, or the ranking has not loaded.`),
+      ...unknown(`${ESCALATION_EXPLAINER}\n\nRight now: no zone is running above its own baseline, or the ranking has not loaded.`),
       needle: null,
     };
   }
   const ratios = zones.map((zone) => Number(zone?.ratio)).filter((n) => Number.isFinite(n) && n > 0);
   if (!ratios.length) {
     return {
-      ...unknown(`${ESCALATION_EXPLAINER}\n\nThe escalation ranking carried no usable ratio.`),
+      ...unknown(`${ESCALATION_EXPLAINER}\n\nRight now: the escalation ranking carried no usable ratio.`),
       needle: null,
     };
   }
@@ -148,15 +157,28 @@ export function jammingReadout(cells) {
  * "is this known" cannot be read off the number. It is known once the total is
  * above zero, or once the feed has reported success; below that this says so.
  */
+export const COUNT_EXPLAINER =
+  "Two numbers, and the second is the one that stops the first from misleading you: "
+  + "what is drawn on screen right now, out of everything received for the current "
+  + "time window.\n\n"
+  + "They differ for reasons that are all deliberate -- records outside the viewport, "
+  + "layers below their own zoom gate, per-zoom caps that thin a crowded board, and "
+  + "whatever you have set in the panel's own filters. So this figure falling as you "
+  + "zoom in is the map scoping to what you are looking at, not a feed going quiet. "
+  + "The pair is the only way to tell those apart, which is why no cell here ever "
+  + "shows a bare count.";
+
 export function countReadout(counts, key, label) {
   const visible = counts?.[key];
   const total = counts?.[`${key}Total`];
   if (!Number.isFinite(total) || total === 0) {
-    return unknown(`No ${label} have been received yet.`);
+    return unknown(`${COUNT_EXPLAINER}\n\nRight now: no ${label} have been received yet.`);
   }
   return {
     text: Number(visible ?? 0).toLocaleString(),
-    title: `${Number(visible ?? 0).toLocaleString()} ${label} drawn here, of ${Number(total).toLocaleString()} held.`,
+    title:
+      `${COUNT_EXPLAINER}\n\nRight now: ${Number(visible ?? 0).toLocaleString()} ${label} `
+      + `drawn here, of ${Number(total).toLocaleString()} held.`,
     known: true,
   };
 }
@@ -170,11 +192,17 @@ export function countReadout(counts, key, label) {
 export function sumCountReadout(counts, keys, label) {
   const totals = keys.map((key) => Number(counts?.[`${key}Total`])).filter(Number.isFinite);
   const held = totals.reduce((a, b) => a + b, 0);
-  if (held === 0) return unknown(`No ${label} have been received yet.`);
+  if (held === 0) return unknown(`${COUNT_EXPLAINER}
+
+Right now: no ${label} have been received yet.`);
   const visible = keys.map((key) => Number(counts?.[key])).filter(Number.isFinite).reduce((a, b) => a + b, 0);
   return {
     text: visible.toLocaleString(),
-    title: `${visible.toLocaleString()} ${label} drawn here, of ${held.toLocaleString()} held.`,
+    title:
+      `${COUNT_EXPLAINER}
+
+Right now: ${visible.toLocaleString()} ${label} drawn here, `
+      + `of ${held.toLocaleString()} held.`,
     known: true,
   };
 }
@@ -185,6 +213,15 @@ export function sumCountReadout(counts, keys, label) {
  * held back by its own zoom gate is not a layer on screen, and this cell claims
  * to say what is.
  */
+export const LAYERS_EXPLAINER =
+  "How many of the map's layers are actually being drawn -- counted off what the map "
+  + "reports it is doing, not off what has been switched on.\n\n"
+  + "It moves as you zoom, and that is the scene resolver rather than anything "
+  + "breaking: most layers are gated to a zoom band, so panning out drops them and "
+  + "zooming in brings them back. A layer you have ticked but which is still below its "
+  + "own gate is not counted here, because it is not on screen -- its checkbox goes "
+  + "amber and says so. Use the pills along the top to see which layers those are.";
+
 export function layerCountReadout(layerVisibility) {
   // `{}` has to be caught as well as null, and it is the *only* case the guard was
   // ever going to see: useLeafletMap seeds layerState as { on: {}, wish: {} }, so
@@ -193,30 +230,53 @@ export function layerCountReadout(layerVisibility) {
   // over a map that had not answered yet. Precisely what this module's own header
   // calls the worst thing a status strip can do.
   if (!layerVisibility || typeof layerVisibility !== "object" || !Object.keys(layerVisibility).length) {
-    return unknown("The map has not reported which layers it is drawing.");
+    return unknown(`${LAYERS_EXPLAINER}
+
+Right now: the map has not reported which layers it is drawing.`);
   }
   const on = Object.values(layerVisibility).filter(Boolean).length;
   return {
     text: String(on),
-    title: `${on} layer${on === 1 ? "" : "s"} currently drawn. A layer switched on but held back by its own zoom gate is not counted here.`,
+    title: `${LAYERS_EXPLAINER}
+
+Right now: ${on} layer${on === 1 ? "" : "s"} drawn.`,
     known: true,
   };
 }
 
 /**
- * Freshness: how long ago the *stalest* source that is otherwise healthy last
+ * Freshness: how long ago the stalest source that is otherwise healthy last
  * succeeded. Not an average and not the fastest -- a strip that reports the
  * best number it can find is a strip that hides the feed that stopped.
  */
+export const FRESHNESS_EXPLAINER =
+  "How long ago the stalest source last managed a successful fetch -- the worst "
+  + "one, not an average and not the best. A strip that reports the best number it "
+  + "can find is a strip that hides the feed that stopped.\n\n"
+  + "So a large figure here does not mean the map is stale; it means one source is, "
+  + "and it does not by itself mean anything is wrong. The feeds run on wildly "
+  + "different clocks -- aircraft every few seconds, a country-boundary set once a "
+  + "week -- and this cell judges them all against one flat "
+  + `${STALE_AFTER_SECONDS}s mark, so a weekly reference file three hours past its `
+  + "last fetch reads as hours old and is perfectly healthy. Sources, next along, is "
+  + "the cell that judges each feed against its own cadence; that is the one to read "
+  + "for whether something is actually broken.";
+
 export function latencyReadout(health) {
   const ages = sourceRows(health)
     .map(([, info]) => Number(info?.seconds_since_success))
     .filter((n) => Number.isFinite(n));
-  if (!ages.length) return unknown("No source has reported a successful fetch yet.");
+  if (!ages.length) {
+    return unknown(`${FRESHNESS_EXPLAINER}
+
+Right now: no source has reported a successful fetch yet.`);
+  }
   const worst = Math.max(...ages);
   return {
     text: worst >= 3600 ? `${Math.round(worst / 3600)}h` : worst >= 90 ? `${Math.round(worst / 60)}m` : `${worst}s`,
-    title: `The stalest source last succeeded ${worst}s ago. Sources are considered stale past ${STALE_AFTER_SECONDS}s.`,
+    title: `${FRESHNESS_EXPLAINER}
+
+Right now: the stalest source last succeeded ${worst}s ago.`,
     known: true,
   };
 }
@@ -238,9 +298,32 @@ export function sourceRows(health) {
  * classification SourceStatusSection renders in the drawer, so a reader who
  * checks the detailed list never finds it disagreeing with the strip.
  */
+export const SOURCES_EXPLAINER =
+  "How many of the map's data sources are currently reporting on schedule, out of "
+  + "how many it carries. The dots beside the number are the worst-off sources, worst "
+  + "first -- there is room for five and they are never spent on five that are fine."
+  + "\n\nEach source is judged against its own cadence rather than one shared "
+  + `deadline: it is late once it has gone quiet for ${STALE_MULTIPLIER}x as long as `
+  + "it normally takes, with a half-hour floor. That is the difference between this "
+  + "cell and Freshness beside it, and it is the whole reason this number is "
+  + "trustworthy: this cell once judged every source against one half-hour deadline "
+  + "and reported 26 of 57 working on a deployment with a single broken feed, because "
+  + "most sources are not supposed to report every half hour."
+  + "\n\nNot everything short of the total is a fault. A source can be waiting for "
+  + "its first fetch, or be a feed this deployment has deliberately not configured a "
+  + "key for -- neither is broken, and both are named in the list rather than counted "
+  + "as failures. Hover reads them out; the control drawer has the same list in full.";
+
 export function sourceReadout(health, dotLimit = 5) {
   const rows = sourceRows(health);
-  if (!rows.length) return { ...unknown("/api/health has not answered yet."), dots: [], ok: null, total: 0 };
+  if (!rows.length) {
+    return {
+      ...unknown(`${SOURCES_EXPLAINER}
+
+Right now: /api/health has not answered yet.`),
+      dots: [], ok: null, total: 0,
+    };
+  }
 
   // Imported rather than restated. This predicate existed twice, by hand, in this
   // file and in the drawer's SourceStatusSection -- and both copies judged all 57
@@ -263,13 +346,15 @@ export function sourceReadout(health, dotLimit = 5) {
     // its *own* cadence. The old wording was `name: failing` for everything that
     // was not green, which is how a seven-day reference set three hours past its
     // last fetch came to be described as a failure.
-    title: states
+    title: `${SOURCES_EXPLAINER}
+
+Right now: ${states
       .filter((s) => s.state !== SOURCE_OK)
       .map((s) => {
         const note = sourceLatenessNote(s.info);
-        return `${s.name}: ${sourceStateLabel(s.state)}${note ? ` (${note})` : ""}`;
+        return `${s.name} -- ${sourceStateLabel(s.state)}${note ? ` (${note})` : ""}`;
       })
-      .join(" · ") || `All ${states.length} sources reporting within their own cadence.`,
+      .join(" · ") || `all ${states.length} sources reporting within their own cadence.`}`,
     known: true,
     dots,
     ok,
@@ -298,6 +383,46 @@ export function formatCursorCoords(lat, lon) {
  * is to make "not live" impossible to miss -- see App.jsx's own note on why
  * replay used to be Admin-Mode-only, and what replaced that argument.
  */
+export const CURSOR_EXPLAINER =
+  "Where the pointer is, in WGS84 latitude and longitude -- the same coordinates "
+  + "every popup and every export uses.\n\n"
+  + "Three decimals, which is about 110 m at the equator: fine enough to read a "
+  + "position off the map, and deliberately too coarse to imply this map knows where "
+  + "anything is to the metre. Most of what it draws is placed far less precisely "
+  + "than that, and a pin's own popup is where that is stated.";
+
+export const REPLAY_EXPLAINER =
+  "Shown only when the map is not live. Every other figure in this strip -- the "
+  + "counts, the escalation ratio, the interference reading -- then describes the "
+  + "moment being replayed rather than now, which is the reason this cell exists at "
+  + "all rather than a quiet indicator somewhere.";
+
+/**
+ * Every cell's explanation, in the order the strip draws them.
+ *
+ * The Legend walks this rather than naming each constant, which is what makes the
+ * two surfaces impossible to drift apart -- including in the direction that actually
+ * happens: a cell added to the strip with an explainer of its own, and the Legend
+ * left listing the old set. Labels match the cells' own <span className="hud-label">
+ * text, because a reader arrives here having read one of those.
+ *
+ * Cursor is in the table and Replay is not. Replay's cell exists only while the map
+ * is not live, so a permanent entry in a reference panel would explain a control
+ * most readers never see; its tooltip carries the same text when it appears. The
+ * attribution cell has no entry either -- the Legend already prints that text in
+ * full, one section down, which is why the cell was given a tooltip in the first
+ * place.
+ */
+export const STATUS_STRIP_EXPLAINERS = [
+  { label: "Escalation", text: ESCALATION_EXPLAINER },
+  { label: "GPS jam", text: JAMMING_EXPLAINER },
+  { label: "Events", text: COUNT_EXPLAINER },
+  { label: "Layers", text: LAYERS_EXPLAINER },
+  { label: "Freshness", text: FRESHNESS_EXPLAINER },
+  { label: "Sources", text: SOURCES_EXPLAINER },
+  { label: "Cursor", text: CURSOR_EXPLAINER },
+];
+
 export function liveReadout({ isReplaying, replayAt } = {}) {
   if (!isReplaying) return { live: true, text: "LIVE", title: "Every layer is showing its latest data." };
   const at = Number.isFinite(replayAt) ? new Date(replayAt) : null;
@@ -305,7 +430,11 @@ export function liveReadout({ isReplaying, replayAt } = {}) {
     live: false,
     text: "NOT LIVE",
     title: at
-      ? `Replaying ${at.toISOString().replace("T", " ").slice(0, 16)} UTC. Live updates are paused until you go live.`
-      : "Replaying a past moment. Live updates are paused until you go live.",
+      ? `${REPLAY_EXPLAINER}
+
+Right now: replaying ${at.toISOString().replace("T", " ").slice(0, 16)} UTC. Live updates are paused until you go live.`
+      : `${REPLAY_EXPLAINER}
+
+Right now: replaying a past moment. Live updates are paused until you go live.`,
   };
 }

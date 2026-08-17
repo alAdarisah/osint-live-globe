@@ -9,6 +9,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { STALE_AFTER_SECONDS } from "../src/utils/tempo.js";
+import { STALE_MULTIPLIER } from "../src/utils/sourceState.js";
+
 import {
   UNKNOWN,
   ESCALATION_CEILING,
@@ -16,6 +19,13 @@ import {
   jammingReadout,
   ESCALATION_EXPLAINER,
   JAMMING_EXPLAINER,
+  COUNT_EXPLAINER,
+  LAYERS_EXPLAINER,
+  FRESHNESS_EXPLAINER,
+  SOURCES_EXPLAINER,
+  CURSOR_EXPLAINER,
+  REPLAY_EXPLAINER,
+  STATUS_STRIP_EXPLAINERS,
   countReadout,
   sumCountReadout,
   layerCountReadout,
@@ -121,7 +131,10 @@ test("the layer count counts what the map is drawing, not what was asked for", (
   // layerState.on, not the wish table: a layer pinned on and held back by its
   // own zoom gate is not a layer on screen, and this cell claims to say what is.
   assert.equal(layerCountReadout({ events: true, ais: false, adsb: true }).text, "2");
-  assert.match(layerCountReadout({ events: true }).title, /held back by its own zoom gate is not counted/);
+  // The clause moved from the reading into the explanation, where it belongs: it is
+  // a fact about the metric rather than about today.
+  assert.match(layerCountReadout({ events: true }).title, /is not counted here, because it is not on screen/);
+  assert.match(layerCountReadout({ events: true }).title, /Right now: 1 layer drawn\./);
 
   // `{}` is the map not having reported yet, not zero layers drawn -- and it is the
   // only case the old guard was ever going to meet, because useLeafletMap seeds
@@ -182,11 +195,13 @@ test("the dots spend their space on the sources that are wrong", () => {
   assert.equal(out.text, "5/7");
   assert.deepEqual(out.dots.map((d) => d.state), ["err", "warn", "ok"]);
   assert.equal(out.dots[0].name, "dead");
-  assert.match(out.title, /dead: failing/);
+  // The separator is an em-dash now, not a colon: the list follows "Right now:" and
+  // two colons in one clause read as one list inside another.
+  assert.match(out.title, /dead -- failing/);
   // "not configured here" rather than "no key": it names what is true of this
   // deployment rather than of the source, and a reader who sees it has nothing to
   // fix. The old wording read like a fault.
-  assert.match(out.title, /nokey: not configured here/);
+  assert.match(out.title, /nokey -- not configured here/);
 });
 
 test("all-healthy says so rather than listing nothing", () => {
@@ -194,7 +209,8 @@ test("all-healthy says so rather than listing nothing", () => {
   // "within their own cadence", because that is now the actual test -- each source
   // against its own reporting interval rather than all 57 against one flat half
   // hour. See utils/sourceState.js.
-  assert.equal(sourceReadout(health).title, "All 1 sources reporting within their own cadence.");
+  assert.match(sourceReadout(health).title,
+    /Right now: all 1 sources reporting within their own cadence\./);
 });
 
 test("cursor coordinates are hemisphere-signed to three decimals", () => {
@@ -331,4 +347,134 @@ test("the worst cell's own counts are the ones reported", () => {
   assert.equal(out.text, "90%");
   assert.match(out.title, /9 of 10 aircraft/);
   assert.match(out.title, /out of 3 cells loaded/);
+});
+
+// ---------- the rest of the strip ----------
+//
+// Escalation and GPS jam got their explanations first because they are measurements.
+// The remaining cells are counts and timings, which look self-explanatory and are
+// not: "Events 150" reads as how many exist rather than how many are on screen, and
+// Freshness and Sources answer two genuinely different questions in numbers that
+// look like the same question asked twice.
+
+test("every cell in the table explains itself before reporting", () => {
+  // Walked from the table rather than cell by cell, so a cell added to the strip
+  // without an explanation fails here rather than shipping bare.
+  for (const { label, text } of STATUS_STRIP_EXPLAINERS) {
+    assert.ok(text && text.length > 150, `${label}: explanation is missing or a stub`);
+    // Two paragraphs minimum for everything except the shortest: what it is, then
+    // how to read it. One long run is the thing a reader skips.
+    assert.ok(text.includes("\n\n"), `${label}: no paragraph break`);
+    assert.ok(!text.includes("*"), `${label}: markdown emphasis renders literally in a title`);
+    assert.ok(!/\s\s/.test(text.replace(/\n/g, "")), `${label}: double spaces from a bad concatenation`);
+  }
+});
+
+test("the table is the strip's own order, and the Legend can walk it", () => {
+  assert.deepEqual(
+    STATUS_STRIP_EXPLAINERS.map((e) => e.label),
+    ["Escalation", "GPS jam", "Events", "Layers", "Freshness", "Sources", "Cursor"],
+  );
+  // Labels match the cells' own hud-label text, because a reader arrives at the
+  // Legend having read one of those.
+  for (const { label } of STATUS_STRIP_EXPLAINERS) {
+    assert.match(label, /^[A-Z]/, label);
+  }
+});
+
+test("the count cells say why the two numbers differ", () => {
+  // The misreading this prevents: the figure falls as you zoom in, and without the
+  // second number that is indistinguishable from a feed going quiet.
+  assert.match(COUNT_EXPLAINER, /drawn on screen right now/);
+  assert.match(COUNT_EXPLAINER, /zoom/);
+  assert.match(COUNT_EXPLAINER, /not a feed going quiet/);
+  const out = countReadout({ events: 150, eventsTotal: 621 }, "events", "conflict events");
+  assert.ok(out.title.startsWith(COUNT_EXPLAINER));
+  assert.match(out.title, /Right now: 150 conflict events drawn here, of 621 held\./);
+});
+
+test("a summed cell shares the same explanation as a single count", () => {
+  // Aircraft is two count keys and Vessels is three; the explanation is identical,
+  // and two copies of it would be two copies to drift.
+  const out = sumCountReadout(
+    { adsbCivilian: 3, adsbCivilianTotal: 30, adsbMilitary: 1, adsbMilitaryTotal: 10 },
+    ["adsbCivilian", "adsbMilitary"], "aircraft",
+  );
+  assert.ok(out.title.startsWith(COUNT_EXPLAINER));
+  assert.match(out.title, /Right now: 4 aircraft drawn here, of 40 held\./);
+});
+
+test("the layers cell explains why the number moves on its own", () => {
+  // A reader watching it drop while panning out is watching the scene resolver, and
+  // nothing on screen says so.
+  assert.match(LAYERS_EXPLAINER, /moves as you zoom/);
+  assert.match(LAYERS_EXPLAINER, /scene resolver rather than anything/);
+  assert.match(LAYERS_EXPLAINER, /amber/, "no pointer to how to find a withheld layer");
+});
+
+test("freshness and sources each say what the other one is for", () => {
+  // The pair is the confusing part: one number is a flat-threshold worst case and the
+  // other is a per-cadence judgement, and side by side they look like one fact twice.
+  // Each explanation names the other cell so a reader can tell which to trust for
+  // "is something broken".
+  assert.match(FRESHNESS_EXPLAINER, /Sources, next along/);
+  assert.match(FRESHNESS_EXPLAINER, /does not by itself mean anything is wrong/);
+  assert.match(FRESHNESS_EXPLAINER, new RegExp(`${STALE_AFTER_SECONDS}s`));
+
+  assert.match(SOURCES_EXPLAINER, /its own cadence/);
+  assert.match(SOURCES_EXPLAINER, /Freshness beside it/);
+  assert.match(SOURCES_EXPLAINER, new RegExp(`${STALE_MULTIPLIER}x`));
+  // And that a number below the total is not automatically a fault -- the two states
+  // that are neither healthy nor broken.
+  assert.match(SOURCES_EXPLAINER, /waiting for/);
+  assert.match(SOURCES_EXPLAINER, /not configured a/);
+});
+
+test("the thresholds in the prose are the ones the code uses", () => {
+  // A number typed into an explanation is a number that can drift from the constant
+  // it describes, and the reader has no way to notice. Both are interpolated; this is
+  // what keeps them that way.
+  assert.ok(FRESHNESS_EXPLAINER.includes(String(STALE_AFTER_SECONDS)), "flat threshold hardcoded");
+  assert.ok(SOURCES_EXPLAINER.includes(String(STALE_MULTIPLIER)), "cadence multiplier hardcoded");
+});
+
+test("the cursor cell says how precise it is not", () => {
+  // Three decimals is a deliberate coarseness, and the point of saying so is that
+  // most of what this map draws is placed far less precisely than the readout is.
+  assert.match(CURSOR_EXPLAINER, /WGS84/);
+  assert.match(CURSOR_EXPLAINER, /110 m/);
+  assert.match(CURSOR_EXPLAINER, /too coarse to imply/);
+});
+
+test("replay explains what it does to every other number in the strip", () => {
+  // The reason the cell exists at all: while it is showing, the counts and ratios
+  // beside it describe the replayed moment rather than now.
+  assert.match(REPLAY_EXPLAINER, /describes the\s+moment being replayed/);
+  const out = liveReadout({ isReplaying: true, replayAt: Date.UTC(2026, 7, 17, 9, 30) });
+  assert.equal(out.text, "NOT LIVE");
+  assert.ok(out.title.startsWith(REPLAY_EXPLAINER));
+  assert.match(out.title, /Right now: replaying 2026-08-17 09:30 UTC/);
+  // And it is absent while live, because a permanent explanation of a cell that is
+  // not there is an explanation of nothing.
+  assert.ok(!STATUS_STRIP_EXPLAINERS.some((e) => e.label === "Replay"));
+});
+
+test("every empty state still carries its explanation", () => {
+  // The state a reader is most likely to hover: the cell reads "—" and the question
+  // is what it would have said. Every cell, not just the two that got it first.
+  const cases = [
+    [escalationReadout([]), ESCALATION_EXPLAINER],
+    [jammingReadout([]), JAMMING_EXPLAINER],
+    [countReadout({}, "events", "conflict events"), COUNT_EXPLAINER],
+    [sumCountReadout({}, ["a", "b"], "aircraft"), COUNT_EXPLAINER],
+    [layerCountReadout({}), LAYERS_EXPLAINER],
+    [latencyReadout({}), FRESHNESS_EXPLAINER],
+    [sourceReadout({}), SOURCES_EXPLAINER],
+  ];
+  for (const [out, explainer] of cases) {
+    assert.equal(out.text, UNKNOWN);
+    assert.equal(out.known, false);
+    assert.ok(out.title.startsWith(explainer), `an empty state lost its explanation: ${out.title.slice(0, 60)}`);
+    assert.match(out.title, /Right now:/);
+  }
 });

@@ -3,7 +3,7 @@ import { paletteColor } from "../../map/iconTheme";
 import { glyphLegend, severityLegend, QUALIFIER_ROWS } from "./legendRows";
 import { ATTRIBUTION_DISCLAIMER } from "../Attribution";
 import { shipSupplierReadout } from "../../map/shipSupplier";
-import { ESCALATION_EXPLAINER, JAMMING_EXPLAINER } from "./hudLogic";
+import { STATUS_STRIP_EXPLAINERS } from "./hudLogic";
 
 const FOLD_KEY = "osint-chrome-folds";
 
@@ -79,21 +79,22 @@ export default function Legend({ health }) {
             ))}
           </div>
 
-          {/* The two figures in the bottom strip that are a *measurement* rather than
-              a count, and so are the two nobody can read off the label. "Escalation
-              3.1×" and "GPS jam 100%" both look self-explanatory and are not: one is
-              a ratio against a zone's own history and not a badness score, and the
-              other is one hex cell on yesterday's data, sometimes over three
-              aircraft.
-              
+          {/* Every figure in the bottom strip, explained. None of them can be read
+              off its own label: "Escalation 3.1×" is a ratio against a zone's own
+              history rather than a badness score, "GPS jam 100%" is one hex cell on
+              yesterday's data and sometimes over two aircraft, "Events 150" is what
+              is on screen rather than what exists, and Freshness and Sources answer
+              two different questions that look like one.
+
               Repeated here from the cells' own tooltips for the reason the disclaimer
               below is repeated: a native title never fires on a touch screen, and
-              this panel is the reference surface a reader can always open. The text
-              is imported rather than retyped, so the two surfaces cannot drift. The
-              other cells are counts and their tooltips say all there is to say. */}
+              this panel is the reference surface a reader can always open. Walked
+              from one exported table rather than retyped, so a cell and this panel
+              cannot drift, and adding a cell to the strip cannot leave this behind. */}
           <div className="lg-section">Status strip</div>
-          <p className="lg-note lg-explainer"><b>Escalation.</b> {ESCALATION_EXPLAINER}</p>
-          <p className="lg-note lg-explainer"><b>GPS jam.</b> {JAMMING_EXPLAINER}</p>
+          {STATUS_STRIP_EXPLAINERS.map(({ label, text }) => (
+            <p key={label} className="lg-note lg-explainer"><b>{label}.</b> {text}</p>
+          ))}
 
           {/* The disclaimer, in full, where it cannot be truncated.
               Its home is the HUD's attribution cell, which is the one cell there

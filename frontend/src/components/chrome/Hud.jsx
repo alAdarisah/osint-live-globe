@@ -4,6 +4,7 @@ import Attribution, { ATTRIBUTION_TEXT } from "../Attribution";
 import { setCursorReadoutSink } from "../../map/cursorReadout";
 import {
   UNKNOWN,
+  CURSOR_EXPLAINER,
   escalationReadout,
   jammingReadout,
   countReadout,
@@ -122,7 +123,7 @@ export default function Hud({
         <Attribution />
       </div>
 
-      <div className="hud-cell hud-coords" title="Pointer position, to about 110 m.">
+      <div className="hud-cell hud-coords" title={CURSOR_EXPLAINER}>
         <span className="hud-label">Cursor</span>
         <span className="hud-value accent" ref={coordsRef}>{UNKNOWN}</span>
       </div>
