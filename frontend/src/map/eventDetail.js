@@ -23,6 +23,7 @@
 
 import { esc, fmtNumber, haversineKm, timeAgoFromDateAdded, parseGdeltDateAdded } from "../utils/format";
 import { reliabilityBand, reliabilityColor, uncertaintyRadiusMetres, VERDICT_NOTE } from "./severity";
+import { eventLeadLine, EVENT_FAMILY_FALLBACK } from "./eventLead";
 
 const SOURCE_LABEL = { acled: "ACLED", ucdp: "UCDP", gdelt: "GDELT" };
 
@@ -199,10 +200,13 @@ function wrapBlock(className, inner) {
 export function buildHeaderBlock(record) {
   const headline = (record.notes || "").trim();
   const cameo = (record.summary || "").trim();
-  const family = record.event_type || "Conflict event";
+  const family = record.event_type || EVENT_FAMILY_FALLBACK;
   const subtype = record.sub_event_type && record.sub_event_type !== record.event_type
     ? record.sub_event_type : null;
-  const lead = headline || cameo || family;
+  // Shared with the map's tooltip/popup and the intel feed's row -- see
+  // map/eventLead.js. `headline` and `cameo` are still read below, for the
+  // provenance line that says which of the two this is.
+  const lead = eventLeadLine(record);
   const date = record.date || null;
   const earliest = earliestCoveragePublished(record.coverage);
   const reportedAt = earliest ? timeAgoFromDateAdded(earliest) : null;

@@ -52,6 +52,7 @@ import {
   DEFAULT_EVENT_FILTER, CONFIDENCE_THRESHOLD,
 } from "../map/severity";
 import { OFFICIALS_KIND_LABEL } from "../map/decorators";
+import { eventLeadLine } from "../map/eventLead";
 import { safeUrl, timeAgoFromDateAdded, timeAgoFromUnix } from "../utils/format";
 import Watchlist from "./feed/Watchlist";
 import FilterChipRow from "./feed/FilterChipRow";
@@ -211,8 +212,14 @@ function EventRow({ event, onLocate, onOpenRecord }) {
     .filter(Boolean)
     .map((s) => SOURCE_BADGE[s] || s.toUpperCase());
   const where = event.location || event.country || "Location unknown";
-  const actors = [event.actor1, event.actor2].filter(Boolean).join(" vs ");
-  const line = (event.notes || "").trim() || actors || event.event_type || "Conflict event";
+  // The same line the map's tooltip, the popup and the detail card show -- see
+  // map/eventLead.js. This used to fall back to `actor1 vs actor2` where the
+  // other three fall back to `summary`, and since the backend writes `summary`
+  // only when there is no headline, the fallback was the one case that mattered:
+  // the row said "Russian armed forces vs Civilians" about a record whose card
+  // read "Russian armed forces carried out an air strike on civilians in
+  // Kharkiv."
+  const line = eventLeadLine(event);
   // Same card recordDetail("events", id) builds for a map pin (see
   // eventDetail.js) -- resolved once, here, rather than re-derived inside
   // RecordLine, so a row with no usable id (never happens for a fused event,

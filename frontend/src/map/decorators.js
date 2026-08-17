@@ -21,6 +21,7 @@ import {
 } from "./severity";
 import { paletteColor, paletteGlyph, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
 import { footprintRadiusKm } from "./groundTrack";
+import { eventLeadLine, EVENT_FAMILY_FALLBACK } from "./eventLead";
 import { inferenceHidden } from "./inferenceVisibility";
 import { REFINE_PANEL_STATUS_TEXT, REFINE_PANEL_STATUS } from "../components/refinePanelStatus";
 
@@ -615,12 +616,14 @@ export function decorateEvent(d, { offset, dimmed } = {}) {
   const trustBand = reliabilityBand(d);
   const weak = reliabilityWeak(d);
   const where = d.location || d.country || "";
-  const kind = d.event_type || "Conflict event";
+  const kind = d.event_type || EVENT_FAMILY_FALLBACK;
   // The lead is whatever actually says what happened: a real scraped headline
   // first, then the sentence built from the coded fields, and only then the
   // bare taxonomy label -- which is where this used to start, and which on its
-  // own ("Unconventional violence") tells a reader nothing.
-  const lead = (d.notes || "").trim() || (d.summary || "").trim() || kind;
+  // own ("Unconventional violence") tells a reader nothing. Now shared with the
+  // detail card and the intel feed's row rather than restated here -- see
+  // map/eventLead.js for what went wrong while the feed had its own version.
+  const lead = eventLeadLine(d);
   // The tooltip leads with the same thing the popup's <h3> does, for the same
   // reason. It used to open with `kind` alone, so hovering a pin answered
   // "what category is this" ("Unconventional violence") while only a click

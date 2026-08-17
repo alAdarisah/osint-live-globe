@@ -185,6 +185,7 @@ import {
 // real zero, which a comparison table must never do).
 import { buildCountryComparison } from "../components/countryCompareLogic";
 import { buildEventDetailHtml } from "./eventDetail";
+import { recordCardTitle } from "./eventLead";
 import { buildChoropleth } from "./choropleth";
 import {
   createDistrictOutlineLayer, indexDistrictCounts,
@@ -9021,7 +9022,13 @@ export function createMapController(container, initial, callbacks) {
       // popup. Every other kind is untouched -- same decorator output as always,
       // so nothing that already opened through this card regresses.
       const html = kind === "events" ? buildEventDetailHtml(item, raw) : d.detail;
-      return { title: d.title || null, html, kind, lat: item.lat, lon: item.lon };
+      // `d.title` has never existed: no decorator returns one (decorateEvent
+      // returns {icon, tooltip, detail}, and so does every sibling), so the card
+      // rendered its own "Event detail" fallback for every record of every kind
+      // a reader ever opened. The title comes off the record itself now -- see
+      // map/eventLead.js -- and stays null only when the record carries nothing
+      // that names it.
+      return { title: recordCardTitle(kind, item), html, kind, lat: item.lat, lon: item.lon };
     },
 
     /**

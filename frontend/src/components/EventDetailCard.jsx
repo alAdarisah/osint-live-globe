@@ -44,7 +44,12 @@ export default function EventDetailCard({ detail, onClose, getShareUrl }) {
   return (
     <aside id="eventDetailCard" ref={panelRef} style={style} role="dialog" aria-label="Event detail">
       <div {...handleProps} className={`event-detail-header ${handleProps.className || ""}`}>
-        <span className="event-detail-title">{detail.title || "Event detail"}</span>
+        {/* "Record detail", not "Event detail": this card opens for a ship, an
+            aircraft, a fire or an official statement as readily as for a fused
+            event, and it spent its whole life showing the event wording for all
+            of them because detail.title was always null (see recordCardTitle).
+            Reached only by a record that carries nothing naming it. */}
+        <span className="event-detail-title">{detail.title || "Record detail"}</span>
         {/* Only offered when the record has a coordinate. A country-scoped feed
             can carry rows that never earned one, and a button that flies the map
             to `undefined` is worse than no button. */}
