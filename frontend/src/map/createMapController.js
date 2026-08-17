@@ -209,14 +209,13 @@ import {
   pathExtent, extentInView,
 } from "../utils/geo";
 import { createGenerationGuard } from "../utils/fetchGeneration";
+import { INFRA_HOT_RADIUS_KM } from "./hotZone";
 import { fetchJson, vesselDetailUrl, portCallsUrl, aircraftDetailUrl } from "../api";
 
-// A nearby ACLED/GDELT event within this radius flags an infrastructure
-// site as a "hot zone" and triggers its flare animation -- same radius
-// class as the city popup's own event-matching (see popups.js), just a bit
-// wider since infra strikes are often geocoded to the nearest city/province
-// rather than the facility itself.
-const INFRA_HOT_RADIUS_KM = 75;
+// A nearby ACLED/GDELT event within this radius flags an infrastructure site as a
+// "hot zone" and triggers its flare animation. Imported rather than declared: the
+// two popups that state the radius in words read the same constant -- see
+// map/hotZone.js, which also records why it came down from 75km to 5km.
 
 // A country crossing either threshold (matched by name against the current
 // ACLED feed, same normalizeCountryName matching the country popup already
@@ -1781,7 +1780,11 @@ export function createMapController(container, initial, callbacks) {
     const absorbed = new Map();
     for (const [id, entry] of airfields.absorbed) absorbed.set(id, { ...entry, by: "airports" });
     for (const [id, entry] of dams.absorbed) absorbed.set(id, { ...entry, by: "dams" });
-    osmTwins = { absorbed, airfieldTwinOf: airfields.twinOf, damTwinOf: dams.twinOf };
+    osmTwins = {
+      absorbed,
+      airfieldTwinOf: airfields.twinOf,
+      damTwinOf: dams.twinOf,
+    };
   }
 
   /**

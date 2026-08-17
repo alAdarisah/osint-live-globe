@@ -455,8 +455,9 @@ html, body {
 }
 
 .infra-marker { cursor: pointer; }
-/* A nearby ACLED/GDELT event (see createMapController.js's INFRA_HOT_RADIUS_KM
-   check) flags a site as a "hot zone" -- same drop-shadow-glow technique as
+/* A nearby ACLED/GDELT event (within INFRA_HOT_RADIUS_KM -- see map/hotZone.js,
+   which owns that number and the argument for it) flags a site as a "hot zone" --
+   same drop-shadow-glow technique as
    .military-marker above, but animated so it visibly flares rather than just
    glowing steady. */
 .infra-hot .entity-icon-wrap {

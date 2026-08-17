@@ -21,6 +21,7 @@ import {
 } from "./severity";
 import { paletteColor, paletteGlyph, scaledSize, layerOpacity, themedStyle } from "./iconTheme";
 import { footprintRadiusKm } from "./groundTrack";
+import { INFRA_HOT_RADIUS_KM } from "./hotZone";
 import { eventLeadLine, EVENT_FAMILY_FALLBACK } from "./eventLead";
 import { inferenceHidden } from "./inferenceVisibility";
 import { REFINE_PANEL_STATUS_TEXT, REFINE_PANEL_STATUS } from "../components/refinePanelStatus";
@@ -4374,7 +4375,7 @@ export function decorateInfra(d, { hot, nearbyEvents, offset } = {}) {
   const tooltip = `<b>${esc(d.name)}</b><br/>${esc(style.label)}${hot ? " &middot; HOT ZONE" : ""}`;
   const events = nearbyEvents || [];
   const activitySection = hot
-    ? `<div class="popup-events"><div class="meta">Recent activity within 75km</div>${events
+    ? `<div class="popup-events"><div class="meta">Recent activity within ${INFRA_HOT_RADIUS_KM}km</div>${events
         .map((e) => `<div class="event-row">${esc(e.headline)}<div class="event-meta">${esc(e.source)}</div></div>`)
         .join("")}</div>`
     : "";

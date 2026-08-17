@@ -16,6 +16,7 @@ import {
   satellitePassesSectionHtml,
 } from "./decorators";
 import { countryContainsPoint } from "./countryHitTest";
+import { INFRA_HOT_RADIUS_KM } from "./hotZone";
 import { CLASS_LABEL as WATER_CLASS_LABEL, WATER_SCALE_CAVEAT } from "./water";
 import { SUBDIVISION_SCALE_CAVEAT } from "./subdivisions";
 import { DISTRICT_METRICS, DISTRICT_NO_RECORD_CAVEAT } from "./districts";
@@ -1453,7 +1454,7 @@ function buildMilitary(bounds, raw, props) {
       infraListRows(militaryAreas, "osmInfra", (d) => d.name)
     }<p class="meta">${OSM_SWEEP_CAVEAT}</p>` : ""}
     ${basesInBounds.some((s) => s.source === "curated") ? `<p class="meta">A curated base's own popup
-      (click its pin, or the row above) shows recent conflict activity within 75km, the same hot-zone flare
+      (click its pin, or the row above) shows recent conflict activity within ${INFRA_HOT_RADIUS_KM}km, the same hot-zone flare
       every curated infrastructure site carries -- OpenStreetMap-sourced pins do not carry that flare yet.</p>` : ""}
     ${airActivity.length ? `<div class="csection-h">Airfields with recent military movements</div>
     ${airActivity.slice(0, 6).map((entry) => `<div class="event-row">${esc(entry.name || entry.code)}
