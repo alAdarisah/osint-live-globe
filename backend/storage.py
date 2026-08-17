@@ -1015,7 +1015,7 @@ async def source_health_latest(source: str) -> tuple[dict | None, dict | None]:
     return (dict(newest) if newest else None), (dict(newest_ok) if newest_ok else None)
 
 
-async def observed_cadence(days: int = 3) -> dict[str, float]:
+async def observed_cadence(days: int | None = None) -> dict[str, float]:
     """`{source: seconds}` -- how often each source *actually* reports.
 
     Measured rather than declared, and that is the point. Every source knows its
@@ -1032,10 +1032,17 @@ async def observed_cadence(days: int = 3) -> dict[str, float]:
 
     The median gap, not the mean: a source that was restarted, rate-limited, or
     briefly down has a handful of enormous gaps, and a mean would let those set the
-    yardstick that decides whether it is currently late. A source with fewer than
-    three rows in the window yields no entry at all -- one gap is not a cadence,
-    and the caller must be able to tell "reports every 6 hours" from "has not
-    reported enough to say".
+    yardstick that decides whether it is currently late.
+
+    The window is the whole retention period, and a single gap counts. Both were
+    tighter -- three days, and three rows required -- and both were wrong for exactly
+    the sources this exists to help: a weekly reference set writes one row every
+    seven days, so in three days it usually has none at all, and even across
+    fourteen it has two rows and therefore one gap. Requiring three rows excluded
+    every slow source from having a cadence, which left them falling back to the flat
+    threshold and reading red -- the original bug, surviving its own fix. A single gap
+    is a weak measurement, but it is a measurement, and the caller floors it at
+    MIN_STALE_SECONDS anyway.
 
     Sources that only write a row when their upstream data actually changed (dams
     and ports do this deliberately, to avoid re-serving an unchanged 3,555-record
@@ -1045,6 +1052,9 @@ async def observed_cadence(days: int = 3) -> dict[str, float]:
     """
     if _pool is None:
         return {}
+    # The whole retention window by default -- see the note above on why a shorter
+    # one cannot see a weekly source at all.
+    window_days = config.SOURCE_HEALTH_RETENTION_DAYS if days is None else days
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -1059,9 +1069,9 @@ async def observed_cadence(days: int = 3) -> dict[str, float]:
             ) spaced
             WHERE gap IS NOT NULL AND gap > 0
             GROUP BY source
-            HAVING count(*) >= 2
+            HAVING count(*) >= 1
             """,
-            str(int(days)),
+            str(int(window_days)),
         )
     return {r["source"]: float(r["median_gap"]) for r in rows if r["median_gap"]}
 
