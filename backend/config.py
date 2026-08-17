@@ -127,9 +127,9 @@ ENTITY_STALE_AFTER = {
     # before the rotation returns to it -- leaving one box's worth on screen however
     # long the process runs, which is precisely the ten-vessel layer this replaced.
     #
-    # Three boxes an hour apart is a three-hour rotation; four hours leaves an
-    # hour's slack for a 429 or a failed request. Widen MARINESIA_BBOXES and this
-    # has to widen with it.
+    # Three boxes at one request an hour is a three-hour rotation; four hours leaves
+    # an hour's slack for a failed request. Widen MARINESIA_BBOXES and this has to
+    # widen with it.
     "marinesia": int(os.getenv("MARINESIA_STALE_AFTER", str(4 * 3600))),
     "adsb": ADSB_STALE_AFTER,
     "satellites": 3600,
@@ -724,7 +724,7 @@ AIS_BBOXES = _parse_bboxes(os.getenv("AIS_BBOXES", _DEFAULT_AIS_BBOXES))
 # the box list is not a batch, it is a rotation of one request per hour, and three
 # numbers below are one decision:
 #
-#   boxes x interval = how old a box's positions can be, and
+#   boxes x MARINESIA_BUDGET_INTERVAL = how old a box's positions can be, and
 #   MARINESIA_STALE_AFTER must exceed that, or a box expires before the rotation
 #   returns to it and the layer holds exactly one box no matter how long it runs.
 #
@@ -740,10 +740,21 @@ _DEFAULT_MARINESIA_BBOXES = (
     "10,43,15,52"     # Gulf of Aden / Bab-el-Mandeb approach
 )
 MARINESIA_BBOXES = _parse_bboxes(os.getenv("MARINESIA_BBOXES", _DEFAULT_MARINESIA_BBOXES))
-# An hour, because that is the whole budget. A shorter interval does not buy more
-# data, it buys 429s -- which is what a 300-second interval was doing: spending the
-# hour's one request in the first minute and then failing eleven times an hour.
-MARINESIA_POLL_INTERVAL = int(os.getenv("MARINESIA_POLL_INTERVAL", "3600"))
+# The provider's own window: one request per this many seconds. It is what the
+# rotation arithmetic above is measured in, and the fallback backoff when a 429
+# arrives without a reset header.
+MARINESIA_BUDGET_INTERVAL = int(os.getenv("MARINESIA_BUDGET_INTERVAL", "3600"))
+
+# How often the job *attempts*, which is deliberately shorter than the budget
+# window rather than equal to it.
+#
+# Equal was the obvious choice and it has a race in it: the collector remembers the
+# reset instant and returns without a request until it passes, so an attempt landing
+# a second early skips -- and the next one is a whole window later, halving the
+# throughput of a budget that is already one request an hour. Attempting twice per
+# window costs nothing, because the early attempt makes no request at all; it just
+# guarantees one lands soon after the budget returns.
+MARINESIA_POLL_INTERVAL = int(os.getenv("MARINESIA_POLL_INTERVAL", "1800"))
 
 # airplanes.live has no world/bbox endpoint, only point+radius (max 250nm) --
 # these regional centers stand in for global coverage. As "lat,lon,radius_nm"

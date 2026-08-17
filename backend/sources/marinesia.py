@@ -95,7 +95,7 @@ REQUEST_SPACING = 13.0
 
 # What a 429 costs. The response names its own reset instant, which is honoured
 # when present; this is the fallback for a 429 that does not.
-RATE_LIMIT_BACKOFF = 3600.0
+RATE_LIMIT_BACKOFF = float(config.MARINESIA_BUDGET_INTERVAL)
 
 # Set from a 429's x-ratelimit-reset, so later sweeps do not spend their turn
 # re-learning that the budget is gone. Module scope rather than the registry

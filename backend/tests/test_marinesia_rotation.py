@@ -17,10 +17,17 @@ from backend import config
 from backend.sources import marinesia
 
 
-def test_one_request_per_sweep_is_the_budget():
-    """An hour between sweeps, because that is the whole quota. A shorter interval
-    does not buy more data, it buys 429s."""
-    assert config.MARINESIA_POLL_INTERVAL >= 3600
+def test_the_attempt_cadence_is_shorter_than_the_budget_window():
+    """Attempting twice per window, on purpose.
+
+    Equal was the obvious choice and has a race: the collector returns without a
+    request until the remembered reset instant passes, so an attempt landing a second
+    early skips -- and the next is a whole window later, halving the throughput of a
+    budget that is already one request an hour. The early attempt costs nothing
+    because it makes no request.
+    """
+    assert config.MARINESIA_POLL_INTERVAL < config.MARINESIA_BUDGET_INTERVAL
+    assert config.MARINESIA_BUDGET_INTERVAL >= 3600
 
 
 def test_the_staleness_window_outlasts_a_full_rotation():
@@ -31,9 +38,9 @@ def test_the_staleness_window_outlasts_a_full_rotation():
     boxes x interval, a box expires before the rotation returns to it and the layer
     holds exactly one box's worth however long the process runs.
     """
-    rotation = len(config.MARINESIA_BBOXES) * config.MARINESIA_POLL_INTERVAL
+    rotation = len(config.MARINESIA_BBOXES) * config.MARINESIA_BUDGET_INTERVAL
     assert config.ENTITY_STALE_AFTER["marinesia"] > rotation, (
-        f"{len(config.MARINESIA_BBOXES)} boxes x {config.MARINESIA_POLL_INTERVAL}s "
+        f"{len(config.MARINESIA_BBOXES)} boxes x {config.MARINESIA_BUDGET_INTERVAL}s "
         f"= {rotation}s of rotation, but rows expire after "
         f"{config.ENTITY_STALE_AFTER['marinesia']}s"
     )
@@ -43,7 +50,7 @@ def test_the_box_list_is_short_enough_to_stay_current():
     """Positions can be as old as a whole rotation, and a hull makes ~19 knots.
     Eight boxes at one an hour is an eight-hour-old picture; the trade for a
     fallback is fewer boxes, fresher."""
-    rotation_hours = len(config.MARINESIA_BBOXES) * config.MARINESIA_POLL_INTERVAL / 3600
+    rotation_hours = len(config.MARINESIA_BBOXES) * config.MARINESIA_BUDGET_INTERVAL / 3600
     assert rotation_hours <= 4, f"a {rotation_hours:.0f}-hour-old ship position is not a position"
 
 
