@@ -137,6 +137,26 @@ async def _rule_alerts() -> tuple[list, int]:
         return [], 0
 
 
+# How long a continuing alert stays quiet in the log after it has been reported once.
+# Long enough that a stuck condition costs a line an hour rather than one a minute; short
+# enough that tailing the log still shows what is currently wrong without waiting a day.
+ALERT_LOG_INTERVAL_S = 3600.0
+
+# Per (subject, condition), when it was last written to the log. In-process only and
+# deliberately so: a restart re-logs everything that is still wrong, which is the right
+# behaviour for reading the log of a process that has just come up.
+_alert_logged_at: dict[tuple[str, str], float] = {}
+
+
+def _should_log(key: tuple[str, str]) -> bool:
+    now = time.monotonic()
+    last = _alert_logged_at.get(key)
+    if last is not None and now - last < ALERT_LOG_INTERVAL_S:
+        return False
+    _alert_logged_at[key] = now
+    return True
+
+
 async def run_once(
     http: httpx.AsyncClient, previous_evicted: int | None, uncached_streak: dict
 ) -> int | None:
@@ -156,8 +176,21 @@ async def run_once(
     await storage.record_source_health("alert_rules", enabled_rule_count, True)
 
     for alert in alerts:
-        level = logging.ERROR if alert.severity == "critical" else logging.WARNING
-        log.log(level, "[%s] %s: %s", alert.severity, alert.subject, alert.detail)
+        # Logged on first sighting, then at most hourly for as long as it keeps firing.
+        #
+        # Every alert used to print every pass, which for a genuinely stuck condition is one
+        # ERROR a minute forever: aisstream went down at 06:18 and by lunchtime a single
+        # upstream outage had produced hundreds of identical criticals, drowning everything
+        # else in the log and in anything reading it. The alert is not less true the four
+        # hundredth time, but the log line carries no new information -- the alerts table
+        # holds the state, /api/health serves it, and the webhook already fires once.
+        #
+        # Deliberately NOT gated on `newly_firing` from record_alert below: that would put the
+        # log after a database write, and a failing database is exactly when the log line is
+        # worth the most.
+        if _should_log(alert.key()):
+            level = logging.ERROR if alert.severity == "critical" else logging.WARNING
+            log.log(level, "[%s] %s: %s", alert.severity, alert.subject, alert.detail)
         newly_firing = await storage.record_alert(
             alert.subject, alert.condition, alert.severity, alert.detail
         )
@@ -166,6 +199,9 @@ async def run_once(
 
     cleared = await storage.resolve_alerts({alert.key() for alert in alerts})
     for subject, condition in cleared:
+        # Forgotten on resolve, so an alert that clears and comes back is logged at once
+        # rather than being silenced for the rest of the hour it last spoke in.
+        _alert_logged_at.pop((subject, condition), None)
         log.info("Resolved: %s / %s", subject, condition)
         await _notify(http, f"Resolved: **{subject} / {condition}**")
 

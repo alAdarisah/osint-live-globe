@@ -180,3 +180,90 @@ def test_thresholds_come_from_config(monkeypatch):
 
     monkeypatch.setattr(config, "CACHE_MIN_SAMPLES_FOR_RATIO", 1_000_000)
     assert evaluate(Probe(hits=1, misses=99)) == []
+
+
+# --- how often a continuing alert is logged ------------------------------
+#
+# An alert that stays true does not become more informative by being printed
+# again. One stuck upstream (aisstream, down for hours) used to produce one
+# ERROR every 60 seconds for as long as it was down, which buries every other
+# problem in the log and in anything reading it.
+
+
+def _reset_log_gate():
+    from backend.cacheworker import __main__ as worker
+
+    worker._alert_logged_at.clear()
+    return worker
+
+
+def test_a_continuing_alert_is_logged_once_then_held_back():
+    worker = _reset_log_gate()
+    key = ("ais", "producer")
+    assert worker._should_log(key) is True      # first sighting always speaks
+    assert worker._should_log(key) is False     # ...and the next pass does not
+    assert worker._should_log(key) is False
+
+
+def test_a_continuing_alert_speaks_again_after_the_interval(monkeypatch):
+    worker = _reset_log_gate()
+    key = ("ais", "producer")
+    clock = [1000.0]
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
+
+    assert worker._should_log(key) is True
+    clock[0] += worker.ALERT_LOG_INTERVAL_S - 1
+    assert worker._should_log(key) is False
+    clock[0] += 2
+    assert worker._should_log(key) is True
+
+
+def test_alerts_are_held_back_independently():
+    """One noisy alert must not silence a different one that has just started."""
+    worker = _reset_log_gate()
+    assert worker._should_log(("ais", "producer")) is True
+    assert worker._should_log(("ais", "producer")) is False
+    assert worker._should_log(("redis", "unreachable")) is True
+
+
+def test_a_resolved_alert_is_logged_again_the_moment_it_returns():
+    """The reason resolve_alerts forgets the key.
+
+    Without that, an alert that cleared and came straight back would be
+    swallowed for the rest of the hour it last spoke in -- and a condition that
+    flaps is one worth seeing every time it turns over.
+    """
+    worker = _reset_log_gate()
+    key = ("ais", "producer")
+    assert worker._should_log(key) is True
+    assert worker._should_log(key) is False
+    worker._alert_logged_at.pop(key, None)      # what the resolve loop does
+    assert worker._should_log(key) is True
+
+
+def test_the_resolve_loop_actually_forgets_the_key():
+    """Ties the simulation above to the real code.
+
+    The test before it pops the key by hand, which proves the gate behaves but
+    not that anything calls it. Checked structurally, in the style of the
+    never-writes-a-cache-key test, because reaching the resolve loop for real
+    needs a Postgres.
+    """
+    source = pathlib.Path("backend/cacheworker/__main__.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    resolve_loops = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "cleared"
+    ]
+    assert len(resolve_loops) == 1, "expected exactly one loop over resolved alerts"
+    popped = [
+        call for call in ast.walk(resolve_loops[0])
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "pop"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "_alert_logged_at"
+    ]
+    assert popped, "a resolved alert must be forgotten, or its return is silenced for an hour"
