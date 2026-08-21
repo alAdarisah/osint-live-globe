@@ -311,15 +311,21 @@ def test_an_entry_with_no_variant_yet_still_answers():
     assert "content-encoding" not in {k.lower() for k in out.headers}
 
 
-def test_every_answer_varies_on_the_encoding():
-    """Including the ones that did not themselves come back compressed, and that is
-    the point: the *resource* varies by encoding, so a shared cache that saw only
-    the identity answer must not hand it to a client that would have earned the
-    brotli one."""
-    for entry in [(b"{}", '"t"'), (b"{}", '"t"', b"br")]:
-        for accept in [{}, {"Accept-Encoding": "br"}]:
-            out = app_mod._built_json_response(_req(accept), entry, "no-cache")
-            assert out.headers["Vary"] == "Accept-Encoding"
+def test_the_two_paths_that_need_vary_carry_it_exactly_once():
+    """The brotli response and the 304. The identity response deliberately does not:
+    GZipMiddleware is about to compress it and adds its own, and setting it here too
+    produced a literal `Vary: Accept-Encoding, Accept-Encoding` on the wire. Legal,
+    and it reads like a bug."""
+    packed = (b"{}", '"t"', b"br")
+    brotli_out = app_mod._built_json_response(_req({"Accept-Encoding": "br"}), packed, "no-cache")
+    assert brotli_out.headers["Vary"] == "Accept-Encoding"
+
+    not_modified = app_mod._built_json_response(_req({"If-None-Match": '"t"'}), packed, "no-cache")
+    assert not_modified.headers["Vary"] == "Accept-Encoding"
+
+    # The identity path leaves it to the middleware that is about to add it.
+    identity = app_mod._built_json_response(_req(), packed, "no-cache")
+    assert "vary" not in {k.lower() for k in identity.headers}
 
 
 def test_a_304_carries_no_encoding_and_no_body():

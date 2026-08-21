@@ -605,18 +605,20 @@ def _built_json_response(request: Request, entry, cache_control: str) -> Respons
     """
     body, etag = entry[0], entry[1]
     packed = entry[2] if len(entry) > 2 else None
-    # Vary regardless of what this particular response carries: the *resource*
-    # varies by encoding, and a cache that saw only the identity answer would
-    # otherwise hand it to a client whose request would have earned the brotli one.
-    headers = {"Cache-Control": cache_control, "ETag": etag, "Vary": "Accept-Encoding"}
+    headers = {"Cache-Control": cache_control, "ETag": etag}
+    # Vary on the two paths that do not otherwise get it. The identity response is
+    # about to be gzipped by GZipMiddleware, which adds its own -- setting it here
+    # as well produced a literal `Vary: Accept-Encoding, Accept-Encoding` on every
+    # such response. Legal, and it reads like a bug.
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers=headers)
+        return Response(status_code=304, headers={**headers, "Vary": "Accept-Encoding"})
     if packed is not None and _brotli_supported(request):
         # Content-Encoding set here is also what stops GZipMiddleware re-compressing
-        # it: Starlette skips any response that already declares one.
+        # it -- Starlette skips any response that already declares one -- which is
+        # why this branch has to carry Vary itself.
         return Response(
             content=packed, media_type="application/json",
-            headers={**headers, "Content-Encoding": "br"},
+            headers={**headers, "Content-Encoding": "br", "Vary": "Accept-Encoding"},
         )
     return Response(content=body, media_type="application/json", headers=headers)
 
