@@ -14,8 +14,59 @@ import { OWM_WEATHER_LAYERS, owmTileUrl } from "./weatherLayers";
 // `bounds` is what makes Leaflet not ask.
 export const WORLD_TILE_BOUNDS = L.latLngBounds([-85.051129, -180], [85.051129, 180]);
 
+// How many tiles beyond the viewport to fetch, and how many to keep after they
+// leave it.
+//
+// Leaflet asks for exactly the tiles the viewport covers and not one more. That is
+// why a pan reveals the map arriving at the edge: the tiles for the ground you are
+// moving onto are requested at the moment it becomes visible, so there is always a
+// strip that is being fetched rather than shown. Measured on a 1278x1214 pane, the
+// layer held 25 tiles for a view that needs exactly 25.
+//
+// It is not a caching failure -- measured on the deployment, 83 of 83 tile requests
+// were served from the browser cache with nothing crossing the network. The tiles
+// are already saved. They are simply not asked for until they are needed.
+//
+// LOAD_PADDING is the fix: one ring of tiles outside the view, so panning uncovers
+// tiles that are already there. A 5x5 view becomes 7x7 -- roughly double the tiles
+// on a cold first paint, at 9-14 KB each and cached hard by CARTO afterwards.
+// Two rings would be 9x9, quadruple, for a strip most pans never reach.
+//
+// KEEP_BUFFER is the other half and costs nothing at all: Leaflet's default prunes
+// tiles two rings past the view, so panning back and forth across a boundary
+// rebuilds tiles it threw away seconds earlier. These are already-decoded images
+// being dropped and re-created, not re-downloaded.
+//
+// What neither of these is: caching the whole map. That question has an arithmetic
+// answer rather than an engineering one -- this map goes to zoom 19, which is
+// 366 billion tiles and something like 4.8 petabytes. Even zoom 0-10 is 1.4 million
+// tiles and 18.7 GB, and fetching it would be a bulk scrape of somebody else's tile
+// service rather than a cache.
+export const LOAD_PADDING = 1;
+export const KEEP_BUFFER = 4;
+
+// Leaflet computes its load range from the pixel bounds of the viewport and offers
+// no option to widen it -- `keepBuffer` only decides what is *kept*, not what is
+// asked for. This is the one method that turns those bounds into a tile range, so
+// padding it here is the whole change.
+//
+// Safe against the edge of the world: _isValidTile still checks the layer's own
+// `bounds` (WORLD_TILE_BOUNDS above), so a padded range asks for nothing outside
+// x=0..2^z-1 and the 404s that motivated that option do not come back.
+const PaddedTileLayer = L.TileLayer.extend({
+  _pxBoundsToTileRange(pixelBounds) {
+    const range = L.TileLayer.prototype._pxBoundsToTileRange.call(this, pixelBounds);
+    const pad = this.options.loadPadding || 0;
+    if (!pad) return range;
+    return new L.Bounds(
+      range.min.subtract([pad, pad]),
+      range.max.add([pad, pad]),
+    );
+  },
+});
+
 export function createBaseLayer(map, theme) {
-  const layer = L.tileLayer(basemapUrlFor(theme), {
+  const layer = new PaddedTileLayer(basemapUrlFor(theme), {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
     maxZoom: 19,
     subdomains: "abcd",
@@ -26,6 +77,11 @@ export function createBaseLayer(map, theme) {
     // the two have to agree, or the reader can pan into blank space.
     noWrap: true,
     bounds: WORLD_TILE_BOUNDS,
+    // See LOAD_PADDING/KEEP_BUFFER above: fetch a ring beyond the view so a pan
+    // uncovers tiles that are already there, and keep them longer so panning back
+    // does not rebuild what was discarded a second ago.
+    loadPadding: LOAD_PADDING,
+    keepBuffer: KEEP_BUFFER,
   }).addTo(map);
   return layer;
 }
