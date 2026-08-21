@@ -19,6 +19,7 @@ import assert from "node:assert/strict";
 import {
   BANDS,
   bandFor,
+  isScoped,
   detailForBand,
   floorOf,
   resolveScene,
@@ -728,4 +729,40 @@ test("manifest integrity", async (t) => {
       );
     }
   });
+});
+
+// ---------- the two layers that stopped shipping the whole world ----------
+//
+// deflock is 131,541 ALPR cameras, 4.1 MB gzipped, and draws only at zoom 9 and
+// above over one town at a time -- so the whole world was being sent for a view
+// that can hold a few hundred pins. Its manifest note used to explain the mismatch
+// rather than fix it: "Not scoped -- /api/deflock takes no viewport bbox."
+
+test("deflock asks for the viewport it can actually draw", () => {
+  assert.equal(isScoped("deflock"), true);
+  // Scoped *and* deep-gated. Either alone leaves the failure: unscoped, a zoom-9
+  // view downloads the world; ungated, 131k pins reach a theatre view.
+  assert.equal(shippedDrawZoom("deflock"), 9);
+});
+
+test("the layers that must stay whole are still whole", () => {
+  // A scoped layer is one a reader can safely be shown a slice of, and these are
+  // not. countries, water and railways are basemap context: a coastline or a rail
+  // network that appeared and disappeared as you panned would read as broken
+  // rather than as thrifty. events and the aircraft layers are what the panels
+  // rank and count, so a viewport slice would make "150 events" mean something
+  // different from one pan to the next.
+  for (const key of ["countries", "water", "railways", "events", "adsbMilitary"]) {
+    assert.notEqual(isScoped(key), true, `${key} must not be viewport-scoped`);
+  }
+});
+
+test("power lines are fetched for the viewport, not for eleven theatres", () => {
+  // Not through `scoped` -- this one is an on-demand document rather than a polled
+  // source, so its viewport flag lives on its ONE_SHOT entry in useOsintData.js.
+  // What the manifest still has to say is that nothing draws it until a reader asks:
+  // 44,984 lines is the largest response this API serves, and fetching it at boot
+  // for a layer that ships off would be the whole cost with none of the use.
+  assert.equal(LAYER_MANIFEST.powerLines.fetch, FETCH_MANUAL);
+  assert.equal(LAYER_MANIFEST.powerLines.disposition, MANUAL);
 });

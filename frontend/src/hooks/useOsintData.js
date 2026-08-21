@@ -879,18 +879,38 @@ export function useOsintData({
         url: "/api/power-lines",
         deliver: (data) => onDataRef.current("powerLines", data || { lines: [] }),
         label: "transmission lines",
+        // The one entry here that narrows to the viewport, and the reason it is a
+        // per-entry flag rather than a rule for all of them: 44,984 lines and
+        // 9.8 MB gzipped, the largest response this API serves, for a layer a
+        // reader switches on to look at one place. Railways above stays whole --
+        // it is a third of the size and reads as basemap context, where a network
+        // that appears and disappears as you pan would be worse than a slow one.
+        //
+        // Being scoped makes this no longer strictly one-shot: the fetch is
+        // re-run when the viewport leaves the cell it was fetched for, which is
+        // exactly what every scoped *polled* layer already does. The cell is
+        // snapped (see bboxCell above), so panning across a city does not mint a
+        // new URL, a new ETag and a new download per pixel.
+        scoped: true,
       },
     };
 
     fetchOneShotRef.current = (key) => {
       const entry = ONE_SHOT[key];
-      if (!entry || oneShotStartedRef.current.has(key)) return;
+      if (!entry) return;
+      // The guard is keyed by what was actually asked for, not by the layer. For
+      // an unscoped entry that is the key alone and behaves exactly as before; for
+      // a scoped one the cell is part of it, so panning to a new cell is a new
+      // request and panning back within the same one is not.
+      const bbox = entry.scoped ? bboxCellRef.current : null;
+      const guard = bbox ? `${key}|${bbox}` : key;
+      if (oneShotStartedRef.current.has(guard)) return;
       // Marked before the request, not after -- the same in-flight guard the
       // lakes fetch keeps, so a reader flipping the checkbox off and on again
       // while the first one is still arriving does not start a second copy of a
       // multi-megabyte download.
-      oneShotStartedRef.current.add(key);
-      fetchJson(entry.url)
+      oneShotStartedRef.current.add(guard);
+      fetchJson(urlWithBbox(entry.url, bbox))
         .then((data) => {
           if (cancelled) return;
           entry.deliver(data);
@@ -899,7 +919,7 @@ export function useOsintData({
           // Cleared on failure so the next toggle retries, exactly as the lakes
           // fetch resets waterLakesFeatures to null. A layer that failed once and
           // then silently refuses to ever try again is worse than a slow one.
-          oneShotStartedRef.current.delete(key);
+          oneShotStartedRef.current.delete(guard);
           console.warn(`Failed to load ${entry.label}:`, err);
         });
     };
@@ -1082,5 +1102,12 @@ export function useOsintData({
     // to the layer toggle in App.jsx -- see ONE_SHOT above for what is in it and
     // why railways and power lines in particular are not fetched at boot.
     ensureOneShot,
+    // The snapped viewport cell the scoped fetches are keyed on. Exposed for one
+    // reason: a scoped one-shot has to be re-asked when the camera leaves the cell
+    // it was fetched for, and the effect in App.jsx that calls ensureOneShot only
+    // ever ran on layer-visibility changes. Without this in its dependencies a
+    // reader switching power lines on and then panning keeps the grid of wherever
+    // they used to be.
+    bboxCell,
   };
 }

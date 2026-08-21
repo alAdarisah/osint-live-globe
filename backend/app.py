@@ -1158,24 +1158,54 @@ async def railways_endpoint(request: Request):
     )
 
 
+def _clip_lines(data: dict, bounds) -> dict:
+    """A line document narrowed to the viewport, envelope intact.
+
+    `attribution`, `provenance` and `truncated_regions` are carried through
+    whichever lines survive: they are claims about how the sweep was made, and a
+    reader who has panned somewhere quiet must still be told that this layer covers
+    eleven theatres rather than the world.
+    """
+    if bounds is None or not isinstance(data, dict):
+        return data
+    return {**data, "lines": regions.filter_paths(data.get("lines") or [], bounds)}
+
+
 @app.get("/api/power-lines")
-async def power_lines_endpoint(request: Request):
-    # Transmission-line geometry, theatre-clipped and served whole (see
-    # backend/sources/power_lines.py) -- same shape and hard cache as
-    # /api/railways, and for the same reason: a line is one object the client
-    # splits into a polyline, not a set of points to clip to a region.
+async def power_lines_endpoint(request: Request, bbox: str | None = None):
+    # Transmission-line geometry (see backend/sources/power_lines.py). This was
+    # served whole -- 44,984 lines, 9.8 MB gzipped after coordinate rounding and
+    # the single largest response this API produces -- on the grounds that a line
+    # is one object the client splits into a polyline rather than a set of points
+    # to clip to a region. True of a *region* filter, and it was the wrong
+    # conclusion for a viewport: a reader looking at one city was being handed the
+    # grid of eleven conflict theatres, then drawing it.
+    #
+    # regions.filter_paths is the missing piece -- bbox against each line's own
+    # extent, so a line crossing the view with both ends outside it is kept. See
+    # its own note on why this over-includes rather than clipping.
     return _cached_source_response(
-        request, "power_lines", None, lambda data, _bounds: data, max_age=86400, stable_etag=True,
+        request, "power_lines", None, _clip_lines,
+        max_age=86400, stable_etag=True, bbox=bbox,
     )
 
 
 @app.get("/api/deflock")
-async def deflock_endpoint(request: Request, region: str | None = None):
+async def deflock_endpoint(request: Request, region: str | None = None, bbox: str | None = None):
     # ALPR camera locations, worldwide (see backend/sources/deflock.py). 99.78%
     # United States and regions.py has no US theatre, so a region filter returns
     # nothing and this is really a World-view layer -- the filter is offered only
     # for consistency with the other point sources.
-    return _cached_source_response(request, "deflock", region, regions.filter_points)
+    #
+    # The viewport bbox is the one that does the work here. 131,541 cameras is
+    # 4.1 MB gzipped and the layer only ever draws at zoom 9 and above, over one
+    # town at a time -- so the whole world was being sent for a view that can hold
+    # a few hundred pins. The client sends a snapped cell (see bboxCellKey in
+    # useOsintData.js), which is what keeps a pan from minting a fresh ETag and a
+    # fresh download on every pixel.
+    return _cached_source_response(
+        request, "deflock", region, regions.filter_points, bbox=bbox,
+    )
 
 
 @app.get("/api/outages")

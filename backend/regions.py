@@ -182,6 +182,41 @@ def filter_points(items: list[dict], bounds: Bounds | None) -> list[dict]:
     return out
 
 
+def filter_paths(items: list[dict], bounds: Bounds | None, key: str = "path") -> list[dict]:
+    """Line records whose own extent touches the viewport.
+
+    The sibling of filter_points for the sources that serve linework rather than
+    pins -- power lines and railways, whose records are `{"path": [[lat, lon], ...]}`
+    rather than GeoJSON features, so filter_geojson cannot read them.
+
+    Bbox against bbox, not "does any vertex fall inside". A transmission line can
+    cross the whole viewport with both endpoints outside it, and testing vertices
+    would drop exactly the long lines a reader most wants to see. The cost is
+    over-inclusion: a line whose extent is a whole country is returned whenever the
+    viewport touches that extent, even where the line itself does not pass. That is
+    the right direction to be wrong in -- a line drawn that need not have been is
+    noise, a line silently missing is a map that lies about the grid.
+
+    Clipping the geometry instead would be smaller still and is deliberately not
+    done: a clipped line is a different claim from the one OpenStreetMap made, and
+    this map's whole promise is that it draws what its sources said.
+    """
+    if bounds is None:
+        return items
+    out = []
+    for item in items:
+        path = item.get(key)
+        if not path:
+            continue
+        lats = [p[0] for p in path if isinstance(p, (list, tuple)) and len(p) >= 2]
+        lons = [p[1] for p in path if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if not lats:
+            continue
+        if _bboxes_intersect((min(lats), min(lons), max(lats), max(lons)), bounds):
+            out.append(item)
+    return out
+
+
 # Per-feature bbox cache for the countries GeoJSON, invalidated whenever
 # countries.py swaps in a new FeatureCollection (once/day) -- no manual
 # cache-busting needed.

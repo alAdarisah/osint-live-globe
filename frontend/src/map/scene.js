@@ -760,7 +760,14 @@ export const LAYER_MANIFEST = {
     // and even once a reader switches it on it draws nothing until they are
     // looking at one town, so 125k pins can never land on a theatre view or a
     // cold world paint. The proximity collapse and the LOCAL cap thin whatever
-    // survives inside a city. Not scoped -- /api/deflock takes no viewport bbox.
+    // survives inside a city.
+    //
+    // Scoped, which it was not, and the note here used to say why: /api/deflock
+    // took no viewport bbox. It does now. The mismatch was the expensive kind --
+    // a layer that only ever draws over one town, fetching all 131,541 cameras
+    // (4.1 MB gzipped, the second-largest response this API serves) so the client
+    // could throw away every one outside the view.
+    scoped: true,
     draw: { band: "LOCAL", z: 9 },
     fetch: "LOCAL",
     cap: { LOCAL: 800 },

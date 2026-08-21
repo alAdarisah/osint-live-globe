@@ -514,12 +514,18 @@ export default function App() {
   // Reads what is actually on the map rather than either wish table, so it
   // covers both without having to know which one asked. ensureOneShot is
   // idempotent, which is what lets this run on every layer-state change.
-  const { ensureOneShot } = dataApi;
+  //
+  // The viewport cell is a dependency because one of those documents is scoped to
+  // it (power lines -- see ONE_SHOT in useOsintData.js): panning past the cell it
+  // was fetched for has to re-ask, or the reader keeps the grid of where they
+  // were. ensureOneShot is keyed by layer *and cell*, so this stays idempotent
+  // for the unscoped entries and for a pan that stays inside the same cell.
+  const { ensureOneShot, bboxCell } = dataApi;
   useEffect(() => {
     for (const [key, on] of Object.entries(layerVisibility || {})) {
       if (on) ensureOneShot(key);
     }
-  }, [layerVisibility, ensureOneShot]);
+  }, [layerVisibility, ensureOneShot, bboxCell]);
 
   // Saved only when an operator is the one deciding.
   //
