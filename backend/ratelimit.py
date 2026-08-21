@@ -45,6 +45,12 @@ class LruTtlCache:
         while len(self._data) > self._maxsize:
             self._data.popitem(last=False)  # drop the least recently used
 
+    def clear(self) -> None:
+        """Drop everything. Used where a test needs the next call to actually
+        rebuild -- a cache keyed on a constant is otherwise shared across a whole
+        test session, and the second test reads the first one's fixture."""
+        self._data.clear()
+
     def __len__(self) -> int:
         return len(self._data)
 

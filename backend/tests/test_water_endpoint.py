@@ -28,6 +28,8 @@ falling back to a walk.
 import asyncio
 import json
 
+from starlette.requests import Request
+
 import pytest
 from fastapi import HTTPException
 
@@ -41,6 +43,18 @@ def _run(coro):
 
 def _body(response):
     return json.loads(response.body)
+
+
+def _req(headers=None):
+    """The bare Request these endpoints now take.
+
+    They take one because both gained an ETag: the handler has to read
+    If-None-Match to answer 304. Nothing else about the request is consulted, so
+    an empty ASGI scope is the whole fixture.
+    """
+    raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    return Request({"type": "http", "method": "GET", "path": "/", "headers": raw,
+                    "query_string": b""})
 
 
 def _feature(fid, bbox, geometry=None):
@@ -116,7 +130,7 @@ def _ids(body):
 
 def test_unknown_kind_is_400_naming_the_three_valid_values(stored):
     with pytest.raises(HTTPException) as raised:
-        _run(app_mod.water_endpoint(kind="glaciers"))
+        _run(app_mod.water_endpoint(_req(), kind="glaciers"))
     assert raised.value.status_code == 400
     assert "marine" in raised.value.detail
     assert "lakes" in raised.value.detail
@@ -129,7 +143,7 @@ def test_rivers_without_bbox_is_400_naming_the_parameter(stored):
     # requires a country rather than serving all 251 at once. This is that
     # gate.
     with pytest.raises(HTTPException) as raised:
-        _run(app_mod.water_endpoint(kind="rivers"))
+        _run(app_mod.water_endpoint(_req(), kind="rivers"))
     assert raised.value.status_code == 400
     assert "bbox" in raised.value.detail
     assert "rivers" in raised.value.detail
@@ -143,29 +157,29 @@ def test_rivers_with_a_malformed_bbox_still_400s(stored):
     # this checks the same detail content as the sibling test above, not just
     # the status code.
     with pytest.raises(HTTPException) as raised:
-        _run(app_mod.water_endpoint(kind="rivers", bbox="not,a,real,bbox"))
+        _run(app_mod.water_endpoint(_req(), kind="rivers", bbox="not,a,real,bbox"))
     assert raised.value.status_code == 400
     assert "bbox" in raised.value.detail
     assert "rivers" in raised.value.detail
 
 
 def test_marine_and_lakes_are_served_whole_without_a_bbox(stored):
-    marine = _body(_run(app_mod.water_endpoint(kind="marine")))
+    marine = _body(_run(app_mod.water_endpoint(_req(), kind="marine")))
     assert _ids(marine) == ["marine:1", "marine:2"]
-    lakes = _body(_run(app_mod.water_endpoint(kind="lakes")))
+    lakes = _body(_run(app_mod.water_endpoint(_req(), kind="lakes")))
     assert _ids(lakes) == ["lake:1", "lake:2"]
 
 
 def test_kind_defaults_to_marine(stored):
-    default = _body(_run(app_mod.water_endpoint()))
-    marine = _body(_run(app_mod.water_endpoint(kind="marine")))
+    default = _body(_run(app_mod.water_endpoint(_req())))
+    marine = _body(_run(app_mod.water_endpoint(_req(), kind="marine")))
     assert default == marine
 
 
 # --- bbox filtering -----------------------------------------------------------
 
 def test_marine_bbox_keeps_only_overlapping_features(stored):
-    body = _body(_run(app_mod.water_endpoint(kind="marine", bbox="12,22,14,24")))
+    body = _body(_run(app_mod.water_endpoint(_req(), kind="marine", bbox="12,22,14,24")))
     assert _ids(body) == ["marine:1"]
 
 
@@ -176,13 +190,13 @@ def test_lakes_bbox_keeps_only_overlapping_features(stored):
     # secretly deriving a bbox from geometry instead of reading
     # properties["bbox"] (the old regions.filter_geojson fallback this
     # replaced), it would come back empty instead.
-    body = _body(_run(app_mod.water_endpoint(kind="lakes", bbox="0,0,2,2")))
+    body = _body(_run(app_mod.water_endpoint(_req(), kind="lakes", bbox="0,0,2,2")))
     assert _ids(body) == ["lake:1"]
 
 
 def test_rivers_bbox_keeps_only_overlapping_features(stored):
     # Same proof as the lakes test above, for rivers.
-    body = _body(_run(app_mod.water_endpoint(kind="rivers", bbox="40,40,42,42")))
+    body = _body(_run(app_mod.water_endpoint(_req(), kind="rivers", bbox="40,40,42,42")))
     assert _ids(body) == ["river:2"]
 
 
@@ -198,9 +212,9 @@ def test_lakes_and_rivers_bbox_filtering_never_calls_filter_geojson(stored, monk
         raise AssertionError("regions.filter_geojson must not be called by /api/water")
 
     monkeypatch.setattr(app_mod.regions, "filter_geojson", _must_not_be_called)
-    _run(app_mod.water_endpoint(kind="lakes", bbox="0,0,2,2"))
-    _run(app_mod.water_endpoint(kind="rivers", bbox="40,40,42,42"))
-    _run(app_mod.water_endpoint(kind="marine", bbox="12,22,14,24"))
+    _run(app_mod.water_endpoint(_req(), kind="lakes", bbox="0,0,2,2"))
+    _run(app_mod.water_endpoint(_req(), kind="rivers", bbox="40,40,42,42"))
+    _run(app_mod.water_endpoint(_req(), kind="marine", bbox="12,22,14,24"))
 
 
 # --- antimeridian: the case Task 4 flagged for Task 5's overlap test --------
@@ -214,13 +228,13 @@ def test_antimeridian_marine_feature_matches_a_query_on_the_western_half(stored)
     # longitude, is the western half (170..180) of the wrapped range and
     # must match -- an overlap test that only understood "west <= east" as
     # valid would flip this feature's box and get it wrong.
-    body = _body(_run(app_mod.water_endpoint(kind="marine", bbox="55,175,60,179")))
+    body = _body(_run(app_mod.water_endpoint(_req(), kind="marine", bbox="55,175,60,179")))
     assert _ids(body) == ["marine:2"]
 
 
 def test_antimeridian_marine_feature_matches_a_query_on_the_eastern_half(stored):
     # Same feature, the other half of the wrap (-180..-170).
-    body = _body(_run(app_mod.water_endpoint(kind="marine", bbox="55,-179,60,-171")))
+    body = _body(_run(app_mod.water_endpoint(_req(), kind="marine", bbox="55,-179,60,-171")))
     assert _ids(body) == ["marine:2"]
 
 
@@ -229,7 +243,7 @@ def test_antimeridian_marine_feature_does_not_match_a_query_away_from_the_seam(s
     # near either half of its wrapped range (170..180 / -180..-170) -- must
     # not match. This isolates the longitude wrap logic from the (already
     # separately correct) latitude comparison.
-    body = _body(_run(app_mod.water_endpoint(kind="marine", bbox="55,0,60,10")))
+    body = _body(_run(app_mod.water_endpoint(_req(), kind="marine", bbox="55,0,60,10")))
     assert _ids(body) == []
 
 
@@ -237,15 +251,15 @@ def test_antimeridian_marine_feature_does_not_match_a_query_away_from_the_seam(s
 
 def test_the_second_ask_for_the_same_kind_and_bbox_does_not_touch_storage(stored):
     answers, reads = stored
-    _run(app_mod.water_endpoint(kind="marine", bbox="12,22,14,24"))
-    _run(app_mod.water_endpoint(kind="marine", bbox="12,22,14,24"))
+    _run(app_mod.water_endpoint(_req(), kind="marine", bbox="12,22,14,24"))
+    _run(app_mod.water_endpoint(_req(), kind="marine", bbox="12,22,14,24"))
     assert reads == ["water_marine"]
 
 
 def test_a_different_bbox_is_a_separate_cache_entry(stored):
     answers, reads = stored
-    _run(app_mod.water_endpoint(kind="marine", bbox="12,22,14,24"))
-    _run(app_mod.water_endpoint(kind="marine", bbox="0,0,5,5"))
+    _run(app_mod.water_endpoint(_req(), kind="marine", bbox="12,22,14,24"))
+    _run(app_mod.water_endpoint(_req(), kind="marine", bbox="0,0,5,5"))
     assert reads == ["water_marine", "water_marine"]
 
 
@@ -257,5 +271,5 @@ def test_a_kind_with_no_stored_snapshot_yet_is_an_empty_collection_not_an_error(
         return None
 
     monkeypatch.setattr(app_mod.storage, "reference", reference)
-    body = _body(_run(app_mod.water_endpoint(kind="lakes")))
+    body = _body(_run(app_mod.water_endpoint(_req(), kind="lakes")))
     assert body == {"type": "FeatureCollection", "features": []}

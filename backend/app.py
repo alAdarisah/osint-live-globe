@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import os
@@ -487,8 +488,74 @@ async def _curated_pipeline_records() -> list[dict]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Big, slow-moving payloads: serialise once, hand back a 304 after that.
+#
+# Two endpoints were rebuilding and re-encoding multi-megabyte JSON on every
+# single request, with no ETag, so a browser that already held an identical copy
+# downloaded it again. Measured on a real page load of the deployment,
+# /api/infrastructure was 8.3 MB decoded and took 34 seconds wall-clock -- the
+# single most expensive thing the map does, for a dataset whose own
+# Cache-Control already claims it is good for a day.
+#
+# What this fixes is both halves of that:
+#
+#   the server  builds and encodes the payload on a miss and keeps the encoded
+#               bytes, so N clients in a TTL window cost one build between them
+#               rather than N. /api/infrastructure merges pipelines and military
+#               bases and serialises 8 MB; none of that is per-client work.
+#   the client  gets an ETag derived from the bytes themselves, so a reload, a
+#               second tab, or a poll that finds nothing changed costs a 304 with
+#               no body instead of the whole payload.
+#
+# The ETag is a content hash rather than a version counter, unlike
+# _cached_source_response above. Those endpoints serve one registry source with a
+# version that ticks on every reassignment; these merge several inputs, some from
+# Postgres, and there is no single counter to read. Hashing the bytes is exact by
+# construction -- the tag changes when and only when the body does -- and it is
+# affordable precisely because it happens once per build, not once per request.
+#
+# The TTL is the staleness ceiling, and it is far below what these endpoints
+# already promise a browser: a day for infrastructure and water, against five
+# minutes here.
+_BUILT_PAYLOAD_CACHE = LruTtlCache(maxsize=64, ttl=300)
+metrics.track_local_cache("built_payload", _BUILT_PAYLOAD_CACHE)
+
+
+def _built_json_response(request: Request, entry, cache_control: str) -> Response:
+    """Serve pre-encoded bytes with a content ETag, or 304 if the client has them."""
+    body, etag = entry
+    headers = {"Cache-Control": cache_control, "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
+
+
+def _encode_payload(payload) -> tuple[bytes, str]:
+    """Encode once and tag by content.
+
+    Compact separators because Starlette's JSONResponse uses them too, and a
+    payload encoded differently here would be a second JSON dialect on the same
+    API. blake2b at 8 bytes: this is a cache validator, not a signature, and a
+    16-character tag keeps the header small on an endpoint polled every 3 minutes.
+    """
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return body, f'"{hashlib.blake2b(body, digest_size=8).hexdigest()}"'
+
+
 @app.get("/api/infrastructure")
-async def infrastructure_list():
+async def infrastructure_list(request: Request):
+    # Built and encoded once per TTL rather than once per request -- see
+    # _BUILT_PAYLOAD_CACHE. Everything below the cache check is the expensive part:
+    # a Postgres read, two merges over the OSM sweep, and 8 MB of JSON encoding.
+    entry = _BUILT_PAYLOAD_CACHE.get("infrastructure")
+    if entry is None:
+        entry = _encode_payload(_round_floats(await _build_infrastructure_payload()))
+        _BUILT_PAYLOAD_CACHE.set("infrastructure", entry)
+    return _built_json_response(request, entry, "public, max-age=86400")
+
+
+async def _build_infrastructure_payload() -> dict:
     # `sites`/`lanes` are static for the process lifetime, same as
     # /api/regions above. `pipelines` is not, as of Task 28: it now folds in
     # whatever osm_infra.py's own Overpass sweep last found (a plain Postgres
@@ -525,7 +592,7 @@ async def infrastructure_list():
         "pipelines_truncated_regions": sorted(osm_doc.get("truncated_regions") or []),
         "military_bases": military_bases,
     }
-    return JSONResponse(payload, headers={"Cache-Control": "public, max-age=86400"})
+    return payload
 
 
 # Filtered payloads, keyed by (source, version, region, bbox).
@@ -545,6 +612,55 @@ async def infrastructure_list():
 # registry is already holding.
 _FILTERED_CACHE = LruTtlCache(maxsize=256, ttl=300)
 metrics.track_local_cache("filtered_source", _FILTERED_CACHE)
+
+
+# How many decimal places a coordinate this API serves is worth.
+#
+# Five is 1.1 m at the equator, and this map does not claim to know where
+# anything is to the metre -- the cursor readout says so in as many words, and
+# most of what it draws is a centroid, a runway reference point or a geocode with
+# a stated uncertainty radius measured in kilometres. Anything past the fifth
+# decimal is noise being paid for in bandwidth, parse time and memory.
+#
+# It is being paid for, too. Measured across sixteen endpoints on the live
+# deployment, rounding here takes 35.5 MB of gzipped payload down to 30.1 MB --
+# 15% overall, and far more where the waste is concentrated:
+#
+#   power-lines   13.1 MB -> 10.1 MB gzipped   (22.7%)
+#   railways       5.6 MB ->  4.4 MB           (21.3%)
+#   infrastructure 2.0 MB ->  1.5 MB           (23.9%)
+#   cables       299 KB   -> 176 KB            (41.3%)
+#
+# Cables is the shape of the problem: its coordinates arrive as raw float
+# repr -- fourteen and fifteen decimal places, 1e-9 m of "precision" -- because
+# nothing ever rounded them. The endpoints already at 5 dp or coarser (countries,
+# marine water, conflict districts) are unaffected, which is the check that this
+# is trimming noise rather than data.
+COORDINATE_DECIMALS = 5
+
+
+def _round_floats(value, places: int = COORDINATE_DECIMALS):
+    """Every float in a payload, rounded. Ints, strings and None pass through.
+
+    Applied to the whole structure rather than to named coordinate fields,
+    because the geometry that dominates these payloads is bare nested arrays with
+    no field name to key on. That is safe here for a reason worth stating rather
+    than assuming: nothing this API serves needs more than five decimals. Scores
+    are integers, ratios are 0-1, and the one class of float where precision
+    could matter -- epoch seconds -- keeps 10 microseconds of it.
+
+    Recursive, and the depth is bounded by GeoJSON's own shape (a few levels), not
+    by the size of the data.
+    """
+    if isinstance(value, float):
+        return round(value, places)
+    if isinstance(value, list):
+        return [_round_floats(v, places) for v in value]
+    if isinstance(value, dict):
+        return {k: _round_floats(v, places) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_round_floats(v, places) for v in value)
+    return value
 
 
 def _cached_source_response(
@@ -621,12 +737,16 @@ def _cached_source_response(
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
 
+    # Encoded bytes, not the filtered object. This cache already spared the filter
+    # pass; every hit still re-serialised the result, which for /api/deflock is
+    # 54 MB of JSON encoding per request. Rounding happens here too, once per entry
+    # rather than once per client -- see COORDINATE_DECIMALS.
     cache_key = (source_name, state.version, region or "world", box_key, variant_key)
-    payload = _FILTERED_CACHE.get(cache_key)
-    if payload is None:
-        payload = filter_fn(state.data, bounds)
-        _FILTERED_CACHE.set(cache_key, payload)
-    return JSONResponse(payload, headers=headers)
+    entry = _FILTERED_CACHE.get(cache_key)
+    if entry is None:
+        entry = _encode_payload(_round_floats(filter_fn(state.data, bounds)))
+        _FILTERED_CACHE.set(cache_key, entry)
+    return Response(content=entry[0], media_type="application/json", headers=headers)
 
 
 @app.get("/api/conflict")
@@ -790,7 +910,7 @@ def _filter_water(collection: dict, bounds) -> dict:
 
 
 @app.get("/api/water")
-async def water_endpoint(kind: str = "marine", bbox: str | None = None):
+async def water_endpoint(request: Request, kind: str = "marine", bbox: str | None = None):
     """Seas, lakes or river centrelines, from Natural Earth via
     sources/water_bodies.py.
 
@@ -817,14 +937,17 @@ async def water_endpoint(kind: str = "marine", bbox: str | None = None):
         )
     box_key = ",".join(f"{v:g}" for v in bounds) if bounds else "-"
     cache_key = (kind, box_key)
-    payload = _WATER_CACHE.get(cache_key)
-    if payload is None:
+    # Encoded bytes rather than the payload object, and with an ETag: this cache
+    # already spared the *filter* pass, and left every hit re-encoding up to 3.2 MB
+    # of GeoJSON per request and sending all of it to a browser that had it.
+    entry = _WATER_CACHE.get(cache_key)
+    if entry is None:
         raw = await storage.reference(_WATER_SNAPSHOT_BY_KIND[kind]) or {
             "type": "FeatureCollection", "features": [],
         }
-        payload = _filter_water(raw, bounds)
-        _WATER_CACHE.set(cache_key, payload)
-    return JSONResponse(payload, headers={"Cache-Control": "public, max-age=86400"})
+        entry = _encode_payload(_round_floats(_filter_water(raw, bounds)))
+        _WATER_CACHE.set(cache_key, entry)
+    return _built_json_response(request, entry, "public, max-age=86400")
 
 
 @app.get("/api/conflict-district-months")
