@@ -275,3 +275,89 @@ def test_a_payload_already_at_five_decimals_is_unchanged():
     already = {"path": [[12.34567, -1.2], [0.0, 90.0]]}
     assert app_mod._round_floats(already) == already
     assert app_mod._round_floats(app_mod._round_floats(already)) == already
+
+
+# --- brotli, for the entries whose bytes are already cached -----------------
+#
+# Not a general compression layer: GZipMiddleware still handles every other
+# response. This is for the two caches whose key space is a handful of entries,
+# where the encoding is paid once and reused -- which is the only reason a
+# seventeen-second quality setting is affordable at all. Measured on
+# /api/infrastructure: gzip 1,479 KB in 0.33 s, brotli q11 897 KB in 16.8 s.
+
+def test_a_client_that_cannot_take_brotli_is_never_sent_it():
+    entry = (b'{"a":1}', '"tag"', b"pretend-brotli")
+    out = app_mod._built_json_response(_req(), entry, "public, max-age=86400")
+    assert out.body == b'{"a":1}'
+    assert "content-encoding" not in {k.lower() for k in out.headers}
+
+
+def test_a_client_that_can_take_brotli_gets_the_smaller_body():
+    entry = (b'{"a":1}', '"tag"', b"pretend-brotli")
+    out = app_mod._built_json_response(_req({"Accept-Encoding": "gzip, deflate, br"}),
+                                       entry, "public, max-age=86400")
+    assert out.body == b"pretend-brotli"
+    assert out.headers["Content-Encoding"] == "br"
+
+
+def test_an_entry_with_no_variant_yet_still_answers():
+    """The first client for a cache entry, and every client on a deployment without
+    the wheel. The identity bytes are always present, so this cannot fail to
+    answer -- which is what lets the compression be optional."""
+    entry = (b'{"a":1}', '"tag"')
+    out = app_mod._built_json_response(_req({"Accept-Encoding": "br"}), entry,
+                                       "public, max-age=86400")
+    assert out.body == b'{"a":1}'
+    assert "content-encoding" not in {k.lower() for k in out.headers}
+
+
+def test_every_answer_varies_on_the_encoding():
+    """Including the ones that did not themselves come back compressed, and that is
+    the point: the *resource* varies by encoding, so a shared cache that saw only
+    the identity answer must not hand it to a client that would have earned the
+    brotli one."""
+    for entry in [(b"{}", '"t"'), (b"{}", '"t"', b"br")]:
+        for accept in [{}, {"Accept-Encoding": "br"}]:
+            out = app_mod._built_json_response(_req(accept), entry, "no-cache")
+            assert out.headers["Vary"] == "Accept-Encoding"
+
+
+def test_a_304_carries_no_encoding_and_no_body():
+    entry = (b'{"a":1}', '"tag"', b"pretend-brotli")
+    out = app_mod._built_json_response(_req({"If-None-Match": '"tag"', "Accept-Encoding": "br"}),
+                                       entry, "public, max-age=86400")
+    assert out.status_code == 304
+    assert out.body == b""
+    assert "content-encoding" not in {k.lower() for k in out.headers}
+
+
+def test_the_accept_header_is_read_case_insensitively():
+    assert app_mod._brotli_supported(_req({"Accept-Encoding": "GZIP, BR"}))
+    assert app_mod._brotli_supported(_req({"Accept-Encoding": "br"}))
+    assert not app_mod._brotli_supported(_req({"Accept-Encoding": "gzip, deflate"}))
+    assert not app_mod._brotli_supported(_req())
+
+
+def test_the_quality_is_the_one_past_the_window_cliff():
+    """Brotli's levels below 10 use a small sliding window and land within 1.5% of
+    gzip on this data -- q9 measured 1,461 KB against gzip's 1,479 KB, for four times
+    the CPU. The whole reason to run a second encoder is the window that opens at
+    q10, so a level below it would be pure cost."""
+    assert app_mod.BROTLI_QUALITY >= 10
+
+
+def test_scheduling_outside_an_event_loop_is_survivable():
+    """The handlers are called directly by several tests in this suite, with no loop
+    running. That must not raise -- a compression that cannot be scheduled is a
+    response that is merely larger."""
+    app_mod._compress_in_background(app_mod._BUILT_PAYLOAD_CACHE, "nothing-here")
+
+
+def test_the_high_cardinality_cache_is_left_on_gzip():
+    """_FILTERED_CACHE is keyed by source, version, region, viewport cell and
+    variant, so it turns over constantly and holds hundreds of entries. Compressing
+    each at q11 would spend far more CPU than it ever saved bandwidth -- the
+    amortisation that justifies it for the other two caches simply is not there."""
+    import inspect
+    source = inspect.getsource(app_mod._cached_source_response)
+    assert "_compress_in_background" not in source

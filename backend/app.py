@@ -522,12 +522,102 @@ _BUILT_PAYLOAD_CACHE = LruTtlCache(maxsize=64, ttl=300)
 metrics.track_local_cache("built_payload", _BUILT_PAYLOAD_CACHE)
 
 
+# Brotli, for the payloads whose encoded bytes are already cached.
+#
+# Deliberately not a general compression layer: GZipMiddleware still handles every
+# other response, and nginx compresses the static bundle. This is for the handful
+# of responses where the bytes are built once and reused, which changes what
+# quality is affordable. Measured on /api/infrastructure, 7.6 MB of JSON:
+#
+#   gzip -6      1,479 KB   0.33 s
+#   brotli q5    1,457 KB   0.42 s      1.5% better -- not worth a second encoder
+#   brotli q9    1,461 KB   1.35 s      no better; the window is still small
+#   brotli q10     933 KB   7.19 s     36.9% better -- the window opens at q10
+#   brotli q11     897 KB  16.77 s     39.3% better
+#
+# The cliff at q10 is brotli's sliding window, not the search effort, which is why
+# the levels in between buy nothing. So the choice is between "no better than gzip"
+# and "far better than gzip, and seconds of CPU" -- and seconds of CPU is only
+# payable at all because these entries are computed once and then serve every
+# client until the data changes.
+#
+# Which is also why it is built off the event loop and only after the response that
+# triggered it has gone out. The first client for a cache entry gets gzip, exactly
+# as before; everyone after gets brotli. Nobody waits 17 seconds for a map.
+BROTLI_QUALITY = 11
+
+try:  # pragma: no cover - exercised by the deployment, not by the suite
+    import brotli as _brotli
+except ImportError:  # a deployment without the wheel serves gzip, as it always did
+    _brotli = None
+
+
+def _brotli_supported(request: Request) -> bool:
+    """Does this client accept brotli?
+
+    A plain substring test against Accept-Encoding. It over-matches in theory -- a
+    header of `br;q=0` means "explicitly do not", and no browser sends that -- and
+    the cost of being wrong is a client that has to decompress something it said it
+    could decompress.
+    """
+    return "br" in request.headers.get("accept-encoding", "").lower()
+
+
+def _compress_in_background(cache, key) -> None:
+    """Add a brotli variant to a cached entry, later, on a worker thread.
+
+    Scheduled rather than awaited, and it is the whole reason this is affordable:
+    the response that found the entry has already been sent. asyncio.to_thread keeps
+    seventeen seconds of C compression off the event loop, where it would otherwise
+    stall every other request in the process.
+
+    Re-reads the entry when it finishes rather than closing over it, because the
+    cache may have rolled to a new version in the meantime -- writing a stale
+    variant back would serve one payload's bytes under another's ETag.
+    """
+    if _brotli is None:
+        return
+
+    async def run():
+        entry = cache.get(key)
+        if entry is None or len(entry) > 2:
+            return  # gone, or someone else got there first
+        body, etag = entry
+        packed = await asyncio.to_thread(_brotli.compress, body, quality=BROTLI_QUALITY)
+        current = cache.get(key)
+        if current is None or current[1] != etag:
+            return  # the data changed while we were compressing; this is not it
+        cache.set(key, (body, etag, packed))
+
+    try:
+        asyncio.get_running_loop().create_task(run())
+    except RuntimeError:  # no loop (a test calling the handler directly)
+        pass
+
+
 def _built_json_response(request: Request, entry, cache_control: str) -> Response:
-    """Serve pre-encoded bytes with a content ETag, or 304 if the client has them."""
-    body, etag = entry
-    headers = {"Cache-Control": cache_control, "ETag": etag}
+    """Serve pre-encoded bytes with a content ETag, or 304 if the client has them.
+
+    Three-element entries carry a brotli variant built by _compress_in_background;
+    two-element ones have not been compressed yet, or never will be because the
+    wheel is absent. Either way the identity bytes are always there, so this cannot
+    fail to answer.
+    """
+    body, etag = entry[0], entry[1]
+    packed = entry[2] if len(entry) > 2 else None
+    # Vary regardless of what this particular response carries: the *resource*
+    # varies by encoding, and a cache that saw only the identity answer would
+    # otherwise hand it to a client whose request would have earned the brotli one.
+    headers = {"Cache-Control": cache_control, "ETag": etag, "Vary": "Accept-Encoding"}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
+    if packed is not None and _brotli_supported(request):
+        # Content-Encoding set here is also what stops GZipMiddleware re-compressing
+        # it: Starlette skips any response that already declares one.
+        return Response(
+            content=packed, media_type="application/json",
+            headers={**headers, "Content-Encoding": "br"},
+        )
     return Response(content=body, media_type="application/json", headers=headers)
 
 
@@ -552,7 +642,11 @@ async def infrastructure_list(request: Request):
     if entry is None:
         entry = _encode_payload(_round_floats(await _build_infrastructure_payload()))
         _BUILT_PAYLOAD_CACHE.set("infrastructure", entry)
-    return _built_json_response(request, entry, "public, max-age=86400")
+    response = _built_json_response(request, entry, "public, max-age=86400")
+    # After the response, never before it -- see _compress_in_background.
+    if len(entry) == 2:
+        _compress_in_background(_BUILT_PAYLOAD_CACHE, "infrastructure")
+    return response
 
 
 async def _build_infrastructure_payload() -> dict:
@@ -746,6 +840,13 @@ def _cached_source_response(
     if entry is None:
         entry = _encode_payload(_round_floats(filter_fn(state.data, bounds)))
         _FILTERED_CACHE.set(cache_key, entry)
+    # Deliberately no brotli variant here, unlike the two caches above. Their key
+    # space is a handful of entries -- one for infrastructure, three kinds of water
+    # -- so a seventeen-second compression is amortised over every client for the
+    # life of the data. This cache is keyed by source, version, region, viewport
+    # cell *and* variant, so it turns over constantly and holds hundreds of entries:
+    # compressing each one at q11 would spend more CPU than it ever saved bandwidth.
+    # gzip, via the middleware, is the right trade at this cardinality.
     return Response(content=entry[0], media_type="application/json", headers=headers)
 
 
@@ -947,7 +1048,10 @@ async def water_endpoint(request: Request, kind: str = "marine", bbox: str | Non
         }
         entry = _encode_payload(_round_floats(_filter_water(raw, bounds)))
         _WATER_CACHE.set(cache_key, entry)
-    return _built_json_response(request, entry, "public, max-age=86400")
+    response = _built_json_response(request, entry, "public, max-age=86400")
+    if len(entry) == 2:
+        _compress_in_background(_WATER_CACHE, cache_key)
+    return response
 
 
 @app.get("/api/conflict-district-months")

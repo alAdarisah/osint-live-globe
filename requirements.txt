@@ -42,3 +42,16 @@ openpyxl==3.1.5
 # in cachestore.py imports it.
 prometheus-client==0.21.1
 pytest==8.3.3
+
+# Brotli, for the encoded-payload caches in backend/app.py.
+#
+# Not a general compression layer -- GZipMiddleware still handles everything
+# else. This is for the handful of responses whose bytes are already cached, where
+# the compression can be paid once per cache entry instead of once per request,
+# and therefore at a quality nobody could afford inline: measured on
+# /api/infrastructure, brotli q11 is 897 KB against gzip's 1,479 KB, and takes 17
+# seconds to get there.
+#
+# Optional at import (see _brotli in app.py). A deployment without the wheel
+# serves gzip exactly as before rather than failing to start.
+Brotli==1.1.0
