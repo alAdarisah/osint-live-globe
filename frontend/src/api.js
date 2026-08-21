@@ -9,6 +9,8 @@
 // the backend had nothing new. Tracking the last ETag per URL and handling
 // 304 here is what actually turns that server-side support into real
 // bandwidth/parse savings, with zero backend changes needed.
+import { readPayload, writePayload } from "./utils/payloadStore.js";
+
 const etagCache = new Map(); // url -> { etag, data }
 
 // Each entry holds a whole decoded payload, and FIRMS alone can be ~49k
@@ -31,8 +33,42 @@ function rememberEtag(url, etag, data) {
   }
 }
 
-export async function fetchJson(url) {
-  const cached = etagCache.get(url);
+// Requests that have gone out and not yet come back, keyed by URL.
+//
+// Measured on a real page load of the deployment: 67 API requests, of which
+// /api/satellites/elements was fetched six times, /api/chokepoints three, and
+// eight more endpoints twice each -- concurrently, by different callers that each
+// legitimately want the same data and have no idea the other exists. The ETag
+// cache above cannot help: it is populated by the *response*, so requests issued
+// before the first one lands all miss it and all go to the network.
+//
+// The waste is not only the bandwidth. Two callers asking for /api/infrastructure
+// at once cost two 8 MB downloads and, worse, two 8 MB JSON parses on the main
+// thread -- which is exactly the kind of stall this map is being blamed for.
+//
+// So a second caller for a URL already in flight joins the first one's promise
+// rather than opening its own request. Callers are unchanged and cannot tell:
+// they still get a promise for the same decoded payload.
+const inFlight = new Map(); // url -> Promise
+
+export function fetchJson(url) {
+  const pending = inFlight.get(url);
+  if (pending) return pending;
+  // Removed in a `finally` rather than on success, so a failed request does not
+  // wedge the URL: the next caller must be able to try again, and a rejected
+  // promise left in this map would hand them the old failure for ever.
+  const request = fetchJsonUncached(url).finally(() => inFlight.delete(url));
+  inFlight.set(url, request);
+  return request;
+}
+
+async function fetchJsonUncached(url) {
+  // The in-memory table first, then the one that survived the reload. Reaching
+  // for IndexedDB only on a miss keeps the poll path -- which hits the memory
+  // table every time -- exactly as fast as it was, and means a fresh page pays
+  // one small read per endpoint instead of downloading everything again.
+  let cached = etagCache.get(url);
+  if (!cached) cached = await readPayload(url);
   const headers = cached?.etag ? { "If-None-Match": cached.etag } : undefined;
   const resp = await fetch(url, { headers });
 
@@ -53,8 +89,17 @@ export async function fetchJson(url) {
 
   const data = await resp.json();
   const etag = resp.headers.get("ETag");
-  if (etag) rememberEtag(url, etag, data);
-  else etagCache.delete(url); // source doesn't ETag (e.g. /api/replay, /api/wind's own 304 path) -- nothing to reuse next time
+  if (etag) {
+    rememberEtag(url, etag, data);
+    // Not awaited: the caller is waiting on this payload, and a store that fails
+    // -- a quota error on a large one is the realistic case -- costs only the
+    // head start on the next reload. See utils/payloadStore.js.
+    writePayload(url, etag, data);
+  } else {
+    // Source doesn't ETag (e.g. /api/replay, /api/wind's own 304 path) -- nothing
+    // to reuse next time, here or across a reload.
+    etagCache.delete(url);
+  }
   return data;
 }
 

@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { prune as prunePayloadCache } from "./utils/payloadStore.js";
 import App from "./App";
 import "./style.css";
 // After style.css, not @import-ed from the top of it. chrome.css restyles
@@ -29,6 +30,15 @@ class CrashScreen extends React.Component {
     }
     return this.props.children;
   }
+}
+
+// Housekeeping for the persistent payload cache, well after the map has painted.
+// A cursor walk over stored responses is not something to put in front of the
+// first frame, and nothing depends on its result -- see utils/payloadStore.js.
+if (typeof requestIdleCallback === "function") {
+  requestIdleCallback(() => { prunePayloadCache(); }, { timeout: 30000 });
+} else {
+  setTimeout(() => { prunePayloadCache(); }, 15000);
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(
