@@ -1146,18 +1146,6 @@ async def cables_endpoint(request: Request):
     )
 
 
-@app.get("/api/railways")
-async def railways_endpoint(request: Request):
-    # Coarse Natural Earth line geometry, theatre-clipped and served whole (see
-    # backend/sources/railways.py) -- same shape and hard cache as /api/cables,
-    # and no region filter for the same reason: a rail line is one object the
-    # client splits, not a set of points to clip. The station/yard/border POINTS
-    # are a different thing entirely and ride /api/osm-infrastructure.
-    return _cached_source_response(
-        request, "railways", None, lambda data, _bounds: data, max_age=86400, stable_etag=True,
-    )
-
-
 def _clip_lines(data: dict, bounds) -> dict:
     """A line document narrowed to the viewport, envelope intact.
 
@@ -1169,6 +1157,28 @@ def _clip_lines(data: dict, bounds) -> dict:
     if bounds is None or not isinstance(data, dict):
         return data
     return {**data, "lines": regions.filter_paths(data.get("lines") or [], bounds)}
+
+
+@app.get("/api/railways")
+async def railways_endpoint(request: Request, bbox: str | None = None):
+    # Natural Earth's coarse global network plus the OSM theatre sweeps (see
+    # backend/sources/railways.py): 45,319 lines, 4.2 MB gzipped, the third-largest
+    # response this API serves. Same shape as /api/power-lines and now narrowed the
+    # same way, through _clip_lines -- a rail line is one object the client splits
+    # into a polyline, which is why it needs filter_paths rather than the point
+    # filter, not a reason it has to be served whole.
+    #
+    # The station/yard/border POINTS are a different thing entirely and ride
+    # /api/osm-infrastructure, which has been viewport-scoped all along.
+    #
+    # Nothing is lost at world zoom, which is the view this layer reads as basemap
+    # context in: the client sends no bbox at all when the viewport is essentially
+    # the whole world (see bboxCell in useOsintData.js), so the full network still
+    # ships there. The clip only engages once a reader is close enough that the rest
+    # of it is off-screen anyway.
+    return _cached_source_response(
+        request, "railways", None, _clip_lines, max_age=86400, stable_etag=True, bbox=bbox,
+    )
 
 
 @app.get("/api/power-lines")

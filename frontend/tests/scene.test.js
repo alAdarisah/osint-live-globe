@@ -752,17 +752,19 @@ test("the layers that must stay whole are still whole", () => {
   // rather than as thrifty. events and the aircraft layers are what the panels
   // rank and count, so a viewport slice would make "150 events" mean something
   // different from one pan to the next.
-  for (const key of ["countries", "water", "railways", "events", "adsbMilitary"]) {
+  for (const key of ["countries", "water", "events", "adsbMilitary"]) {
     assert.notEqual(isScoped(key), true, `${key} must not be viewport-scoped`);
   }
 });
 
-test("power lines are fetched for the viewport, not for eleven theatres", () => {
-  // Not through `scoped` -- this one is an on-demand document rather than a polled
-  // source, so its viewport flag lives on its ONE_SHOT entry in useOsintData.js.
-  // What the manifest still has to say is that nothing draws it until a reader asks:
-  // 44,984 lines is the largest response this API serves, and fetching it at boot
-  // for a layer that ships off would be the whole cost with none of the use.
-  assert.equal(LAYER_MANIFEST.powerLines.fetch, FETCH_MANUAL);
-  assert.equal(LAYER_MANIFEST.powerLines.disposition, MANUAL);
+test("the two linework layers are fetched only when asked for", () => {
+  // Neither carries `scoped` here -- both are on-demand documents rather than polled
+  // sources, so their viewport flag lives on their ONE_SHOT entries in
+  // useOsintData.js. What the manifest still has to say is that nothing fetches
+  // them until a reader asks: between them they are 14 MB gzipped, and pulling that
+  // at boot for two layers that ship off would be the whole cost with none of the
+  // use.
+  for (const key of ["powerLines", "railways"]) {
+    assert.equal(LAYER_MANIFEST[key].fetch, FETCH_MANUAL, key);
+  }
 });

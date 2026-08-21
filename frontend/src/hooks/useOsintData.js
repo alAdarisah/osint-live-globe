@@ -874,17 +874,21 @@ export function useOsintData({
         url: "/api/railways",
         deliver: (data) => onDataRef.current("railways", data || { lines: [] }),
         label: "railway linework",
+        // 45,319 lines and 4.2 MB gzipped, narrowed the same way power lines are.
+        // The worry about scoping a layer that reads as basemap context -- a
+        // network flickering as you pan -- does not survive contact with how the
+        // cell is computed: bboxCell is null when the viewport is essentially the
+        // whole world, so the full network still ships at the zoom where a reader
+        // is actually looking at it as context. Closer in, what the clip removes is
+        // off-screen by definition.
+        scoped: true,
       },
       powerLines: {
         url: "/api/power-lines",
         deliver: (data) => onDataRef.current("powerLines", data || { lines: [] }),
         label: "transmission lines",
-        // The one entry here that narrows to the viewport, and the reason it is a
-        // per-entry flag rather than a rule for all of them: 44,984 lines and
-        // 9.8 MB gzipped, the largest response this API serves, for a layer a
-        // reader switches on to look at one place. Railways above stays whole --
-        // it is a third of the size and reads as basemap context, where a network
-        // that appears and disappears as you pan would be worse than a slow one.
+        // 44,984 lines and 9.8 MB gzipped, the largest response this API serves,
+        // for a layer a reader switches on to look at one place.
         //
         // Being scoped makes this no longer strictly one-shot: the fetch is
         // re-run when the viewport leaves the cell it was fetched for, which is

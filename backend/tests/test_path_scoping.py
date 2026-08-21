@@ -103,3 +103,33 @@ def test_an_unscoped_request_gets_the_whole_document_back_unchanged():
     from backend import app as app_mod
     doc = {"attribution": "x", "lines": [{"id": "a", "path": [[1.0, 1.0], [2.0, 2.0]]}]}
     assert app_mod._clip_lines(doc, None) is doc
+
+
+def test_both_linework_endpoints_share_one_filter():
+    """Railways and power lines are the same document shape and are narrowed by the
+    same function. Two filters for one shape would be two places to fix a bug in --
+    and the bug in question (dropping a line that crosses the view) is one nobody
+    would see in either."""
+    import inspect
+    from backend import app as app_mod
+    for name in ("railways_endpoint", "power_lines_endpoint"):
+        source = inspect.getsource(getattr(app_mod, name))
+        assert "_clip_lines" in source, f"{name} does not use the shared filter"
+        assert "bbox=bbox" in source, f"{name} does not pass the viewport through"
+
+
+def test_the_natural_earth_half_survives_a_clip_that_covers_it():
+    """Railways is two datasets in one document: Natural Earth's coarse global
+    network and the OSM theatre sweeps. Both are `{path, source}` records, so the
+    filter treats them alike -- which is what it should do, and worth pinning because
+    the global half is the one a reader reads as basemap context."""
+    doc = {
+        "lines": [
+            {"source": "ne", "path": [[12.0, 12.0], [13.0, 13.0]]},
+            {"source": "osm", "path": [[12.5, 12.5], [12.6, 12.6]]},
+            {"source": "ne", "path": [[70.0, 70.0], [71.0, 71.0]]},
+        ],
+    }
+    from backend import app as app_mod
+    kept = app_mod._clip_lines(doc, VIEW)["lines"]
+    assert [line["source"] for line in kept] == ["ne", "osm"]
