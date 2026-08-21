@@ -1555,6 +1555,46 @@ export function fetchZoomFor(scene, key) {
  * quarter of a million points, airfields ~48k, GFW gaps ~23k) or unable to take
  * a band gate at all because the country card reads it (firms, jamming).
  */
+/**
+ * The snapped viewport cell a scoped fetch asks for, or null for "send no bbox".
+ *
+ * Pure, and here rather than in the polling hook, for the reason every other gate
+ * in this file is here: it reads the band table above, and a copy of that
+ * arithmetic anywhere else is a copy that can drift.
+ *
+ * Snapped, because an unsnapped viewport mints a new URL -- and therefore a new
+ * ETag, a new server cache entry and a full download -- on every pixel of a pan.
+ * Padded 25% first, so the box a reader is about to pan into is already in it.
+ *
+ * Returns null in three cases, and the first is the one that has actually cost
+ * something: a box covering essentially the whole world clips nothing while still
+ * being its own private cache entry on both sides. That test used to be exact
+ * equality against +/-90 and +/-180, which a world view panned slightly off centre
+ * misses -- it snaps to something like -90,-160,90,180, 94% of the planet, and went
+ * out as a bbox. Seen on the deployment as `railways?bbox=-90,-160,90,180`: 4.1 MB,
+ * the entire layer, under a URL no other reader shares.
+ */
+export const WORLD_COVERAGE_LIMIT = 0.9;
+
+export function bboxCellFor(bounds, zoom) {
+  if (!bounds) return null;
+  const snap = bboxSnapDegrees(bandFor(zoom ?? 3));
+  const padLat = (bounds.north - bounds.south) * 0.25;
+  const padLon = (bounds.east - bounds.west) * 0.25;
+  const south = Math.max(-90, Math.floor((bounds.south - padLat) / snap) * snap);
+  const north = Math.min(90, Math.ceil((bounds.north + padLat) / snap) * snap);
+  const west = Math.max(-180, Math.floor((bounds.west - padLon) / snap) * snap);
+  const east = Math.min(180, Math.ceil((bounds.east + padLon) / snap) * snap);
+  // Below the limit a box genuinely narrows something and earns its own entry;
+  // above it the clip is rounding error against the cost of a private copy.
+  if ((north - south) / 180 >= WORLD_COVERAGE_LIMIT
+      && (east - west) / 360 >= WORLD_COVERAGE_LIMIT) return null;
+  // west > east would be a box across the antimeridian, which the backend refuses
+  // (see regions.parse_bbox) -- so it is not sent at all.
+  if (west > east || south > north) return null;
+  return `${south},${west},${north},${east}`;
+}
+
 export function isScoped(key) {
   return LAYER_MANIFEST[key]?.scoped === true;
 }

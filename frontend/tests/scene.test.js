@@ -20,6 +20,9 @@ import {
   BANDS,
   bandFor,
   isScoped,
+  bboxCellFor,
+  bboxSnapDegrees,
+  WORLD_COVERAGE_LIMIT,
   detailForBand,
   floorOf,
   resolveScene,
@@ -767,4 +770,81 @@ test("the two linework layers are fetched only when asked for", () => {
   for (const key of ["powerLines", "railways"]) {
     assert.equal(LAYER_MANIFEST[key].fetch, FETCH_MANUAL, key);
   }
+});
+
+// ---------- the cell a scoped fetch asks for ----------
+//
+// Extracted from useOsintData's own useMemo so it can be tested at all, and the
+// reason it needed testing is a bug that shipped: the "this box is the whole world,
+// send no bbox" guard was exact equality against +/-90 and +/-180, which a world
+// view panned slightly off centre misses. Seen on the deployment as
+// `railways?bbox=-90,-160,90,180` -- 94% of the planet, clipping nothing, 4.1 MB,
+// under a URL no other reader shares.
+
+const world = { south: -85, west: -180, north: 85, east: 180 };
+
+test("a whole-world viewport asks for no bbox at all", () => {
+  assert.equal(bboxCellFor(world, 2), null);
+});
+
+test("a nearly-whole-world viewport also asks for no bbox", () => {
+  // The case that shipped. -160 rather than -180 is a world view nudged east, and
+  // the old exact-equality guard let it through as a real box.
+  assert.equal(bboxCellFor({ south: -85, west: -160, north: 85, east: 180 }, 2), null);
+  assert.equal(bboxCellFor({ south: -80, west: -170, north: 80, east: 170 }, 3), null);
+});
+
+test("a viewport that genuinely narrows something does ask", () => {
+  const cell = bboxCellFor({ south: 24, west: 50, north: 30, east: 58 }, 8);
+  assert.ok(cell, "a Gulf-sized viewport must produce a cell");
+  const [s, w, n, e] = cell.split(",").map(Number);
+  // Padded outwards, never inwards: a box tighter than the view would leave a
+  // visible strip of the map empty.
+  assert.ok(s <= 24 && w <= 50 && n >= 30 && e >= 58, cell);
+});
+
+test("every edge of the cell lands on the snap grid", () => {
+  // This is the anti-churn guarantee, and it is the one that is actually true.
+  // A new bbox string is a new ETag and a full download on both sides, so the cell
+  // must be coarse -- but it cannot be *stable* under every pan, because the box is
+  // padded 25% before snapping and a padded edge sitting on a grid line crosses it
+  // on the next pixel. What snapping buys is that the cell takes a small number of
+  // discrete values instead of a new one per pixel, and that is what to assert.
+  const snap = bboxSnapDegrees(bandFor(8));
+  for (const view of [
+    { south: 25, west: 51, north: 29, east: 55 },
+    { south: 25.1, west: 51.1, north: 29.1, east: 55.1 },
+    { south: 45, west: 71, north: 49, east: 75 },
+  ]) {
+    const cell = bboxCellFor(view, 8);
+    assert.ok(cell, JSON.stringify(view));
+    for (const edge of cell.split(",").map(Number)) {
+      assert.equal(edge % snap, 0, `${cell} is not on the ${snap}-degree grid`);
+    }
+  }
+});
+
+test("a pan across the map does move the cell", () => {
+  // The other half: a cell pinned to wherever the reader started would serve them
+  // the linework of somewhere they are no longer looking at.
+  const gulf = bboxCellFor({ south: 25, west: 51, north: 29, east: 55 }, 8);
+  const elsewhere = bboxCellFor({ south: 45, west: 71, north: 49, east: 75 }, 8);
+  assert.notEqual(gulf, elsewhere);
+});
+
+test("a box across the antimeridian is not sent", () => {
+  // regions.parse_bbox on the backend refuses it, so sending one is a request that
+  // can only fail.
+  assert.equal(bboxCellFor({ south: 10, west: 170, north: 20, east: -170 }, 8), null);
+});
+
+test("no viewport yet means no cell", () => {
+  assert.equal(bboxCellFor(null, 8), null);
+  assert.equal(bboxCellFor(undefined, 8), null);
+});
+
+test("the coverage limit is stated rather than buried in the comparison", () => {
+  // Nudging this changes when a reader gets a private full-world copy instead of
+  // the shared unscoped URL, which is exactly the failure it was written for.
+  assert.equal(WORLD_COVERAGE_LIMIT, 0.9);
 });

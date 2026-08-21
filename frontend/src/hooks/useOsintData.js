@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJson, urlForRegion, urlWithBbox, urlWithQuery } from "../api";
 import {
-  resolveScene, fetchZoomFor, isScoped, sourceQueryFor, bboxSnapDegrees, bandFor,
+  resolveScene, fetchZoomFor, isScoped, sourceQueryFor, bboxSnapDegrees, bboxCellFor, bandFor,
 } from "../map/scene";
 import { countOf, failureDetail } from "./bootSourceMeta.js";
 
@@ -477,23 +477,9 @@ export function useOsintData({
       const [s, w, n, e] = focus.bounds;
       return `${s.toFixed(2)},${w.toFixed(2)},${n.toFixed(2)},${e.toFixed(2)}`;
     }
-    const b = mapBounds;
-    if (!b) return null;
-    const snap = bboxSnapDegrees(bandFor(zoom ?? 3));
-    const padLat = (b.north - b.south) * 0.25;
-    const padLon = (b.east - b.west) * 0.25;
-    const south = Math.max(-90, Math.floor((b.south - padLat) / snap) * snap);
-    const north = Math.min(90, Math.ceil((b.north + padLat) / snap) * snap);
-    const west = Math.max(-180, Math.floor((b.west - padLon) / snap) * snap);
-    const east = Math.min(180, Math.ceil((b.east + padLon) / snap) * snap);
-    // A box covering essentially everything is not worth sending: it clips
-    // nothing, and every distinct bbox string is its own cache entry on both
-    // sides. Better one shared unscoped URL than a private full-world one.
-    if (south <= -90 && north >= 90 && west <= -180 && east >= 180) return null;
-    // west > east would be a box across the antimeridian, which the backend
-    // refuses (see regions.parse_bbox) -- so it is not sent at all.
-    if (west > east || south > north) return null;
-    return `${south},${west},${north},${east}`;
+    // The snapping, the padding and the three "send no bbox" cases live in
+    // map/scene.js beside the band table they read -- see bboxCellFor.
+    return bboxCellFor(mapBounds, zoom);
   }, [mapBounds, zoom, focus]);
 
   // The pollers are registered once and read this through a ref, the same way
